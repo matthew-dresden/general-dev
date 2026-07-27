@@ -1,0 +1,17 @@
+{
+  "cli_version": "2.2.0",
+  "template_name": "<your-template-name>",
+  "template_path": "<absolute path to your saved cdevcontainer template, or omit>",
+  "containerEnv": {
+    "DEVELOPER_NAME": "<Your Name>",
+    "GIT_USER": "<your-git-username>",
+    "GIT_USER_EMAIL": "<you@example.com>",
+    "GIT_PROVIDER_URL": "github.com",
+    "DEFAULT_GIT_BRANCH": "main",
+    "AWS_CONFIG_ENABLED": "true",
+    "AWS_DEFAULT_OUTPUT": "json",
+    "HOST_PROXY": "false",
+    "HOST_PROXY_URL": "",
+    "PAGER": "cat"
+  }
+}

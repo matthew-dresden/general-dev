@@ -1,0 +1,21 @@
+{
+  "plugins": {
+    "md013": {
+      "enabled": false
+    },
+    "md024": {
+      "siblings_only": true
+    },
+    "md036": {
+      "enabled": false
+    },
+    "md033": {
+      "allowed_elements": "br,details,summary"
+    }
+  },
+  "extensions": {
+    "front-matter": {
+      "enabled": true
+    }
+  }
+}

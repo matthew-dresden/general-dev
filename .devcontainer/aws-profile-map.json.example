@@ -1,0 +1,18 @@
+{
+  "<profile-name>": {
+    "region": "us-east-1",
+    "sso_start_url": "https://<your-sso-portal>.awsapps.com/start",
+    "sso_region": "us-east-1",
+    "account_name": "<account-alias>",
+    "account_id": "<account-id>",
+    "role_name": "<PermissionSetName>"
+  },
+  "<second-profile-name>": {
+    "region": "us-west-2",
+    "sso_start_url": "https://<your-sso-portal>.awsapps.com/start",
+    "sso_region": "us-east-1",
+    "account_name": "<another-account-alias>",
+    "account_id": "<another-account-id>",
+    "role_name": "<PermissionSetName>"
+  }
+}

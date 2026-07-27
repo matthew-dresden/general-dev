@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# This repo is a workspace: other repositories are cloned alongside it and
+# worked on concurrently. None of them belong in this repo's history.
+#
+# The root is therefore an allowlist — everything is ignored unless named
+# below. A repo cloned into the root is ignored the moment it appears, with no
+# .gitignore edit and nothing to remember. `make lint` fails if a nested repo
+# is ever tracked anyway, so the two mechanisms cover each other.
+#
+# Adding a new tracked file at the root means adding it here.
+# ---------------------------------------------------------------------------
+/*
+!/.devcontainer/
+!/.vscode/
+!/docs/
+!/.gitignore
+!/.pymarkdown.json
+!/CLAUDE.md
+!/Makefile
+!/README.md
+!/LICENSE
+!/shell.env.example
+!/devcontainer-environment-variables.json.example
+
+# ---------------------------------------------------------------------------
+# Per-developer identity and secrets. The .example files above are committed;
+# these are generated from them and reach the remote container only through
+# Parameter Store. Listed explicitly so they stay ignored even if the
+# allowlist above is edited.
+# ---------------------------------------------------------------------------
+/shell.env
+/devcontainer-environment-variables.json
+.devcontainer/aws-profile-map.json
+.devcontainer/ssh-private-key
+.claude/settings.local.json

@@ -94,7 +94,28 @@ Run this when provisioning a new Mac against an already-running instance.
      alias gdev-shell='/Users/mdresden/Workspace/caylent-solutions/general-dev/.devcontainer/remote-docker/shell.sh'
      ```
 
-6. **Validate end-to-end.** In a shell that has sourced the new block:
+6. **Trust workspaces automatically.** VS Code otherwise asks "Do you trust the
+   authors of the files in this folder" whenever it opens one it has not seen,
+   and every rebuilt container is a new URI, so it asks again after each
+   rebuild. Add to `~/Library/Application Support/Code/User/settings.json`
+   (create it if absent; it is JSONC, so comments are allowed):
+
+   ```json
+   "security.workspace.trust.enabled": false
+   ```
+
+   It has to be the *user* settings file. All five `security.workspace.trust.*`
+   settings are application-scoped, which VS Code reads only from there: they
+   are ignored in a workspace's `.vscode/settings.json` and in
+   `devcontainer.json` customizations, so neither can be used to do this.
+
+   Tell me before applying it, because it applies to every folder opened on
+   this Mac. Workspace trust is what withholds automatic execution of tasks,
+   debug configurations and some extensions from a repository that has not
+   been reviewed, and this project clones other repositories into its
+   workspace.
+
+7. **Validate end-to-end.** In a shell that has sourced the new block:
    - `gdev-connect` → must end with
      `Connected: remote docker server … via context 'general-dev-remote'`.
    - `docker ps` → talks to the remote engine without error.
@@ -104,7 +125,7 @@ Run this when provisioning a new Mac against an already-running instance.
    - Re-run your `~/.zshrc` block installation once more and verify the file
      contains exactly one block (idempotency proof).
 
-7. **Report.** Summarize: what was installed vs already present, the key
+8. **Report.** Summarize: what was installed vs already present, the key
    path used, the aliases created, and validation results. Remind me that
    the next action is VS Code → *Dev Containers: Clone Repository in
    Container Volume*, that `make help` in the repo root documents every
@@ -118,3 +139,5 @@ Run this when provisioning a new Mac against an already-running instance.
 - `~/.zshrc` contains exactly one managed block after two runs.
 - `gdev-connect` / `gdev-disconnect` / `gdev-shell` all work, and the Mac is
   left CONNECTED to the remote context.
+- VS Code opens a devcontainer workspace without asking whether its authors are
+  trusted, or I declined that step knowing it will ask on every rebuild.

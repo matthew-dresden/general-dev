@@ -243,8 +243,24 @@ rdc_branch() {
   git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD
 }
 
-# Volume holding the checkout. Deterministic, unlike the hash VS Code appends,
-# so the same branch always maps to the same volume.
+# The remote build clones from origin, so a branch that exists only on this
+# machine cannot be built. Two ways out, both spelled out.
+rdc_branch_missing_on_origin() {
+  local branch="$1" default_branch="$2"
+  printf '\n\033[0;31m%s\033[0m\n' "$(printf '=%.0s' $(seq 1 74))" >&2
+  printf '\033[0;31m  Branch '\''%s'\'' does not exist on origin\033[0m\n' "$branch" >&2
+  printf '\033[0;31m%s\033[0m\n\n' "$(printf '=%.0s' $(seq 1 74))" >&2
+  printf '  The container is built by cloning from origin, not from this machine,\n' >&2
+  printf '  so the branch has to be there first.\n\n' >&2
+  printf '  \033[1mPush this branch\033[0m and build from it:\n' >&2
+  printf '      git push -u origin %s\n' "$branch" >&2
+  printf '      make up\n\n' >&2
+  printf '  \033[1mOr switch to %s\033[0m and build from that instead:\n' "$default_branch" >&2
+  printf '      git checkout %s\n' "$default_branch" >&2
+  printf '      make up\n\n' >&2
+  exit 1
+}
+
 rdc_workspace_volume() {
   printf '%s-%s\n' "$PROJECT_NAME" "$(rdc_branch | tr '/' '-')"
 }
@@ -261,15 +277,23 @@ rdc_build_prereqs() {
   # this working tree directly, where no such gap exists.
   [ "$(rdc_backend)" = "remote" ] || return 0
 
-  local branch
+  # The container is built from the branch you are on. No guessing and no
+  # substitution: if that branch is not on origin, say so and stop.
+  local branch default_branch
   branch="$(rdc_branch)"
-  git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/${branch}" > /dev/null \
-    || rd_die "origin/${branch} does not exist. Push the branch first, the build clones from origin, not from this machine."
+  git -C "$REPO_ROOT" fetch --quiet origin "$branch" 2> /dev/null || true
+  if ! git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/${branch}" > /dev/null; then
+    # Under set -e with pipefail a failing pipeline here would abort the
+    # script before the message below could be printed, which is exactly the
+    # silent "Error 1" this guard exists to replace.
+    default_branch="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2> /dev/null | sed 's|^origin/||' || true)"
+    rdc_branch_missing_on_origin "$branch" "${default_branch:-main}"
+  fi
 
   # The clone comes from origin, so unpushed local commits would silently not
   # be in the container.
   local unpushed
-  unpushed="$(git -C "$REPO_ROOT" log --oneline "origin/${branch}..HEAD")"
+  unpushed="$(git -C "$REPO_ROOT" log --oneline "origin/${branch}..HEAD" 2> /dev/null || true)"
   if [ -n "$unpushed" ] && [ "${FORCE:-0}" != "1" ]; then
     printf '\033[0;31m[ERROR]\033[0m %s commit(s) are not on origin/%s and would be missing from the container:\n\n' \
       "$(printf '%s\n' "$unpushed" | wc -l | tr -d ' ')" "$branch" >&2

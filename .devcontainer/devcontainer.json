@@ -94,7 +94,7 @@
             "args": [
               "-i",
               "-c",
-              "tmpick"
+              "tm-session-pick"
             ]
           },
           "zsh": {

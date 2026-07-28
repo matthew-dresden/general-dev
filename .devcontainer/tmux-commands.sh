@@ -4,7 +4,8 @@
 #
 # Terminals here open inside a shared tmux session so work survives VS Code
 # closing. These wrap the tmux invocations worth remembering, under a common
-# tm prefix: type "tm" and press Tab to list them. Every command accepts
+# tm- prefix, grouped by what they act on: type "tm-" and press Tab to list
+# them, "tm-session-" or "tm-window-" to narrow it. Every command accepts
 # --help.
 #
 # Portability: must parse under both bash and zsh. No associative arrays, no
@@ -17,44 +18,44 @@
 : "${TM_SESSION:=main}"
 
 # Single source of truth for command documentation: name|args|summary.
-# Both tmhelp and each command's --help read from here.
+# Both tm-help and each command's --help read from here.
 __tm_registry() {
   cat <<'EOF'
-tmopen|[name]|Go to a session, creating it if missing (default: main).
-tmpick||List sessions and open the one you name. Drives the VS Code profile.
-tmnew|<name>|Create a session and go to it. Fails if the name is taken.
-tmlist||List sessions.
-tmsession||Name of the session you are in.
-tmrenamesession|<name>|Rename the session you are in.
-tmwindow|[name]|New window in this session, named if you say so.
-tmwindows||List windows in the current session.
-tmrename|<name>|Rename the current window.
-tmdetach||Leave the session; everything keeps running.
-tmkill|<name>|Kill one named session.
-tmkillall||Kill every session.
-tmhelp||Show all commands and key bindings.
+tm-session-list||List every session on this container.
+tm-session-current||Name of the session you are in.
+tm-session-open|[name]|Go to a session, creating it if missing (default: main).
+tm-session-pick||List sessions and open the one you name. Drives the VS Code profile.
+tm-session-new|<name>|Create a session and go to it. Refuses a name already taken.
+tm-session-rename|<name>|Rename the session you are in.
+tm-session-detach||Leave the session; everything in it keeps running.
+tm-session-kill|<name>|Destroy one named session and everything in it.
+tm-session-kill-all||Destroy every session on this container.
+tm-window-list||List the windows in this session.
+tm-window-new|[name]|Open another window here, named if you pass one.
+tm-window-rename|<name>|Rename the window you are in.
+tm-help||Every command, the key bindings, and the mouse.
 EOF
 }
 
 # Longer notes, shown only by "<command> --help".
 __tm_detail() {
   case "$1" in
-    tmopen)
+    tm-session-open)
       printf '%s\n' \
         'Terminals in this container already open inside the shared session, so' \
-        'you rarely need this. Use it after tmdetach, or to start a second,' \
-        'isolated session:' \
+        'you rarely need this. Use it after tm-session-detach, or to start a' \
+        'second, isolated session:' \
         '' \
-        '    tmopen build' \
+        '    tm-session-open build' \
         '' \
         'It never destroys anything: an existing session is joined with' \
         'everything still running, a missing one is created.' \
         '' \
         'Works from inside a session too, where it moves this terminal to the' \
         'named session rather than nesting one inside the other. Ctrl+b d, or' \
-        'tmopen main, brings you back.'
+        'tm-session-open main, brings you back.'
       ;;
-    tmpick)
+    tm-session-pick)
       printf '%s\n' \
         'Prints the sessions that exist, then opens the one you name, creating' \
         'it if the name is new. Enter alone takes the default session.' \
@@ -66,85 +67,85 @@ __tm_detail() {
         'It replaces the shell with tmux, so the terminal tab becomes that' \
         'session rather than leaving a shell underneath it.'
       ;;
-    tmnew)
+    tm-session-new)
       printf '%s\n' \
         'Creates a session and moves this terminal to it:' \
         '' \
-        '    tmnew build' \
+        '    tm-session-new build' \
         '' \
         'It refuses when the name is already taken, so it can never drop you' \
         'into something already running by accident. To go to a session whether' \
-        'or not it exists, use tmopen.'
+        'or not it exists, use tm-session-open.'
       ;;
-    tmlist)
+    tm-session-list)
       printf '%s\n' \
         'Shows every session on this container, its window count, and which one' \
         'is currently attached. Use it when you have lost track of what is' \
         'running after a reconnect.'
       ;;
-    tmsession)
+    tm-session-current)
       printf '%s\n' \
         'Prints the name of the session you are in, which the status bar also' \
-        'shows on the left. Useful in a script, or after tmopen when you are' \
-        'not sure where you landed.'
+        'shows on the left. Useful in a script, or after tm-session-open when' \
+        'you are not sure where you landed.'
       ;;
-    tmrenamesession)
+    tm-session-rename)
       printf '%s\n' \
         'Renames the session itself, not the window:' \
         '' \
-        '    tmrenamesession review' \
+        '    tm-session-rename review' \
         '' \
-        'The name is what appears on the left of the status bar and what tmopen' \
-        'and tmkill take, so rename to whatever the work is.'
+        'The name is what appears on the left of the status bar, and what' \
+        'tm-session-open and tm-session-kill take, so rename it to the work.'
       ;;
-    tmwindow)
+    tm-window-new)
       printf '%s\n' \
         'Opens another window in this session, the same as Ctrl+b c, and names' \
         'it if you pass one:' \
         '' \
-        '    tmwindow logs' \
+        '    tm-window-new logs' \
         '' \
         'Windows are whole screens and only one shows at a time. For two things' \
         'side by side, split the window into panes with Ctrl+b % or Ctrl+b ".'
       ;;
-    tmwindows)
+    tm-window-list)
       printf '%s\n' \
         'Windows are the tabs inside a session. The active one is marked with' \
-        '*. Name them with tmrename so this list stays readable.'
+        '*. Name them with tm-window-rename so this list stays readable.'
       ;;
-    tmrename)
+    tm-window-rename)
       printf '%s\n' \
-        'Renames the window you are in, so tmlist, tmwindows and Ctrl+b w show' \
+        'Renames the window you are in, so tm-window-list and Ctrl+b w show' \
         'something meaningful instead of "zsh":' \
         '' \
-        '    tmrename claude'
+        '    tm-window-rename claude'
       ;;
-    tmdetach)
+    tm-session-detach)
       printf '%s\n' \
         'Leaves the session running and returns you to a plain shell. Nothing is' \
-        'stopped. Equivalent to Ctrl+b d. Rejoin with tmopen.' \
+        'stopped. Equivalent to Ctrl+b d. Rejoin with tm-session-open.' \
         '' \
         'Closing the VS Code window has the same effect on the session, so you' \
         'do not need to detach before disconnecting.'
       ;;
-    tmkill)
+    tm-session-kill)
       printf '%s\n' \
         'Destroys a session and every process inside it. Requires an explicit' \
         'name so it can never take out the session you are sitting in by' \
         'accident:' \
         '' \
-        '    tmkill build'
+        '    tm-session-kill build'
       ;;
-    tmkillall)
+    tm-session-kill-all)
       printf '%s\n' \
         'Stops the tmux server and every session on this container. Anything' \
         'running in them is killed. Rebuilding the container has the same' \
         'effect, since the tmux server does not outlive it.'
       ;;
-    tmhelp)
+    tm-help)
       printf '%s\n' \
         'Lists every tm command with its summary, then the tmux key bindings.' \
-        'For detail on one command, ask it directly: tmopen --help'
+        'For detail on one command, ask it directly: tm-session-open --help'
       ;;
   esac
 }
@@ -164,8 +165,8 @@ __tm_help_for() {
   printf '\n'
 }
 
-tmopen() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmopen; return 0; fi
+tm-session-open() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-session-open; return 0; fi
   set -- "${1:-$TM_SESSION}"
   if [ -z "${TMUX:-}" ]; then
     tmux new-session -A -s "$1" "$TM_SHELL"
@@ -182,8 +183,8 @@ tmopen() {
 
 # Interactive chooser for the "tmux: pick session" terminal profile. exec, so
 # the tab becomes the tmux client instead of stacking one on top of a shell.
-tmpick() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmpick; return 0; fi
+tm-session-pick() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-session-pick; return 0; fi
   printf '\nSessions on this container:\n\n'
   tmux list-sessions -F '  #{session_name}  (#{session_windows} windows)' 2> /dev/null \
     || printf '  none yet\n'
@@ -192,41 +193,41 @@ tmpick() {
   exec tmux new-session -A -s "${__tm_pick:-$TM_SESSION}" "$TM_SHELL"
 }
 
-# Deliberately refuses an existing name: tmopen is the one that does not care.
-tmnew() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmnew; return 0; fi
+# Deliberately refuses an existing name: tm-session-open is the one that does not care.
+tm-session-new() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-session-new; return 0; fi
   if [ -z "$1" ]; then
-    printf 'tmnew: a session name is required. See: tmnew --help\n' >&2
+    printf 'tm-session-new: a session name is required. See: tm-session-new --help\n' >&2
     return 1
   fi
   if tmux has-session -t "$1" 2> /dev/null; then
-    printf 'tmnew: session %s already exists. Go to it with: tmopen %s\n' "$1" "$1" >&2
+    printf 'tm-session-new: session %s already exists. Go to it with: tm-session-open %s\n' "$1" "$1" >&2
     return 1
   fi
-  tmopen "$1"
+  tm-session-open "$1"
 }
 
-tmlist() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmlist; return 0; fi
+tm-session-list() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-session-list; return 0; fi
   tmux list-sessions
 }
 
-tmsession() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmsession; return 0; fi
+tm-session-current() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-session-current; return 0; fi
   tmux display-message -p '#{session_name}'
 }
 
-tmrenamesession() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmrenamesession; return 0; fi
+tm-session-rename() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-session-rename; return 0; fi
   if [ -z "$1" ]; then
-    printf 'tmrenamesession: a name is required. See: tmrenamesession --help\n' >&2
+    printf 'tm-session-rename: a name is required. See: tm-session-rename --help\n' >&2
     return 1
   fi
   tmux rename-session "$1"
 }
 
-tmwindow() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmwindow; return 0; fi
+tm-window-new() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-window-new; return 0; fi
   if [ -z "$1" ]; then
     tmux new-window
     return $?
@@ -234,45 +235,45 @@ tmwindow() {
   tmux new-window -n "$1"
 }
 
-tmwindows() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmwindows; return 0; fi
+tm-window-list() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-window-list; return 0; fi
   tmux list-windows
 }
 
-tmrename() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmrename; return 0; fi
+tm-window-rename() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-window-rename; return 0; fi
   if [ -z "$1" ]; then
-    printf 'tmrename: a name is required. See: tmrename --help\n' >&2
+    printf 'tm-window-rename: a name is required. See: tm-window-rename --help\n' >&2
     return 1
   fi
   tmux rename-window "$1"
 }
 
-tmdetach() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmdetach; return 0; fi
+tm-session-detach() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-session-detach; return 0; fi
   if [ -z "${TMUX:-}" ]; then
-    printf 'tmdetach: not inside a tmux session, nothing to detach from.\n' >&2
+    printf 'tm-session-detach: not inside a tmux session, nothing to detach from.\n' >&2
     return 1
   fi
   tmux detach-client
 }
 
-tmkill() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmkill; return 0; fi
+tm-session-kill() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-session-kill; return 0; fi
   if [ -z "$1" ]; then
-    printf 'tmkill: a session name is required. See: tmkill --help\n' >&2
+    printf 'tm-session-kill: a session name is required. See: tm-session-kill --help\n' >&2
     return 1
   fi
   tmux kill-session -t "$1"
 }
 
-tmkillall() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmkillall; return 0; fi
+tm-session-kill-all() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-session-kill-all; return 0; fi
   tmux kill-server
 }
 
-tmhelp() {
-  if [ "$1" = "--help" ]; then __tm_help_for tmhelp; return 0; fi
+tm-help() {
+  if [ "$1" = "--help" ]; then __tm_help_for tm-help; return 0; fi
   cat <<'EOF'
 
 tmux, persistent shells in this container
@@ -285,7 +286,7 @@ tmux, persistent shells in this container
 COMMANDS                              every command also accepts --help
 EOF
   __tm_registry | while IFS='|' read -r __tm_name __tm_args __tm_summary; do
-    printf '  \033[1;36m%-20s\033[0m %s\n' "$__tm_name $__tm_args" "$__tm_summary"
+    printf '  \033[1;36m%-26s\033[0m %s\n' "$__tm_name $__tm_args" "$__tm_summary"
   done
   cat <<'EOF'
 

@@ -204,26 +204,26 @@ terminal, and you are back in the same session with the work still going.
 Nothing to remember on the way out; `-A` attaches to the existing session or
 creates it.
 
-Inside the container, `tmhelp` lists every command and key binding. Type
+Inside the container, `tm-help` lists every command and key binding. Type
 `tm` and press Tab to discover them; each also takes `--help` for detail.
 They are defined in `.devcontainer/tmux-commands.sh`, sourced into bash and
 zsh by postcreate.
 
 | Command | Does |
 |---|---|
-| `tmopen [name]` | Go to a session, creating it if missing (default: `main`) |
-| `tmpick` | List sessions and open the one you name |
-| `tmnew <name>` | Create a session and go to it; refuses an existing name |
-| `tmlist` | List sessions |
-| `tmsession` | Name of the session you are in |
-| `tmrenamesession <name>` | Rename the session you are in |
-| `tmwindow [name]` | New window in this session |
-| `tmwindows` | List windows in the current session |
-| `tmrename <name>` | Rename the current window |
-| `tmdetach` | Leave the session; everything keeps running |
-| `tmkill <name>` | Kill one named session |
-| `tmkillall` | Kill every session |
-| `tmhelp` | All commands and key bindings |
+| `tm-session-open [name]` | Go to a session, creating it if missing (default: `main`) |
+| `tm-session-pick` | List sessions and open the one you name |
+| `tm-session-new <name>` | Create a session and go to it; refuses an existing name |
+| `tm-session-list` | List sessions |
+| `tm-session-current` | Name of the session you are in |
+| `tm-session-rename <name>` | Rename the session you are in |
+| `tm-window-new [name]` | New window in this session |
+| `tm-window-list` | List windows in the current session |
+| `tm-window-rename <name>` | Rename the current window |
+| `tm-session-detach` | Leave the session; everything keeps running |
+| `tm-session-kill <name>` | Kill one named session |
+| `tm-session-kill-all` | Kill every session |
+| `tm-help` | All commands and key bindings |
 
 Every window and pane runs zsh. tmux opens `default-shell`, which is the
 account's login shell and is bash here, so the terminal profile's `zsh`
@@ -247,11 +247,11 @@ window you are looking at, and are all visible together.
 | Plain non-persistent shell | pick the `zsh` profile from the terminal dropdown |
 
 The terminal dropdown offers three profiles. `tmux` is the default and always
-opens the shared `main` session. `tmux: pick session` runs `tmpick`, which
+opens the shared `main` session. `tmux: pick session` runs `tm-session-pick`, which
 lists the sessions that exist and opens the one you name, creating it if the
 name is new. `zsh` is a plain shell outside tmux. A VS Code profile is fixed
 configuration and cannot list sessions that did not exist when the container
-was built, which is why the choice is made by `tmpick` rather than by more
+was built, which is why the choice is made by `tm-session-pick` rather than by more
 profiles.
 
 The `b` is lowercase and takes no Shift: hold Ctrl, tap `b`, release both, then

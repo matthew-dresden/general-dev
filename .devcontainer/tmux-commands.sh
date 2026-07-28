@@ -21,6 +21,7 @@
 __tm_registry() {
   cat <<'EOF'
 tmopen|[name]|Go to a session, creating it if missing (default: main).
+tmpick||List sessions and open the one you name. Drives the VS Code profile.
 tmlist||List sessions.
 tmwindows||List windows in the current session.
 tmrename|<name>|Rename the current window.
@@ -48,6 +49,18 @@ __tm_detail() {
         'Works from inside a session too, where it moves this terminal to the' \
         'named session rather than nesting one inside the other. Ctrl+b d, or' \
         'tmopen main, brings you back.'
+      ;;
+    tmpick)
+      printf '%s\n' \
+        'Prints the sessions that exist, then opens the one you name, creating' \
+        'it if the name is new. Enter alone takes the default session.' \
+        '' \
+        'This is what the "tmux: pick session" terminal profile runs. VS Code' \
+        'profiles are fixed configuration and cannot list sessions that did not' \
+        'exist when the container was built, so the choice is made here instead.' \
+        '' \
+        'It replaces the shell with tmux, so the terminal tab becomes that' \
+        'session rather than leaving a shell underneath it.'
       ;;
     tmlist)
       printf '%s\n' \
@@ -126,6 +139,18 @@ tmopen() {
   # then move this client to it.
   tmux has-session -t "$1" 2> /dev/null || tmux new-session -d -s "$1" "$TM_SHELL"
   tmux switch-client -t "$1"
+}
+
+# Interactive chooser for the "tmux: pick session" terminal profile. exec, so
+# the tab becomes the tmux client instead of stacking one on top of a shell.
+tmpick() {
+  if [ "$1" = "--help" ]; then __tm_help_for tmpick; return 0; fi
+  printf '\nSessions on this container:\n\n'
+  tmux list-sessions -F '  #{session_name}  (#{session_windows} windows)' 2> /dev/null \
+    || printf '  none yet\n'
+  printf '\nOpen which? Enter alone takes %s, a new name creates it: ' "$TM_SESSION"
+  read -r __tm_pick
+  exec tmux new-session -A -s "${__tm_pick:-$TM_SESSION}" "$TM_SHELL"
 }
 
 tmlist() {

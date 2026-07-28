@@ -88,6 +88,14 @@
               "zsh"
             ]
           },
+          "tmux: pick session": {
+            "path": "zsh",
+            "args": [
+              "-i",
+              "-c",
+              "tmpick"
+            ]
+          },
           "zsh": {
             "path": "zsh"
           }

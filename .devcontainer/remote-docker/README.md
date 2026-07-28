@@ -233,6 +233,14 @@ window you are looking at, and are all visible together.
 | `Ctrl+b [` | Scroll back (`q` exits) |
 | Plain non-persistent shell | pick the `zsh` profile from the terminal dropdown |
 
+The terminal dropdown offers three profiles. `tmux` is the default and always
+opens the shared `main` session. `tmux: pick session` runs `tmpick`, which
+lists the sessions that exist and opens the one you name, creating it if the
+name is new. `zsh` is a plain shell outside tmux. A VS Code profile is fixed
+configuration and cannot list sessions that did not exist when the container
+was built, which is why the choice is made by `tmpick` rather than by more
+profiles.
+
 The `b` is lowercase and takes no Shift: hold Ctrl, tap `b`, release both, then
 press the second key on its own. Shift appears only when the character itself
 needs it, as in `%` and `"`.

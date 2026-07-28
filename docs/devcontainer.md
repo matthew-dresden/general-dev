@@ -27,16 +27,36 @@ EC2 reference, troubleshooting) live in
   (`terminal.integrated.profiles.linux`). VS Code terminates terminal processes
   when the window closes, so this is what keeps a Claude session or long build
   alive across a disconnect, terminal persistence alone only restores the tab
-  and its scrollback. The `tm-*` commands that drive it are defined in
-  `.devcontainer/tmux-commands.sh` and sourced by postCreate; `tm-help` lists
-  them. A plain non-persistent shell is available as the `zsh` profile.
+  and its scrollback. The `tm-session-*` and `tm-window-*` commands that drive
+  it are defined in `.devcontainer/tmux-commands.sh` and sourced by postCreate;
+  `tm-help` lists them, and `tm-` plus Tab discovers them. `tmux: pick session`
+  is a second profile that runs `tm-session-pick`, which lists the sessions
+  that exist and opens the one you name: a VS Code profile is fixed
+  configuration written when the container is built and cannot enumerate
+  sessions created later. A plain non-persistent shell is the `zsh` profile.
+- `.devcontainer/tmux.conf`, installed to `~/.tmux.conf` by postCreate, turns
+  the mouse on so the wheel scrolls and clicks select, raises tmux's own
+  scrollback from its 2000-line default, lists every session on the status bar,
+  and sets `default-shell` so windows open zsh rather than the account's login
+  shell. postCreate rewrites that line with the zsh it resolved, because the
+  committed file cannot know where zsh was installed.
+- `postAttachCommand` runs `.devcontainer/resmon-disks.py`, which points the
+  Resource Monitor extension at the devices behind `/workspaces` and `/tmp`.
+  resmon filters by device rather than mount point and the device differs per
+  host, so it is resolved at run time. It runs on attach rather than in
+  postCreate because VS Code writes its settings file after postCreate, and it
+  never creates that file: doing so stops VS Code seeding it and leaves the
+  container with no profiles or editor settings at all.
 - Git repo detection: `git.autoRepositoryDetection: "subFolders"` +
   `git.repositoryScanMaxDepth: -1` + `git.openRepositoryInParentFolders:
   "never"`, every nested repo under the workspace root is detected at any
   depth, and nothing outside the workspace is ever adopted. Gitignored clones
-  are surfaced explicitly via `git.scanRepositories` in `.vscode/settings.json`
-  (workspace settings override the devcontainer defaults, so both files carry
-  the same values).
+  are found too: the extension's traversal filters on folder name, excluding
+  `.git` and `git.repositoryScanIgnoredFolders`, and never reads `.gitignore`.
+  Nothing needs listing in `git.scanRepositories`, which is why that setting is
+  no longer used. Clone into `repos/`, or anywhere else under the workspace.
+  Workspace settings override the devcontainer defaults, so both files carry
+  the same values.
 
 ## Provisioning flow (postCreate)
 

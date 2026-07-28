@@ -9,10 +9,11 @@ Personal general-purpose development workspace built on the
   through SSH-over-SSM. Containers and source live on the instance, so work
   survives the laptop sleeping, restarting, or losing connectivity.
 
-Project repos being worked on (currently `kanon` and `devbench`) are **plain
-nested clones** inside the workspace, not submodules. They are gitignored by
-this repo and listed in `.vscode/settings.json` `git.scanRepositories` so each
-appears as its own repository in Source Control.
+Project repos being worked on are **plain nested clones** inside the
+workspace, not submodules, and `repos/` is where they go. They are gitignored
+by this repo and each appears as its own repository in Source Control with
+nothing to configure: VS Code's scan walks directories and never consults
+`.gitignore`, so an ignored clone is found like any other.
 
 ## Layout
 
@@ -21,6 +22,7 @@ appears as its own repository in Source Control.
 | `.devcontainer/` | Devcontainer definition (image + features), postcreate setup, shared shell functions |
 | `.devcontainer/remote-docker/` | Remote EC2 engine: tunnel/shell/secrets scripts, instance config, see its [README](.devcontainer/remote-docker/README.md) |
 | `.devcontainer/nix-family-os/`, `wsl-family-os/` | Host-side proxy (tinyproxy) helpers for local mode |
+| `repos/` | Where project repositories are cloned. Only its `.gitkeep` is tracked |
 | `.vscode/settings.json` | Workspace git-repo detection (nested clones) |
 | `docs/devcontainer.md` | Deep dive: setup flow, secrets, cdevcontainer contract |
 | `CLAUDE.md` | Engineering standards for AI-assisted work in this repo |
@@ -97,14 +99,15 @@ lists the commands and key bindings.
 
 ```sh
 # inside the (local or remote) devcontainer
-cd /workspaces/general-dev
+cd /workspaces/general-dev/repos
 git clone https://github.com/caylent-solutions/kanon
 git clone https://github.com/caylent-solutions/devbench
 ```
 
-Each clone shows up as its own repo in Source Control. For a **new** project
-clone, add it to `.gitignore` and to `git.scanRepositories` in
-`.vscode/settings.json` (auto-detection skips gitignored folders).
+Each clone shows up as its own repo in Source Control, with nothing to add
+anywhere. `repos/` is ignored except for its `.gitkeep`, and being ignored does
+not hide a clone from the scan. Cloning anywhere else under the workspace works
+the same way; `repos/` just keeps the root tidy.
 
 To run a *different* project as its own remote devcontainer instead: push it to
 GitHub, then from that repo's root run `make push-secrets` and `make build`

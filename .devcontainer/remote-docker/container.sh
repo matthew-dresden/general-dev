@@ -35,6 +35,23 @@ REPO_ROOT="$(cd "${RD_DIR}/../.." && pwd)"
 : "${CONTAINER_WORKSPACES_ROOT:=/workspaces}"
 CONTAINER_WORKSPACE="${CONTAINER_WORKSPACES_ROOT}/${PROJECT_NAME}"
 
+# The workspace path inside the container, taken from devcontainer.json rather
+# than rebuilt here. That file owns workspaceFolder, and it can contain
+# variables such as ${localWorkspaceFolderBasename}, so the resolved value is
+# read from the CLI. Changing workspaceFolder therefore needs no change here.
+# Resolved once per run: the CLI call is not free.
+rdc_workspace_folder() {
+  if [ -z "${RDC_WORKSPACE_FOLDER:-}" ]; then
+    if command -v "$DEVCONTAINER_CLI" > /dev/null 2>&1 && command -v jq > /dev/null 2>&1; then
+      RDC_WORKSPACE_FOLDER="$("$DEVCONTAINER_CLI" read-configuration --workspace-folder "$REPO_ROOT" 2> /dev/null \
+        | jq -r '.configuration.workspaceFolder // empty' 2> /dev/null || true)"
+    fi
+    [ -n "${RDC_WORKSPACE_FOLDER:-}" ] || rd_die \
+      "cannot resolve workspaceFolder from ${REPO_ROOT}/.devcontainer/devcontainer.json. Install the devcontainer CLI and jq, or set CONTAINER_WORKSPACES_ROOT and PROJECT_NAME."
+  fi
+  printf '%s\n' "$RDC_WORKSPACE_FOLDER"
+}
+
 # Run a command in the container as the account the devcontainer runs as.
 rdc_exec() {
   local id="$1"; shift
@@ -449,78 +466,25 @@ rdc_reopen() {
   if [ "$(rdc_backend)" != "remote" ]; then
     rd_require_cmd "$VSCODE_CLI" "Install the VS Code 'code' command: Command Palette > Shell Command: Install 'code' command in PATH"
     rd_log "opening ${REPO_ROOT} in its container"
-    "$VSCODE_CLI" --folder-uri "vscode-remote://dev-container+$(printf '%s' "$REPO_ROOT" | od -A n -t x1 | tr -d ' \n')${CONTAINER_WORKSPACE}"
+    "$VSCODE_CLI" --folder-uri "vscode-remote://dev-container+$(printf '%s' "$REPO_ROOT" | od -A n -t x1 | tr -d ' \n')$(rdc_workspace_folder)"
     rd_ok "VS Code opening, the window attaches to '${name}'"
     return 0
   fi
 
-  # The remote workspace lives in a volume, so there is no local path to hand
-  # VS Code. Attach is the route that works; the clone-in-volume reattach path
-  # is documented as unreliable on a high-latency context.
-  rd_log "remote backend, attach is the supported route"
-  printf '\n  VS Code -> Cmd+Shift+P -> \033[1mDev Containers: Attach to Running Container...\033[0m\n'
-  printf '  Pick: \033[1m%s\033[0m\n\n' "$name"
-}
-
-# One command that gets you working from whatever state things are in.
-#
-# Decides rather than asks: an unreachable remote engine means the tunnel needs
-# refreshing, no container means build one, a stopped container means start it,
-# and a running one means there is nothing to do but open it. Everything it
-# calls is a target you can also run on its own, so nothing here is a second
-# implementation of anything.
-rdc_up() {
-  rd_require_cmd docker "Install the docker CLI: https://docs.docker.com/engine/install/"
-
-  local backend
-  backend="$(rdc_backend)"
-
-  # An unreachable engine is recoverable on the remote backend: the SSM tunnel
-  # drops on sleep and on SSO expiry, and refreshing it is what connect does.
-  if ! docker info > /dev/null 2>&1; then
-    if [ "$backend" = "remote" ]; then
-      rd_log "remote engine is not answering, refreshing the tunnel"
-      "${RD_DIR}/docker-tunnel.sh" > /dev/null \
-        || rd_die "could not reach the remote engine. If this is an auth failure run: aws sso login --profile ${REMOTE_AWS_PROFILE}"
-      rd_ok "tunnel refreshed"
-    else
-      rd_die "docker context '$(docker context show)' is not answering. Start your local Docker engine, or switch endpoint with 'make remote'."
-    fi
-  fi
-
-  local ids
-  ids="$(rdc_container_ids)"
-
-  if [ -z "$ids" ]; then
-    rd_log "no container for '${PROJECT_NAME}' on the ${backend} engine, building one"
-    rdc_build
-    rdc_reopen
-    return 0
-  fi
-
-  # rdc_require_container refuses to guess when several instances exist, and
-  # names them, so CONTAINER=<name> is the answer rather than a wrong choice.
-  local id state
-  id="$(rdc_require_container)"
-  state="$(rdc_container_state "$id")"
-
-  case "$state" in
-    running)
-      rd_ok "container is already running"
-      ;;
-    *)
-      rd_log "container is '${state}', starting it"
-      docker start "$id" > /dev/null \
-        || rd_die "could not start the container. 'make rebuild' recreates it if it is broken."
-      rd_ok "started"
-      ;;
-  esac
-
-  # Cheap, and it verifies rather than assumes: a credential that expired since
-  # the container was built would otherwise only surface on the next push.
-  rdc_push_git_creds
-  rdc_status
-  rdc_reopen
+  # A volume-backed workspace has no local path, but VS Code can open a folder
+  # inside an already-attached container by URI. The authority is
+  # "attached-container+" followed by hex-encoded JSON naming the container and
+  # the docker context it lives on, which is exactly what VS Code writes to its
+  # own recently-opened list when you attach by hand.
+  rd_require_cmd "$VSCODE_CLI" "Install the VS Code 'code' command: Command Palette > Shell Command: Install 'code' command in PATH"
+  local authority
+  authority="$(printf '{"containerName":"/%s","settings":{"context":"%s"}}' \
+    "$name" "$(docker context show)" | od -A n -t x1 | tr -d ' \n')"
+  local workspace
+  workspace="$(rdc_workspace_folder)"
+  rd_log "opening ${workspace} in '${name}'"
+  "$VSCODE_CLI" --folder-uri "vscode-remote://attached-container+${authority}${workspace}"
+  rd_ok "VS Code opening the workspace directly, no Attach step needed"
 }
 
 # Build and start the container, blocking until postCreate finishes. Exits with

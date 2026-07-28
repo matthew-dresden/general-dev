@@ -1,0 +1,8 @@
+Clone project repositories into this folder.
+
+They are ignored by this repository and found by VS Code on their own. The
+scan walks every directory under the workspace, so a repository anywhere in
+it appears in Source Control, here or not, and a clone made while the
+container is running shows up without a reload.
+
+Only this file is tracked, so the folder exists in a fresh clone.

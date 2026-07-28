@@ -22,6 +22,12 @@
 !/LICENSE
 !/shell.env.example
 !/devcontainer-environment-variables.json.example
+# The folder is tracked so it exists in a fresh clone; what you clone into
+# it is not. VS Code still finds those repositories, because its scan walks
+# directories rather than consulting .gitignore.
+!/repos/
+/repos/*
+!/repos/.gitkeep
 
 # ---------------------------------------------------------------------------
 # Per-developer identity and secrets. The .example files above are committed;

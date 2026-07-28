@@ -1,16 +1,37 @@
 {
-  // Source Control shows the workspace root repo plus every project repo
-  // cloned under it. Project clones are gitignored by the parent repo, and
-  // VS Code's auto-detection skips gitignored folders, so each clone must
-  // be listed explicitly in git.scanRepositories to appear. When you clone
-  // a new project into this workspace, add it here AND to .gitignore.
-  "git.scanRepositories": [
-    "devbench",
-    "kanon"
-  ],
-  // Detect non-ignored nested repos at any depth, but only inside this
-  // workspace; never adopt repos from parent folders or elsewhere (/tmp etc).
+  // Source Control shows every git repository under this workspace, wherever
+  // it sits: the root repo, anything in repos/, anything cloned elsewhere in
+  // the tree. Nothing is listed by hand.
+  //
+  // git.scanRepositories used to carry each clone explicitly, on the belief
+  // that the scan skipped gitignored folders. It does not. The traversal in
+  // the git extension filters only on folder name, excluding ".git" and
+  // anything in git.repositoryScanIgnoredFolders, and never consults
+  // .gitignore, so an ignored clone is found like any other. Depth -1 means
+  // unlimited. (That extension also rejects absolute paths in
+  // git.scanRepositories, so a generated list would have to be relative even
+  // if one were still needed.)
   "git.autoRepositoryDetection": "subFolders",
   "git.repositoryScanMaxDepth": -1,
-  "git.openRepositoryInParentFolders": "never"
+  // Unlimited depth walks every directory, so the heavy ones are named here.
+  // The extension's own default is ["node_modules"] alone.
+  "git.repositoryScanIgnoredFolders": [
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "dist",
+    "build",
+    "target",
+    ".next"
+  ],
+  // "subFolders" confines detection to the workspace, so opening a file from
+  // /tmp or anywhere outside never adds its repository. "never" stops the
+  // workspace's own parent directories being adopted.
+  "git.openRepositoryInParentFolders": "never",
+  "git.detectSubmodules": true,
+  "git.detectSubmodulesLimit": 20
 }

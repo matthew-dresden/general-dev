@@ -69,9 +69,13 @@
         "dbaeumer.vscode-eslint",
         "Angular.ng-template",
         "anthropic.claude-code",
+        "mutantdino.resourcemonitor",
         "wholroyd.jinja"
       ],
       "settings": {
+        "resmon.show.cputemp": false,
+        "resmon.show.battery": false,
+        "resmon.updatefrequencyms": 2000,
         "terminal.integrated.profiles.linux": {
           "tmux": {
             "path": "tmux",
@@ -203,6 +207,7 @@
         "chat.editor.wordWrap": "on",
         "chat.editRequests": "inline",
         "chat.checkpoints.showFileChanges": true,
+        "workbench.secondarySideBar.defaultVisibility": "hidden",
         "chat.restoreLastPanelSession": false,
         "chat.viewSessions.enabled": true,
         "chat.viewSessions.orientation": "sideBySide",

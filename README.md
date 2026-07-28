@@ -105,9 +105,21 @@ git clone https://github.com/caylent-solutions/devbench
 ```
 
 Each clone shows up as its own repo in Source Control, with nothing to add
-anywhere. `repos/` is ignored except for its `.gitkeep`, and being ignored does
-not hide a clone from the scan. Cloning anywhere else under the workspace works
-the same way; `repos/` just keeps the root tidy.
+anywhere, and it appears the moment you clone it rather than at the next window
+open. `repos/` is ignored except for its `.gitkeep`, and being ignored does not
+hide a clone from the scan.
+
+That immediacy is the one thing `repos/` buys you. VS Code scans the workspace
+when the window opens, and separately watches for new `.git` directories, but
+it drops any whose path is already inside an open repository. This workspace
+root is itself a repository, so it claims every clone made under it and the
+watcher never fires. postCreate writes a `.gitmodules` naming `repos/` as a
+submodule path, which is the one case the lookup skips: the clone is left
+unclaimed and VS Code opens it as its own repository. No gitlink is created, so
+`git submodule status`, `update` and `sync` stay no-ops and `git clone
+--recurse-submodules` is unaffected. The file is generated, not committed, so
+it is rebuilt from scratch every time the container is. Clone somewhere else
+under the workspace and it still works, but it waits for the next window open.
 
 To run a *different* project as its own remote devcontainer instead: push it to
 GitHub, then from that repo's root run `make push-secrets` and `make build`

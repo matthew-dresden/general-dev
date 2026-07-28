@@ -34,6 +34,7 @@ source "${WORK_DIR}/.devcontainer/devcontainer-functions.sh"
 : "${DEVCONTAINER_CLAUDE_FLAGS:=--dangerously-skip-permissions}"
 # Prepended to PATH for the container user and for project-setup.sh.
 : "${DEVCONTAINER_EXTRA_PATH:=/usr/local/py-utils/bin:/usr/local/python/current/bin}"
+: "${DEVCONTAINER_REPOS_DIR:=repos}"
 
 ###########
 # Derived #
@@ -53,6 +54,8 @@ TMUX_COMMANDS="${WORK_DIR}/.devcontainer/tmux-commands.sh"
 TMUX_CONF="${WORK_DIR}/.devcontainer/tmux.conf"
 PROJECT_SETUP="${WORK_DIR}/.devcontainer/project-setup.sh"
 AWS_PROFILE_MAP_FILE="${WORK_DIR}/.devcontainer/aws-profile-map.json"
+GITMODULES_FILE="${WORK_DIR}/.gitmodules"
+REPOS_PATH="${WORK_DIR}/${DEVCONTAINER_REPOS_DIR}"
 
 WARNINGS=()
 is_cicd() { [ "${CICD,,}" = "true" ]; }
@@ -249,6 +252,19 @@ configure_git() {
   log_section_done "Git configuration"
 }
 
+configure_repo_detection() {
+  if ! container_user_has git; then
+    log_section_skipped "Repository detection" "git is not installed"
+    return 0
+  fi
+  log_section "Repository detection" "${DEVCONTAINER_REPOS_DIR}/"
+  mkdir -p "${REPOS_PATH}"
+  git config -f "${GITMODULES_FILE}" "submodule.${DEVCONTAINER_REPOS_DIR}.path" "${DEVCONTAINER_REPOS_DIR}"
+  git config -f "${GITMODULES_FILE}" "submodule.${DEVCONTAINER_REPOS_DIR}.url" "./${DEVCONTAINER_REPOS_DIR}"
+  chown "${CONTAINER_USER}:${CONTAINER_USER}" "${GITMODULES_FILE}" "${REPOS_PATH}"
+  log_section_done "Repository detection"
+}
+
 # Hand the home directory back to the container user: this script runs as root,
 # so anything it wrote is root-owned until now.
 fix_ownership() {
@@ -307,6 +323,7 @@ main() {
   configure_aws_profiles
   validate_proxy
   configure_git
+  configure_repo_detection
   fix_ownership
   report_warnings
   run_project_setup

@@ -76,6 +76,8 @@
         "resmon.show.cputemp": false,
         "resmon.show.battery": false,
         "resmon.updatefrequencyms": 2000,
+        "resmon.show.disk": true,
+        "resmon.disk.format": "UsedOutOfTotal",
         "terminal.integrated.profiles.linux": {
           "tmux": {
             "path": "tmux",
@@ -258,5 +260,6 @@
   },
   "userEnvProbe": "loginInteractiveShell",
   "postCreateCommand": "bash -c 'set -o pipefail; bash .devcontainer/postcreate-wrapper.sh 2>&1 | tee /tmp/devcontainer-setup.log'",
-  "postStartCommand": "echo 'Dev container ready.'"
+  "postStartCommand": "echo 'Dev container ready.'",
+  "postAttachCommand": "python3 .devcontainer/resmon-disks.py"
 }

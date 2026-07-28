@@ -61,6 +61,7 @@ operation and both entry points stay in step.
 | `push-secrets.sh` | Transform local `shell.env` for remote use and publish both secret files to SSM Parameter Store (`/devcontainer/<project>/…`). |
 | `container.sh` | Container lifecycle for the current project: status, start/stop/restart, unpushed-work check, teardown, rebuild report. |
 | `lib.sh` | Shared functions (sourced by the others), including the failure translation described below. |
+| `../resmon-disks.py` | Runs from `postAttachCommand`. Points the Resource Monitor extension at the devices behind `/workspaces` and `/tmp`, resolved per host. |
 | `config.env` | Defaults (instance ID, region, profile, context names). Every value is overridable via environment variables. |
 | `ec2-user-data.yaml` | cloud-init config the instance was provisioned with (kept for reproducibility). |
 

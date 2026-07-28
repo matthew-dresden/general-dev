@@ -35,6 +35,7 @@ source "${WORK_DIR}/.devcontainer/devcontainer-functions.sh"
 # Prepended to PATH for the container user and for project-setup.sh.
 : "${DEVCONTAINER_EXTRA_PATH:=/usr/local/py-utils/bin:/usr/local/python/current/bin}"
 : "${DEVCONTAINER_REPOS_DIR:=repos}"
+: "${DEVCONTAINER_REPO_SCAN_IGNORE:=node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache dist build target .next}"
 
 ###########
 # Derived #
@@ -54,7 +55,6 @@ TMUX_COMMANDS="${WORK_DIR}/.devcontainer/tmux-commands.sh"
 TMUX_CONF="${WORK_DIR}/.devcontainer/tmux.conf"
 PROJECT_SETUP="${WORK_DIR}/.devcontainer/project-setup.sh"
 AWS_PROFILE_MAP_FILE="${WORK_DIR}/.devcontainer/aws-profile-map.json"
-GITMODULES_FILE="${WORK_DIR}/.gitmodules"
 REPOS_PATH="${WORK_DIR}/${DEVCONTAINER_REPOS_DIR}"
 
 WARNINGS=()
@@ -252,16 +252,58 @@ configure_git() {
   log_section_done "Git configuration"
 }
 
+declare_unclaimed_path() {
+  local file="$1/.gitmodules" relative_path="$2"
+  git config -f "${file}" "submodule.${relative_path}.path" "${relative_path}"
+  git config -f "${file}" "submodule.${relative_path}.url" "./${relative_path}"
+  chown "${CONTAINER_USER}:${CONTAINER_USER}" "${file}"
+}
+
+enclosing_repo() {
+  local dir
+  dir="$(dirname "$1")"
+  while [ "${dir}" != "/" ]; do
+    if [ -e "${dir}/.git" ]; then
+      printf '%s\n' "${dir}"
+      return 0
+    fi
+    [ "${dir}" != "${WORK_DIR}" ] || return 1
+    dir="$(dirname "${dir}")"
+  done
+  return 1
+}
+
 configure_repo_detection() {
   if ! container_user_has git; then
     log_section_skipped "Repository detection" "git is not installed"
     return 0
   fi
-  log_section "Repository detection" "${DEVCONTAINER_REPOS_DIR}/"
+  [ -n "${DEVCONTAINER_REPO_SCAN_IGNORE}" ] ||
+    exit_with_error "DEVCONTAINER_REPO_SCAN_IGNORE must name at least one directory"
+  log_section "Repository detection" "${DEVCONTAINER_REPOS_DIR}/ and every nested clone"
   mkdir -p "${REPOS_PATH}"
-  git config -f "${GITMODULES_FILE}" "submodule.${DEVCONTAINER_REPOS_DIR}.path" "${DEVCONTAINER_REPOS_DIR}"
-  git config -f "${GITMODULES_FILE}" "submodule.${DEVCONTAINER_REPOS_DIR}.url" "./${DEVCONTAINER_REPOS_DIR}"
-  chown "${CONTAINER_USER}:${CONTAINER_USER}" "${GITMODULES_FILE}" "${REPOS_PATH}"
+  chown "${CONTAINER_USER}:${CONTAINER_USER}" "${REPOS_PATH}"
+  declare_unclaimed_path "${WORK_DIR}" "${DEVCONTAINER_REPOS_DIR}"
+
+  local -a ignore_names ignore_expr=()
+  local name
+  read -ra ignore_names <<< "${DEVCONTAINER_REPO_SCAN_IGNORE}"
+  for name in "${ignore_names[@]}"; do
+    ignore_expr+=(-name "${name}" -o)
+  done
+  unset "ignore_expr[$(( ${#ignore_expr[@]} - 1 ))]"
+
+  local marker repo parent relative count=0
+  while IFS= read -r marker; do
+    repo="$(dirname "${marker}")"
+    [ "${repo}" != "${WORK_DIR}" ] || continue
+    parent="$(enclosing_repo "${repo}")" || continue
+    relative="${repo#"${parent}"/}"
+    declare_unclaimed_path "${parent}" "${relative}"
+    count=$(( count + 1 ))
+  done < <(find "${WORK_DIR}" \( "${ignore_expr[@]}" \) -prune -o -name .git -prune -print)
+
+  log_info "Declared ${count} nested repository path(s)"
   log_section_done "Repository detection"
 }
 

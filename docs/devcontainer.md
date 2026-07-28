@@ -57,6 +57,18 @@ EC2 reference, troubleshooting) live in
   no longer used. Clone into `repos/`, or anywhere else under the workspace.
   Workspace settings override the devcontainer defaults, so both files carry
   the same values.
+- That scan only runs at window open. Between scans the extension watches for
+  new `.git` directories, but discards any path already inside an open
+  repository, and both the workspace root and every clone under it are open
+  repositories. `configure_repo_detection` in postCreate defeats that by
+  writing `.gitmodules` files: `repos/` in the workspace root, plus one entry
+  per nested repository in whichever repository encloses it. A path declared as
+  a submodule path is the one case the extension's lookup skips, so the clone
+  is left unclaimed and opened on its own. No gitlink is written, so every
+  `git submodule` command stays a no-op, and the files are generated rather
+  than committed so a rebuild recreates them. `DEVCONTAINER_REPOS_DIR` and
+  `DEVCONTAINER_REPO_SCAN_IGNORE` control the directory and the folders the
+  walk prunes.
 
 ## Provisioning flow (postCreate)
 
@@ -80,6 +92,7 @@ EC2 reference, troubleshooting) live in
    | `~/.aws/config` from `aws-profile-map.json` | `jq` + a non-empty map |
    | host proxy reachability | `HOST_PROXY=true` |
    | git identity and credential helper | `git` |
+   | `.gitmodules` per repository, for live repo detection | `git` |
 
    It then hands `$HOME` back to the container user and runs
    `project-setup.sh` as that user.

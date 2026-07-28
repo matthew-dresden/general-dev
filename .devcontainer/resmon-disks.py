@@ -12,6 +12,12 @@ Run from postAttachCommand, not postCreate: VS Code writes the settings file
 itself when the server starts, which is after postCreate, and would overwrite
 anything put there earlier.
 
+This never creates that file. VS Code seeds it with everything under
+customizations.vscode.settings, and only when it does not already exist, so an
+earlier version of this script creating it left a container with one key in it
+and no terminal profiles, no editor settings, nothing. If the file is not there
+yet this exits without touching anything and the next attach sets the drives.
+
 Inputs (environment):
   RESMON_DISK_MOUNTS   space-separated mount points  (default: /workspaces /tmp)
   RESMON_SETTINGS      settings file to update
@@ -51,8 +57,6 @@ def device_for(mount):
 
 
 def load(path):
-    if not os.path.exists(path):
-        return {}
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
     if not text.strip():
@@ -75,6 +79,16 @@ def main():
         "~/.vscode-server/data/Machine/settings.json"
     )
     path = os.environ.get("RESMON_SETTINGS", default_settings)
+
+    # Creating this file is what must never happen: VS Code seeds it from
+    # customizations.vscode.settings only when it is absent, so getting there
+    # first leaves a container with no terminal profiles and no editor settings.
+    if not os.path.exists(path):
+        print(
+            "resmon-disks: %s does not exist yet, so VS Code has not written its "
+            "settings. Leaving it alone; the next attach sets the drives." % path
+        )
+        return
 
     devices = []
     for mount in mounts:

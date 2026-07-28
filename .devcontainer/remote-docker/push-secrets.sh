@@ -50,7 +50,7 @@ REMOTE_SHELL_ENV=$(sed \
 [ -n "$REMOTE_SHELL_ENV" ] || rd_die "transformed shell.env is empty"
 
 rd_log "Publishing ${SSM_PREFIX}/shell.env (SecureString)..."
-aws ssm put-parameter \
+rd_aws ssm put-parameter \
   --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" \
   --name "${SSM_PREFIX}/shell.env" \
   --type SecureString \
@@ -58,7 +58,7 @@ aws ssm put-parameter \
   --overwrite > /dev/null
 
 rd_log "Publishing ${SSM_PREFIX}/aws-profile-map.json (String)..."
-aws ssm put-parameter \
+rd_aws ssm put-parameter \
   --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" \
   --name "${SSM_PREFIX}/aws-profile-map.json" \
   --type String \

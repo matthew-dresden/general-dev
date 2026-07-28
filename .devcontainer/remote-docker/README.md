@@ -60,7 +60,7 @@ operation and both entry points stay in step.
 | `shell.sh` | Interactive zsh on the instance (same tunnel). |
 | `push-secrets.sh` | Transform local `shell.env` for remote use and publish both secret files to SSM Parameter Store (`/devcontainer/<project>/…`). |
 | `container.sh` | Container lifecycle for the current project: status, start/stop/restart, unpushed-work check, teardown, rebuild report. |
-| `lib.sh` | Shared functions (sourced by the others). |
+| `lib.sh` | Shared functions (sourced by the others), including the failure translation described below. |
 | `config.env` | Defaults (instance ID, region, profile, context names). Every value is overridable via environment variables. |
 | `ec2-user-data.yaml` | cloud-init config the instance was provisioned with (kept for reproducibility). |
 
@@ -380,6 +380,33 @@ warning above.
 
 To stop the instance (cost saving), first disable stop protection:
 `aws ec2 modify-instance-attribute --instance-id <ec2-instance-id> --no-disable-api-stop --region us-east-1`
+
+## When something fails
+
+Failures from `docker`, `aws` and the `devcontainer` CLI are translated before
+they reach you. Each one names the cause and the command that fixes it, so a
+message like `conflict: unable to delete ... (must be forced)` arrives as an
+explanation of which other container still holds the image and what to do about
+it. The wrappers are `rd_docker`, `rd_aws` and `rd_devcontainer_up` in
+`lib.sh`; anything with no translation yet still prints the tool's own message,
+labelled as untranslated, rather than a bare exit code.
+
+Two rules keep it honest, and both matter when editing these scripts:
+
+- Only calls where a non-zero status is an *error* go through the wrappers.
+  Where it is an *answer*, such as "does this volume exist" or "is this branch
+  ahead of its upstream", the command is called directly and the caller reads
+  the status. `rdc_exec` and `rdc_exec_probe` in `container.sh` are that
+  distinction made explicit.
+- On the bash 3.2 that macOS ships, `set -e` does not apply inside a command
+  substitution. A helper that fails there ends only its own subshell, and its
+  caller carries on with an empty value and reports something else. Anything
+  capturing the output of a function that can fail therefore writes
+  `x="$(f)" || exit $?` rather than relying on `set -e`.
+
+`devcontainer up` is the exception to capturing output: its build log streams
+as it always did, and the explanation is printed last, after the CLI's stack
+trace, so it is the final thing on screen rather than something scrolled past.
 
 ## Troubleshooting
 

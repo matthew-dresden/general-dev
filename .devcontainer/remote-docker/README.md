@@ -404,9 +404,13 @@ Two rules keep it honest, and both matter when editing these scripts:
   capturing the output of a function that can fail therefore writes
   `x="$(f)" || exit $?` rather than relying on `set -e`.
 
-`devcontainer up` is the exception to capturing output: its build log streams
-as it always did, and the explanation is printed last, after the CLI's stack
-trace, so it is the final thing on screen rather than something scrolled past.
+`devcontainer up` is the exception to capturing anything at all. It renders a
+live log to the terminal for minutes at a time, and redirecting either of its
+streams changes how it writes: capturing stdout to parse its JSON summary made
+the log arrive without carriage returns, so every line started where the
+previous one ended. Nothing is lost by leaving both alone, because the CLI
+prints that summary to stdout *and* stderr, so it is already the last thing on
+screen. Do not redirect either stream here.
 
 ## Troubleshooting
 

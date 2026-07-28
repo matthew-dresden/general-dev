@@ -414,67 +414,40 @@ rd_aws_failed() {
   esac
 }
 
-# Run 'devcontainer up', which is the one call whose progress has to stay
-# visible: it can run for many minutes. The CLI writes its whole log to stderr
-# and a single JSON summary to stdout, so stderr streams untouched and stdout
-# is captured, leaving the explanation as the last thing printed rather than
-# something scrolled past by a Node stack trace.
+# Run 'devcontainer up'. Neither of its streams is touched, and that is the
+# whole design: this is the one call that renders a live log to the terminal
+# for minutes at a time, and redirecting either stream changes how the CLI
+# writes. Capturing stdout to parse the summary made the log arrive without
+# carriage returns, so every line started where the previous one ended.
+#
+# Nothing is lost by leaving them alone. The CLI prints the same JSON summary
+# to both streams, so it is already the last thing on screen; this only has to
+# say what it means and what to do next.
 rd_devcontainer_up() {
-  local cli="$1" out status=0 summary message
+  local cli="$1" status=0
   shift
-  out="$(mktemp "${TMPDIR:-/tmp}/rd-devcontainer.XXXXXX")"
-  "$cli" up "$@" > "$out" || status=$?
-  summary="$(sed -n '$p' "$out")"
-  rm -f "$out"
+  "$cli" up "$@" || status=$?
   if [ "$status" -eq 0 ]; then
     return 0
   fi
 
-  message="$(printf '%s' "$summary" | jq -r '.message // empty' 2> /dev/null || true)"
-  [ -n "$message" ] || message="the CLI exited ${status} without reporting a reason"
-
-  case "$message" in
-    *'docker pull'* | *'failed to resolve'* | *'manifest unknown'*)
-      rd_fail "The build could not pull an image" \
-        "The tag does not exist, or this engine cannot reach the registry." \
-        "" \
-        "devcontainer reported:" \
-        "$(rd_quote "$message")"
-      ;;
-    *'docker build'* | *'buildkit'* | *'returned a non-zero code'*)
-      rd_fail "The image build failed" \
-        "The failing step is in the log above, at the last RUN that reported an error." \
-        "" \
-        "If a cached layer went stale under a changed feature or base image:" \
-        "  ${RD_BOLD}make rebuild-no-cache${RD_RESET}" \
-        "" \
-        "devcontainer reported:" \
-        "$(rd_quote "$message")"
-      ;;
-    *postCreate* | *onCreate* | *updateContent* | *postStart* | *postAttach*)
-      rd_fail "A lifecycle command failed after the container was created" \
-        "The image is fine; a command in .devcontainer ran and exited non-zero. Its" \
-        "output is above, immediately before the stack trace." \
-        "" \
-        "Fix the command, then ${RD_BOLD}make rebuild${RD_RESET}." \
-        "" \
-        "devcontainer reported:" \
-        "$(rd_quote "$message")"
-      ;;
-    *'no space left on device'*)
-      rd_fail "The docker engine ran out of disk during the build" \
-        "Reclaim space and build again:" \
-        "  ${RD_BOLD}docker system prune${RD_RESET}" \
-        "" \
-        "On the remote engine:  ${RD_BOLD}make shell${RD_RESET}, then  docker system df"
-      ;;
-    *)
-      rd_fail "The devcontainer build failed (exit ${status})" \
-        "devcontainer reported:" \
-        "$(rd_quote "$message")" \
-        "" \
-        "The log above holds the detail. A stale cached layer is the common cause when" \
-        "nothing in the log looks wrong:  ${RD_BOLD}make rebuild-no-cache${RD_RESET}"
-      ;;
-  esac
+  rd_fail "The devcontainer build failed (exit ${status})" \
+    "The CLI's summary is the last line above, as {\"outcome\":\"error\",\"message\":...}." \
+    "What its message means:" \
+    "" \
+    "  ${RD_BOLD}Command failed: docker pull ...${RD_RESET}" \
+    "      the tag does not exist, or this engine cannot reach the registry." \
+    "" \
+    "  ${RD_BOLD}Command failed: docker build ...${RD_RESET}" \
+    "      a step in the image build failed. It is the last error in the log above." \
+    "      When a cached layer has gone stale under a changed feature or base image:" \
+    "      make rebuild-no-cache" \
+    "" \
+    "  ${RD_BOLD}a postCreate, onCreate or postStart command${RD_RESET}" \
+    "      the image is fine and a command in .devcontainer exited non-zero. Its own" \
+    "      output is above, before the stack trace. Fix it, then: make rebuild" \
+    "" \
+    "  ${RD_BOLD}no space left on device${RD_RESET}" \
+    "      the engine is full. Reclaim space with: docker system prune" \
+    "      On the remote engine, look first: make shell, then docker system df"
 }

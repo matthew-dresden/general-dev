@@ -4,7 +4,7 @@
 devcontainer.json is JSONC: the spec permits comments, and the devcontainer CLI
 parses them. A strict json.load would reject a valid config, so full-line
 comments are stripped before parsing. Comments after a value on the same line
-are left alone deliberately — stripping those would need a real JSONC parser,
+are left alone deliberately, stripping those would need a real JSONC parser,
 and would risk mangling "https://..." inside a string.
 """
 

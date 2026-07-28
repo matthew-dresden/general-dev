@@ -1,4 +1,4 @@
-# Agent prompt — create `mdresden` on the EC2 box with auto-discovered workspace symlinks
+# Agent prompt, create `mdresden` on the EC2 box with auto-discovered workspace symlinks
 
 Use with a Claude Code session running **on the macOS host**:
 
@@ -18,7 +18,7 @@ On the remote EC2 Docker host (`<ec2-instance-id>`, reachable as
    from this Mac over the existing SSM tunnel.
 2. Give `mdresden` a `~/workspaces` directory that is **automatically and
    continuously populated** with one symlink per devcontainer workspace
-   discovered on the box — every workspace that exists now or appears later,
+   discovered on the box, every workspace that exists now or appears later,
    not just general-dev. Each symlink is named after the **git project**
    cloned in that workspace (e.g. `general-dev`).
 3. Ensure `mdresden` has **full read/write access** to those workspace trees,
@@ -36,7 +36,7 @@ On the remote EC2 Docker host (`<ec2-instance-id>`, reachable as
   volumes **labeled** `vsch.local.repository=<git clone URL>[/tree/<branch>]`.
   The volume's `Mountpoint` (host path under `/var/lib/docker/volumes/…/_data`)
   contains one folder per workspace, normally named after the repo. That
-  label is the discovery mechanism — do NOT hardcode volume names.
+  label is the discovery mechanism, do NOT hardcode volume names.
 - Docker's data root is a dedicated ext4 volume (ACL-capable) at
   `/var/lib/docker`. Never loosen its `0710` permissions with chmod; grant
   traversal with narrow ACL entries only (`u:mdresden:x`).
@@ -63,15 +63,14 @@ On the remote EC2 Docker host (`<ec2-instance-id>`, reachable as
 1. **User**: create `mdresden` (home dir, shell `/usr/bin/zsh`) if absent.
    Add to groups `docker` and `sudo`. Install
    `/etc/sudoers.d/mdresden` containing
-   `mdresden ALL=(ALL) NOPASSWD:ALL` (mode 0440, `visudo -c` must pass —
-   the account has no password, so sudo must be NOPASSWD to work at all).
+   `mdresden ALL=(ALL) NOPASSWD:ALL` (mode 0440, `visudo -c` must pass, the account has no password, so sudo must be NOPASSWD to work at all).
 2. **SSH access**: derive the public key from the Mac private key
    (`ssh-keygen -y -f <key>`) and append it to
    `/home/mdresden/.ssh/authorized_keys` (dir 700, file 600, owned by
    mdresden) unless already present.
 3. **oh-my-zsh** for mdresden, unattended install, as done for ubuntu:
    `runuser -l mdresden -c 'sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended'`
-4. **Workspace sync script** — install as
+4. **Workspace sync script**, install as
    `/usr/local/sbin/sync-devcontainer-workspaces` (root:root, 0755), with
    this exact behavior (write clean bash; adjust syntax only if something
    doesn't run on the box):
@@ -127,11 +126,10 @@ On the remote EC2 Docker host (`<ec2-instance-id>`, reachable as
 
 5. **systemd units** so discovery is continuous (new clones appear within a
    minute, removed ones get pruned):
-   - `/etc/systemd/system/sync-devcontainer-workspaces.service` — `Type=oneshot`,
+   - `/etc/systemd/system/sync-devcontainer-workspaces.service`, `Type=oneshot`,
      `ExecStart=/usr/local/sbin/sync-devcontainer-workspaces`,
      `After=docker.service`, `Requires=docker.service`.
-   - `/etc/systemd/system/sync-devcontainer-workspaces.timer` —
-     `OnBootSec=30s`, `OnUnitActiveSec=60s`, `[Install] WantedBy=timers.target`.
+   - `/etc/systemd/system/sync-devcontainer-workspaces.timer`, `OnBootSec=30s`, `OnUnitActiveSec=60s`, `[Install] WantedBy=timers.target`.
    - `systemctl daemon-reload && systemctl enable --now` the timer, then run
      the service once immediately and check
      `systemctl status` + `journalctl -u sync-devcontainer-workspaces --no-pager -n 20`

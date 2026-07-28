@@ -117,13 +117,32 @@ rdc_project_volumes() {
 
 # Lists every instance, so multiple clones of one repo are all visible.
 rdc_status() {
-  local ids id
+  local ids id context
+  context="$(docker context show 2>/dev/null || echo unknown)"
   printf '\n\033[1mProject\033[0m        %s\n' "$PROJECT_NAME"
-  if [ "$(rdc_backend)" = "remote" ]; then
-    printf '\033[1mBackend\033[0m        remote, context %s (%s)\n' "$(docker context show)" "$REMOTE_INSTANCE_ID"
+  if [ "$context" = "$REMOTE_DOCKER_CONTEXT" ]; then
+    printf '\033[1mBackend\033[0m        remote, context %s (%s)\n' "$context" "$REMOTE_INSTANCE_ID"
   else
-    printf '\033[1mBackend\033[0m        local, context %s\n' "$(docker context show)"
+    printf '\033[1mBackend\033[0m        local, context %s\n' "$context"
   fi
+
+  # Report where you are pointed even when the engine cannot be reached: that
+  # is exactly when you need to know, and the cause is usually diagnosable.
+  if ! docker info > /dev/null 2>&1; then
+    printf '\033[1mEngine\033[0m         \033[0;31mnot reachable\033[0m\n'
+    if [ "$context" = "$REMOTE_DOCKER_CONTEXT" ]; then
+      if aws sts get-caller-identity --profile "$REMOTE_AWS_PROFILE" > /dev/null 2>&1; then
+        printf '\033[1mLikely cause\033[0m   the SSM tunnel has dropped. Fix: make connect\n\n'
+      else
+        printf '\033[1mLikely cause\033[0m   AWS SSO has expired, which breaks the tunnel.\n'
+        printf '               Fix: aws sso login --profile %s, then make connect\n\n' "$REMOTE_AWS_PROFILE"
+      fi
+    else
+      printf '\033[1mLikely cause\033[0m   the local Docker engine is not running. Start it, or switch with: make remote\n\n'
+    fi
+    return 1
+  fi
+
   ids="$(rdc_container_ids)"
   if [ -z "$ids" ]; then
     printf '\033[1mContainer\033[0m      none, create with Dev Containers: Clone Repository in Container Volume...\n\n'
@@ -617,7 +636,7 @@ rdc_rebuild() {
 RDC_COMMAND="${1:-}"
 
 case "$RDC_COMMAND" in
-  status) rdc_require_docker && rdc_status ;;
+  status) rdc_status ;;
   start) rdc_require_docker && rdc_start ;;
   stop) rdc_require_docker && rdc_stop ;;
   restart) rdc_require_docker && rdc_restart ;;

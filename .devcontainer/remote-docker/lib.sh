@@ -32,7 +32,11 @@ rd_load_config() {
   local shell_env="${REPO_SHELL_ENV:-${RD_DIR}/../../shell.env}"
   if [ -f "$shell_env" ]; then
     local assignments
-    assignments="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?((REMOTE_|LOCAL_DOCKER_|TINYPROXY_)[A-Z_]+)=(.*)$/: "${\2:=\4}"/p' "$shell_env" || true)"
+    # Strip surrounding quotes: shell.env writes export VAR='value', and the
+    # only-if-unset rewrite would otherwise carry the quotes into the value.
+    assignments="$(sed -nE -e "s/^[[:space:]]*(export[[:space:]]+)?((REMOTE_|LOCAL_DOCKER_|TINYPROXY_)[A-Z_]+)='(.*)'[[:space:]]*$/: \"\\\${\2:=\4}\"/p" \
+      -e 's/^[[:space:]]*(export[[:space:]]+)?((REMOTE_|LOCAL_DOCKER_|TINYPROXY_)[A-Z_]+)="(.*)"[[:space:]]*$/: "${\2:=\4}"/p' \
+      -e 's/^[[:space:]]*(export[[:space:]]+)?((REMOTE_|LOCAL_DOCKER_|TINYPROXY_)[A-Z_]+)=([^"'"'"'].*)$/: "${\2:=\4}"/p' "$shell_env" || true)"
     [ -z "$assignments" ] || eval "$assignments"
   fi
 

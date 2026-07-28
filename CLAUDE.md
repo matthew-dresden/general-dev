@@ -142,11 +142,11 @@ All failures must:
 
 When a function, class, or pattern is replaced by a new implementation:
 
-1. **Find all references** — search the entire codebase for every call site, import, test, and documentation reference to the old code
-2. **Update all consumers** — every caller, test, and reference must be migrated to the new implementation in the same story/commit
-3. **Remove the old code** — delete the superseded function/class entirely; do not leave dead code behind
-4. **Update all tests** — tests for the old function must be replaced with tests for the new function; never patch tests to work around removed code
-5. **Verify no orphaned references** — run a final grep to confirm zero remaining references to the old function name
+1. **Find all references**, search the entire codebase for every call site, import, test, and documentation reference to the old code
+2. **Update all consumers**, every caller, test, and reference must be migrated to the new implementation in the same story/commit
+3. **Remove the old code**, delete the superseded function/class entirely; do not leave dead code behind
+4. **Update all tests**, tests for the old function must be replaced with tests for the new function; never patch tests to work around removed code
+5. **Verify no orphaned references**, run a final grep to confirm zero remaining references to the old function name
 
 **This applies to:**
 
@@ -723,7 +723,7 @@ execute(query)
 **Required:**
 
 ```text
-// ALWAYS do this — parameterized query
+// ALWAYS do this, parameterized query
 query = "SELECT * FROM users WHERE username = :username"
 execute(query, params: {username: username})
 ```
@@ -974,7 +974,7 @@ When adding files with git:
 
 1. Investigate and fix the root cause
 2. If you believe it's a false positive, ask the human for guidance
-3. Never work around the check — fix the code or fix the check
+3. Never work around the check, fix the code or fix the check
 
 **No exceptions.** If a pre-commit or pre-push hook is failing, the correct response is to fix the issue it found, not to bypass it.
 

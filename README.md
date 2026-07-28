@@ -4,13 +4,13 @@ Personal general-purpose development workspace built on the
 [Caylent devcontainer](https://github.com/caylent-solutions/devcontainer)
 (`cdevcontainer` CLI). The same repo runs in two modes:
 
-- **Local** — VS Code Dev Containers on the laptop's Docker engine (OrbStack).
-- **Remote** — VS Code Dev Containers against a Docker engine on EC2, reached
+- **Local**. VS Code Dev Containers on the laptop's Docker engine (OrbStack).
+- **Remote**. VS Code Dev Containers against a Docker engine on EC2, reached
   through SSH-over-SSM. Containers and source live on the instance, so work
   survives the laptop sleeping, restarting, or losing connectivity.
 
 Project repos being worked on (currently `kanon` and `devbench`) are **plain
-nested clones** inside the workspace — not submodules. They are gitignored by
+nested clones** inside the workspace, not submodules. They are gitignored by
 this repo and listed in `.vscode/settings.json` `git.scanRepositories` so each
 appears as its own repository in Source Control.
 
@@ -19,13 +19,13 @@ appears as its own repository in Source Control.
 | Path | Purpose |
 |---|---|
 | `.devcontainer/` | Devcontainer definition (image + features), postcreate setup, shared shell functions |
-| `.devcontainer/remote-docker/` | Remote EC2 engine: tunnel/shell/secrets scripts, instance config — see its [README](.devcontainer/remote-docker/README.md) |
+| `.devcontainer/remote-docker/` | Remote EC2 engine: tunnel/shell/secrets scripts, instance config, see its [README](.devcontainer/remote-docker/README.md) |
 | `.devcontainer/nix-family-os/`, `wsl-family-os/` | Host-side proxy (tinyproxy) helpers for local mode |
 | `.vscode/settings.json` | Workspace git-repo detection (nested clones) |
 | `docs/devcontainer.md` | Deep dive: setup flow, secrets, cdevcontainer contract |
 | `CLAUDE.md` | Engineering standards for AI-assisted work in this repo |
 
-## Quick start — local
+## Quick start, local
 
 1. `cdevcontainer setup-devcontainer` (generates the gitignored `shell.env`,
    `devcontainer-environment-variables.json`, `.devcontainer/aws-profile-map.json`).
@@ -46,7 +46,7 @@ Replace every `<PLACEHOLDER>`. What each value does, how to have Claude fill
 them out, and the differences between macOS, Linux and WSL are in
 [docs/environment-files.md](docs/environment-files.md).
 
-## Quick start — remote
+## Quick start, remote
 
 Everything runs through `make` from this directory. `make help` documents each
 target in detail; details and instance reference live in
@@ -75,7 +75,7 @@ machine, and refuses to start if the branch has unpushed commits, if
 copy in Parameter Store.
 
 Then VS Code → **Dev Containers: Attach to Running Container…**. Reconnect the
-same way after any disconnect — the container never stopped
+same way after any disconnect, the container never stopped
 (`shutdownAction: "none"`). The container bootstraps its secrets from Parameter
 Store via the instance role, so there is no manual seeding.
 
@@ -114,8 +114,8 @@ Every project gets its own container + volume on the shared engine.
 
 ## Conveniences
 
-- `ccd` — `claude --dangerously-skip-permissions`
-- `ccdr` — `claude --dangerously-skip-permissions --resume`
+- `ccd`, `claude --dangerously-skip-permissions`
+- `ccdr`, `claude --dangerously-skip-permissions --resume`
 - kubectl + helm installed (minikube removed); Python 3.14, Node 25, AWS CLI,
   docker-in-docker via devcontainer features.
 
@@ -124,7 +124,7 @@ Every project gets its own container + volume on the shared engine.
 - This repo's `.devcontainer` diverges from the upstream cdevcontainer catalog:
   asdf support is removed, minikube is disabled, and the postcreate wrapper
   gained the SSM secret bootstrap. Choosing "replace" during a future
-  `cdevcontainer setup-devcontainer` would clobber these changes — review the
+  `cdevcontainer setup-devcontainer` would clobber these changes, review the
   git diff and merge back. (Candidate for upstreaming to the catalog.)
 - `cdevcontainer` regenerates `shell.env` with an asdf `PATH` line; it is dead
   but harmless. Re-run `push-secrets.sh` after regenerating or rotating tokens.

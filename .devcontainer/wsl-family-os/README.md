@@ -4,7 +4,7 @@
 >
 > For macOS or native Linux hosts, see the [nix-family-os](../nix-family-os/README.md) directory instead.
 
-This directory is a **common catalog asset** — it is automatically copied into every project's `.devcontainer/wsl-family-os/` when a devcontainer is set up via `cdevcontainer setup-devcontainer`. It contains scripts for managing tinyproxy as a background daemon on your Windows/WSL host, required for devcontainer proxy support with an upstream corporate proxy.
+This directory is a **common catalog asset**, it is automatically copied into every project's `.devcontainer/wsl-family-os/` when a devcontainer is set up via `cdevcontainer setup-devcontainer`. It contains scripts for managing tinyproxy as a background daemon on your Windows/WSL host, required for devcontainer proxy support with an upstream corporate proxy.
 
 ## Overview
 
@@ -107,7 +107,7 @@ chmod +x .devcontainer/wsl-family-os/tinyproxy-daemon.sh
 
 The daemon script uses a **template-based config generation** approach:
 
-1. `tinyproxy.conf.template` — checked into the repo with placeholders (`__USER__`, `__UPSTREAM_HOST__`, etc.)
+1. `tinyproxy.conf.template`, checked into the repo with placeholders (`__USER__`, `__UPSTREAM_HOST__`, etc.)
 2. On `start`, the script resolves all placeholders using environment variables and OS-detected values (user, group)
 3. A runtime config is written to `~/.devcontainer-proxy/tinyproxy.conf`
 4. tinyproxy runs against the generated runtime config
@@ -299,12 +299,12 @@ fi
 
 The script follows strict error handling:
 
-- **No silent failures** — all errors are reported
-- **Non-zero exit codes** — proper exit codes on failure
-- **No fallbacks** — fails fast if requirements aren't met (missing env vars, missing tinyproxy)
-- **Readiness polling** — verifies port is listening after start instead of blind delays
-- **Detailed error messages** — explains what went wrong
-- **Log file references** — directs you to logs for debugging
+- **No silent failures**, all errors are reported
+- **Non-zero exit codes**, proper exit codes on failure
+- **No fallbacks**, fails fast if requirements aren't met (missing env vars, missing tinyproxy)
+- **Readiness polling**, verifies port is listening after start instead of blind delays
+- **Detailed error messages**, explains what went wrong
+- **Log file references**, directs you to logs for debugging
 
 ### Exit Codes
 
@@ -352,5 +352,5 @@ The script follows strict error handling:
 - The proxy binds to `0.0.0.0` (all interfaces) to be accessible from Docker containers
 - Only accessible from your local machine and Docker containers
 - Upstream proxy traffic may be monitored by the upstream provider
-- Logs may contain proxy traffic — protect log directory
+- Logs may contain proxy traffic, protect log directory
 - The generated runtime config is stored in `~/.devcontainer-proxy/` (not in the repo)

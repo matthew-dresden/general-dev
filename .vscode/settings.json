@@ -1,7 +1,7 @@
 {
   // Source Control shows the workspace root repo plus every project repo
   // cloned under it. Project clones are gitignored by the parent repo, and
-  // VS Code's auto-detection skips gitignored folders — so each clone must
+  // VS Code's auto-detection skips gitignored folders, so each clone must
   // be listed explicitly in git.scanRepositories to appear. When you clone
   // a new project into this workspace, add it here AND to .gitignore.
   "git.scanRepositories": [

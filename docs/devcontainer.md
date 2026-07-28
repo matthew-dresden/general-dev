@@ -1,7 +1,7 @@
 # Devcontainer internals
 
 How this workspace's container is defined, provisioned, and supplied with
-secrets — in both local and remote mode. Remote-engine operations (tunnel,
+secrets, in both local and remote mode. Remote-engine operations (tunnel,
 EC2 reference, troubleshooting) live in
 [`.devcontainer/remote-docker/README.md`](../.devcontainer/remote-docker/README.md).
 
@@ -14,7 +14,7 @@ EC2 reference, troubleshooting) live in
   `/workspaces/${localWorkspaceFolderBasename}`.
 - Features: aws-cli, Python 3.14, Node 25, kubectl + helm (minikube disabled
   via `"minikube": "none"`), common-utils, docker-in-docker.
-- `"shutdownAction": "none"` — the container is NOT stopped when the VS Code
+- `"shutdownAction": "none"`, the container is NOT stopped when the VS Code
   window closes or the connection drops. Applies in both modes; on the remote
   engine this is what makes sessions survive laptop shutdowns.
 - `runArgs` names the container `<repo>-${devcontainerId}` and stamps it with
@@ -26,13 +26,13 @@ EC2 reference, troubleshooting) live in
 - Terminals default to a `tmux` profile that attaches to a shared session
   (`terminal.integrated.profiles.linux`). VS Code terminates terminal processes
   when the window closes, so this is what keeps a Claude session or long build
-  alive across a disconnect — terminal persistence alone only restores the tab
+  alive across a disconnect, terminal persistence alone only restores the tab
   and its scrollback. The `tm-*` commands that drive it are defined in
   `.devcontainer/tmux-commands.sh` and sourced by postCreate; `tm-help` lists
   them. A plain non-persistent shell is available as the `zsh` profile.
 - Git repo detection: `git.autoRepositoryDetection: "subFolders"` +
   `git.repositoryScanMaxDepth: -1` + `git.openRepositoryInParentFolders:
-  "never"` — every nested repo under the workspace root is detected at any
+  "never"`, every nested repo under the workspace root is detected at any
   depth, and nothing outside the workspace is ever adopted. Gitignored clones
   are surfaced explicitly via `git.scanRepositories` in `.vscode/settings.json`
   (workspace settings override the devcontainer defaults, so both files carry
@@ -45,7 +45,7 @@ EC2 reference, troubleshooting) live in
 1. **Wrapper: secrets.** If `shell.env` is missing, bootstrap from SSM
    Parameter Store (see below); otherwise source the local file. Configures
    apt proxy when `HTTP_PROXY` is set. Fails fast on any missing input.
-2. **Postcreate: configuration.** Installs nothing — everything installable is
+2. **Postcreate: configuration.** Installs nothing, everything installable is
    a feature. Each step is a function in `.devcontainer.postcreate.sh`, states
    the dependency it needs, and is skipped with a banner when that dependency
    is absent rather than aborting the build:
@@ -53,7 +53,7 @@ EC2 reference, troubleshooting) live in
    | Step | Depends on |
    |---|---|
    | apt proxy config (root-only, for later manual `apt` use) | `HTTP_PROXY` set |
-   | `shell.env` sourcing into `.bashrc` / `.zshenv` | — |
+   | `shell.env` sourcing into `.bashrc` / `.zshenv` |, |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
    | `tm-*` commands sourced into both shells | `tmux` |
    | Oh My Zsh theme and options | `common-utils` `installOhMyZsh` |
@@ -68,7 +68,7 @@ EC2 reference, troubleshooting) live in
 
 The container holds no credential of its own until one is pushed to it.
 postCreate only sets `credential.helper store` and the SSH→HTTPS URL rewrite;
-`make push-git-creds` — which `make build` runs as its last step — copies in
+`make push-git-creds`, which `make build` runs as its last step, copies in
 the credential that already works on the developer's machine, obtained through
 `git credential fill` so it works with any configured helper (osxkeychain,
 libsecret, gh, store).
@@ -76,7 +76,7 @@ libsecret, gh, store).
 This replaced `GIT_AUTH_METHOD` / `GIT_TOKEN` / ssh-key handling driven by
 `shell.env`, which had two problems: the token had to be rotated by hand, and
 `configure_git_token` wrote `~/.netrc` while configuring the `store` helper,
-which reads only `~/.git-credentials` — so it authenticated nothing even when
+which reads only `~/.git-credentials`, so it authenticated nothing even when
 the token was current. Neither failure was visible while VS Code was attached,
 because the extension forwards the host's credentials; it surfaced only when an
 agent tried to push from a detached session.
@@ -95,12 +95,12 @@ blocking and scriptable:
    and postCreate and propagates its exit code.
 
 The config is read from the laptop while the checkout comes from origin, so the
-build refuses to run when `.devcontainer` has uncommitted changes — otherwise
+build refuses to run when `.devcontainer` has uncommitted changes, otherwise
 the container would not contain the config that built it. `FORCE=1` overrides.
 
 asdf was removed entirely (it managed zero tools; Python/Node come from
 features). If a future project needs asdf, that support must be reintroduced
-deliberately — nothing references it anymore.
+deliberately, nothing references it anymore.
 
 ## Secrets model
 
@@ -130,7 +130,7 @@ aws-profile-map.json                           /devcontainer/<project>/…      
 
 - `.devcontainer/` contents began as a snapshot copied from the tool's catalog
   (`caylent-solutions/devcontainer@2.3.0`) and have since diverged
-  substantially — see the README caveats. The tool only overwrites them if you
+  substantially, see the README caveats. The tool only overwrites them if you
   explicitly choose "replace", which would clobber those modifications.
 - `shell.env` + `devcontainer-environment-variables.json` are regenerated on
   every `setup-devcontainer` run from your saved template

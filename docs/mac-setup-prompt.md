@@ -1,4 +1,4 @@
-# Agent prompt — Mac host setup for the general-dev remote Docker engine
+# Agent prompt. Mac host setup for the general-dev remote Docker engine
 
 Use this with a Claude Code session running **on the macOS host** (a normal
 Mac terminal, NOT inside a devcontainer), started in this repo's root folder:
@@ -48,8 +48,8 @@ Run this when provisioning a new Mac against an already-running instance.
    - AWS CLI v2: `brew install awscli`
    - `brew install --cask session-manager-plugin`
    - docker CLI: should already exist via OrbStack (`docker context ls` must
-     list a local context — typically `orbstack`). If missing, stop and ask.
-   - `brew install jq` — used by `make build` to generate the override config
+     list a local context, typically `orbstack`). If missing, stop and ask.
+   - `brew install jq`, used by `make build` to generate the override config
    - devcontainer CLI: `npm install -g @devcontainers/cli`, required by
      `make build` / `make rebuild`. Needs node/npm; if absent, stop and ask.
    - python3 and git are expected from the Xcode command line tools; verify
@@ -76,14 +76,14 @@ Run this when provisioning a new Mac against an already-running instance.
 4. **Locate and verify the SSH private key.** Search `~/.ssh/` for the key
    pair's private key (common names: `<your-key-pair-name>.pem`,
    `id_ed25519`, downloads from the EC2 console). Verify the match with
-   `ssh-keygen -lf <candidate>` — the fingerprint must equal
+   `ssh-keygen -lf <candidate>`, the fingerprint must equal
    `SHA256:QmT+d5VyqB/ufJprRgMY2GVBHtc/7wOa/NnyrRXM7p0=`.
    If no candidate matches, list what you checked and ask me where the key
    is. Ensure the file is `chmod 600`.
 
 5. **Persist configuration in `~/.zshrc`** (single managed block, see Rules).
    The block must contain:
-   - `export REMOTE_SSH_KEY_PATH="<verified key path>"` — only if it differs
+   - `export REMOTE_SSH_KEY_PATH="<verified key path>"`, only if it differs
      from the default `~/.ssh/<your-key-pair-name>.pem`.
    - Convenience aliases (substitute `<LOCAL_CONTEXT>` with the actual local
      docker context name discovered in step 2):

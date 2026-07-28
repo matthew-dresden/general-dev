@@ -1,0 +1,29 @@
+name: CI
+
+# Runs the same checks the git hooks run, so local and CI cannot disagree.
+# The single source of truth is the lint target in the Makefile.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Linters resolve through uv, so the versions match a developer machine
+      # and nothing has to be installed globally here either.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: make lint
+        run: make lint

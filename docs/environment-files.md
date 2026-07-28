@@ -16,7 +16,7 @@ cp .devcontainer/aws-profile-map.json.example .devcontainer/aws-profile-map.json
 cp devcontainer-environment-variables.json.example devcontainer-environment-variables.json
 ```
 
-Then replace every `<PLACEHOLDER>`. Nothing else is required — placeholders are
+Then replace every `<PLACEHOLDER>`. Nothing else is required, placeholders are
 the only thing standing between a fresh clone and a working container.
 
 ## Filling them out with Claude
@@ -65,7 +65,7 @@ provisioning if wrong:
 | `HOST_PROXY` | `true` requires a reachable `HOST_PROXY_URL` or the build fails |
 
 `BASH_ENV` points at the **in-container** path
-(`/workspaces/<repo>/shell.env`), not a host path — the same file is at a
+(`/workspaces/<repo>/shell.env`), not a host path, the same file is at a
 different location depending on which side reads it.
 
 ## Host differences
@@ -90,7 +90,7 @@ ip -4 addr show docker0 | awk '/inet /{print $2}' | cut -d/ -f1
 
 ### Running the proxy itself
 
-One script serves all hosts — `.devcontainer/tinyproxy-daemon.sh`, with
+One script serves all hosts, `.devcontainer/tinyproxy-daemon.sh`, with
 wrappers under `nix-family-os/` and `wsl-family-os/` for discoverability. It
 detects the host family and picks `ss` or `lsof` automatically.
 
@@ -102,7 +102,7 @@ detects the host family and picks `ss` or `lsof` automatically.
 
 Settings live in `.devcontainer/remote-docker/config.env` alongside the rest of
 the host-side configuration, so nothing has to be exported by hand. Only
-`TINYPROXY_UPSTREAM_HOST` has no default — set it there or in your environment:
+`TINYPROXY_UPSTREAM_HOST` has no default, set it there or in your environment:
 
 ```bash
 make proxy-start
@@ -113,11 +113,11 @@ make proxy-stop
 
 | Setting | Default |
 |---|---|
-| `TINYPROXY_UPSTREAM_HOST` | *(none — required)* |
+| `TINYPROXY_UPSTREAM_HOST` | *(none, required)* |
 | `TINYPROXY_UPSTREAM_PORT` | `8080` |
-| `TINYPROXY_PORT` | `3128` — must match the port in `HOST_PROXY_URL` |
+| `TINYPROXY_PORT` | `3128`, must match the port in `HOST_PROXY_URL` |
 | `TINYPROXY_READINESS_TIMEOUT` / `TINYPROXY_STOP_TIMEOUT` | `10` |
-| `TINYPROXY_STATE_DIR` | `~/.devcontainer-proxy` — override to run more than one |
+| `TINYPROXY_STATE_DIR` | `~/.devcontainer-proxy`, override to run more than one |
 
 Starting the proxy does not make the container use it: set `HOST_PROXY=true`
 and `HOST_PROXY_URL` in `shell.env` for that.
@@ -169,4 +169,4 @@ containers can bootstrap themselves. Consequences worth knowing:
   the credential helper already working on your machine by
   `make push-git-creds`, which `make build` runs automatically.
 - `build` and `rebuild` publish `shell.env` themselves when it is newer than
-  the stored copy, so editing it is enough — no separate step to remember.
+  the stored copy, so editing it is enough, no separate step to remember.

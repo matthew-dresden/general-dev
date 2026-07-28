@@ -487,6 +487,67 @@ rdc_reopen() {
   rd_ok "VS Code opening the workspace directly, no Attach step needed"
 }
 
+# One command that gets you working from whatever state things are in.
+#
+# Decides rather than asks: an unreachable remote engine means the tunnel needs
+# refreshing, no container means build one, a stopped container means start it,
+# and a running one means there is nothing to do but open it. Everything it
+# calls is a target you can also run on its own, so nothing here is a second
+# implementation of anything.
+rdc_up() {
+  rd_require_cmd docker "Install the docker CLI: https://docs.docker.com/engine/install/"
+
+  local backend
+  backend="$(rdc_backend)"
+
+  # An unreachable engine is recoverable on the remote backend: the SSM tunnel
+  # drops on sleep and on SSO expiry, and refreshing it is what connect does.
+  if ! docker info > /dev/null 2>&1; then
+    if [ "$backend" = "remote" ]; then
+      rd_log "remote engine is not answering, refreshing the tunnel"
+      "${RD_DIR}/docker-tunnel.sh" > /dev/null \
+        || rd_die "could not reach the remote engine. If this is an auth failure run: aws sso login --profile ${REMOTE_AWS_PROFILE}"
+      rd_ok "tunnel refreshed"
+    else
+      rd_die "docker context '$(docker context show)' is not answering. Start your local Docker engine, or switch endpoint with 'make remote'."
+    fi
+  fi
+
+  local ids
+  ids="$(rdc_container_ids)"
+
+  if [ -z "$ids" ]; then
+    rd_log "no container for '${PROJECT_NAME}' on the ${backend} engine, building one"
+    rdc_build
+    rdc_reopen
+    return 0
+  fi
+
+  # rdc_require_container refuses to guess when several instances exist, and
+  # names them, so CONTAINER=<name> is the answer rather than a wrong choice.
+  local id state
+  id="$(rdc_require_container)"
+  state="$(rdc_container_state "$id")"
+
+  case "$state" in
+    running)
+      rd_ok "container is already running"
+      ;;
+    *)
+      rd_log "container is '${state}', starting it"
+      docker start "$id" > /dev/null \
+        || rd_die "could not start the container. 'make rebuild' recreates it if it is broken."
+      rd_ok "started"
+      ;;
+  esac
+
+  # Cheap, and it verifies rather than assumes: a credential that expired since
+  # the container was built would otherwise only surface on the next push.
+  rdc_push_git_creds
+  rdc_status
+  rdc_reopen
+}
+
 # Build and start the container, blocking until postCreate finishes. Exits with
 # the CLI's status, so a failed build fails the make target.
 # Flags shared by both backends. NO_CACHE=1 rebuilds the image from scratch,

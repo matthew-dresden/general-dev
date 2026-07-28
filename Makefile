@@ -44,7 +44,7 @@ PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer
 
 .DEFAULT_GOAL := help
 .PHONY: help connect disconnect status shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
-        lint lint-md lint-sh lint-json lint-private lint-nested format hooks-install hooks-uninstall hooks-run \
+        lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested format hooks-install hooks-uninstall hooks-run \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up
 
 help:
@@ -231,7 +231,7 @@ proxy-status:
 # The git hooks invoke `make hooks-run`, so what runs on commit is exactly what
 # you can run by hand.
 
-lint: lint-private lint-nested lint-json lint-sh lint-md
+lint: lint-private lint-nested lint-json lint-sh lint-dispatch lint-md
 	@printf '\033[0;32m[DONE]\033[0m all checks passed\n'
 
 # Repos cloned into this workspace are their own repositories. The root
@@ -252,6 +252,10 @@ lint-nested:
 lint-md:
 	@printf '\033[0;36m[LINT]\033[0m markdown (%s files)\n' "$(words $(MD_FILES))"
 	@$(MARKDOWN_LINT) scan $(MD_FILES)
+
+lint-dispatch:
+	@printf '\033[0;36m[LINT]\033[0m dispatched commands resolve\n'
+	@$(RD_DIR)/lint-dispatch.sh
 
 lint-sh:
 	@printf '\033[0;36m[LINT]\033[0m shell (%s files)\n' "$(words $(SH_FILES))"

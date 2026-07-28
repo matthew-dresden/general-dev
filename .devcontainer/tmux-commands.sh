@@ -22,7 +22,11 @@ __tm_registry() {
   cat <<'EOF'
 tmopen|[name]|Go to a session, creating it if missing (default: main).
 tmpick||List sessions and open the one you name. Drives the VS Code profile.
+tmnew|<name>|Create a session and go to it. Fails if the name is taken.
 tmlist||List sessions.
+tmsession||Name of the session you are in.
+tmrenamesession|<name>|Rename the session you are in.
+tmwindow|[name]|New window in this session, named if you say so.
 tmwindows||List windows in the current session.
 tmrename|<name>|Rename the current window.
 tmdetach||Leave the session; everything keeps running.
@@ -62,11 +66,46 @@ __tm_detail() {
         'It replaces the shell with tmux, so the terminal tab becomes that' \
         'session rather than leaving a shell underneath it.'
       ;;
+    tmnew)
+      printf '%s\n' \
+        'Creates a session and moves this terminal to it:' \
+        '' \
+        '    tmnew build' \
+        '' \
+        'It refuses when the name is already taken, so it can never drop you' \
+        'into something already running by accident. To go to a session whether' \
+        'or not it exists, use tmopen.'
+      ;;
     tmlist)
       printf '%s\n' \
         'Shows every session on this container, its window count, and which one' \
         'is currently attached. Use it when you have lost track of what is' \
         'running after a reconnect.'
+      ;;
+    tmsession)
+      printf '%s\n' \
+        'Prints the name of the session you are in, which the status bar also' \
+        'shows on the left. Useful in a script, or after tmopen when you are' \
+        'not sure where you landed.'
+      ;;
+    tmrenamesession)
+      printf '%s\n' \
+        'Renames the session itself, not the window:' \
+        '' \
+        '    tmrenamesession review' \
+        '' \
+        'The name is what appears on the left of the status bar and what tmopen' \
+        'and tmkill take, so rename to whatever the work is.'
+      ;;
+    tmwindow)
+      printf '%s\n' \
+        'Opens another window in this session, the same as Ctrl+b c, and names' \
+        'it if you pass one:' \
+        '' \
+        '    tmwindow logs' \
+        '' \
+        'Windows are whole screens and only one shows at a time. For two things' \
+        'side by side, split the window into panes with Ctrl+b % or Ctrl+b ".'
       ;;
     tmwindows)
       printf '%s\n' \
@@ -153,9 +192,46 @@ tmpick() {
   exec tmux new-session -A -s "${__tm_pick:-$TM_SESSION}" "$TM_SHELL"
 }
 
+# Deliberately refuses an existing name: tmopen is the one that does not care.
+tmnew() {
+  if [ "$1" = "--help" ]; then __tm_help_for tmnew; return 0; fi
+  if [ -z "$1" ]; then
+    printf 'tmnew: a session name is required. See: tmnew --help\n' >&2
+    return 1
+  fi
+  if tmux has-session -t "$1" 2> /dev/null; then
+    printf 'tmnew: session %s already exists. Go to it with: tmopen %s\n' "$1" "$1" >&2
+    return 1
+  fi
+  tmopen "$1"
+}
+
 tmlist() {
   if [ "$1" = "--help" ]; then __tm_help_for tmlist; return 0; fi
   tmux list-sessions
+}
+
+tmsession() {
+  if [ "$1" = "--help" ]; then __tm_help_for tmsession; return 0; fi
+  tmux display-message -p '#{session_name}'
+}
+
+tmrenamesession() {
+  if [ "$1" = "--help" ]; then __tm_help_for tmrenamesession; return 0; fi
+  if [ -z "$1" ]; then
+    printf 'tmrenamesession: a name is required. See: tmrenamesession --help\n' >&2
+    return 1
+  fi
+  tmux rename-session "$1"
+}
+
+tmwindow() {
+  if [ "$1" = "--help" ]; then __tm_help_for tmwindow; return 0; fi
+  if [ -z "$1" ]; then
+    tmux new-window
+    return $?
+  fi
+  tmux new-window -n "$1"
 }
 
 tmwindows() {

@@ -86,6 +86,12 @@ container_user_has() {
   PATH="${CONTAINER_USER_PATH:-${PATH}}" command -v "$1" > /dev/null 2>&1
 }
 
+# Absolute path to a command, searched the same way, for the callers that need
+# to write one into a config file rather than just run it.
+container_user_path_to() {
+  PATH="${CONTAINER_USER_PATH:-${PATH}}" command -v "$1" 2> /dev/null
+}
+
 configure_apt_proxy() {
   # Configure apt to use proxy from environment variables.
   # Writes /etc/apt/apt.conf.d/99proxy if HTTP_PROXY or http_proxy is set.

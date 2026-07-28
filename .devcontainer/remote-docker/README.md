@@ -212,13 +212,25 @@ zsh by postcreate.
 | Command | Does |
 |---|---|
 | `tmopen [name]` | Go to a session, creating it if missing (default: `main`) |
+| `tmpick` | List sessions and open the one you name |
+| `tmnew <name>` | Create a session and go to it; refuses an existing name |
 | `tmlist` | List sessions |
+| `tmsession` | Name of the session you are in |
+| `tmrenamesession <name>` | Rename the session you are in |
+| `tmwindow [name]` | New window in this session |
 | `tmwindows` | List windows in the current session |
 | `tmrename <name>` | Rename the current window |
 | `tmdetach` | Leave the session; everything keeps running |
 | `tmkill <name>` | Kill one named session |
 | `tmkillall` | Kill every session |
 | `tmhelp` | All commands and key bindings |
+
+Every window and pane runs zsh. tmux opens `default-shell`, which is the
+account's login shell and is bash here, so the terminal profile's `zsh`
+argument only applied when it *created* the session: attaching to an existing
+one, or opening a window with `Ctrl+b c`, landed in bash. `tmux.conf` sets
+`default-shell`, and postcreate rewrites that line with the zsh it resolved,
+since a committed config cannot know where zsh was installed.
 
 A session holds windows, a window holds panes. A window is a whole screen,
 like a tab, and only one is visible at a time; panes are splits inside the

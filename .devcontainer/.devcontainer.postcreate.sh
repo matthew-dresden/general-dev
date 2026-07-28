@@ -133,6 +133,18 @@ configure_tmux_commands() {
   # from the workspace so a session still comes up correctly if the checkout is
   # not mounted where it was built.
   install -m 644 "${TMUX_CONF}" "${USER_HOME}/.tmux.conf"
+
+  # default-shell has to be an absolute path and the committed config cannot
+  # know where zsh landed, so it is resolved here. Without this every window
+  # opens the account's login shell, which is bash.
+  local zsh_path
+  zsh_path="$(container_user_path_to zsh)"
+  [ -n "${zsh_path}" ] || exit_with_error \
+    "zsh not found, so tmux would open bash. Enable installZsh on the common-utils feature."
+  sed -i "s|^set -g default-shell .*|set -g default-shell ${zsh_path}|" "${USER_HOME}/.tmux.conf"
+  grep -q "^set -g default-shell ${zsh_path}$" "${USER_HOME}/.tmux.conf" \
+    || exit_with_error "could not set default-shell in ${USER_HOME}/.tmux.conf"
+
   log_section_done "tmux commands"
 }
 

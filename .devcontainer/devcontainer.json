@@ -70,7 +70,8 @@
         "Angular.ng-template",
         "anthropic.claude-code",
         "mutantdino.resourcemonitor",
-        "wholroyd.jinja"
+        "wholroyd.jinja",
+        "bierner.markdown-mermaid"
       ],
       "settings": {
         "resmon.show.cputemp": false,

@@ -50,6 +50,7 @@ ZSH_ENV="${USER_HOME}/.zshenv"
 SHELL_ENV="${WORK_DIR}/shell.env"
 FUNCTIONS_FILE="${WORK_DIR}/.devcontainer/devcontainer-functions.sh"
 TMUX_COMMANDS="${WORK_DIR}/.devcontainer/tmux-commands.sh"
+TMUX_CONF="${WORK_DIR}/.devcontainer/tmux.conf"
 PROJECT_SETUP="${WORK_DIR}/.devcontainer/project-setup.sh"
 AWS_PROFILE_MAP_FILE="${WORK_DIR}/.devcontainer/aws-profile-map.json"
 
@@ -110,7 +111,7 @@ configure_claude_aliases() {
   log_section_done "Claude Code aliases"
 }
 
-# Depends on: tmux, from the apt-packages feature. The tm-* helpers take
+# Depends on: tmux, from the apt-packages feature. The tm* helpers take
 # arguments and --help, so they are functions in a sourced file, not aliases.
 configure_tmux_commands() {
   if ! container_user_has tmux; then
@@ -122,11 +123,16 @@ configure_tmux_commands() {
     log_section_skipped "tmux commands" "${TMUX_COMMANDS} is missing"
     return 0
   }
-  log_section "tmux commands" "tm-* helpers for the shared session"
+  [ -f "${TMUX_CONF}" ] || exit_with_error "tmux config not found at ${TMUX_CONF}"
+  log_section "tmux commands" "tm* helpers, mouse and scrollback"
   local rc
   while read -r rc; do
     echo "source \"${TMUX_COMMANDS}\"" >> "${rc}"
   done < <(interactive_rcs)
+  # tmux reads this once, when the server starts. Copied rather than sourced
+  # from the workspace so a session still comes up correctly if the checkout is
+  # not mounted where it was built.
+  install -m 644 "${TMUX_CONF}" "${USER_HOME}/.tmux.conf"
   log_section_done "tmux commands"
 }
 

@@ -90,7 +90,7 @@ Store via the instance role, so there is no manual seeding.
 | `make disconnect` | point docker back at the local engine |
 
 Terminals inside the container open in a shared tmux session, so a Claude
-session or long build survives closing VS Code. `tm-help` in the container
+session or long build survives closing VS Code. `tmhelp` in the container
 lists the commands and key bindings.
 
 ## Working on projects

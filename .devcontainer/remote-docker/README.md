@@ -203,30 +203,49 @@ terminal, and you are back in the same session with the work still going.
 Nothing to remember on the way out; `-A` attaches to the existing session or
 creates it.
 
-Inside the container, `tm-help` lists every command and key binding. Type
-`tm-` and press Tab to discover them; each also takes `--help` for detail.
+Inside the container, `tmhelp` lists every command and key binding. Type
+`tm` and press Tab to discover them; each also takes `--help` for detail.
 They are defined in `.devcontainer/tmux-commands.sh`, sourced into bash and
 zsh by postcreate.
 
 | Command | Does |
 |---|---|
-| `tm-open [name]` | Attach to a session, creating it if missing (default: `main`) |
-| `tm-list` | List sessions |
-| `tm-windows` | List windows in the current session |
-| `tm-rename <name>` | Rename the current window |
-| `tm-detach` | Leave the session; everything keeps running |
-| `tm-kill <name>` | Kill one named session |
-| `tm-kill-all` | Kill every session |
-| `tm-help` | All commands and key bindings |
+| `tmopen [name]` | Go to a session, creating it if missing (default: `main`) |
+| `tmlist` | List sessions |
+| `tmwindows` | List windows in the current session |
+| `tmrename <name>` | Rename the current window |
+| `tmdetach` | Leave the session; everything keeps running |
+| `tmkill <name>` | Kill one named session |
+| `tmkillall` | Kill every session |
+| `tmhelp` | All commands and key bindings |
+
+A session holds windows, a window holds panes. A window is a whole screen,
+like a tab, and only one is visible at a time; panes are splits inside the
+window you are looking at, and are all visible together.
 
 | Key | Does |
 |---|---|
-| `Ctrl+B w` | Pick a window from a list |
-| `Ctrl+B c` / `Ctrl+B ,` | New window / rename it |
-| `Ctrl+B n` / `Ctrl+B p` / `Ctrl+B <number>` | Switch windows |
-| `Ctrl+B %` / `Ctrl+B "` | Split left\|right / top-bottom |
-| `Ctrl+B [` | Scroll back (`q` exits) |
+| `Ctrl+b w` | Pick a window from a list |
+| `Ctrl+b c` / `Ctrl+b ,` | New window / rename it |
+| `Ctrl+b n` / `Ctrl+b p` / `Ctrl+b <number>` | Switch windows |
+| `Ctrl+b %` / `Ctrl+b "` | Split the window into panes, left\|right / top-bottom |
+| `Ctrl+b o` / `Ctrl+b x` | Cycle between panes / close one |
+| `Ctrl+b [` | Scroll back (`q` exits) |
 | Plain non-persistent shell | pick the `zsh` profile from the terminal dropdown |
+
+The `b` is lowercase and takes no Shift: hold Ctrl, tap `b`, release both, then
+press the second key on its own. Shift appears only when the character itself
+needs it, as in `%` and `"`.
+
+`.devcontainer/tmux.conf`, installed to `~/.tmux.conf` by postcreate, turns the
+mouse on: the wheel scrolls the pane's own history, clicking focuses a pane,
+and dragging a border resizes one. Without it tmux ignores the wheel and the
+terminal falls back to sending arrow keys, which walks shell history and prints
+`^[[A`. It also raises tmux's scrollback from its 2000-line default to the
+100000 that `devcontainer.json` asks VS Code for, since tmux keeps its own and
+would otherwise discard everything past 2000. Mouse selection becomes tmux's
+rather than the terminal's, so hold Shift while dragging to select for the
+system clipboard.
 
 Because every VS Code terminal attaches to the *same* session, opening a second
 terminal tab mirrors the first. Use tmux windows rather than VS Code tabs to

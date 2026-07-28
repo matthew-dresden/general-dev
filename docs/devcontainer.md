@@ -28,7 +28,7 @@ EC2 reference, troubleshooting) live in
   when the window closes, so this is what keeps a Claude session or long build
   alive across a disconnect, terminal persistence alone only restores the tab
   and its scrollback. The `tm-*` commands that drive it are defined in
-  `.devcontainer/tmux-commands.sh` and sourced by postCreate; `tm-help` lists
+  `.devcontainer/tmux-commands.sh` and sourced by postCreate; `tmhelp` lists
   them. A plain non-persistent shell is available as the `zsh` profile.
 - Git repo detection: `git.autoRepositoryDetection: "subFolders"` +
   `git.repositoryScanMaxDepth: -1` + `git.openRepositoryInParentFolders:

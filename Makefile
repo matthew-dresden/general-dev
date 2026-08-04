@@ -1,14 +1,3 @@
-# Driver for the remote EC2 Docker engine that hosts this project's
-# devcontainer. Runs on the laptop, not inside the container.
-#
-# All logic lives in .devcontainer/remote-docker/*.sh; these targets are thin
-# wrappers so there is one implementation per operation. Configuration comes
-# from .devcontainer/remote-docker/config.env and is overridable per invocation:
-#     make status PROJECT_NAME=other-repo
-#
-# Compatible with the macOS system make (GNU Make 3.81): no .ONESHELL, no
-# .SHELLFLAGS. Each recipe line is its own shell and make stops on the first
-# non-zero exit.
 
 SHELL := /bin/bash
 
@@ -20,17 +9,11 @@ SHELL_SH := $(RD_DIR)/shell.sh
 SECRETS_SH := $(RD_DIR)/push-secrets.sh
 PROXY_SH := .devcontainer/tinyproxy-daemon.sh
 
-# tinyproxy settings live in config.env with the rest of the host-side config.
-# Exported so the daemon script sees them without anyone exporting by hand.
 PROXY_ENV = set -a; . $(CONFIG); set +a;
 
-# Read defaults from config.env so the Makefile holds no configuration of its
-# own. config.env only assigns unset variables, so an exported override wins.
 LOCAL_CONTEXT = $(shell source $(CONFIG) && echo $$LOCAL_DOCKER_CONTEXT)
 REMOTE_CONTEXT = $(shell source $(CONFIG) && echo $$REMOTE_DOCKER_CONTEXT)
 
-# Linting runs through uv, so no linter has to be installed globally and every
-# machine resolves the same versions. Files are discovered rather than listed.
 UVX ?= uvx
 MARKDOWN_LINT ?= $(UVX) pymarkdownlnt --config .pymarkdown.json
 SHELL_LINT ?= $(UVX) --from shellcheck-py shellcheck
@@ -38,14 +21,12 @@ LINT_EXCLUDES ?= -not -path './.git/*' -not -path './devbench/*' -not -path './n
 MD_FILES = $(shell find . -name '*.md' $(LINT_EXCLUDES))
 SH_FILES = $(shell find . -name '*.sh' $(LINT_EXCLUDES))
 JSON_FILES = $(shell find . -name '*.json' $(LINT_EXCLUDES))
-# Config files that must never be committed: they hold identity and secrets.
-# Their .example counterparts are what belongs in git.
 PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer/aws-profile-map.json
 
 .DEFAULT_GOAL := help
 .PHONY: help connect disconnect status shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested format hooks-install hooks-uninstall hooks-run \
-        proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up
+        proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server
 
 help:
 	@printf '\n\033[1mgeneral-dev\033[0m devcontainer control. Project: \033[1m%s\033[0m   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
@@ -69,6 +50,7 @@ help:
 	@printf '\n\033[1mLIFECYCLE\033[0m\n'
 	@printf '  \033[1;36m%-30s\033[0m %s\n' "make status"           "Backend, container, image and volumes. Read-only, so start here when something looks wrong."
 	@printf '  \033[1;36m%-30s\033[0m %s\n' "make reopen"           "Open the container in VS Code. Local opens the folder; remote names the container to attach to."
+	@printf '  \033[1;36m%-30s\033[0m %s\n' "make vscode-server"    "Fetch the VS Code server this machine needs inside the container. reopen does it for you."
 	@printf '  \033[1;36m%-30s\033[0m %s\n' "make start / stop"     "Start or stop the container. The checkout survives either way."
 	@printf '  \033[1;36m%-30s\033[0m %s\n' "make restart"          "Restart in place. Fixes a wedged container without rebuilding anything."
 	@printf '  \033[1;36m%-30s\033[0m %s\n' "make rename NAME=x"    "Give the container a readable name. New ones are <repo>-<devcontainerId>, which is too long to pick from a list."
@@ -99,12 +81,9 @@ help:
 	@printf '  %s\n' "Every target checks what it needs and fails with the command that installs it."
 	@printf '\n'
 
-
 connect:
 	@$(TUNNEL_SH)
 
-# The local context differs by machine (orbstack on macOS, usually default on
-# Linux). Fail with the available names rather than a bare docker error.
 disconnect:
 	@docker context inspect $(LOCAL_CONTEXT) > /dev/null 2>&1 || { \
 		printf '\033[0;31m[ERROR]\033[0m docker context "%s" does not exist on this machine.\n' "$(LOCAL_CONTEXT)" >&2; \
@@ -135,9 +114,6 @@ rename:
 check:
 	@$(CONTAINER_SH) check
 
-# First run in a fresh clone: create the three gitignored config files from
-# their committed examples. Never overwrites an existing file, because those
-# hold identity and secrets and are not recoverable from git.
 init:
 	@printf '\033[0;36m[INIT]\033[0m creating config files from their examples\n'
 	@for target in $(PRIVATE_FILES); do \
@@ -171,33 +147,29 @@ init:
 		printf '        What each value does: docs/environment-files.md\n'; \
 	fi
 
-# The everyday command: works from any state, and does only what is missing.
 up:
 	@$(CONTAINER_SH) up
 
 build:
 	@$(CONTAINER_SH) build
 
-# Same build, image rebuilt from scratch. The fix when a feature or base image
-# changed underneath a cached layer.
 build-no-cache:
 	@NO_CACHE=1 $(CONTAINER_SH) build
 
 rebuild-no-cache:
 	@NO_CACHE=1 $(CONTAINER_SH) rebuild
 
-# Switch which engine everything targets. Both are just docker contexts; VS Code
-# follows the active one.
 local: disconnect
 	@printf '\033[0;32m[DONE]\033[0m targeting the local engine, "make build" bind-mounts this folder\n'
 
 remote: connect
 	@printf '\033[0;32m[DONE]\033[0m targeting the remote engine, "make build" clones into a volume\n'
 
-# Open the running container in VS Code, choosing the right mechanism for the
-# backend: locally the folder opens in its container, remotely you attach.
 reopen:
 	@$(CONTAINER_SH) reopen
+
+vscode-server:
+	@$(CONTAINER_SH) vscode-server
 
 push-git-creds:
 	@$(CONTAINER_SH) push-git-creds
@@ -211,10 +183,6 @@ rebuild:
 push-secrets:
 	@$(SECRETS_SH)
 
-# --- host proxy (tinyproxy) --------------------------------------------------
-# Runs on this machine, not in the container: the devcontainer reaches it via
-# host.docker.internal. Only needed behind a corporate proxy.
-
 proxy-start:
 	@$(PROXY_ENV) $(PROXY_SH) start
 
@@ -227,16 +195,9 @@ proxy-restart:
 proxy-status:
 	@$(PROXY_ENV) $(PROXY_SH) status
 
-# --- linting -----------------------------------------------------------------
-# The git hooks invoke `make hooks-run`, so what runs on commit is exactly what
-# you can run by hand.
-
 lint: lint-private lint-nested lint-json lint-sh lint-dispatch lint-md
 	@printf '\033[0;32m[DONE]\033[0m all checks passed\n'
 
-# Repos cloned into this workspace are their own repositories. The root
-# allowlist in .gitignore keeps them out; this catches anything that got in
-# anyway, e.g. via `git add -f`.
 lint-nested:
 	@printf '\033[0;36m[LINT]\033[0m no nested repos tracked\n'
 	@gitlinks=$$(git ls-files -s | awk '$$1 == 160000 { $$1=""; $$2=""; $$3=""; sub(/^ +/, ""); print }'); \
@@ -265,7 +226,6 @@ lint-json:
 	@printf '\033[0;36m[LINT]\033[0m json (%s files)\n' "$(words $(JSON_FILES))"
 	@python3 .devcontainer/lint-json.py $(JSON_FILES)
 
-# The examples are committed; the real files never are.
 lint-private:
 	@printf '\033[0;36m[LINT]\033[0m private files not tracked\n'
 	@for f in $(PRIVATE_FILES); do \
@@ -280,8 +240,6 @@ format:
 	@printf '\033[0;36m[FORMAT]\033[0m markdown (%s files)\n' "$(words $(MD_FILES))"
 	@$(MARKDOWN_LINT) fix $(MD_FILES) || true
 	@printf '\033[0;32m[DONE]\033[0m formatted, re-run "make lint" to see what remains\n'
-
-# --- git hooks ---------------------------------------------------------------
 
 hooks-run: lint
 

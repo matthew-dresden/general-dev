@@ -13,7 +13,12 @@ EC2 reference, troubleshooting) live in
   (no Dockerfile), user `vscode`, workspace at
   `/workspaces/${localWorkspaceFolderBasename}`.
 - Features: aws-cli, Python 3.14, Node 25, kubectl + helm (minikube disabled
-  via `"minikube": "none"`), common-utils, docker-in-docker.
+  via `"minikube": "none"`), common-utils, docker-in-docker, uv.
+- uv is a feature because `make lint` runs every linter through `uvx`, so without
+  it the target fails at the tool rather than on findings, and nothing else
+  installed it: not a feature, not `project-setup.sh`. The feature installs the
+  release tarball from `astral-sh/uv` directly, and both `uv` and `uvx` land in
+  `/usr/local/bin` for the container user.
 - `"shutdownAction": "none"`, the container is NOT stopped when the VS Code
   window closes or the connection drops. Applies in both modes; on the remote
   engine this is what makes sessions survive laptop shutdowns.
@@ -34,6 +39,19 @@ EC2 reference, troubleshooting) live in
   that exist and opens the one you name: a VS Code profile is fixed
   configuration written when the container is built and cannot enumerate
   sessions created later. A plain non-persistent shell is the `zsh` profile.
+- `terminal.integrated.persistentSessionReviveProcess` is `never`. VS Code
+  restores a persisted terminal by relaunching its executable without the args it
+  was started with, so a tab launched as `tmux new-session -A -s main zsh` came
+  back as bare `tmux`, which does not attach to anything: it created a fresh
+  auto-numbered session. They accumulated one or more per reattach, and the tmux
+  server outlives the connection, so they never went away. The evidence was in
+  `~/.vscode-server/data/logs/*/ptyhost.log`, where every restore logged
+  `args undefined` next to the profile launches that logged full args, and each
+  one matched a numbered session to the second. `never` switches off recreating a
+  dead process; reconnecting to a live one is unaffected. Nothing is lost, since
+  scrollback lives in tmux via `history-limit`, not in VS Code's replay buffer.
+  Because it is a setting, it reaches a container only when VS Code seeds
+  `data/Machine/settings.json`, which is on a rebuild.
 - `.devcontainer/tmux.conf`, installed to `~/.tmux.conf` by postCreate, turns
   the mouse on so the wheel scrolls and clicks select, raises tmux's own
   scrollback from its 2000-line default, lists every session on the status bar,
@@ -41,9 +59,14 @@ EC2 reference, troubleshooting) live in
   shell. postCreate rewrites that line with the zsh it resolved, because the
   committed file cannot know where zsh was installed.
 - `postAttachCommand` runs `resmon-disks.py`, which points the Resource Monitor
-  extension at the devices behind `/workspaces` and `/tmp`. resmon filters by
-  device rather than mount point and the device differs per host, so it is
-  resolved at run time. It runs on attach rather than in postCreate because VS
+  extension at the device behind `/workspaces`. resmon filters by device rather
+  than mount point and the device differs per host, so it is resolved at run
+  time. Only mount points backed by a real device are reportable: the extension
+  keeps the filesystems whose source string appears in `resmon.disk.drives`, and
+  `/tmp` is a tmpfs whose source `df` prints as `none`, which would show up as an
+  entry labelled `none` and match every tmpfs at once. `/tmp` is therefore out of
+  the default, and a mount point named in `RESMON_DISK_MOUNTS` that resolves to a
+  pseudo-filesystem now fails rather than writing that entry. It runs on attach rather than in postCreate because VS
   Code writes its settings file after postCreate, and it never creates that
   file: doing so stops VS Code seeding it and leaves the container with no
   profiles or editor settings at all.
@@ -59,6 +82,64 @@ EC2 reference, troubleshooting) live in
   `postAttachCommand … failed with exit code 2` and no disk figures. postCreate
   verifies the link by running it as the container user, so a broken one fails
   the build instead of every attach.
+- `mounts` puts a volume, `vscode-server-<repo>`, over
+  `/home/vscode/.vscode-server/bin`. VS Code installs its headless server there by
+  piping ~200 MiB from the laptop into the container, which crosses the SSM
+  tunnel on the remote engine: 252s at 836 kB/s in a measured build. The volume
+  outlives the container, so a rebuild finds `bin/<vscode-build>` already
+  present, and the extension's check (`test -d`) skips the transfer entirely.
+  Per project rather than engine-wide, because two containers sharing one server
+  directory would collide on `data/Machine/.devport-<build>` and the connection
+  token. `configure_vscode_server_dir` in postCreate hands the mount point to
+  the container user, since Docker creates a named volume root-owned and the
+  server installs as `vscode`, and it aborts the build if that path is not a
+  mount point, so a config that stopped mounting it cannot go unnoticed. The
+  target is a literal path there because no devcontainer variable resolves to
+  the remote user's home and `${containerEnv:HOME}` is empty in this image;
+  postCreate composes the same path from `/etc/passwd` instead, which is what
+  makes the mismatch detectable. `make clean` keeps it, identified by its mount
+  point rather than its name, so a teardown does not throw away a cache that
+  costs a fetch to rebuild.
+- `postAttachCommand` also runs `vscode-settings-sync.py`, ahead of the resmon
+  hook and sequentially so the two never write the settings file at once. VS Code
+  writes `data/Machine/settings.json` from `customizations.vscode.settings` only
+  when that file is absent, so before this an edit to `devcontainer.json` reached
+  a container only by creating one. The hook merges the settings that file
+  declares into the existing copy on every attach: keys VS Code or a feature put
+  there are left alone, and a key removed from `devcontainer.json` is not
+  removed from the container, which still needs a rebuild. It never creates the
+  file, for the same reason the resmon hook does not. It locates the config by
+  the one `\*/.devcontainer/devcontainer.json` under `/workspaces`, since an
+  attached container gives a hook no workspace path, and fails when that is not
+  exactly one file; `DEVCONTAINER_CONFIG` names it directly.
+- `extensionsCache` is on a second volume, `vscode-extensions-cache-<repo>`.
+  Without it VS Code copies the extension packages it has cached on the laptop
+  into each new container over the docker connection, 23.4s in and 11.2s tarring
+  them back in a measured build, both across the tunnel on the remote engine.
+  Kept between containers, the packages are already there.
+- `data/` and `extensions/` are deliberately not on a volume. VS Code seeds
+  `data/Machine/settings.json` from `customizations.vscode.settings` only when
+  that file does not exist, so persisting `data/` would freeze the in-container
+  settings; `extensions/` is what VS Code installs from the cache, 6s for 19 of
+  them in a measured build, so persisting it would only risk a set that no longer
+  matches the server build. `DEVCONTAINER_VSCODE_SERVER_VOLUMES` names the
+  directories postCreate expects to find mounted.
+- `make reopen` seeds that volume before it opens the window, and `make
+  vscode-server` does it on demand. The build to fetch is only knowable on the
+  laptop, since VS Code updates itself between container builds, so postCreate
+  cannot have seeded what the next attach will look for: `code --version` line 2
+  is the build, the platform comes from `uname` in the container, and the tarball
+  is fetched from `VSCODE_UPDATE_URL` inside the container, off the tunnel. A
+  measured cold seed took 31s for download and extraction of 635 MB, against
+  252s for VS Code's own transfer. It verifies the `commit` in the delivered
+  `product.json` before moving it into place, extracts beside the target so an
+  interrupted fetch leaves no half-server where the extension probes, and does
+  nothing when the build is already present. `SKIP_VSCODE_SERVER_SEED=1` opens
+  the window without it. It then prunes builds nothing needs: VS Code never
+  deletes the server it stops using, and each is around 635 MB, so one arrives
+  per VS Code update and none leave. A build a process in the container is
+  running is kept, since that is the server the current window is talking to, and
+  every removal is reported.
 - Git repo detection: `git.autoRepositoryDetection: "subFolders"` +
   `git.repositoryScanMaxDepth: -1` + `git.openRepositoryInParentFolders:
   "never"`, every nested repo under the workspace root is detected at any
@@ -100,10 +181,13 @@ EC2 reference, troubleshooting) live in
    | Step | Depends on |
    |---|---|
    | apt proxy config (root-only, for later manual `apt` use) | `HTTP_PROXY` set |
+   | global npm prefix handed to the container user | the node feature |
+   | `~/.vscode-server` handed to the container user | the `mounts` volume, required |
    | `shell.env` sourcing into `.bashrc` / `.zshenv` |, |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
    | `tm-*` commands sourced into both shells | `tmux` |
    | `resmon-disks.py` linked into `~/.local/bin` for postAttach | `python3`, required |
+   | `vscode-settings-sync.py` linked into `~/.local/bin` for postAttach | `python3`, required |
    | Oh My Zsh theme and options | `common-utils` `installOhMyZsh` |
    | `~/.aws/config` from `aws-profile-map.json` | `jq` + a non-empty map |
    | host proxy reachability | `HOST_PROXY=true` |

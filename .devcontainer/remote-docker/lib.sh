@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Shared functions for the remote-docker scripts. Sourced, never executed.
-# Compatible with macOS /bin/bash 3.2 (no bash-4-only constructs).
 
 set -euo pipefail
 
@@ -15,8 +13,6 @@ RD_RESET=$'\033[0m'
 rd_log() { printf '%s[INFO]%s %s\n' "$RD_CYAN" "$RD_RESET" "$1"; }
 rd_ok() { printf '%s[DONE]%s %s\n' "$RD_GREEN" "$RD_RESET" "$1"; }
 
-# One-line failure. Anything that needs more than one line, because it has to
-# name a cause and offer a way forward, uses rd_fail instead.
 rd_die() {
   printf '%s[ERROR]%s %s\n' "$RD_RED" "$RD_RESET" "$1" >&2
   exit 1
@@ -27,24 +23,10 @@ rd_rule() {
   printf '%*s' "$width" '' | tr ' ' '='
 }
 
-# Nth line of a multi-line string, for payloads that are structured by line.
 rd_line() { printf '%s\n' "$2" | sed -n "$1p"; }
 
-# Indent a block so quoted tool output is visibly not our own prose. Leading
-# blank lines are dropped: the aws CLI starts its errors with one.
 rd_quote() { printf '%s\n' "$1" | sed -e '/./,$!d' -e 's/^\(..*\)/  \1/'; }
 
-# A failure explained in full: a heading naming the cause, then the ways
-# forward, one per argument. Multi-line arguments keep their line breaks, so
-# a tool's own output can be quoted verbatim. Exits 1.
-#
-# Callers must not leave a second conclusion reachable after one of these. On
-# the bash 3.2 that macOS ships, errexit does not apply inside a command
-# substitution, so a function that fails there ends only that subshell: its
-# caller carries on with an empty value and reports something else, and the
-# real cause scrolls away above the wrong one. Anything that captures the
-# output of a function that can fail therefore propagates the status itself,
-# with  x="$(f)" || exit $?  rather than relying on set -e.
 rd_fail() {
   local heading="$1" line
   shift
@@ -58,27 +40,13 @@ rd_fail() {
   exit 1
 }
 
-# Load configuration. Environment variables win over config.env defaults
-# because config.env only assigns unset variables (: "${VAR:=...}").
 rd_load_config() {
   local config_file="${REMOTE_DOCKER_CONFIG:-${RD_DIR}/config.env}"
   [ -f "$config_file" ] || rd_die "config file not found: $config_file"
 
-  # Real values live in shell.env, which is gitignored, so config.env can be
-  # committed with placeholders and the repo published without identifiers.
-  #
-  # Only the settings these scripts own are taken, not the whole file: it also
-  # carries container-side values such as http_proxy pointing at
-  # host.docker.internal, which would break the AWS CLI if applied here. Read
-  # before config.env, because config.env only assigns what is still unset.
-  # Precedence is environment, then shell.env, then the config.env defaults, so
-  # each assignment is rewritten to only-if-unset form. A plain eval would make
-  # shell.env beat an exported override, which is backwards.
   local shell_env="${REPO_SHELL_ENV:-${RD_DIR}/../../shell.env}"
   if [ -f "$shell_env" ]; then
     local assignments
-    # Strip surrounding quotes: shell.env writes export VAR='value', and the
-    # only-if-unset rewrite would otherwise carry the quotes into the value.
     assignments="$(sed -nE -e "s/^[[:space:]]*(export[[:space:]]+)?((REMOTE_|LOCAL_DOCKER_|TINYPROXY_)[A-Z_]+)='(.*)'[[:space:]]*$/: \"\\\${\2:=\4}\"/p" \
       -e 's/^[[:space:]]*(export[[:space:]]+)?((REMOTE_|LOCAL_DOCKER_|TINYPROXY_)[A-Z_]+)="(.*)"[[:space:]]*$/: "${\2:=\4}"/p' \
       -e 's/^[[:space:]]*(export[[:space:]]+)?((REMOTE_|LOCAL_DOCKER_|TINYPROXY_)[A-Z_]+)=([^"'"'"'].*)$/: "${\2:=\4}"/p' "$shell_env" || true)"
@@ -88,7 +56,6 @@ rd_load_config() {
   # shellcheck source=config.env
   source "$config_file"
 
-  # config.env ships placeholders so the repo carries no real identifiers.
   case "${REMOTE_INSTANCE_ID:-}" in
     "<"*">") rd_die "REMOTE_INSTANCE_ID is still the placeholder ${REMOTE_INSTANCE_ID}. Set it in shell.env (see shell.env.example) or export it." ;;
   esac
@@ -117,8 +84,6 @@ rd_check_aws_auth() {
     || rd_die "AWS credentials for profile '$REMOTE_AWS_PROFILE' are not valid. Run: aws sso login --profile $REMOTE_AWS_PROFILE"
 }
 
-# Install/refresh the managed SSH config block for the SSM tunnel.
-# Idempotent: replaces any previous block between the markers.
 rd_install_ssh_config() {
   [ -n "${REMOTE_SSH_KEY_PATH:-}" ] || rd_die "REMOTE_SSH_KEY_PATH must be set (private key for the EC2 key pair)"
   [ -f "$REMOTE_SSH_KEY_PATH" ] || rd_die "SSH private key not found at $REMOTE_SSH_KEY_PATH (set REMOTE_SSH_KEY_PATH to your key for the '<your-key-pair-name>' key pair)"
@@ -162,23 +127,6 @@ rd_install_ssh_config() {
   rd_ok "SSH config block installed for Host '${REMOTE_SSH_ALIAS}' -> ${REMOTE_INSTANCE_ID}"
 }
 
-# ---------------------------------------------------------------------------
-# Failure translation
-#
-# docker, aws and the devcontainer CLI each report failures in their own
-# vocabulary: "conflict: unable to delete", "error during connect", "The config
-# profile could not be found". Every failure that actually happens here has one
-# cause and one fix, so call sites run through these wrappers and the message
-# names both instead of leaving the tool's wording to be interpreted.
-#
-# Only calls whose failure is an error go through them. Where a non-zero status
-# is the answer to a question, such as "does this volume exist", the command is
-# still called directly and the caller acts on the status.
-# ---------------------------------------------------------------------------
-
-# Run a command, capturing stderr so a failure can be explained. stdout is left
-# alone, so callers can still capture it. On failure the translator is called
-# with the exit status, the captured stderr and the command; it does not return.
 rd_run() {
   local translator="$1" err status=0 detail
   shift
@@ -193,9 +141,6 @@ rd_run() {
 rd_docker() { rd_run rd_docker_failed docker "$@"; }
 rd_aws() { rd_run rd_aws_failed aws "$@"; }
 
-# Why the docker engine cannot be reached, and the command that fixes it, as
-# two lines: cause, then fix. 'status' and the failure translator both use it,
-# so they cannot end up telling you different things.
 rd_engine_diagnosis() {
   local context="$1"
   if ! command -v docker > /dev/null 2>&1; then
@@ -218,13 +163,9 @@ rd_engine_diagnosis() {
   printf 'make connect\n'
 }
 
-# Translate a failed docker command. Patterns are the strings docker actually
-# emits; each was reproduced against this setup before being matched on.
 rd_docker_failed() {
   local status="$1" detail="$2"
   shift 2
-  # The command still carries its own binary name, which the untranslated
-  # message needs; the subcommand is what the translations key on.
   local invocation="$*"
   shift
   local context diagnosis subject holder
@@ -241,8 +182,6 @@ rd_docker_failed() {
         "$(rd_quote "$detail")"
       ;;
     *'context not found'* | *'unable to resolve docker endpoint'*)
-      # Listed with DOCKER_CONTEXT cleared: docker echoes that value back as a
-      # row of its own, so the missing context would appear in its own list.
       rd_fail "The docker context this run targets does not exist on this machine" \
         "Contexts that do exist:" \
         "$(rd_quote "$(env -u DOCKER_CONTEXT docker context ls --format '{{.Name}}' 2> /dev/null || printf 'none, docker could not list them')")" \
@@ -332,10 +271,6 @@ rd_docker_failed() {
         "$(rd_quote "$detail")"
       ;;
     *)
-      # 'docker exec' writes its own OCI failure to stdout, not stderr, so a
-      # failed exec arrives here with nothing to match on. The exit status is
-      # what is left: 126 and 127 are the two the runtime uses when it could
-      # not start the command at all.
       if [ "${1:-}" = "exec" ] && [ -z "$detail" ] && { [ "$status" -eq 126 ] || [ "$status" -eq 127 ]; }; then
         rd_fail "The command could not be started inside the container (exit ${status})" \
           "Either it is not installed in the container, or it is not on the PATH that a" \
@@ -352,8 +287,6 @@ rd_docker_failed() {
   esac
 }
 
-# Translate a failed aws command. Credentials expiring mid-session is the
-# common one and used to surface as an empty result or a bare exit code.
 rd_aws_failed() {
   local status="$1" detail="$2"
   shift 2
@@ -414,15 +347,6 @@ rd_aws_failed() {
   esac
 }
 
-# Run 'devcontainer up'. Neither of its streams is touched, and that is the
-# whole design: this is the one call that renders a live log to the terminal
-# for minutes at a time, and redirecting either stream changes how the CLI
-# writes. Capturing stdout to parse the summary made the log arrive without
-# carriage returns, so every line started where the previous one ended.
-#
-# Nothing is lost by leaving them alone. The CLI prints the same JSON summary
-# to both streams, so it is already the last thing on screen; this only has to
-# say what it means and what to do next.
 rd_devcontainer_up() {
   local cli="$1" status=0
   shift

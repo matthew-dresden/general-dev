@@ -59,10 +59,10 @@ operation and both entry points stay in step.
 | `docker-tunnel.sh` | Install the managed SSH config block, create/refresh the `general-dev-remote` docker context, switch to it, verify end-to-end. |
 | `shell.sh` | Interactive zsh on the instance (same tunnel). |
 | `push-secrets.sh` | Transform local `shell.env` for remote use and publish both secret files to SSM Parameter Store (`/devcontainer/<project>/…`). |
-| `container.sh` | Container lifecycle for the current project: status, start/stop/restart, unpushed-work check, teardown, rebuild report. |
+| `container.sh` | Container lifecycle for the current project: status, start/stop/restart, unpushed-work check, teardown, rebuild report, and seeding the VS Code server (`vscode-server`, which `reopen` runs for you). |
 | `lib.sh` | Shared functions (sourced by the others), including the failure translation described below. |
 | `../resmon-disks.py` | Runs from `postAttachCommand`, by the absolute path postCreate links it to (`~/.local/bin/`), because an attached container gives the hook no workspace to run in. Points the Resource Monitor extension at the devices behind `/workspaces` and `/tmp`, resolved per host. |
-| `config.env` | Defaults (instance ID, region, profile, context names). Every value is overridable via environment variables. |
+| `config.env` | Defaults (instance ID, region, profile, context names, VS Code server download endpoint and channel). Every value is overridable via environment variables, including `SKIP_VSCODE_SERVER_SEED=1` to open a window without seeding the server. |
 | `ec2-user-data.yaml` | cloud-init config the instance was provisioned with (kept for reproducibility). |
 
 ## Launching a project on the remote engine
@@ -356,10 +356,11 @@ make clean
 ```
 
 It reads the container's own mounts before removing it, so the volumes it
-deletes are the ones actually attached, not guessed from a naming convention, then removes the container, those volumes, and the image. `vscode` and
-`minikube-config` are excluded as shared (`SHARED_VOLUMES` overrides the list),
-and `devcontainer-base:noble` and `vsc-volume-bootstrap` stay cached: they hold
-no project state and make the rebuild faster.
+deletes are the ones actually attached, not guessed from a naming convention, then removes the container, those volumes, and the image. `minikube-config` is
+excluded as shared (`SHARED_VOLUMES` overrides the list), the VS Code server
+volume is excluded by its mount point, and `devcontainer-base:noble` and
+`vsc-volume-bootstrap` stay cached: they hold no project state and make the
+rebuild faster.
 
 The equivalent by hand:
 

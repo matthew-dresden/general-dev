@@ -16,7 +16,6 @@ import sys
 
 FULL_LINE_COMMENT = re.compile(r"^\s*//.*$", re.MULTILINE)
 
-
 def parse(path: str) -> str | None:
     """Return an error message, or None when the file parses."""
     try:
@@ -31,7 +30,6 @@ def parse(path: str) -> str | None:
         return f"line {exc.lineno}, column {exc.colno}: {exc.msg}"
     return None
 
-
 def main(paths: list[str]) -> int:
     failures = 0
     for path in paths:
@@ -45,7 +43,6 @@ def main(paths: list[str]) -> int:
         return 1
     print(f"  {len(paths)} file(s) parse")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))

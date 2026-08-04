@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# postCreateCommand entry point. Runs as the container user, before the
-# provisioning script, and exists to do the one thing that must happen first:
-# make shell.env available.
-#
-# Locally, cdevcontainer generates shell.env and aws-profile-map.json (both
-# gitignored). A remote clone-in-volume workspace starts without them, so they
-# are fetched from Parameter Store using the instance role. IMDSv2, on an
-# instance launched with hop-limit 2 so containers can reach it.
-#
-# Every value is overridable from the environment.
 
 set -euo pipefail
 
@@ -46,7 +36,6 @@ imds_get() {
     "${DEVCONTAINER_IMDS_ENDPOINT}/latest/meta-data/$2"
 }
 
-# Write one Parameter Store value to a file, failing if it arrives empty.
 fetch_parameter() {
   local region="$1" name="$2" destination="$3" decrypt="${4:-}"
   local args=(--region "${region}" --name "${DEVCONTAINER_SSM_PREFIX}/${name}"
@@ -83,7 +72,6 @@ bootstrap_secrets() {
   log_success "Bootstrapped shell.env and aws-profile-map.json from Parameter Store"
 }
 
-# Git checkouts on Windows hosts can carry CRLF, which breaks these scripts.
 normalize_line_endings() {
   is_wsl || return 0
   log_info "WSL detected, normalising line endings under .devcontainer"
@@ -103,9 +91,6 @@ main() {
 
   normalize_line_endings
 
-  # sudo replaces PATH with secure_path, discarding the image ENV that puts
-  # feature-installed tools on the path. Pass it through so the provisioning
-  # script can tell what the container user actually has available.
   sudo -E env "CONTAINER_USER_PATH=${PATH}" bash "${POSTCREATE}" "${DEVCONTAINER_USER}"
 
   log_success "Setup complete. View logs: cat /tmp/devcontainer-setup.log"

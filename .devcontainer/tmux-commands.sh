@@ -1,24 +1,8 @@
 # shellcheck shell=bash
-# tmux commands for this devcontainer. Sourced into interactive bash and zsh
-# by postcreate, never executed, so it sets no shell options of its own.
-#
-# Terminals here open inside a shared tmux session so work survives VS Code
-# closing. These wrap the tmux invocations worth remembering, under a common
-# tm- prefix, grouped by what they act on: type "tm-" and press Tab to list
-# them, "tm-session-" or "tm-window-" to narrow it. Every command accepts
-# --help.
-#
-# Portability: must parse under both bash and zsh. No associative arrays, no
-# [[ ]], no process substitution.
 
-# Shell started inside new sessions. The vscode account's login shell is bash,
-# so this is set explicitly to match the VS Code terminal profile.
 : "${TM_SHELL:=zsh}"
-# Session used when no name is given.
 : "${TM_SESSION:=main}"
 
-# Single source of truth for command documentation: name|args|summary.
-# Both tm-help and each command's --help read from here.
 __tm_registry() {
   cat <<'EOF'
 tm-session-list||List every session on this container.
@@ -37,7 +21,6 @@ tm-help||Every command, the key bindings, and the mouse.
 EOF
 }
 
-# Longer notes, shown only by "<command> --help".
 __tm_detail() {
   case "$1" in
     tm-session-open)
@@ -150,7 +133,6 @@ __tm_detail() {
   esac
 }
 
-# Usage block for a single command, assembled from the registry plus detail.
 __tm_help_for() {
   __tm_registry | while IFS='|' read -r __tm_name __tm_args __tm_summary; do
     if [ "$__tm_name" = "$1" ]; then
@@ -172,17 +154,10 @@ tm-session-open() {
     tmux new-session -A -s "$1" "$TM_SHELL"
     return $?
   fi
-  # Already inside a session. tmux refuses to attach one from within another
-  # ("sessions should be nested with care"), and every terminal in this
-  # container starts inside the shared session, so plain attach could never
-  # work from where you actually type. Create it detached if it is missing,
-  # then move this client to it.
   tmux has-session -t "$1" 2> /dev/null || tmux new-session -d -s "$1" "$TM_SHELL"
   tmux switch-client -t "$1"
 }
 
-# Interactive chooser for the "tmux: pick session" terminal profile. exec, so
-# the tab becomes the tmux client instead of stacking one on top of a shell.
 tm-session-pick() {
   if [ "$1" = "--help" ]; then __tm_help_for tm-session-pick; return 0; fi
   printf '\nSessions on this container:\n\n'
@@ -193,7 +168,6 @@ tm-session-pick() {
   exec tmux new-session -A -s "${__tm_pick:-$TM_SESSION}" "$TM_SHELL"
 }
 
-# Deliberately refuses an existing name: tm-session-open is the one that does not care.
 tm-session-new() {
   if [ "$1" = "--help" ]; then __tm_help_for tm-session-new; return 0; fi
   if [ -z "$1" ]; then

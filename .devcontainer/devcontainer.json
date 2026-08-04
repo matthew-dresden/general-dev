@@ -13,13 +13,26 @@
     "--label",
     "devcontainer.project=${localWorkspaceFolderBasename}"
   ],
+  "mounts": [
+    {
+      "type": "volume",
+      "source": "vscode-server-${localWorkspaceFolderBasename}",
+      "target": "/home/vscode/.vscode-server/bin"
+    },
+    {
+      "type": "volume",
+      "source": "vscode-extensions-cache-${localWorkspaceFolderBasename}",
+      "target": "/home/vscode/.vscode-server/extensionsCache"
+    }
+  ],
   "features": {
     "ghcr.io/devcontainers/features/aws-cli:1": {
       "version": "latest"
     },
     "ghcr.io/devcontainers/features/python:1": {
       "version": "3.14",
-      "installTools": "true"
+      "installTools": "true",
+      "toolsToInstall": "flake8,black,yapf,mypy,pydocstyle,pycodestyle,bandit,pipenv,virtualenv,pytest,pylint"
     },
     "ghcr.io/devcontainers/features/node:2.1.0": {
       "version": "25",
@@ -44,6 +57,9 @@
       "version": "latest"
     },
     "ghcr.io/anthropics/devcontainer-features/claude-code:1.0.5": {},
+    "ghcr.io/va-h/devcontainers-features/uv:1.1.4": {
+      "version": "latest"
+    },
     "ghcr.io/devcontainers-extra/features/pipx-package:1.1.9": {
       "package": "aws-sso-util",
       "version": "latest"
@@ -56,8 +72,6 @@
     "vscode": {
       "extensions": [
         "aws-scripting-guy.cform",
-        "amazonwebservices.aws-toolkit-vscode",
-        "ms-azuretools.vscode-docker",
         "ms-python.debugpy",
         "charliermarsh.ruff",
         "ms-python.python",
@@ -103,7 +117,7 @@
         },
         "terminal.integrated.defaultProfile.linux": "tmux",
         "terminal.integrated.enablePersistentSessions": true,
-        "terminal.integrated.persistentSessionReviveProcess": "onExitAndWindowClose",
+        "terminal.integrated.persistentSessionReviveProcess": "never",
         "terminal.integrated.scrollback": 100000,
         "terminal.integrated.persistentSessionScrollback": 100000,
         "git.detectSubmodules": true,
@@ -274,5 +288,5 @@
   "userEnvProbe": "loginInteractiveShell",
   "postCreateCommand": "bash -c 'set -o pipefail; bash .devcontainer/postcreate-wrapper.sh 2>&1 | tee /tmp/devcontainer-setup.log'",
   "postStartCommand": "echo 'Dev container ready.'",
-  "postAttachCommand": "python3 \"$HOME/.local/bin/resmon-disks.py\""
+  "postAttachCommand": "python3 \"$HOME/.local/bin/vscode-settings-sync.py\" && python3 \"$HOME/.local/bin/resmon-disks.py\""
 }

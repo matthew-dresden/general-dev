@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# Connect the local docker CLI (and VS Code Dev Containers) to the remote
-# EC2 Docker engine through an SSH tunnel carried inside an IAM-authenticated
-# SSM session. No inbound ports are open on the instance; docker traffic is
-# never exposed over TCP.
-#
-# Usage: ./docker-tunnel.sh
-# Configuration: see config.env (every value overridable via environment).
 
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
@@ -48,8 +41,6 @@ ssh -o BatchMode=yes "$REMOTE_SSH_ALIAS" true \
     "  'session-manager-plugin not found' means the plugin is missing from PATH."
 rd_ok "SSH tunnel works"
 
-# Existence is a question, so it is asked directly; everything that follows is
-# an instruction, so a failure is explained.
 if docker context inspect "$REMOTE_DOCKER_CONTEXT" > /dev/null 2>&1; then
   rd_log "Docker context '${REMOTE_DOCKER_CONTEXT}' already exists - updating endpoint"
   rd_docker context update "$REMOTE_DOCKER_CONTEXT" \

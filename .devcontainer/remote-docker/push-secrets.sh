@@ -1,21 +1,4 @@
 #!/usr/bin/env bash
-# Publish a project's devcontainer secrets to SSM Parameter Store so remote
-# clone-in-volume workspaces can bootstrap themselves (the postcreate wrapper
-# fetches these with the EC2 instance role; see postcreate-wrapper.sh).
-#
-# Reads the LOCAL gitignored files:
-#   <repo>/shell.env                        -> SecureString /devcontainer/<project>/shell.env
-#   <repo>/.devcontainer/aws-profile-map.json -> String     /devcontainer/<project>/aws-profile-map.json
-#
-# The shell.env is transformed for the remote engine before upload:
-#   - HOST_PROXY forced to false and all proxy variables removed (the laptop
-#     tinyproxy does not exist on EC2; containers there have direct egress)
-#   - BASH_ENV rewritten to the remote workspace path
-#   - stale PATH prepends (asdf / .localscripts) removed
-#
-# Usage: ./push-secrets.sh
-# Inputs (env vars): PROJECT_NAME (default: repo basename),
-#   SHELL_ENV_SOURCE, PROFILE_MAP_SOURCE, plus config.env values.
 
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
@@ -33,7 +16,6 @@ SSM_PREFIX="/devcontainer/${PROJECT_NAME}"
 [ -f "$SHELL_ENV_SOURCE" ] || rd_die "shell.env not found at ${SHELL_ENV_SOURCE} (run 'cdevcontainer setup-devcontainer' first)"
 [ -f "$PROFILE_MAP_SOURCE" ] || rd_die "aws-profile-map.json not found at ${PROFILE_MAP_SOURCE}"
 
-# Transform in-memory; no secret material is written to temp files.
 REMOTE_SHELL_ENV=$(sed \
   -e "s|^export HOST_PROXY=.*|export HOST_PROXY='false'|" \
   -e "s|^export BASH_ENV=.*|export BASH_ENV='/workspaces/${PROJECT_NAME}/shell.env'|" \

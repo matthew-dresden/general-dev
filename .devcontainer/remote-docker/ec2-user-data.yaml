@@ -1,9 +1,4 @@
 #cloud-config
-# Provisioning for the general-dev remote Docker engine (EC2, Ubuntu 24.04 arm64).
-# Declares the desired end state of the host; passed as user-data at launch by
-# the aws cli (see README.md in this folder). The 1TB data volume is formatted
-# with a high inode density (-i 8192) because devcontainer agent workloads
-# create very large numbers of small files under container filesystems.
 
 package_update: true
 
@@ -18,9 +13,6 @@ mounts:
   - ["LABEL=DOCKERDATA", "/var/lib/docker", "ext4", "defaults,noatime,nofail", "0", "2"]
 
 write_files:
-  # Docker engine config: containers keep running across dockerd restarts
-  # (live-restore), high file-descriptor limits for agent workloads, and
-  # capped json logs so runaway container logging cannot fill the disk.
   - path: /etc/docker/daemon.json
     permissions: "0644"
     content: |
@@ -39,8 +31,6 @@ write_files:
           "max-file": "3"
         }
       }
-  # Kernel limits sized for many concurrent devcontainers running file
-  # watchers (VS Code, language servers, agent harnesses).
   - path: /etc/sysctl.d/99-devcontainers.conf
     permissions: "0644"
     content: |
@@ -51,10 +41,6 @@ write_files:
       vm.max_map_count=1048576
 
 runcmd:
-  # Format and mount the data volume. NVMe device enumeration is NOT
-  # deterministic on Nitro instances (the root disk is not always nvme0n1),
-  # so the data disk is selected as the single disk carrying no filesystem
-  # signatures. Fails fast on zero or multiple candidates.
   - |
     set -e
     if ! blkid -L DOCKERDATA > /dev/null 2>&1; then
@@ -72,8 +58,6 @@ runcmd:
       mkfs.ext4 -i 8192 -L DOCKERDATA "$1"
     fi
     mount -a
-  # Fail fast if the data volume still did not mount: without this guard
-  # Docker would silently install onto the 100GB root volume.
   - |
     if ! mountpoint -q /var/lib/docker; then
       echo "FATAL: /var/lib/docker is not a mountpoint - data volume missing or failed to mount" | tee /dev/console

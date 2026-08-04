@@ -19,7 +19,7 @@ and no terminal profiles, no editor settings, nothing. If the file is not there
 yet this exits without touching anything and the next attach sets the drives.
 
 Inputs (environment):
-  RESMON_DISK_MOUNTS   space-separated mount points  (default: /workspaces /tmp)
+  RESMON_DISK_MOUNTS   space-separated mount points  (default: /workspaces)
   RESMON_SETTINGS      settings file to update
                        (default: ~/.vscode-server/data/Machine/settings.json)
 """
@@ -31,11 +31,9 @@ import sys
 
 SETTING = "resmon.disk.drives"
 
-
 def fail(message):
     sys.stderr.write("resmon-disks: %s\n" % message)
     raise SystemExit(1)
-
 
 def device_for(mount):
     """The device backing a mount point, as df reports it and resmon matches it."""
@@ -53,8 +51,16 @@ def device_for(mount):
     lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     if len(lines) < 2:
         fail("df reported no device for %s" % mount)
-    return lines[1]
-
+    device = lines[1]
+    if not os.path.exists(device):
+        fail(
+            "%s is backed by %r, which is not a device resmon can report: it "
+            "matches entries by the source df prints, so a pseudo-filesystem "
+            "would show up unlabelled or match several at once.\n"
+            "Name only mount points backed by real devices in "
+            "RESMON_DISK_MOUNTS." % (mount, device)
+        )
+    return device
 
 def load(path):
     with open(path, encoding="utf-8") as handle:
@@ -69,9 +75,8 @@ def load(path):
             "it and reattach." % (path, error)
         )
 
-
 def main():
-    mounts = os.environ.get("RESMON_DISK_MOUNTS", "/workspaces /tmp").split()
+    mounts = os.environ.get("RESMON_DISK_MOUNTS", "/workspaces").split()
     if not mounts:
         fail("RESMON_DISK_MOUNTS is set but empty, so there is nothing to report")
 
@@ -80,9 +85,6 @@ def main():
     )
     path = os.environ.get("RESMON_SETTINGS", default_settings)
 
-    # Creating this file is what must never happen: VS Code seeds it from
-    # customizations.vscode.settings only when it is absent, so getting there
-    # first leaves a container with no terminal profiles and no editor settings.
     if not os.path.exists(path):
         print(
             "resmon-disks: %s does not exist yet, so VS Code has not written its "
@@ -110,7 +112,6 @@ def main():
         "resmon-disks: %s = %s (from %s)"
         % (SETTING, devices, " ".join(mounts))
     )
-
 
 if __name__ == "__main__":
     main()

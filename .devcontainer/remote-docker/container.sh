@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Lifecycle operations for this project's devcontainer on the remote EC2
-# Docker engine. Invoked by the root Makefile; usable directly.
-#
-# Usage: ./container.sh <status|start|stop|restart|rename|check|build|clean|rebuild>
-# Configuration: see config.env. PROJECT_NAME defaults to the repo directory
-# name; every value is overridable via the environment.
 
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
@@ -13,38 +7,18 @@ rd_load_config
 
 REPO_ROOT="$(cd "${RD_DIR}/../.." && pwd)"
 : "${PROJECT_NAME:=$(basename "$REPO_ROOT")}"
-# Volumes shared by every project on the engine. Never removed by 'clean':
-# they hold no project state and only cost re-provisioning time.
-: "${SHARED_VOLUMES:=vscode minikube-config}"
-# User inside the devcontainer. git refuses to operate as root in the volume
-# ("detected dubious ownership"), so exec must target this account.
+: "${SHARED_VOLUMES:=minikube-config}"
+: "${VSCODE_SERVER_DIRNAME:=.vscode-server}"
+: "${VSCODE_SERVER_CACHE_SUBDIR:=bin}"
 : "${CONTAINER_USER:=vscode}"
-# uid:gid the devcontainer runs as. The clone happens as root, so the tree has
-# to be handed to this account or nothing in the container can write to it.
 : "${CONTAINER_UID_GID:=1000:1000}"
-# Image used for the throwaway clone step. The devcontainer base ships git and
-# is pulled for the build anyway, so this adds no extra download.
 : "${CLONE_IMAGE:=mcr.microsoft.com/devcontainers/base:noble}"
-# The devcontainer CLI drives the build. Not the VS Code extension's bundled
-# copy, which is unsupported for direct use.
 : "${DEVCONTAINER_CLI:=devcontainer}"
-# SSM path that postCreate bootstraps shell.env from.
 : "${DEVCONTAINER_SSM_PREFIX:=/devcontainer/${PROJECT_NAME}}"
-# Where the workspace volume is mounted, and the checkout inside it. Must match
-# workspaceFolder in devcontainer.json.
 : "${CONTAINER_WORKSPACES_ROOT:=/workspaces}"
 CONTAINER_WORKSPACE="${CONTAINER_WORKSPACES_ROOT}/${PROJECT_NAME}"
-# Generated per remote build and removed on exit. Declared here so the EXIT
-# trap that removes it can still name it once the build function has returned.
 RDC_OVERRIDE_CONFIG=""
 
-# The resolved devcontainer configuration, as the single JSON line the CLI
-# prints. Both the workspace path and the remote build's override config are
-# derived from it, so it is read in one place.
-#
-# Three distinct things can go wrong, and they send you to three different
-# places: no config file at all, a config the CLI rejects, and a config that
-# parses but yields nothing. One message for all three is a message for none.
 rdc_read_configuration() {
   rd_require_cmd "$DEVCONTAINER_CLI" "Install it: npm install -g @devcontainers/cli"
   rd_require_cmd jq "Install jq: 'brew install jq' or 'apt-get install jq'"
@@ -56,8 +30,6 @@ rdc_read_configuration() {
     "This ran against ${REPO_ROOT}. Run it from the repository that owns the" \
     ".devcontainer directory, or point PROJECT_NAME at the right one."
 
-  # The CLI prints its banner on stderr and one JSON line on stdout, so the two
-  # are captured separately: the banner would otherwise be fed to jq.
   local resolved errors reported status=0
   errors="$(mktemp "${TMPDIR:-/tmp}/rdc-read-config.XXXXXX")"
   resolved="$("$DEVCONTAINER_CLI" read-configuration --workspace-folder "$REPO_ROOT" 2> "$errors")" || status=$?
@@ -84,10 +56,6 @@ rdc_read_configuration() {
   printf '%s\n' "$resolved"
 }
 
-# The workspace path inside the container, taken from devcontainer.json rather
-# than rebuilt here. That file owns workspaceFolder, and it can contain
-# variables such as ${localWorkspaceFolderBasename}, so the resolved value is
-# read from the CLI. Changing workspaceFolder therefore needs no change here.
 rdc_workspace_folder() {
   if [ -n "${RDC_WORKSPACE_FOLDER:-}" ]; then
     printf '%s\n' "$RDC_WORKSPACE_FOLDER"
@@ -96,9 +64,6 @@ rdc_workspace_folder() {
 
   local config="${REPO_ROOT}/.devcontainer/devcontainer.json"
 
-  # The status is propagated by hand: a failure inside the substitution would
-  # otherwise arrive here as an empty value and be reported as a missing
-  # workspaceFolder, on top of the real message.
   local resolved status=0
   resolved="$(rdc_read_configuration)" || status=$?
   [ "$status" -eq 0 ] || exit "$status"
@@ -115,35 +80,19 @@ rdc_workspace_folder() {
   printf '%s\n' "$RDC_WORKSPACE_FOLDER"
 }
 
-# Run a command in the container as the account the devcontainer runs as.
-# A failure here is an error, so it is explained: a stopped container and a
-# missing command inside it look identical otherwise.
 rdc_exec() {
   local id="$1"; shift
   rd_docker exec -u "$CONTAINER_USER" "$id" "$@"
 }
 
-# The same, for the callers that ask a question rather than issue an order and
-# act on the exit status themselves. Wrapping these would turn "no upstream
-# branch" into a fatal error.
 rdc_exec_probe() {
   local id="$1"; shift
   docker exec -u "$CONTAINER_USER" "$id" "$@"
 }
 
-# Split the two-line credential pair produced by rdc_git_credentials.
 rdc_cred_user() { printf '%s' "$1" | sed -n 1p; }
 rdc_cred_secret() { printf '%s' "$1" | sed -n 2p; }
 
-# Which engine the active docker context points at. Every operation adapts to
-# this rather than demanding one particular endpoint: the same commands work on
-# a laptop engine (OrbStack, Docker Desktop, docker-ce) and on the remote EC2
-# engine, because the difference is confined to how the workspace is mounted.
-#
-#   remote, no laptop path exists on the engine, so the checkout is cloned
-#            into a volume and workspaceMount is redirected at it
-#   local, the engine shares this filesystem, so devcontainer.json's default
-#            bind mount is correct and nothing has to be cloned
 rdc_backend() {
   if [ "$(docker context show)" = "$REMOTE_DOCKER_CONTEXT" ]; then
     printf 'remote\n'
@@ -164,15 +113,10 @@ rdc_require_docker() {
     "Fix     ${RD_BOLD}$(rd_line 2 "$diagnosis")${RD_RESET}"
 }
 
-# The devcontainer CLI stamps every container with the in-container path of the
-# config it was built from. That label identifies the project, but it is the
-# same on every instance of it, so several clones of one repo all match.
 rdc_container_ids() {
   rd_docker ps -aq --filter "label=devcontainer.project=${PROJECT_NAME}"
 }
 
-# Resolve the one container to act on. CONTAINER=<name|id> selects explicitly;
-# otherwise exactly one match is required. Never guesses between instances.
 rdc_require_container() {
   local ids count context
   context="$(docker context show 2> /dev/null || printf 'unknown')"
@@ -187,9 +131,6 @@ rdc_require_container() {
         "${RD_BOLD}make local${RD_RESET} or ${RD_BOLD}make remote${RD_RESET} if you are pointed at the wrong one."
     return 0
   fi
-  # Propagated rather than left to errexit: this function is called from inside
-  # a command substitution, where a failure would otherwise read as "no
-  # containers" and produce a second, wrong message.
   ids="$(rdc_container_ids)" || exit $?
   [ -n "$ids" ] || rd_fail "No container for project '${PROJECT_NAME}' exists on context '${context}'" \
     "Build one:" \
@@ -217,25 +158,26 @@ rdc_container_state() {
   rd_docker inspect "$1" --format '{{.State.Status}}'
 }
 
-# Docker records the name with a leading slash; nothing that reads it wants one.
 rdc_container_name() {
   rd_docker inspect "$1" --format '{{.Name}}' | sed 's|^/||'
 }
 
-# Volume names attached to the container, minus the engine-wide shared ones.
 rdc_project_volumes() {
-  local id="$1" vol
-  rd_docker inspect "$id" --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' \
-    | while IFS= read -r vol; do
+  local id="$1" vol target
+  rd_docker inspect "$id" \
+    --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{.Destination}}{{"\n"}}{{end}}{{end}}' \
+    | while read -r vol target; do
         [ -n "$vol" ] || continue
         case " ${SHARED_VOLUMES} " in
           *" ${vol} "*) continue ;;
+        esac
+        case "$target" in
+          */"${VSCODE_SERVER_DIRNAME}"/*) continue ;;
         esac
         printf '%s\n' "$vol"
       done
 }
 
-# Lists every instance, so multiple clones of one repo are all visible.
 rdc_status() {
   local ids id context
   context="$(docker context show 2>/dev/null || echo unknown)"
@@ -246,9 +188,6 @@ rdc_status() {
     printf '\033[1mBackend\033[0m        local, context %s\n' "$context"
   fi
 
-  # Report where you are pointed even when the engine cannot be reached: that
-  # is exactly when you need to know, and the cause is usually diagnosable.
-  # The diagnosis is the shared one, so this and a failing command agree.
   if ! docker info > /dev/null 2>&1; then
     local diagnosis
     diagnosis="$(rd_engine_diagnosis "$context")"
@@ -263,8 +202,6 @@ rdc_status() {
     printf '\033[1mContainer\033[0m      none, create with Dev Containers: Clone Repository in Container Volume...\n\n'
     return 0
   fi
-  # Assigned before they are printed, so a docker failure stops here instead of
-  # printing a row of blanks under the error it just produced.
   local name state image volumes
   for id in $ids; do
     name="$(rdc_container_name "$id")"
@@ -278,8 +215,6 @@ rdc_status() {
   printf '\n'
 }
 
-# Docker's generated names, and the ${devcontainerId} suffix the config applies,
-# are both unreadable. Rename an instance to something you will recognise.
 rdc_rename() {
   local id old
   [ -n "${NAME:-}" ] || rd_die "NAME is required, e.g.: make rename NAME=general-dev-review"
@@ -324,35 +259,26 @@ rdc_restart() {
   rd_ok "restarted, reconnect with Dev Containers: Attach to Running Container..."
 }
 
-# Report uncommitted work in the volume. Exit non-zero when the checkout is
-# dirty so 'clean' can refuse to destroy unpushed work.
 rdc_check() {
   local id state dirty ahead
-  # A local container bind-mounts this working tree, so its checkout is the one
-  # you can already see; there is no second copy that could hold lost work.
   if [ "$(rdc_backend)" != "remote" ]; then
     rd_ok "local backend, the container shares this working tree, nothing to check"
     return 0
   fi
   id="$(rdc_require_container)"
   state="$(rdc_container_state "$id")"
-  # Inspecting the checkout needs a running container. Start it rather than
-  # sending the caller away to run one command and come back.
   if [ "$state" != "running" ]; then
     rd_log "container is '${state}', starting it to inspect the checkout"
     rd_docker start "$id" > /dev/null
   fi
 
   dirty="$(rdc_exec "$id" git -C "${CONTAINER_WORKSPACE}" status --porcelain)"
-  # A checkout with no upstream is a legitimate answer here, not a failure, so
-  # this one asks rather than orders.
   ahead="$(rdc_exec_probe "$id" git -C "${CONTAINER_WORKSPACE}" log --oneline '@{upstream}..HEAD' 2> /dev/null || true)"
 
   if [ -z "$dirty" ] && [ -z "$ahead" ]; then
     rd_ok "checkout in the volume is clean and pushed, safe to destroy"
     return 0
   fi
-  # Only the kinds of work that are actually present get a heading.
   local lines
   lines=()
   [ -z "$ahead" ] || lines+=("unpushed commits:" "$(rd_quote "$ahead")" "")
@@ -371,8 +297,6 @@ rdc_branch() {
   git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD
 }
 
-# The remote build clones from origin, so a branch that exists only on this
-# machine cannot be built. Two ways out, both spelled out.
 rdc_branch_missing_on_origin() {
   local branch="$1" default_branch="$2"
   rd_fail "Branch '${branch}' does not exist on origin" \
@@ -392,33 +316,22 @@ rdc_workspace_volume() {
   printf '%s-%s\n' "$PROJECT_NAME" "$(rdc_branch | tr '/' '-')"
 }
 
-# Everything the build needs before it starts doing work.
 rdc_build_prereqs() {
   rd_require_cmd "$DEVCONTAINER_CLI" "Install it: npm install -g @devcontainers/cli"
   rd_require_cmd git "Install git."
   rd_require_cmd jq "Install jq: 'brew install jq' or 'apt-get install jq'"
   rd_require_cmd python3 "Install python3 (used to compare timestamps)."
 
-  # Everything below concerns the remote backend only: it clones from origin
-  # and reads config from here, so the two can disagree. A local build uses
-  # this working tree directly, where no such gap exists.
   [ "$(rdc_backend)" = "remote" ] || return 0
 
-  # The container is built from the branch you are on. No guessing and no
-  # substitution: if that branch is not on origin, say so and stop.
   local branch default_branch
   branch="$(rdc_branch)"
   git -C "$REPO_ROOT" fetch --quiet origin "$branch" 2> /dev/null || true
   if ! git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/${branch}" > /dev/null; then
-    # Under set -e with pipefail a failing pipeline here would abort the
-    # script before the message below could be printed, which is exactly the
-    # silent "Error 1" this guard exists to replace.
     default_branch="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2> /dev/null | sed 's|^origin/||' || true)"
     rdc_branch_missing_on_origin "$branch" "${default_branch:-main}"
   fi
 
-  # The clone comes from origin, so unpushed local commits would silently not
-  # be in the container.
   local unpushed
   unpushed="$(git -C "$REPO_ROOT" log --oneline "origin/${branch}..HEAD" 2> /dev/null || true)"
   if [ -n "$unpushed" ] && [ "${FORCE:-0}" != "1" ]; then
@@ -433,9 +346,6 @@ rdc_build_prereqs() {
       "Or build without them, deliberately:  ${RD_BOLD}make build FORCE=1${RD_RESET}"
   fi
 
-  # devcontainer.json is read from this machine, while the checkout comes from
-  # origin. Uncommitted config would therefore build a container whose own
-  # .devcontainer differs from the one that built it, silently.
   local dirty_config
   dirty_config="$(git -C "$REPO_ROOT" status --porcelain -- .devcontainer)"
   if [ -n "$dirty_config" ] && [ "${FORCE:-0}" != "1" ]; then
@@ -449,9 +359,6 @@ rdc_build_prereqs() {
   fi
 }
 
-# postCreate bootstraps shell.env from Parameter Store, so a container built
-# against a stale copy comes up misconfigured, silently. Publish whenever the
-# local file is newer, or has never been published, instead of stopping to ask.
 rdc_ensure_secrets_current() {
   [ "${SKIP_SECRETS_CHECK:-0}" != "1" ] || { rd_log "SKIP_SECRETS_CHECK=1, leaving Parameter Store untouched"; return 0; }
   rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
@@ -467,8 +374,6 @@ rdc_ensure_secrets_current() {
     "" \
     "What each value does: docs/environment-files.md"
 
-  # Not 2>/dev/null: a discarded error here left the whole build exiting on a
-  # bare status, with expired credentials looking exactly like an empty result.
   published="$(rd_aws ssm describe-parameters \
     --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" \
     --parameter-filters "Key=Name,Values=${DEVCONTAINER_SSM_PREFIX}/shell.env" \
@@ -491,28 +396,16 @@ PY
     || rd_die "failed to publish secrets to Parameter Store"
 }
 
-# Host portion of a git remote URL, for a credential lookup.
 rdc_remote_host() {
   printf '%s' "$1" | sed -e 's|^[a-z]*://||' -e 's|^[^@]*@||' -e 's|[:/].*$||'
 }
 
-# Ask git for the credentials it would use for this host, from whatever helper
-# the laptop already has configured (osxkeychain, gh, store, ...). This is the
-# same source that makes `git push` work here, so no separate token has to be
-# maintained. Prints "<username>\n<password>"; empty if the helper has nothing.
 rdc_git_credentials() {
   printf 'protocol=https\nhost=%s\n\n' "$1" \
     | GIT_TERMINAL_PROMPT=0 git credential fill 2> /dev/null \
     | awk -F= '$1=="username"{u=$2} $1=="password"{p=$2} END{if (u && p) printf "%s\n%s\n", u, p}'
 }
 
-# Clone the repo from origin into a named volume on the engine. The devcontainer
-# CLI would otherwise bind-mount a laptop path, which does not exist there.
-#
-# The repo may be private, so the clone needs credentials. They are written to a
-# throwaway credentials file inside the clone container and passed on stdin
-# rather than as arguments or environment: the secret never reaches the
-# container's argv or its inspect output, and the clone keeps a clean remote URL.
 rdc_seed_volume() {
   local volume="$1" branch="$2" url="$3" host creds git_user git_secret
   if docker volume inspect "$volume" > /dev/null 2>&1; then
@@ -529,9 +422,6 @@ rdc_seed_volume() {
   rd_log "creating volume ${volume}"
   rd_docker volume create "$volume" > /dev/null
   rd_log "cloning ${url} (${branch}) into ${volume}"
-  # Output streams rather than being captured: a large clone with no progress
-  # is indistinguishable from a hang. git's own message is therefore already on
-  # screen above, and what follows says what to do about it.
   docker run --rm -i -v "${volume}:/workspaces" "$CLONE_IMAGE" sh -s <<SEED || {
 set -e
 umask 077
@@ -559,17 +449,6 @@ SEED
   rd_ok "checkout seeded at ${CONTAINER_WORKSPACE}"
 }
 
-# Copy this machine's git credentials into the container so it can reach the
-# remote on its own.
-#
-# While VS Code is attached it forwards the host's credentials, which hides the
-# fact that the container has none; detached, an agent running in tmux, push
-# fails. postCreate writes whatever GIT_TOKEN shell.env carries, which is a
-# separate credential that has to be kept alive by hand. This instead reuses the
-# helper that already works on this machine, and overwrites postCreate's copy.
-#
-# The credential is written to a file inside the container, on the shared
-# engine. Anyone with docker access to that engine can read it.
 rdc_push_git_creds() {
   local id host creds git_user git_secret
   id="$(rdc_require_container)"
@@ -580,7 +459,6 @@ rdc_push_git_creds() {
   git_user="$(rdc_cred_user "$creds")"
   git_secret="$(rdc_cred_secret "$creds")"
 
-  # Passed on stdin so the secret is in neither argv nor the exec's inspect output.
   local written=0
   docker exec -i -u "$CONTAINER_USER" "$id" sh -s <<CREDS || written=$?
 set -e
@@ -594,8 +472,6 @@ CREDS
     "" \
     "The container has to be running for this:  ${RD_BOLD}make start${RD_RESET}"
 
-  # Prove it works with nothing attached, rather than assuming. A rejection is
-  # an answer, so this asks rather than orders.
   rdc_exec_probe "$id" sh -c "cd '${CONTAINER_WORKSPACE}' && GIT_TERMINAL_PROMPT=0 git ls-remote origin > /dev/null 2>&1" \
     || rd_fail "The credential was written but ${host} rejects it" \
       "It is the same credential this machine uses, so it is expired, revoked, or has" \
@@ -610,19 +486,141 @@ CREDS
   rd_ok "container authenticates to ${host} on its own (verified with git ls-remote)"
 }
 
-# Open the container in VS Code. Locally the folder is opened in its container
-# directly; remotely there is no local folder to open, so the supported route is
-# attaching to the running container.
 : "${VSCODE_CLI:=code}"
+
+rdc_vscode_commit() {
+  rd_require_cmd "$VSCODE_CLI" "Install the VS Code 'code' command: Command Palette > Shell Command: Install 'code' command in PATH"
+
+  local reported commit errors
+  errors="$(mktemp "${TMPDIR:-/tmp}/rdc-vscode-version.XXXXXX")"
+  reported="$("$VSCODE_CLI" --version 2> "$errors" || true)"
+  commit="$(printf '%s\n' "$reported" | sed -n 2p | tr -d '[:space:]')"
+  case "$commit" in
+    *[!0-9a-f]* | "")
+      rd_fail "Could not read the VS Code build from '${VSCODE_CLI} --version'" \
+        "Line 2 of that output is the build the container's server is keyed on, and it read:" \
+        "$(rd_quote "${commit:-nothing}")" \
+        "" \
+        "It reported:" \
+        "$(rd_quote "${reported:-nothing on stdout}")" \
+        "$(rd_quote "$(cat "$errors")")" \
+        "" \
+        "Check the CLI belongs to the VS Code you connect with:  ${RD_BOLD}${VSCODE_CLI} --version${RD_RESET}" \
+        "" \
+        "To open the window and let VS Code transfer the server itself:" \
+        "  ${RD_BOLD}SKIP_VSCODE_SERVER_SEED=1 make reopen${RD_RESET}"
+      ;;
+  esac
+  rm -f "$errors"
+  printf '%s\n' "$commit"
+}
+
+rdc_vscode_server_platform() {
+  local id="$1" os machine arch
+  os="$(rdc_exec_probe "$id" uname -s | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  machine="$(rdc_exec_probe "$id" uname -m | tr -d '[:space:]')"
+  case "$machine" in
+    aarch64 | arm64) arch=arm64 ;;
+    x86_64 | amd64) arch=x64 ;;
+    armv7l) arch=armhf ;;
+    *)
+      rd_fail "No VS Code server build is published for the container's architecture '${machine}'" \
+        "The download service names builds per architecture, and this is not one it publishes." \
+        "" \
+        "To open the window and let VS Code transfer the server itself:" \
+        "  ${RD_BOLD}SKIP_VSCODE_SERVER_SEED=1 make reopen${RD_RESET}"
+      ;;
+  esac
+  printf 'server-%s-%s\n' "$os" "$arch"
+}
+
+rdc_seed_vscode_server() {
+  local id="${1:-}"
+  [ -n "$id" ] || id="$(rdc_require_container)"
+
+  if [ "${SKIP_VSCODE_SERVER_SEED}" = "1" ]; then
+    rd_log "SKIP_VSCODE_SERVER_SEED=1, leaving the server transfer to VS Code"
+    return 0
+  fi
+
+  local commit home dir
+  commit="$(rdc_vscode_commit)"
+  home="$(rdc_exec_probe "$id" sh -c 'printf %s "$HOME"')"
+  [ -n "$home" ] || rd_die "could not read ${CONTAINER_USER}'s home directory from the container"
+  dir="${home}/${VSCODE_SERVER_DIRNAME}/${VSCODE_SERVER_CACHE_SUBDIR}"
+
+  rdc_exec_probe "$id" awk -v target="$dir" \
+    '$2 == target { found = 1 } END { exit found ? 0 : 1 }' /proc/self/mounts \
+    || rd_fail "${dir} in the container is not a mount point, so a seeded server would not survive a rebuild" \
+      "devcontainer.json is meant to mount a volume there. Without it, VS Code reinstalls the server" \
+      "into the container's own filesystem every time one is built." \
+      "" \
+      "Check the mounts entry in ${RD_BOLD}.devcontainer/devcontainer.json${RD_RESET} targets ${dir}." \
+      "" \
+      "To open the window and let VS Code transfer the server itself:" \
+      "  ${RD_BOLD}SKIP_VSCODE_SERVER_SEED=1 make reopen${RD_RESET}"
+
+  if rdc_exec_probe "$id" test -x "${dir}/${commit}/bin/code-server"; then
+    rd_ok "server for build ${commit} is already in the volume, nothing to fetch"
+    rdc_prune_vscode_servers "$id" "$dir" "$commit"
+    return 0
+  fi
+
+  local platform url
+  platform="$(rdc_vscode_server_platform "$id")"
+  url="${VSCODE_UPDATE_URL}/commit:${commit}/${platform}/${VSCODE_UPDATE_CHANNEL}"
+  rd_log "fetching ${platform} for build ${commit} inside the container"
+
+  rdc_exec_probe "$id" bash -c "
+set -euo pipefail
+incoming=\"${dir}/${commit}.incoming.\$\$\"
+trap 'rm -rf \"\$incoming\"' EXIT
+mkdir -p \"\$incoming\"
+curl -fsSL --max-time '${VSCODE_SERVER_FETCH_TIMEOUT}' '${url}' | tar -xz --strip-components=1 -C \"\$incoming\"
+delivered=\"\$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[\"commit\"])' \"\$incoming/product.json\")\"
+[ \"\$delivered\" = '${commit}' ] || { echo \"downloaded server reports build \$delivered, not ${commit}\" >&2; exit 1; }
+test -x \"\$incoming/bin/code-server\"
+mv -n \"\$incoming\" '${dir}/${commit}'
+" || rd_fail "The VS Code server could not be fetched inside the container" \
+    "Nothing was installed, so VS Code will transfer it over the docker connection instead, which is" \
+    "what this avoids. The reason is in the output above." \
+    "" \
+    "Check the container can reach the download service:" \
+    "  ${RD_BOLD}make shell${RD_RESET}, then ${RD_BOLD}curl -sSI ${url}${RD_RESET}" \
+    "" \
+    "To open the window and accept the slow transfer:" \
+    "  ${RD_BOLD}SKIP_VSCODE_SERVER_SEED=1 make reopen${RD_RESET}"
+
+  rd_ok "server for build ${commit} seeded, VS Code will find it and transfer nothing"
+  rdc_prune_vscode_servers "$id" "$dir" "$commit"
+}
+
+rdc_prune_vscode_servers() {
+  local id="$1" dir="$2" keep="$3" build removed=0
+  while IFS= read -r build; do
+    [ -n "$build" ] || continue
+    [ "$build" != "$keep" ] || continue
+    if rdc_exec_probe "$id" pgrep -f "${dir}/${build}/" > /dev/null 2>&1; then
+      rd_log "keeping build ${build}, a process in the container is running it"
+      continue
+    fi
+    rdc_exec_probe "$id" rm -rf "${dir}/${build}" \
+      || rd_die "could not remove ${dir}/${build} from the container"
+    rd_log "removed build ${build}, nothing needs it"
+    removed=$(( removed + 1 ))
+  done < <(rdc_exec_probe "$id" sh -c "ls -1 '${dir}' 2> /dev/null || true")
+  [ "$removed" -eq 0 ] || rd_ok "pruned ${removed} unused server build(s) from the volume"
+}
+
 rdc_reopen() {
   local id name workspace authority
   id="$(rdc_require_container)"
+
+  rdc_seed_vscode_server "$id"
   name="$(rdc_container_name "$id")"
 
   if [ "$(rdc_backend)" != "remote" ]; then
     rd_require_cmd "$VSCODE_CLI" "Install the VS Code 'code' command: Command Palette > Shell Command: Install 'code' command in PATH"
-    # Resolved before the URI is built: a failure inside the argument would
-    # otherwise open VS Code on a truncated path.
     workspace="$(rdc_workspace_folder)"
     rd_log "opening ${REPO_ROOT} in its container"
     "$VSCODE_CLI" --folder-uri "vscode-remote://dev-container+$(printf '%s' "$REPO_ROOT" | od -A n -t x1 | tr -d ' \n')${workspace}"
@@ -630,11 +628,6 @@ rdc_reopen() {
     return 0
   fi
 
-  # A volume-backed workspace has no local path, but VS Code can open a folder
-  # inside an already-attached container by URI. The authority is
-  # "attached-container+" followed by hex-encoded JSON naming the container and
-  # the docker context it lives on, which is exactly what VS Code writes to its
-  # own recently-opened list when you attach by hand.
   rd_require_cmd "$VSCODE_CLI" "Install the VS Code 'code' command: Command Palette > Shell Command: Install 'code' command in PATH"
   authority="$(printf '{"containerName":"/%s","settings":{"context":"%s"}}' \
     "$name" "$(docker context show)" | od -A n -t x1 | tr -d ' \n')"
@@ -644,26 +637,15 @@ rdc_reopen() {
   rd_ok "VS Code opening the workspace directly, no Attach step needed"
 }
 
-# One command that gets you working from whatever state things are in.
-#
-# Decides rather than asks: an unreachable remote engine means the tunnel needs
-# refreshing, no container means build one, a stopped container means start it,
-# and a running one means there is nothing to do but open it. Everything it
-# calls is a target you can also run on its own, so nothing here is a second
-# implementation of anything.
 rdc_up() {
   rd_require_cmd docker "Install the docker CLI: https://docs.docker.com/engine/install/"
 
   local backend
   backend="$(rdc_backend)"
 
-  # An unreachable engine is recoverable on the remote backend: the SSM tunnel
-  # drops on sleep and on SSO expiry, and refreshing it is what connect does.
   if ! docker info > /dev/null 2>&1; then
     if [ "$backend" = "remote" ]; then
       rd_log "remote engine is not answering, refreshing the tunnel"
-      # The tunnel script reports its own failures in full; this only has to say
-      # which step of 'up' it was.
       "${RD_DIR}/docker-tunnel.sh" > /dev/null \
         || rd_fail "The tunnel could not be refreshed, so the remote engine stays unreachable" \
           "The reason is in the output above." \
@@ -692,8 +674,6 @@ rdc_up() {
     return 0
   fi
 
-  # rdc_require_container refuses to guess when several instances exist, and
-  # names them, so CONTAINER=<name> is the answer rather than a wrong choice.
   local id state
   id="$(rdc_require_container)"
   state="$(rdc_container_state "$id")"
@@ -709,23 +689,15 @@ rdc_up() {
       ;;
   esac
 
-  # Cheap, and it verifies rather than assumes: a credential that expired since
-  # the container was built would otherwise only surface on the next push.
   rdc_push_git_creds
   rdc_status
   rdc_reopen
 }
 
-# Build and start the container, blocking until postCreate finishes. Exits with
-# the CLI's status, so a failed build fails the make target.
-# Flags shared by both backends. NO_CACHE=1 rebuilds the image from scratch,
-# which is the fix when a feature or base image changed underneath a cached layer.
 rdc_build_flags() {
   [ "${NO_CACHE:-0}" != "1" ] || printf '%s\n' --build-no-cache
 }
 
-# Build against a laptop engine. devcontainer.json's own bind mount is correct
-# here, so there is nothing to clone and no config to override.
 rdc_build_local() {
   rd_log "backend: local (context '$(docker context show)'), workspace bind-mounted from ${REPO_ROOT}"
   rd_log "building, this runs the image build and postCreate, and will take a while"
@@ -739,9 +711,6 @@ rdc_build_local() {
     ${flags[@]+"${flags[@]}"}
 }
 
-# Build against the remote engine: no laptop path exists there, so the checkout
-# is cloned into a volume and workspaceMount is redirected at it. The committed
-# devcontainer.json is never modified, the override is generated per build.
 rdc_build_remote() {
   rdc_ensure_secrets_current
 
@@ -753,10 +722,6 @@ rdc_build_remote() {
 
   rdc_seed_volume "$volume" "$branch" "$url"
 
-  # Explicit template: "mktemp -t NAME" means different things on BSD and GNU.
-  # Held in a variable the trap can still see, and removed however this ends: a
-  # failed build used to leave it behind, because under 'set -e' the cleanup
-  # after the CLI call was never reached.
   RDC_OVERRIDE_CONFIG="$(mktemp "${TMPDIR:-/tmp}/devcontainer-override.XXXXXX")"
   trap 'rm -f "$RDC_OVERRIDE_CONFIG"' EXIT
   rdc_read_configuration \
@@ -787,8 +752,6 @@ rdc_build_remote() {
 
 rdc_build() {
   rdc_build_prereqs
-  # Assigned before it is tested, not tested inside a substitution: a failure
-  # there would read as "no containers" and start a second build.
   local existing
   existing="$(rdc_container_ids)"
   [ -z "$existing" ] || rd_fail "A container for '${PROJECT_NAME}' already exists on this engine" \
@@ -810,15 +773,11 @@ rdc_build() {
   rdc_status
 }
 
-# Destroy the container, its non-shared volumes, and its image. A rebuild
-# re-clones from origin, so anything unpushed is gone for good.
 rdc_clean() {
   local id name image volumes orphan existing
   existing="$(rdc_container_ids)"
   if [ -z "${CONTAINER:-}" ] && [ -z "$existing" ]; then
     rd_log "no container for '${PROJECT_NAME}'"
-    # A build that failed after seeding leaves the workspace volume behind.
-    # Its name is derived, not discovered, so removing it here is unambiguous.
     orphan="$(rdc_workspace_volume)"
     if docker volume inspect "$orphan" > /dev/null 2>&1; then
       rd_log "removing orphaned workspace volume ${orphan}"
@@ -827,7 +786,6 @@ rdc_clean() {
     rd_ok "nothing left to remove"
     return 0
   fi
-  # Resolves to exactly one instance, or fails listing them all.
   id="$(rdc_require_container)"
 
   if [ "${FORCE:-0}" != "1" ]; then
@@ -838,8 +796,6 @@ rdc_clean() {
 
   name="$(rdc_container_name "$id")"
   image="$(rd_docker inspect "$id" --format '{{.Config.Image}}')"
-  # Capture mounts before removal: once the container is gone the association
-  # between project and volumes cannot be recovered.
   volumes="$(rdc_project_volumes "$id")"
 
   rd_log "removing container ${name}"
@@ -854,12 +810,9 @@ rdc_clean() {
   rd_log "removing image ${image}"
   rd_docker rmi "$image" > /dev/null
 
-  rd_ok "torn down, shared volumes (${SHARED_VOLUMES}) and the cached base image were kept"
+  rd_ok "torn down, shared volumes (${SHARED_VOLUMES}), the VS Code server cache and the cached base image were kept"
 }
 
-# Tear down and build again, blocking through both. Prerequisites are checked
-# before anything is destroyed, so a missing tool cannot leave you with no
-# container and no way to make one.
 rdc_rebuild() {
   rdc_build_prereqs
   rdc_ensure_secrets_current
@@ -867,7 +820,6 @@ rdc_rebuild() {
   rdc_build
 }
 
-# Surfaced in the ambiguity error so it can name the target the user just ran.
 RDC_COMMAND="${1:-}"
 
 case "$RDC_COMMAND" in
@@ -879,9 +831,10 @@ case "$RDC_COMMAND" in
   check) rdc_require_docker && rdc_check ;;
   build) rdc_require_docker && rdc_build ;;
   reopen) rdc_require_docker && rdc_reopen ;;
+  vscode-server) rdc_require_docker && rdc_seed_vscode_server ;;
   up) rdc_up ;;
   push-git-creds) rdc_require_docker && rdc_push_git_creds ;;
   clean) rdc_require_docker && rdc_clean ;;
   rebuild) rdc_require_docker && rdc_rebuild ;;
-  *) rd_die "usage: $(basename "$0") <up|status|start|stop|restart|rename|reopen|check|build|push-git-creds|clean|rebuild>" ;;
+  *) rd_die "usage: $(basename "$0") <up|status|start|stop|restart|rename|reopen|vscode-server|check|build|push-git-creds|clean|rebuild>" ;;
 esac

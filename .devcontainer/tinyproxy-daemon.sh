@@ -1,28 +1,7 @@
 #!/usr/bin/env bash
-# tinyproxy daemon management for the HOST OS, macOS, Linux or WSL.
-#
-# Runs tinyproxy on the host so the devcontainer can reach an upstream proxy
-# via host.docker.internal. One implementation for every host family: the only
-# genuine difference is whether ports are inspected with ss or lsof, which is
-# resolved at runtime. The per-family directories carry thin wrappers around
-# this file so their documented paths keep working.
-#
-# Required environment variables:
-#   TINYPROXY_UPSTREAM_HOST       - Upstream proxy hostname (e.g., edge.surepath.ai)
-#   TINYPROXY_UPSTREAM_PORT       - Upstream proxy port (e.g., 8080)
-#   TINYPROXY_PORT                - Listen port (e.g., 3128)
-#   TINYPROXY_READINESS_TIMEOUT   - Startup readiness timeout in seconds (e.g., 10)
-#   TINYPROXY_STOP_TIMEOUT        - Graceful stop timeout in seconds (e.g., 10)
-#
-# Usage: ./tinyproxy-daemon.sh {start|stop|restart|status}
 
 set -euo pipefail
 
-################################
-# Host family
-################################
-# Message text that differs by host is derived here rather than maintained as
-# separate copies of this script.
 case "$(uname -s)" in
     Darwin) HOST_FAMILY="macOS";  TINYPROXY_INSTALL_HINT="brew install tinyproxy" ;;
     *)      if grep -qi microsoft /proc/version 2>/dev/null; then
@@ -33,7 +12,6 @@ case "$(uname -s)" in
             TINYPROXY_INSTALL_HINT="sudo apt-get install tinyproxy" ;;
 esac
 
-# Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_FILE="${TINYPROXY_TEMPLATE_FILE:-${SCRIPT_DIR}/tinyproxy.conf.template}"
 LOG_DIR="${TINYPROXY_STATE_DIR:-${HOME}/.devcontainer-proxy}"
@@ -41,14 +19,12 @@ RUNTIME_CONFIG="${LOG_DIR}/tinyproxy.conf"
 PID_FILE="${LOG_DIR}/tinyproxy.pid"
 LOG_FILE="${LOG_DIR}/tinyproxy.log"
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Logging functions
 log_info() {
     echo -e "${BLUE}ℹ${NC}  $1"
 }
@@ -70,7 +46,6 @@ exit_with_error() {
     exit 1
 }
 
-# Detect the user's shell rc file for guidance
 detect_shell_rc() {
     local current_shell="${SHELL:-}"
     case "${current_shell}" in
@@ -80,7 +55,6 @@ detect_shell_rc() {
     esac
 }
 
-# Print guidance for setting a missing environment variable
 print_env_guidance() {
     local var_name="$1"
     local example_value="$2"
@@ -101,7 +75,6 @@ print_env_guidance() {
     fi
 }
 
-# Validate all required environment variables are set
 validate_required_env() {
     local missing=0
 
@@ -135,7 +108,6 @@ validate_required_env() {
     fi
 }
 
-# Detect if running inside a Docker container and warn the user
 warn_if_in_container() {
     local in_container=false
 
@@ -162,22 +134,14 @@ warn_if_in_container() {
     fi
 }
 
-# Create log directory if it doesn't exist
 mkdir -p "${LOG_DIR}"
 
-# Check if tinyproxy is installed
 check_tinyproxy() {
     if ! command -v tinyproxy &> /dev/null; then
         exit_with_error "tinyproxy is not installed. Install it with: ${TINYPROXY_INSTALL_HINT}"
     fi
 }
 
-################################
-# Port inspection
-################################
-# The only behaviour that genuinely differs between host families: ss ships on
-# Ubuntu and WSL, lsof on macOS. Resolve which to use once, and fail fast when
-# neither exists rather than silently reporting a port as free.
 if command -v ss &> /dev/null; then
     PORT_INSPECTOR="ss"
 elif command -v lsof &> /dev/null; then
@@ -196,7 +160,6 @@ require_port_inspector() {
         || exit_with_error "neither 'ss' nor 'lsof' is available to inspect port usage, install one of them"
 }
 
-# Raw listener lines for a port; empty when nothing is listening.
 port_listeners() {
     local port="$1"
     require_port_inspector
@@ -206,12 +169,10 @@ port_listeners() {
     esac
 }
 
-# Is anything listening on the port?
 check_port_listening() {
     [[ -n "$(port_listeners "$1")" ]]
 }
 
-# Unique PIDs holding the port.
 port_listener_pids() {
     local listeners
     listeners="$(port_listeners "$1")"
@@ -222,12 +183,10 @@ port_listener_pids() {
     esac
 }
 
-# Resolve the current user's primary group
 resolve_group() {
     id -gn 2>/dev/null || exit_with_error "Failed to resolve primary group for user '${USER}'"
 }
 
-# Generate runtime config from template
 generate_config() {
     if [[ ! -f "${TEMPLATE_FILE}" ]]; then
         exit_with_error "Template file not found: ${TEMPLATE_FILE}"
@@ -248,7 +207,6 @@ generate_config() {
     log_info "Generated runtime config: ${RUNTIME_CONFIG}"
 }
 
-# Get PID if running
 get_pid() {
     if [[ -f "${PID_FILE}" ]]; then
         local pid
@@ -257,14 +215,12 @@ get_pid() {
             echo "${pid}"
             return 0
         else
-            # Stale PID file
             rm -f "${PID_FILE}"
         fi
     fi
     return 1
 }
 
-# Wait for process to be ready (PID file exists and port is listening)
 wait_for_ready() {
     local port="$1"
     local elapsed=0
@@ -279,7 +235,6 @@ wait_for_ready() {
     return 1
 }
 
-# Wait for process to stop
 wait_for_stop() {
     local pid="$1"
     local elapsed=0
@@ -289,11 +244,9 @@ wait_for_stop() {
         elapsed=$((elapsed + 1))
     done
 
-    # Return whether process is still running
     ps -p "${pid}" > /dev/null 2>&1
 }
 
-# Check if the listen port is available before starting
 check_port_available() {
     local port="$1"
     local listeners
@@ -325,7 +278,6 @@ check_port_available() {
     exit 1
 }
 
-# Start tinyproxy
 start_proxy() {
     warn_if_in_container
     log_info "Starting tinyproxy daemon..."
@@ -333,7 +285,6 @@ start_proxy() {
     check_tinyproxy
     validate_required_env
 
-    # Check if already running
     if get_pid > /dev/null 2>&1; then
         local pid
         pid=$(get_pid)
@@ -341,10 +292,8 @@ start_proxy() {
         return 0
     fi
 
-    # Check port is available before attempting to start
     check_port_available "${TINYPROXY_PORT}"
 
-    # Generate runtime config from template
     generate_config
 
     log_info "Config file: ${RUNTIME_CONFIG}"
@@ -352,10 +301,8 @@ start_proxy() {
     log_info "Upstream proxy: ${TINYPROXY_UPSTREAM_HOST}:${TINYPROXY_UPSTREAM_PORT}"
     log_info "Log file: ${LOG_FILE}"
 
-    # Start tinyproxy with generated runtime config
     tinyproxy -c "${RUNTIME_CONFIG}"
 
-    # Wait for readiness
     if wait_for_ready "${TINYPROXY_PORT}"; then
         local pid
         pid=$(get_pid)
@@ -373,7 +320,6 @@ start_proxy() {
     fi
 }
 
-# Stop tinyproxy
 stop_proxy() {
     log_info "Stopping tinyproxy daemon..."
 
@@ -390,12 +336,10 @@ stop_proxy() {
 
     kill "${pid}" 2>/dev/null || true
 
-    # Wait for process to stop
     if wait_for_stop "${pid}"; then
         log_warn "Process didn't stop gracefully, sending KILL signal..."
         kill -9 "${pid}" 2>/dev/null || true
 
-        # Poll until confirmed dead
         local elapsed=0
         while ps -p "${pid}" > /dev/null 2>&1 && [[ ${elapsed} -lt ${TINYPROXY_STOP_TIMEOUT} ]]; do
             sleep 0.5
@@ -407,14 +351,12 @@ stop_proxy() {
     log_success "tinyproxy stopped"
 }
 
-# Restart tinyproxy
 restart_proxy() {
     log_info "Restarting tinyproxy daemon..."
     stop_proxy
     start_proxy
 }
 
-# Show status
 show_status() {
     log_info "Checking tinyproxy daemon status..."
     echo ""
@@ -426,14 +368,12 @@ show_status() {
         pid=$(get_pid)
         log_success "tinyproxy is RUNNING (PID: ${pid})"
 
-        # Check if port is listening
         if lsof -iTCP:"${TINYPROXY_PORT}" -sTCP:LISTEN -P | grep -q "${pid}"; then
             log_success "Listening on port ${TINYPROXY_PORT}"
         else
             log_warn "Process running but not listening on port ${TINYPROXY_PORT}"
         fi
 
-        # Show recent logs
         if [[ -f "${LOG_FILE}" ]]; then
             echo ""
             log_info "Last log entries (last 20 lines):"
@@ -444,7 +384,6 @@ show_status() {
     else
         log_warn "tinyproxy is NOT RUNNING"
 
-        # Show last log entries if available
         if [[ -f "${LOG_FILE}" ]]; then
             echo ""
             log_info "Last run log entries (last 20 lines):"
@@ -459,7 +398,6 @@ show_status() {
     fi
 }
 
-# Main command handler
 case "${1:-}" in
     start)
         start_proxy

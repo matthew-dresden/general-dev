@@ -14,6 +14,12 @@ EC2 reference, troubleshooting) live in
   `/workspaces/${localWorkspaceFolderBasename}`.
 - Features: aws-cli, Python 3.14, Node 25, kubectl + helm (minikube disabled
   via `"minikube": "none"`), common-utils, docker-in-docker, uv.
+- `devcontainer-lock.json` is not tracked. The CLI writes it when it resolves a
+  feature it has no entry for, so a tracked copy left `.devcontainer` dirty after
+  the first build with a new feature, and the build guard then refused the next
+  build: it clones from origin, where a locally written lock would not be. The
+  file is an output, not an input; builds resolve features from the tags in
+  `devcontainer.json` without it. Feature versions are pinned there instead.
 - uv is a feature because `make lint` runs every linter through `uvx`, so without
   it the target fails at the tool rather than on findings, and nothing else
   installed it: not a feature, not `project-setup.sh`. The feature installs the

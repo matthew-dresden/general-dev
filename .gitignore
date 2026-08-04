@@ -38,5 +38,6 @@
 /shell.env
 /devcontainer-environment-variables.json
 .devcontainer/aws-profile-map.json
+.devcontainer/devcontainer-lock.json
 .devcontainer/ssh-private-key
 .claude/settings.local.json

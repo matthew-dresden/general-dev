@@ -274,5 +274,5 @@
   "userEnvProbe": "loginInteractiveShell",
   "postCreateCommand": "bash -c 'set -o pipefail; bash .devcontainer/postcreate-wrapper.sh 2>&1 | tee /tmp/devcontainer-setup.log'",
   "postStartCommand": "echo 'Dev container ready.'",
-  "postAttachCommand": "python3 .devcontainer/resmon-disks.py"
+  "postAttachCommand": "python3 \"$HOME/.local/bin/resmon-disks.py\""
 }

@@ -40,13 +40,25 @@ EC2 reference, troubleshooting) live in
   and sets `default-shell` so windows open zsh rather than the account's login
   shell. postCreate rewrites that line with the zsh it resolved, because the
   committed file cannot know where zsh was installed.
-- `postAttachCommand` runs `.devcontainer/resmon-disks.py`, which points the
-  Resource Monitor extension at the devices behind `/workspaces` and `/tmp`.
-  resmon filters by device rather than mount point and the device differs per
-  host, so it is resolved at run time. It runs on attach rather than in
-  postCreate because VS Code writes its settings file after postCreate, and it
-  never creates that file: doing so stops VS Code seeding it and leaves the
-  container with no profiles or editor settings at all.
+- `postAttachCommand` runs `resmon-disks.py`, which points the Resource Monitor
+  extension at the devices behind `/workspaces` and `/tmp`. resmon filters by
+  device rather than mount point and the device differs per host, so it is
+  resolved at run time. It runs on attach rather than in postCreate because VS
+  Code writes its settings file after postCreate, and it never creates that
+  file: doing so stops VS Code seeding it and leaves the container with no
+  profiles or editor settings at all.
+- The hook names that script as `$HOME/.local/bin/resmon-disks.py`, not by a
+  workspace-relative path, and `configure_resmon_disks` in postCreate links it
+  there. Only postCreate is run by the devcontainer CLI, which knows
+  `workspaceFolder` and runs it there; `postAttachCommand` is run by VS Code, and
+  on the remote engine the workspace is a volume with no local path, so the
+  window attaches to the container by name. An attached container carries no
+  `workspaceFolder` in its metadata for the extension to run hooks in, so the
+  hook runs in the home directory: a relative path resolved to
+  `~/.devcontainer/resmon-disks.py`, and every attach ended in
+  `postAttachCommand … failed with exit code 2` and no disk figures. postCreate
+  verifies the link by running it as the container user, so a broken one fails
+  the build instead of every attach.
 - Git repo detection: `git.autoRepositoryDetection: "subFolders"` +
   `git.repositoryScanMaxDepth: -1` + `git.openRepositoryInParentFolders:
   "never"`, every nested repo under the workspace root is detected at any
@@ -80,7 +92,10 @@ EC2 reference, troubleshooting) live in
 2. **Postcreate: configuration.** Installs nothing, everything installable is
    a feature. Each step is a function in `.devcontainer.postcreate.sh`, states
    the dependency it needs, and is skipped with a banner when that dependency
-   is absent rather than aborting the build:
+   is absent rather than aborting the build. The resmon link is the exception:
+   `postAttachCommand` runs it unconditionally, so a container that cannot
+   provide it fails on every attach, and the build stops instead of shipping
+   one:
 
    | Step | Depends on |
    |---|---|
@@ -88,6 +103,7 @@ EC2 reference, troubleshooting) live in
    | `shell.env` sourcing into `.bashrc` / `.zshenv` |, |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
    | `tm-*` commands sourced into both shells | `tmux` |
+   | `resmon-disks.py` linked into `~/.local/bin` for postAttach | `python3`, required |
    | Oh My Zsh theme and options | `common-utils` `installOhMyZsh` |
    | `~/.aws/config` from `aws-profile-map.json` | `jq` + a non-empty map |
    | host proxy reachability | `HOST_PROXY=true` |

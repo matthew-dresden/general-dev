@@ -56,11 +56,19 @@ TMUX_CONF="${WORK_DIR}/.devcontainer/tmux.conf"
 PROJECT_SETUP="${WORK_DIR}/.devcontainer/project-setup.sh"
 AWS_PROFILE_MAP_FILE="${WORK_DIR}/.devcontainer/aws-profile-map.json"
 REPOS_PATH="${WORK_DIR}/${DEVCONTAINER_REPOS_DIR}"
+RESMON_DISKS="${WORK_DIR}/.devcontainer/resmon-disks.py"
+
+# Where postAttachCommand looks for the script. devcontainer.json names this
+# path literally, because a hook string cannot resolve it, so the two files have
+# to agree: changing it here needs the same change there. remoteEnv in that file
+# already puts this directory on PATH; nothing created it until now.
+USER_BIN="${USER_HOME}/.local/bin"
+RESMON_DISKS_HOOK="${USER_BIN}/$(basename "${RESMON_DISKS}")"
 
 WARNINGS=()
 is_cicd() { [ "${CICD,,}" = "true" ]; }
 
-export PATH="${DEVCONTAINER_EXTRA_PATH}:${USER_HOME}/.local/bin:${PATH}"
+export PATH="${DEVCONTAINER_EXTRA_PATH}:${USER_BIN}:${PATH}"
 
 ############
 # Sections #
@@ -86,6 +94,17 @@ configure_shell_env() {
   } > "${ZSH_ENV}"
 
   log_section_done "Shell environment"
+}
+
+# Run a command as the container user, so anything it creates is correctly owned
+# and anything it tests is tested with that account's permissions rather than
+# root's. WSL cannot use sudo -u, so only the invocation differs between the two.
+as_container_user() {
+  if is_wsl; then
+    bash -c "$1"
+  else
+    sudo -u "${CONTAINER_USER}" bash -c "$1"
+  fi
 }
 
 # Interactive rc files that should carry aliases and functions. Written once
@@ -149,6 +168,60 @@ configure_tmux_commands() {
     || exit_with_error "could not set default-shell in ${USER_HOME}/.tmux.conf"
 
   log_section_done "tmux commands"
+}
+
+# Depends on: python3, from the python feature, and the script itself. Both are
+# required rather than optional, so this section aborts where the ones above skip
+# with a banner: devcontainer.json runs `python3 $HOME/.local/bin/resmon-disks.py`
+# from postAttachCommand unconditionally, so skipping would leave a container
+# whose every attach fails. A build that stops here says so once, with the
+# remedy; the alternative reports it on every attach, after provisioning claimed
+# to have succeeded.
+#
+# resmon-disks.py runs from postAttachCommand, and that hook's working directory
+# is not the workspace on every route into the container. On the remote engine
+# the workspace is a volume with no local path, so VS Code attaches to the
+# container by name, and an attached container carries no workspaceFolder for the
+# extension to run hooks in: it uses the home directory. A workspace-relative
+# command therefore resolved to ~/.devcontainer/resmon-disks.py, and the hook
+# died with exit 2 on every attach, taking the Resource Monitor's disk figures
+# with it. Linking the script somewhere the hook can always name fixes it for
+# both routes at once.
+#
+# Linked rather than copied, unlike .tmux.conf: tmux reads its config once when
+# its server starts, which can be before the workspace is there, while this only
+# ever runs on attach, when the workspace is mounted by definition. So there is
+# one copy of the script, and editing it takes effect on the next attach.
+configure_resmon_disks() {
+  [ -f "${RESMON_DISKS}" ] || exit_with_error \
+    "resmon script not found at ${RESMON_DISKS}, which postAttachCommand runs on every attach"
+
+  # Resolved rather than run as a bare name: PATH under sudo is not the container
+  # user's, and the answer is what proves the interpreter the hook names exists.
+  local python
+  python="$(container_user_path_to python3)"
+  [ -n "${python}" ] || exit_with_error \
+    "python3 not found, so postAttachCommand cannot run ${RESMON_DISKS_HOOK}. Add the python feature to devcontainer.json."
+
+  log_section "Resource Monitor disks" "${RESMON_DISKS_HOOK} -> ${RESMON_DISKS}"
+
+  install -d -m 755 "${USER_BIN}"
+  ln -sfn "${RESMON_DISKS}" "${RESMON_DISKS_HOOK}"
+
+  # Run it as the account the hook runs as, rather than assuming the link works:
+  # that proves python3 resolves, the link resolves, and the file is readable by
+  # that user, which root reading it does not. VS Code has not written its
+  # settings this early, so the script says so and exits 0 without touching
+  # anything; the first attach after this is what sets the drives.
+  #
+  # HOME is named rather than inherited because the script derives the settings
+  # path from it, and the WSL branch of as_container_user does not go through
+  # sudo, so it would inherit root's and check a file nothing ever reads.
+  as_container_user "HOME='${USER_HOME}' '${python}' '${RESMON_DISKS_HOOK}'" \
+    || exit_with_error \
+      "${RESMON_DISKS_HOOK} does not run, so postAttachCommand would fail on every attach"
+
+  log_section_done "Resource Monitor disks"
 }
 
 # Depends on: common-utils feature (installOhMyZsh) and a .zshrc to edit.
@@ -314,8 +387,8 @@ fix_ownership() {
   chown -R "${CONTAINER_USER}:${CONTAINER_USER}" "${USER_HOME}"
 }
 
-# Runs as the container user so anything it creates is correctly owned. WSL
-# cannot use sudo -u, so only the invocation differs between the two.
+# Runs as the container user so anything it creates is correctly owned; see
+# as_container_user for how that is arranged on each platform.
 run_project_setup() {
   if [ ! -f "${PROJECT_SETUP}" ]; then
     log_warn "No project setup script at ${PROJECT_SETUP}"
@@ -324,16 +397,12 @@ run_project_setup() {
   log_section "Project setup" "$(basename "${PROJECT_SETUP}")"
 
   local command="export WORK_DIR='${WORK_DIR}'
-export PATH='${DEVCONTAINER_EXTRA_PATH}:${USER_HOME}/.local/bin:'\"\$PATH\"
+export PATH='${DEVCONTAINER_EXTRA_PATH}:${USER_BIN}:'\"\$PATH\"
 source '${SHELL_ENV}'
 cd '${WORK_DIR}'
 BASH_ENV='${FUNCTIONS_FILE}' bash '${PROJECT_SETUP}'"
 
-  if is_wsl; then
-    bash -c "${command}"
-  else
-    sudo -u "${CONTAINER_USER}" bash -c "${command}"
-  fi
+  as_container_user "${command}"
   log_section_done "Project setup"
 }
 
@@ -361,6 +430,7 @@ main() {
   configure_shell_env
   configure_claude_aliases
   configure_tmux_commands
+  configure_resmon_disks
   configure_oh_my_zsh
   configure_aws_profiles
   validate_proxy

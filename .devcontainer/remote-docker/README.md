@@ -437,7 +437,7 @@ message like `conflict: unable to delete ... (must be forced)` arrives as an
 explanation of which other container still holds the image and what to do about
 it. The wrappers are `rd_docker`, `rd_aws` and `rd_devcontainer_up` in
 `lib.sh`; anything with no translation yet still prints the tool's own message,
-labelled as untranslated, rather than a bare exit code.
+labeled as untranslated, rather than a bare exit code.
 
 Two rules keep it honest, and both matter when editing these scripts:
 

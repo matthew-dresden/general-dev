@@ -1061,6 +1061,31 @@ When making code changes:
 3. **Verify completeness** - Ensure all references are updated
 4. **Flag missing docs** - If documentation doesn't exist but should, create it
 
+### Documentation Language
+
+**All documentation is written in US English.**
+
+`make lint-spell` enforces this over every markdown file in this repository and
+runs as part of `make lint`, so British forms (the `-ise`, `-isation` and
+`-our` endings, doubled consonants, `-re` endings) and common typos fail the
+build. `make spell-fix` applies what the dictionary can map; it rewrites files,
+so review its diff.
+
+Quoting a British spelling as an example fails the check too, since the checker
+cannot tell an example from a mistake. Describe the form rather than spelling it
+out.
+
+The check has no ignore list. A finding is either a real misspelling, which you
+fix, or a legitimate term the dictionary does not know, which requires human
+approval before it is suppressed, per the security-scan rule above.
+
+`SPELL_FILES` overrides the set to check, which is how you spell-check
+documentation this repository does not own, such as a clone under `repos/`:
+
+```sh
+make lint-spell SPELL_FILES="repos/<name>/docs/*.md"
+```
+
 ### Documentation Creation Policy
 
 **Do not create summary documents unless explicitly requested**

@@ -125,7 +125,7 @@ and `HOST_PROXY_URL` in `shell.env` for that.
 ### Line endings on Windows
 
 A checkout on a Windows filesystem can carry CRLF, which breaks shell scripts.
-The wrapper normalises `.devcontainer` automatically when it detects WSL. Avoid
+The wrapper normalizes `.devcontainer` automatically when it detects WSL. Avoid
 the problem at source by cloning inside the WSL filesystem (`~/...`, not
 `/mnt/c/...`), which is also markedly faster.
 

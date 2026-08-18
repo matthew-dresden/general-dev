@@ -20,7 +20,7 @@ EC2 reference, troubleshooting) live in
   runs `devcontainer up --skip-post-create`, then installs the server itself and
   stops at `ln: failed to create symbolic link
   '/home/vscode/.vscode-server/bin/<build>': Permission denied`. Ownership set in
-  the image is what a fresh volume is initialised with, so the mount points are
+  the image is what a fresh volume is initialized with, so the mount points are
   writable from the moment the container starts. Remote mode never hit it,
   because `make build` runs the whole of `devcontainer up`, postCreate included,
   before it seeds the server.
@@ -32,7 +32,7 @@ EC2 reference, troubleshooting) live in
   feature contributes `AmazonWebServices.aws-toolkit-vscode`, which nothing here
   uses: nobody signs into it, so its explorer sat on a Sign in button, and it
   shows a telemetry notice on first activation regardless of the `aws.telemetry`
-  setting, on every rebuild anew because the acknowledgement lives in `data/`,
+  setting, on every rebuild anew because the acknowledgment lives in `data/`,
   which is deliberately not persisted. The `-`-prefixed entry in the extensions
   list is the spec's opt-out and keeps the feature (the CLI is used) while
   dropping its extension. `aws.telemetry: false` stays in the settings so a
@@ -59,7 +59,7 @@ EC2 reference, troubleshooting) live in
   long, and `make rename` replaces it with something readable. Local `make
   build` also passes `devcontainer.local_folder` and `devcontainer.config_file`
   as id-labels: any `--id-label` replaces the CLI's defaults, and those two are
-  how VS Code recognises a folder's container, so without them `make reopen`
+  how VS Code recognizes a folder's container, so without them `make reopen`
   had VS Code build a second, identically-configured container rather than
   attach to the one just built.
 - Terminals default to a `tmux` profile that attaches to a shared session
@@ -160,7 +160,7 @@ EC2 reference, troubleshooting) live in
   chowns anything: the Dockerfile owns that, and a chown running after VS Code
   has already tried to install the server is too late to be the fix. A volume
   that an earlier build left root-owned with content in it keeps that ownership,
-  since Docker only initialises an empty one, and the write check is what says
+  since Docker only initializes an empty one, and the write check is what says
   so. The
   target is a literal path there because no devcontainer variable resolves to
   the remote user's home and `${containerEnv:HOME}` is empty in this image;

@@ -17,16 +17,22 @@ REMOTE_CONTEXT = $(shell source $(CONFIG) && echo $$REMOTE_DOCKER_CONTEXT)
 
 UVX ?= uvx
 MARKDOWN_LINT ?= $(UVX) pymarkdownlnt --config .pymarkdown.json
+SPELL_LINT ?= $(UVX) codespell --builtin clear,rare,en-GB_to_en-US
 SHELL_LINT ?= $(UVX) --from shellcheck-py shellcheck
-LINT_EXCLUDES ?= -not -path './.git/*' -not -path './devbench/*' -not -path './node_modules/*'
+# repos/ holds clones of other repositories. Their contents are not this
+# repo's to lint, and an unparseable file in one of them failed the build here.
+LINT_EXCLUDES ?= -not -path './.git/*' -not -path './devbench/*' -not -path './node_modules/*' -not -path './repos/*'
 MD_FILES = $(shell find . -name '*.md' $(LINT_EXCLUDES))
 SH_FILES = $(shell find . -name '*.sh' $(LINT_EXCLUDES))
 JSON_FILES = $(shell find . -name '*.json' $(LINT_EXCLUDES))
+# Override to spell-check a set this repo does not own, e.g. docs in a clone
+# under repos/:  make lint-spell SPELL_FILES="repos/<name>/*.md"
+SPELL_FILES ?= $(MD_FILES)
 PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer/aws-profile-map.json
 
 .DEFAULT_GOAL := help
 .PHONY: help connect disconnect status shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
-        lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested format hooks-install hooks-uninstall hooks-run \
+        lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-spell spell-fix format hooks-install hooks-uninstall hooks-run \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings
 
@@ -69,8 +75,10 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-restart"    "local"  "Stop then start, picking up changed settings."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-stop"       "local"  "Stop it. Settings come from $(CONFIG); set HOST_PROXY=true in shell.env to make the container use it."
 	@printf '\n\033[1mQUALITY\033[0m\n'
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint"             "host"   "Private files untracked, no nested repos, JSON parses, shellcheck, markdown. Non-zero on any finding."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint"             "host"   "Private files untracked, no nested repos, JSON parses, shellcheck, markdown, US English. Non-zero on any finding."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make format"           "host"   "Auto-fix what the markdown tooling can fix, then report what is left."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint-spell"       "host"   "US English spelling over this repo's markdown. SPELL_FILES overrides the set."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make spell-fix"        "host"   "Auto-fix spelling, British-to-American included, in the same set. Rewrites the files."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-install"    "host"   "Install pre-commit and pre-push hooks. Each is one line, 'exec make hooks-run', so they cannot drift."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-run"        "host"   "Exactly what the hooks run. Use it to reproduce a hook failure."
 	@printf '\n\033[1mOPTIONS\033[0m\n'
@@ -203,7 +211,7 @@ proxy-restart:
 proxy-status:
 	@$(PROXY_ENV) $(PROXY_SH) status
 
-lint: lint-private lint-nested lint-json lint-sh lint-dispatch lint-md
+lint: lint-private lint-nested lint-json lint-sh lint-dispatch lint-md lint-spell
 	@printf '\033[0;32m[DONE]\033[0m all checks passed\n'
 
 lint-nested:
@@ -221,6 +229,15 @@ lint-nested:
 lint-md:
 	@printf '\033[0;36m[LINT]\033[0m markdown (%s files)\n' "$(words $(MD_FILES))"
 	@$(MARKDOWN_LINT) scan $(MD_FILES)
+
+lint-spell:
+	@printf '\033[0;36m[LINT]\033[0m spelling, US English (%s files)\n' "$(words $(SPELL_FILES))"
+	@if [ -z "$(strip $(SPELL_FILES))" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m SPELL_FILES resolved to nothing, so no file would be checked.\n' >&2; \
+		printf '        Name the files to check in SPELL_FILES, or unset it to use this repo'"'"'s markdown.\n' >&2; \
+		exit 1; \
+	fi
+	@$(SPELL_LINT) $(SPELL_FILES)
 
 lint-dispatch:
 	@printf '\033[0;36m[LINT]\033[0m dispatched commands resolve\n'
@@ -248,6 +265,18 @@ format:
 	@printf '\033[0;36m[FORMAT]\033[0m markdown (%s files)\n' "$(words $(MD_FILES))"
 	@$(MARKDOWN_LINT) fix $(MD_FILES) || true
 	@printf '\033[0;32m[DONE]\033[0m formatted, re-run "make lint" to see what remains\n'
+
+# Separate from format: a dictionary rewrite can be wrong on a proper noun, so
+# it stays an explicit request rather than part of the routine formatting pass.
+spell-fix:
+	@printf '\033[0;36m[FIX]\033[0m spelling, US English (%s files)\n' "$(words $(SPELL_FILES))"
+	@if [ -z "$(strip $(SPELL_FILES))" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m SPELL_FILES resolved to nothing, so no file would be fixed.\n' >&2; \
+		printf '        Name the files to fix in SPELL_FILES, or unset it to use this repo'"'"'s markdown.\n' >&2; \
+		exit 1; \
+	fi
+	@$(SPELL_LINT) -w $(SPELL_FILES)
+	@printf '\033[0;32m[DONE]\033[0m fixed what the dictionary maps, re-run "make lint" to see what remains\n'
 
 hooks-run: lint
 

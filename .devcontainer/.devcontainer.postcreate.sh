@@ -20,6 +20,7 @@ source "${WORK_DIR}/.devcontainer/devcontainer-functions.sh"
 : "${DEVCONTAINER_CLAUDE_FLAGS:=--dangerously-skip-permissions}"
 : "${DEVCONTAINER_EXTRA_PATH:=/usr/local/py-utils/bin:/usr/local/python/current/bin}"
 : "${DEVCONTAINER_NPM_GLOBAL_DIRS:=lib/node_modules bin}"
+: "${DEVCONTAINER_NPM_MANAGED_CLIS:=claude}"
 : "${DEVCONTAINER_VSCODE_SERVER_DIRNAME:=.vscode-server}"
 : "${DEVCONTAINER_VSCODE_SERVER_VOLUMES:=bin extensionsCache}"
 : "${DEVCONTAINER_REPOS_DIR:=repos}"
@@ -85,6 +86,44 @@ interactive_rcs() {
   return 0
 }
 
+# The node_modules a globally installed CLI actually lives under, walked up
+# from the executable itself. 'npm prefix -g' reports the prefix of the active
+# node version only, and nvm keeps one prefix per version, so a CLI a feature
+# installed can sit under a version that is not active when postCreate runs.
+npm_install_root_of() {
+  local cli="$1" bin target root
+  bin="$(container_user_path_to "${cli}")" || return 1
+  [ -n "${bin}" ] || return 1
+  target="$(readlink -f "${bin}")" || return 1
+  root="${target}"
+  while [ "${root}" != "/" ]; do
+    root="$(dirname "${root}")"
+    if [ "$(basename "${root}")" = "node_modules" ]; then
+      printf '%s\n' "${root}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Every directory an update writes into: the global node_modules, each scope
+# directory inside it, and bin, which holds the executable symlink npm
+# replaces. A package is updated by replacing its directory, so what has to be
+# writable is the directory holding it, not the package directory itself.
+npm_package_parents() {
+  local prefix
+  for prefix in "$@"; do
+    if [ -d "${prefix}/lib/node_modules" ]; then
+      printf '%s\n' "${prefix}/lib/node_modules"
+      find "${prefix}/lib/node_modules" -maxdepth 1 -mindepth 1 -type d -name '@*'
+    fi
+    if [ -d "${prefix}/bin" ]; then
+      printf '%s\n' "${prefix}/bin"
+    fi
+  done
+  return 0
+}
+
 configure_npm_global_ownership() {
   if ! container_user_has npm; then
     log_section_skipped "Global npm ownership" \
@@ -101,22 +140,57 @@ configure_npm_global_ownership() {
   [ -d "${prefix}" ] \
     || exit_with_error "npm reports a global prefix that does not exist: ${prefix}"
 
-  log_section "Global npm ownership" "${prefix} -> ${CONTAINER_USER}"
+  # A devcontainer feature installs its CLI as root at image build time, so the
+  # package directory and the scope directory above it are left root-owned. The
+  # handover therefore has to reach the prefix that CLI is really in, which is
+  # not always the one npm just reported.
+  local -a prefixes=("${prefix}") clis=()
+  local cli root cli_prefix
+  read -ra clis <<< "${DEVCONTAINER_NPM_MANAGED_CLIS}"
+  for cli in ${clis[@]+"${clis[@]}"}; do
+    container_user_has "${cli}" || continue
+    root="$(npm_install_root_of "${cli}")" \
+      || exit_with_error "${cli} is on PATH but is not inside a node_modules, so the prefix owning it cannot be resolved"
+    cli_prefix="$(dirname "$(dirname "${root}")")"
+    case " ${prefixes[*]} " in
+      *" ${cli_prefix} "*) ;;
+      *) prefixes+=("${cli_prefix}") ;;
+    esac
+  done
+
+  log_section "Global npm ownership" "${prefixes[*]} -> ${CONTAINER_USER}"
 
   local -a names targets=()
   local name
   read -ra names <<< "${DEVCONTAINER_NPM_GLOBAL_DIRS}"
-  for name in "${names[@]}"; do
-    [ -d "${prefix}/${name}" ] \
-      || exit_with_error "${prefix}/${name} is missing, so the npm prefix is not laid out as expected"
-    targets+=("${prefix}/${name}")
+  for prefix in "${prefixes[@]}"; do
+    for name in "${names[@]}"; do
+      [ -d "${prefix}/${name}" ] \
+        || exit_with_error "${prefix}/${name} is missing, so the npm prefix is not laid out as expected"
+      targets+=("${prefix}/${name}")
+    done
   done
   chown -R "${CONTAINER_USER}" "${targets[@]}"
 
-  as_container_user "test -w '${prefix}/lib/node_modules'" \
-    || exit_with_error "${CONTAINER_USER} still cannot write ${prefix}/lib/node_modules"
+  # Probed by creating and removing an entry rather than with test -w, which
+  # passes on a group-writable node_modules while the scope directories inside
+  # it stay root-owned. That is the state a feature leaves behind, and it fails
+  # an update with "no write permission to npm prefix" long after the build
+  # reported success.
+  local dir
+  while read -r dir; do
+    as_container_user "probe=\"${dir}/.postcreate-write-probe.\$\$\" \
+      && mkdir \"\${probe}\" && rmdir \"\${probe}\"" > /dev/null 2>&1 \
+      || exit_with_error "$(printf '%s\n' \
+        "${CONTAINER_USER} cannot create entries in ${dir}, so npm cannot replace a package there" \
+        "and a globally installed CLI will fail to update itself." \
+        "Directories handed over: ${DEVCONTAINER_NPM_GLOBAL_DIRS} under ${prefixes[*]}." \
+        "A directory still root-owned here is outside that set: add its prefix by naming the CLI" \
+        "in DEVCONTAINER_NPM_MANAGED_CLIS, or the directory in DEVCONTAINER_NPM_GLOBAL_DIRS.")"
+  done < <(npm_package_parents "${prefixes[@]}")
 
-  log_section_done "Global npm ownership"
+  log_section_done "Global npm ownership" \
+    "$(npm_package_parents "${prefixes[@]}" | wc -l | tr -d ' ') writable directories"
 }
 
 configure_claude_aliases() {

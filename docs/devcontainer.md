@@ -255,7 +255,7 @@ EC2 reference, troubleshooting) live in
    | Step | Depends on |
    |---|---|
    | apt proxy config (root-only, for later manual `apt` use) | `HTTP_PROXY` set |
-   | global npm prefix handed to the container user | the node feature |
+   | every npm prefix holding a global CLI handed to the container user | the node feature |
    | `~/.vscode-server` handed to the container user | the `mounts` volume, required |
    | `shell.env` sourcing into `.bashrc` / `.zshenv` |, |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
@@ -271,6 +271,27 @@ EC2 reference, troubleshooting) live in
 
    It then hands `$HOME` back to the container user and runs
    `project-setup.sh` as that user.
+
+   The npm handover is what lets a globally installed CLI update itself.
+   A feature installs one as root at image build time, so the package directory
+   and the scope directory above it (`lib/node_modules/@anthropic-ai` for Claude
+   Code) are left owned by root and not group-writable, while
+   `lib/node_modules` itself is group-writable from the node feature. npm
+   updates a package by replacing its directory, which needs write permission on
+   the directory holding it, so the update fails with `no write permission to
+   npm prefix` even though the prefix looks writable. Two things follow from
+   that:
+   - The prefixes handed over are not only the one `npm prefix -g` reports.
+     nvm keeps a prefix per node version, and a CLI can sit under a version that
+     is not the active one, so each CLI named in
+     `DEVCONTAINER_NPM_MANAGED_CLIS` (default `claude`) is resolved from its own
+     executable and its prefix added.
+   - The check is a real `mkdir` and `rmdir` as the container user in every
+     directory npm writes into: `lib/node_modules`, each scope directory inside
+     it, and `bin`, where the executable symlink is replaced. `test -w` on
+     `lib/node_modules` passes while the scope directories inside it are still
+     root-owned, which reported a successful build and left the update broken
+     until someone ran `claude update` by hand.
 
    `.devcontainer/claude-settings.json` is the desired state for Claude Code's
    own `~/.claude/settings.json`, merged in rather than written over so

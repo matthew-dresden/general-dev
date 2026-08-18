@@ -4,6 +4,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 rd_load_config
+rd_require_remote_config
 rd_check_prereqs
 rd_require_cmd docker "Install the docker CLI (engine not required locally): https://docs.docker.com/engine/install/"
 rd_check_aws_auth

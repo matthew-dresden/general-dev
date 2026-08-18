@@ -45,7 +45,11 @@ brew install jq            # and python3, used to compare timestamps
 ```
 
 Every target checks its own prerequisites and fails with the install command
-for whatever is missing.
+for whatever is missing. All of the above applies to the remote engine only:
+on a machine that only ever targets a local engine, none of the `REMOTE_*`
+configuration needs to exist, and only the remote targets (`connect`, `shell`,
+`push-secrets`) and commands run while the remote context is active validate
+it.
 
 ## Scripts
 
@@ -356,7 +360,8 @@ make clean
 ```
 
 It reads the container's own mounts before removing it, so the volumes it
-deletes are the ones actually attached, not guessed from a naming convention, then removes the container, those volumes, and the image. `minikube-config` is
+deletes are the ones actually attached, not guessed from a naming convention, then removes the container, those volumes, and the image. `minikube-config` and
+`vscode` — the Dev Containers extension's engine-wide server cache — are
 excluded as shared (`SHARED_VOLUMES` overrides the list), the VS Code server
 volume is excluded by its mount point, and `devcontainer-base:noble` and
 `vsc-volume-bootstrap` stay cached: they hold no project state and make the
@@ -389,8 +394,10 @@ What `build` does:
    engine, using the cached base image, then hands the tree to the container's
    uid.
 2. Generates an override config, the resolved `devcontainer.json` with
-   `workspaceMount` pointed at that volume. The committed file is untouched, so
-   local builds still bind-mount normally.
+   `workspaceMount` pointed at that volume and `build.dockerfile` and
+   `build.context` rewritten absolute, since the override lives in a temp file
+   and the CLI resolves relative paths against it. The committed file is
+   untouched, so local builds still bind-mount normally.
 3. Runs `devcontainer up` against it.
 
 It refuses to start, before touching anything, when:

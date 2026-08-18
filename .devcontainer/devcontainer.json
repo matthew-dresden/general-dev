@@ -1,7 +1,9 @@
 {
-  "name": "caylent-devcontainer",
+  "name": "devcontainer",
   "remoteUser": "vscode",
-  "image": "mcr.microsoft.com/devcontainers/base:noble",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "shutdownAction": "none",
   "remoteEnv": {
@@ -71,6 +73,7 @@
   "customizations": {
     "vscode": {
       "extensions": [
+        "-AmazonWebServices.aws-toolkit-vscode",
         "aws-scripting-guy.cform",
         "ms-python.debugpy",
         "charliermarsh.ruff",

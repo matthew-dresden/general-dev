@@ -8,6 +8,7 @@ TUNNEL_SH := $(RD_DIR)/docker-tunnel.sh
 SHELL_SH := $(RD_DIR)/shell.sh
 SECRETS_SH := $(RD_DIR)/push-secrets.sh
 PROXY_SH := .devcontainer/tinyproxy-daemon.sh
+KEYBINDINGS_PY := .devcontainer/vscode-keybindings-install.py
 
 PROXY_ENV = set -a; . $(CONFIG); set +a;
 
@@ -26,58 +27,62 @@ PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer
 .DEFAULT_GOAL := help
 .PHONY: help connect disconnect status shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested format hooks-install hooks-uninstall hooks-run \
-        proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server
+        proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
+        keybindings
 
 help:
 	@printf '\n\033[1mgeneral-dev\033[0m devcontainer control. Project: \033[1m%s\033[0m   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
 	@printf 'Local engine builds bind-mount this folder. The remote engine clones the repo into a volume on EC2.\n'
+	@printf 'Second column: \033[1mboth\033[0m = works on either engine via the active context, \033[1mlocal\033[0m/\033[1mremote\033[0m = that engine only,\n'
+	@printf '\033[1mhost\033[0m = runs on this machine and touches no engine at all.\n'
 	@printf '\n\033[1mSTART HERE\033[0m\n'
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make up"               "Get working from any state: refreshes the tunnel, builds or starts as needed, then opens VS Code."
-	@printf '\n\033[1mFIRST RUN\033[0m\n'
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make init"             "Create the three gitignored config files from their examples. Never overwrites an existing one."
-	@printf '\n\033[1mENDPOINT\033[0m  which docker engine everything targets\n'
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make local"            "Point docker and VS Code at the local engine ($(LOCAL_CONTEXT)). Nothing remote is stopped."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make remote"           "Point them at the EC2 engine ($(REMOTE_CONTEXT)), refreshing the SSH-over-SSM tunnel first."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make connect"          "What 'make remote' calls. Re-run after a reboot, after sleep, or when SSO expires."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make disconnect"       "What 'make local' calls. Only changes where new commands and windows point."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make shell"            "Interactive zsh on the EC2 host itself, not in a container."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make up"               "both"   "Get working from any state: refreshes the tunnel (remote), builds or starts as needed, then opens VS Code."
+	@printf '\n\033[1mFIRST RUN\033[0m  once per machine\n'
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make init"             "host"   "Create the three gitignored config files from their examples. Never overwrites an existing one."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make keybindings"      "host"   "Bind Shift+Enter to a newline in VS Code terminals. Must run on the host, not in the container."
+	@printf '\n\033[1mENGINE\033[0m  pick where builds and containers live\n'
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make local"            "host"   "Point docker and VS Code at the local engine ($(LOCAL_CONTEXT)). Nothing remote is stopped."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)), refreshing the SSH-over-SSM tunnel first."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make connect"          "remote" "What 'make remote' calls. Re-run after a reboot, after sleep, or when SSO expires."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make disconnect"       "host"   "What 'make local' calls. Only changes where new commands and windows point."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make shell"            "remote" "Interactive zsh on the EC2 host itself, not in a container."
 	@printf '\n\033[1mBUILD\033[0m  every target blocks until the container is up and exits non-zero if anything fails\n'
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make build"            "Create the container for the active backend. Refuses if one already exists."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make rebuild"          "clean, then build. Prerequisites are checked before anything is destroyed."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make build-no-cache"   "build with the image rebuilt from scratch."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make rebuild-no-cache" "rebuild with the image rebuilt from scratch. Use when a feature or base image changed."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make clean"            "Destroy the container, its private volumes and its image. Shared volumes and the base image are kept."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make build"            "both"   "Create the container for the active backend. Refuses if one already exists."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make rebuild"          "both"   "clean, then build. Prerequisites are checked before anything is destroyed."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make build-no-cache"   "both"   "build with the image rebuilt from scratch."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make rebuild-no-cache" "both"   "rebuild with the image rebuilt from scratch. Use when a feature or base image changed."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make clean"            "both"   "Destroy the container, its private volumes and its image. Shared volumes and the base image are kept."
 	@printf '\n\033[1mLIFECYCLE\033[0m\n'
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make status"           "Backend, container, image and volumes. Read-only, so start here when something looks wrong."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make reopen"           "Open the container in VS Code. Local opens the folder; remote names the container to attach to."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make vscode-server"    "Fetch the VS Code server this machine needs inside the container. reopen does it for you."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make start / stop"     "Start or stop the container. The checkout survives either way."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make restart"          "Restart in place. Fixes a wedged container without rebuilding anything."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make rename NAME=x"    "Give the container a readable name. New ones are <repo>-<devcontainerId>, which is too long to pick from a list."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make check"            "Report uncommitted or unpushed work in the remote volume. Exits non-zero when dirty."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make status"           "both"   "Backend, container, image and volumes. Read-only, so start here when something looks wrong."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make reopen"           "both"   "Open the container in VS Code. Local opens the folder; remote names the container to attach to."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make vscode-server"    "both"   "Fetch the VS Code server this machine needs inside the container. reopen does it for you."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make start / stop"     "both"   "Start or stop the container. The checkout survives either way."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make restart"          "both"   "Restart in place. Fixes a wedged container without rebuilding anything."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make rename NAME=x"    "both"   "Give the container a readable name. New ones are <repo>-<devcontainerId>, which is too long to pick from a list."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make check"            "both"   "Remote: report uncommitted or unpushed work in the volume, non-zero when dirty. Local: a no-op, the container shares this folder."
 	@printf '\n\033[1mSECRETS AND CREDENTIALS\033[0m\n'
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make push-secrets"     "Publish shell.env and aws-profile-map.json to Parameter Store. build and rebuild do this when needed."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make push-git-creds"   "Copy this machine's git credentials into the container so it can push with no editor attached."
-	@printf '\n\033[1mHOST PROXY\033[0m  only needed behind a corporate proxy\n'
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make proxy-start"      "Run tinyproxy on this machine. The container reaches it via host.docker.internal."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make proxy-status"     "Whether it is running, and on which port."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make proxy-restart"    "Stop then start, picking up changed settings."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make proxy-stop"       "Stop it. Settings come from $(CONFIG); set HOST_PROXY=true in shell.env to make the container use it."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make push-git-creds"   "both"   "Copy this machine's git credentials into the container so it can push with no editor attached."
+	@printf '\n\033[1mHOST PROXY\033[0m  only needed behind a corporate proxy; remote builds force HOST_PROXY=false\n'
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-start"      "local"  "Run tinyproxy on this machine. Local containers reach it via host.docker.internal."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-status"     "local"  "Whether it is running, and on which port."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-restart"    "local"  "Stop then start, picking up changed settings."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-stop"       "local"  "Stop it. Settings come from $(CONFIG); set HOST_PROXY=true in shell.env to make the container use it."
 	@printf '\n\033[1mQUALITY\033[0m\n'
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make lint"             "Private files untracked, no nested repos, JSON parses, shellcheck, markdown. Non-zero on any finding."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make format"           "Auto-fix what the markdown tooling can fix, then report what is left."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make hooks-install"    "Install pre-commit and pre-push hooks. Each is one line, 'exec make hooks-run', so they cannot drift."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "make hooks-run"        "Exactly what the hooks run. Use it to reproduce a hook failure."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint"             "host"   "Private files untracked, no nested repos, JSON parses, shellcheck, markdown. Non-zero on any finding."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make format"           "host"   "Auto-fix what the markdown tooling can fix, then report what is left."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-install"    "host"   "Install pre-commit and pre-push hooks. Each is one line, 'exec make hooks-run', so they cannot drift."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-run"        "host"   "Exactly what the hooks run. Use it to reproduce a hook failure."
 	@printf '\n\033[1mOPTIONS\033[0m\n'
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "CONTAINER=<name>"      "Pick one instance when several clones of this repo exist. 'make status' lists them."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "FORCE=1"               "Proceed past the unpushed-work and uncommitted-config guards."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "SKIP_SECRETS_CHECK=1"  "Do not compare shell.env against Parameter Store, and do not publish it."
-	@printf '  \033[1;36m%-30s\033[0m %s\n' "NO_CACHE=1"            "What the no-cache targets set. Works with build and rebuild directly."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "CONTAINER=<name>"      ""       "Pick one instance when several clones of this repo exist. 'make status' lists them."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "FORCE=1"               ""       "Proceed past the unpushed-work and uncommitted-config guards."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "SKIP_SECRETS_CHECK=1"  ""       "Do not compare shell.env against Parameter Store, and do not publish it."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "NO_CACHE=1"            ""       "What the no-cache targets set. Works with build and rebuild directly."
 	@printf '\n\033[1mPREREQUISITES\033[0m\n'
-	@printf '  %-30s %s\n' "always"                "docker"
-	@printf '  %-30s %s\n' "remote endpoint"       "aws, ssh, session-manager-plugin"
-	@printf '  %-30s %s\n' "build and rebuild"     "devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli"
-	@printf '  %-30s %s\n' "lint"                  "uv                                      brew install uv"
+	@printf '  %-23s %s\n' "container targets"     "docker"
+	@printf '  %-23s %s\n' "remote engine"         "aws, ssh, session-manager-plugin, and REMOTE_INSTANCE_ID in shell.env"
+	@printf '  %-23s %s\n' "build and rebuild"     "devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli"
+	@printf '  %-23s %s\n' "lint"                  "uv                                      brew install uv"
 	@printf '  %s\n' "Every target checks what it needs and fails with the command that installs it."
 	@printf '\n'
 
@@ -146,6 +151,9 @@ init:
 		printf '\n\033[0;36m[NEXT]\033[0m replace the placeholders above, then: make local (or make remote), then make build\n'; \
 		printf '        What each value does: docs/environment-files.md\n'; \
 	fi
+
+keybindings:
+	@python3 $(KEYBINDINGS_PY)
 
 up:
 	@$(CONTAINER_SH) up

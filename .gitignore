@@ -41,3 +41,10 @@
 .devcontainer/devcontainer-lock.json
 .devcontainer/ssh-private-key
 .claude/settings.local.json
+
+# Environment files
+shell.env
+devcontainer-environment-variables.json
+
+# Python bytecode
+__pycache__/

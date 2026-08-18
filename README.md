@@ -48,6 +48,20 @@ Replace every `<PLACEHOLDER>`. What each value does, how to have Claude fill
 them out, and the differences between macOS, Linux and WSL are in
 [docs/environment-files.md](docs/environment-files.md).
 
+Then, once per machine rather than once per container:
+
+```sh
+make keybindings      # Shift+Enter = newline in VS Code terminals
+```
+
+Everything else the container needs it configures itself, but keybindings are
+resolved by the VS Code window, which runs on your machine even when the
+workspace is a container, so this one step cannot come from `devcontainer.json`.
+Reload the window afterwards. Running Claude Code's `/terminal-setup` from a
+container terminal writes the same binding into the *container's* home
+directory, where no VS Code process reads it, which is why it appears to do
+nothing.
+
 ## Quick start, remote
 
 Everything runs through `make` from this directory. `make help` documents each
@@ -140,6 +154,11 @@ Every project gets its own container + volume on the shared engine.
 
 - `ccd`, `claude --dangerously-skip-permissions`
 - `ccdr`, `claude --dangerously-skip-permissions --resume`
+- Claude Code starts on the classic renderer and never offers the flicker-free
+  fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen`
+  still opts in for the current container.
+- Shift+Enter inserts a newline in every VS Code terminal, tmux or not, once
+  `make keybindings` has run on the machine.
 - kubectl + helm installed (minikube removed); Python 3.14, Node 25, AWS CLI,
   docker-in-docker via devcontainer features.
 

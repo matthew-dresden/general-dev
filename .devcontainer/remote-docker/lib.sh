@@ -55,7 +55,12 @@ rd_load_config() {
 
   # shellcheck source=config.env
   source "$config_file"
+}
 
+# Only remote operations need the EC2 identity, so this is separate from
+# rd_load_config: local-engine commands must keep working on a machine where
+# none of it is configured.
+rd_require_remote_config() {
   case "${REMOTE_INSTANCE_ID:-}" in
     "<"*">") rd_die "REMOTE_INSTANCE_ID is still the placeholder ${REMOTE_INSTANCE_ID}. Set it in shell.env (see shell.env.example) or export it." ;;
   esac

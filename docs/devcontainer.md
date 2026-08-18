@@ -9,11 +9,34 @@ EC2 reference, troubleshooting) live in
 
 `.devcontainer/devcontainer.json`:
 
-- Prebuilt multi-arch image `caylent-solutions/devcontainer-base:noble`
-  (no Dockerfile), user `vscode`, workspace at
-  `/workspaces/${localWorkspaceFolderBasename}`.
+- Built from `.devcontainer/Dockerfile`, user `vscode`, workspace at
+  `/workspaces/${localWorkspaceFolderBasename}`. The Dockerfile is
+  `FROM mcr.microsoft.com/devcontainers/base:noble` plus one layer: it creates
+  `~/.vscode-server` and the directories the server volumes mount over, owned by
+  `vscode`. Docker creates a missing mount point, and a named volume that is
+  empty, root-owned; VS Code installs its server as `vscode` before any
+  lifecycle hook has run, so nothing inside the container can hand those
+  directories over in time. In local mode that failure was fatal: the extension
+  runs `devcontainer up --skip-post-create`, then installs the server itself and
+  stops at `ln: failed to create symbolic link
+  '/home/vscode/.vscode-server/bin/<build>': Permission denied`. Ownership set in
+  the image is what a fresh volume is initialised with, so the mount points are
+  writable from the moment the container starts. Remote mode never hit it,
+  because `make build` runs the whole of `devcontainer up`, postCreate included,
+  before it seeds the server.
 - Features: aws-cli, Python 3.14, Node 25, kubectl + helm (minikube disabled
   via `"minikube": "none"`), common-utils, docker-in-docker, uv.
+- Features contribute VS Code extensions of their own, merged with the
+  `customizations.vscode.extensions` list: the container image's
+  `devcontainer.metadata` label records which feature added which. The aws-cli
+  feature contributes `AmazonWebServices.aws-toolkit-vscode`, which nothing here
+  uses: nobody signs into it, so its explorer sat on a Sign in button, and it
+  shows a telemetry notice on first activation regardless of the `aws.telemetry`
+  setting, on every rebuild anew because the acknowledgement lives in `data/`,
+  which is deliberately not persisted. The `-`-prefixed entry in the extensions
+  list is the spec's opt-out and keeps the feature (the CLI is used) while
+  dropping its extension. `aws.telemetry: false` stays in the settings so a
+  manual install of the toolkit still collects nothing.
 - `devcontainer-lock.json` is not tracked. The CLI writes it when it resolves a
   feature it has no entry for, so a tracked copy left `.devcontainer` dirty after
   the first build with a new feature, and the build guard then refused the next
@@ -33,7 +56,12 @@ EC2 reference, troubleshooting) live in
   on, so containers created by `make build` and by VS Code's Clone Repository
   in Container Volume are discovered identically. `${devcontainerId}` is unique
   per instance, so several clones of one repo coexist; the generated name is
-  long, and `make rename` replaces it with something readable.
+  long, and `make rename` replaces it with something readable. Local `make
+  build` also passes `devcontainer.local_folder` and `devcontainer.config_file`
+  as id-labels: any `--id-label` replaces the CLI's defaults, and those two are
+  how VS Code recognises a folder's container, so without them `make reopen`
+  had VS Code build a second, identically-configured container rather than
+  attach to the one just built.
 - Terminals default to a `tmux` profile that attaches to a shared session
   (`terminal.integrated.profiles.linux`). VS Code terminates terminal processes
   when the window closes, so this is what keeps a Claude session or long build
@@ -45,6 +73,27 @@ EC2 reference, troubleshooting) live in
   that exist and opens the one you name: a VS Code profile is fixed
   configuration written when the container is built and cannot enumerate
   sessions created later. A plain non-persistent shell is the `zsh` profile.
+- Keybindings are the one part of the terminal experience `devcontainer.json`
+  cannot carry. `customizations.vscode` takes `settings` and `extensions`, both
+  of which the server applies inside the container, but a keybinding is
+  resolved by the window on the developer's machine, and VS Code exposes no
+  setting that changes what the terminal sends for a chord. Shift+Enter
+  therefore reaches the shell as a bare `\r`, indistinguishable from Enter, and
+  Claude Code submits instead of inserting a newline. `/terminal-setup` fixes
+  exactly this by writing a `workbench.action.terminal.sendSequence` binding
+  that sends `ESC CR`, but run from a container terminal it writes
+  `~/.config/Code/User/keybindings.json` *in the container*, which nothing
+  reads, and reports success. `.devcontainer/vscode-keybindings.json` holds the
+  binding and `make keybindings` merges it into the editor's real
+  `keybindings.json` on the host, refusing to run if it detects
+  `REMOTE_CONTAINERS`, `DEVCONTAINER` or `CODESPACES`. It appends only, keeps
+  the pre-existing file as `keybindings.json.pre-devcontainer.bak`, and fails
+  rather than overwrite a `shift+enter` binding that already exists with other
+  arguments. `VSCODE_USER_DIR` overrides the location for Insiders, Cursor or a
+  portable install; `VSCODE_APP_DIRNAME` overrides just the application folder.
+  tmux is not involved in the failure: it forwards `ESC CR` to the pane intact
+  at every `escape-time`, because the two bytes arrive in one write and the
+  timer that would split them never starts.
 - `terminal.integrated.persistentSessionReviveProcess` is `never`. VS Code
   restores a persisted terminal by relaunching its executable without the args it
   was started with, so a tab launched as `tmux new-session -A -s main zsh` came
@@ -65,17 +114,26 @@ EC2 reference, troubleshooting) live in
   shell. postCreate rewrites that line with the zsh it resolved, because the
   committed file cannot know where zsh was installed.
 - `postAttachCommand` runs `resmon-disks.py`, which points the Resource Monitor
-  extension at the device behind `/workspaces`. resmon filters by device rather
-  than mount point and the device differs per host, so it is resolved at run
-  time. Only mount points backed by a real device are reportable: the extension
-  keeps the filesystems whose source string appears in `resmon.disk.drives`, and
-  `/tmp` is a tmpfs whose source `df` prints as `none`, which would show up as an
-  entry labelled `none` and match every tmpfs at once. `/tmp` is therefore out of
-  the default, and a mount point named in `RESMON_DISK_MOUNTS` that resolves to a
-  pseudo-filesystem now fails rather than writing that entry. It runs on attach rather than in postCreate because VS
-  Code writes its settings file after postCreate, and it never creates that
-  file: doing so stops VS Code seeding it and leaves the container with no
-  profiles or editor settings at all.
+  extension at the device behind the workspace. resmon filters by device rather
+  than mount point and the device differs per host, so both the mount and its
+  device are resolved at run time. Which mount holds the workspace differs per
+  engine: remote mounts the checkout volume at `/workspaces`, local bind-mounts
+  only the repository below it, leaving `/workspaces` itself on the container's
+  overlay. Unset, `RESMON_DISK_MOUNTS` therefore resolves to the shallowest mount
+  at or under `/workspaces` — `/workspaces` on one engine, `/workspaces/<repo>`
+  on the other — and `RESMON_WORKSPACES` moves where that is searched. Reportable
+  means the source names one filesystem, not that it names a device file: the
+  extension keeps the filesystems whose source string appears in
+  `resmon.disk.drives`, a local bind mount reports a driver name (`mac` for
+  virtiofs on macOS) that matches exactly one of them, while `/tmp` is a tmpfs
+  reporting `none` or `tmpfs` for several unrelated filesystems at once and would
+  show up unlabelled or matching all of them. A source is checked by whether
+  every mount sharing it is the same filesystem (`st_dev`), which accepts a
+  device Docker bind-mounts repeatedly, as it does for `/etc/hosts`, and fails on
+  an ambiguous one rather than writing that entry. It runs on attach rather than
+  in postCreate because VS Code writes its settings file after postCreate, and it
+  never creates that file: doing so stops VS Code seeding it and leaves the
+  container with no profiles or editor settings at all.
 - The hook names that script as `$HOME/.local/bin/resmon-disks.py`, not by a
   workspace-relative path, and `configure_resmon_disks` in postCreate links it
   there. Only postCreate is run by the devcontainer CLI, which knows
@@ -96,10 +154,14 @@ EC2 reference, troubleshooting) live in
   present, and the extension's check (`test -d`) skips the transfer entirely.
   Per project rather than engine-wide, because two containers sharing one server
   directory would collide on `data/Machine/.devport-<build>` and the connection
-  token. `configure_vscode_server_dir` in postCreate hands the mount point to
-  the container user, since Docker creates a named volume root-owned and the
-  server installs as `vscode`, and it aborts the build if that path is not a
-  mount point, so a config that stopped mounting it cannot go unnoticed. The
+  token. `configure_vscode_server_dir` in postCreate aborts the build if that
+  path is not a mount point, so a config that stopped mounting it cannot go
+  unnoticed, and then proves the container user can write it. It no longer
+  chowns anything: the Dockerfile owns that, and a chown running after VS Code
+  has already tried to install the server is too late to be the fix. A volume
+  that an earlier build left root-owned with content in it keeps that ownership,
+  since Docker only initialises an empty one, and the write check is what says
+  so. The
   target is a literal path there because no devcontainer variable resolves to
   the remote user's home and `${containerEnv:HOME}` is empty in this image;
   postCreate composes the same path from `/etc/passwd` instead, which is what
@@ -140,7 +202,13 @@ EC2 reference, troubleshooting) live in
   252s for VS Code's own transfer. It verifies the `commit` in the delivered
   `product.json` before moving it into place, extracts beside the target so an
   interrupted fetch leaves no half-server where the extension probes, and does
-  nothing when the build is already present. `SKIP_VSCODE_SERVER_SEED=1` opens
+  nothing when the build is already present. An entry that is present but not a
+  usable server is removed first, unless a process is running from it: a VS Code
+  window attached to a local container it created itself mounts the host's
+  server cache at `/vscode` and writes a symlink to it into the volume, which
+  dangles in every container built without that mount — invisible to `test -e`,
+  which follows links, yet enough to make the final `mv` refuse and fail the
+  seed on every attach. `SKIP_VSCODE_SERVER_SEED=1` opens
   the window without it. It then prunes builds nothing needs: VS Code never
   deletes the server it stops using, and each is around 635 MB, so one arrives
   per VS Code update and none leave. A build a process in the container is
@@ -191,6 +259,7 @@ EC2 reference, troubleshooting) live in
    | `~/.vscode-server` handed to the container user | the `mounts` volume, required |
    | `shell.env` sourcing into `.bashrc` / `.zshenv` |, |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
+   | `claude-settings.json` merged into `~/.claude/settings.json` | `claude-code` feature + `jq` |
    | `tm-*` commands sourced into both shells | `tmux` |
    | `resmon-disks.py` linked into `~/.local/bin` for postAttach | `python3`, required |
    | `vscode-settings-sync.py` linked into `~/.local/bin` for postAttach | `python3`, required |
@@ -202,6 +271,17 @@ EC2 reference, troubleshooting) live in
 
    It then hands `$HOME` back to the container user and runs
    `project-setup.sh` as that user.
+
+   `.devcontainer/claude-settings.json` is the desired state for Claude Code's
+   own `~/.claude/settings.json`, merged in rather than written over so
+   anything the CLI has already stored there survives. `$HOME` is not a volume,
+   so a rebuild starts from an empty `~/.claude` and the merge is what makes
+   the choice repeatable. It currently sets `tui` to `default`, the classic
+   main-screen renderer. The value matters less than the key being present:
+   Claude Code offers the flicker-free fullscreen renderer on startup only
+   while `tui` is unset, so declaring it both picks the renderer and retires
+   the prompt and the tip that advertises it. `/tui fullscreen` still switches
+   the running container, and postCreate puts it back on the next rebuild.
 
 ## Git credentials
 
@@ -229,7 +309,11 @@ blocking and scriptable:
    the engine, using the cached base image, then chown it to the container uid.
 2. Generate an override config: the resolved `devcontainer.json` with
    `workspaceMount` pointed at that volume. The committed file is untouched, so
-   local builds still bind-mount normally.
+   local builds still bind-mount normally. It is written to a temp file, and the
+   CLI resolves a config's relative paths against the config it was handed, so
+   `build.dockerfile` and `build.context` are rewritten absolute against
+   `.devcontainer` on the way through. Without that the build would look for the
+   Dockerfile next to the temp file.
 3. `devcontainer up --override-config …`, which blocks through the image build
    and postCreate and propagates its exit code.
 

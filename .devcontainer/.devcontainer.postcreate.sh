@@ -37,6 +37,7 @@ TMUX_COMMANDS="${WORK_DIR}/.devcontainer/tmux-commands.sh"
 TMUX_CONF="${WORK_DIR}/.devcontainer/tmux.conf"
 PROJECT_SETUP="${WORK_DIR}/.devcontainer/project-setup.sh"
 AWS_PROFILE_MAP_FILE="${WORK_DIR}/.devcontainer/aws-profile-map.json"
+CLAUDE_SETTINGS_FILE="${WORK_DIR}/.devcontainer/claude-settings.json"
 REPOS_PATH="${WORK_DIR}/${DEVCONTAINER_REPOS_DIR}"
 RESMON_DISKS="${WORK_DIR}/.devcontainer/resmon-disks.py"
 VSCODE_SETTINGS_SYNC="${WORK_DIR}/.devcontainer/vscode-settings-sync.py"
@@ -135,6 +136,45 @@ configure_claude_aliases() {
   log_section_done "Claude Code aliases"
 }
 
+configure_claude_settings() {
+  if ! container_user_has claude; then
+    log_section_skipped "Claude Code settings" \
+      "claude is not installed, add the claude-code feature to devcontainer.json"
+    return 0
+  fi
+  if ! container_user_has jq; then
+    log_section_skipped "Claude Code settings" \
+      "jq is not installed, add it to the apt-packages feature in devcontainer.json"
+    return 0
+  fi
+  [ -s "${CLAUDE_SETTINGS_FILE}" ] \
+    || exit_with_error "Claude Code settings not found at ${CLAUDE_SETTINGS_FILE}"
+  jq empty "${CLAUDE_SETTINGS_FILE}" > /dev/null 2>&1 \
+    || exit_with_error "${CLAUDE_SETTINGS_FILE} is not valid JSON"
+
+  local target="${USER_HOME}/.claude/settings.json"
+  log_section "Claude Code settings" \
+    "$(jq -r 'keys | join(", ")' "${CLAUDE_SETTINGS_FILE}") -> ${target}"
+
+  mkdir -p "$(dirname "${target}")"
+  [ -f "${target}" ] || echo '{}' > "${target}"
+  jq empty "${target}" > /dev/null 2>&1 \
+    || exit_with_error "${target} is not valid JSON, so it cannot be merged into"
+
+  local merged
+  merged="$(jq -s '.[0] * .[1]' "${target}" "${CLAUDE_SETTINGS_FILE}")"
+  printf '%s\n' "${merged}" > "${target}"
+
+  local key
+  while read -r key; do
+    [ "$(jq -c --arg k "${key}" '.[$k]' "${target}")" \
+      = "$(jq -c --arg k "${key}" '.[$k]' "${CLAUDE_SETTINGS_FILE}")" ] \
+      || exit_with_error "'${key}' is not set in ${target} after the merge"
+  done < <(jq -r 'keys[]' "${CLAUDE_SETTINGS_FILE}")
+
+  log_section_done "Claude Code settings"
+}
+
 configure_tmux_commands() {
   if ! container_user_has tmux; then
     log_section_skipped "tmux commands" \
@@ -189,11 +229,15 @@ configure_vscode_server_dir() {
   done
 
   log_section "VS Code server volumes" "${DEVCONTAINER_VSCODE_SERVER_VOLUMES}"
-  chown "${CONTAINER_USER}:${CONTAINER_USER}" "${VSCODE_SERVER_DIR}" "${paths[@]}"
 
   for path in "${VSCODE_SERVER_DIR}" "${paths[@]}"; do
     as_container_user "test -w '${path}'" \
-      || exit_with_error "${CONTAINER_USER} cannot write ${path}, so VS Code could not install into it"
+      || exit_with_error "$(printf '%s\n' \
+        "${CONTAINER_USER} cannot write ${path}, so VS Code could not install its server into it." \
+        ".devcontainer/Dockerfile creates ${VSCODE_SERVER_DIR} and every mount point under it owned by" \
+        "${CONTAINER_USER}, and Docker copies that ownership into a volume only while the volume is empty." \
+        "A volume that an earlier build left root-owned with content in it keeps that ownership: remove" \
+        "it from the engine and build again.")"
   done
 
   log_section_done "VS Code server volumes" \
@@ -431,6 +475,7 @@ main() {
   configure_shell_env
   configure_npm_global_ownership
   configure_claude_aliases
+  configure_claude_settings
   configure_tmux_commands
   configure_resmon_disks
   configure_vscode_settings_sync

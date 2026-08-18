@@ -34,7 +34,7 @@ PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer
 .PHONY: help connect disconnect status shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-spell spell-fix format hooks-install hooks-uninstall hooks-run \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
-        keybindings
+        keybindings validate
 
 help:
 	@printf '\n\033[1mgeneral-dev\033[0m devcontainer control. Project: \033[1m%s\033[0m   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
@@ -81,6 +81,7 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make spell-fix"        "host"   "Auto-fix spelling, British-to-American included, in the same set. Rewrites the files."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-install"    "host"   "Install pre-commit and pre-push hooks. Each is one line, 'exec make hooks-run', so they cannot drift."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-run"        "host"   "Exactly what the hooks run. Use it to reproduce a hook failure."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make validate"         "host"   "The green-baseline contract automation depends on. Currently lint; gains test as suites land."
 	@printf '\n\033[1mOPTIONS\033[0m\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "CONTAINER=<name>"      ""       "Pick one instance when several clones of this repo exist. 'make status' lists them."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "FORCE=1"               ""       "Proceed past the unpushed-work and uncommitted-config guards."
@@ -213,6 +214,12 @@ proxy-status:
 
 lint: lint-private lint-nested lint-json lint-sh lint-dispatch lint-md lint-spell
 	@printf '\033[0;32m[DONE]\033[0m all checks passed\n'
+
+# The single entry point external automation calls to decide whether this
+# checkout is green. Kept separate from lint so that adding a test suite widens
+# what "green" means without every caller having to learn a new target name.
+validate: lint
+	@printf '\033[0;32m[DONE]\033[0m validate passed\n'
 
 lint-nested:
 	@printf '\033[0;36m[LINT]\033[0m no nested repos tracked\n'

@@ -22,6 +22,12 @@
 !/LICENSE
 !/shell.env.example
 !/devcontainer-environment-variables.json.example
+!/pyproject.toml
+!/tests/
+# Tracked so plugin tasks can `git add` a module under .claude/plugins/ with
+# no -f flag needed. .claude/settings.local.json stays ignored: its own
+# later, more specific entry below still wins over this broader re-include.
+!/.claude/
 # The folder is tracked so it exists in a fresh clone; what you clone into
 # it is not. VS Code still finds those repositories, because its scan walks
 # directories rather than consulting .gitignore.

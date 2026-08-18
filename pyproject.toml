@@ -1,0 +1,51 @@
+[project]
+name = "general-dev"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.uv]
+# Nothing here is a Python package to build or install. This file exists so
+# `uv run` has a project, a dev dependency group, and tool configuration to
+# read, not so the repository can be packaged.
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "bandit",
+]
+
+# pythonpath is required because devcontainer_config will live inside the
+# plugin tree at .claude/plugins/devcontainer/scripts, not on a conventional
+# source path such as src/ or the repository root. E1-F2-S1-T1 creates that
+# package. pytest resolves pythonpath at collection time, so once the package
+# exists there, every test that does `import devcontainer_config` resolves it
+# without a ModuleNotFoundError.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".claude/plugins/devcontainer/scripts"]
+
+# E1-F2-S1-T1 creates the devcontainer_config package at this path; it does
+# not exist yet. coverage resolves `source` at run time, so this entry is
+# inert (no source to measure) until that unit lands, not a typo.
+[tool.coverage.run]
+branch = true
+source = [".claude/plugins/devcontainer/scripts/devcontainer_config"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

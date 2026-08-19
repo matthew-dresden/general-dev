@@ -28,6 +28,13 @@
 # no -f flag needed. .claude/settings.local.json stays ignored: its own
 # later, more specific entry below still wins over this broader re-include.
 !/.claude/
+# The Terraform module (provider/aws) and the per-instance Terragrunt
+# deployments (remote-instances/<name>/) (E5, spec Sections 5.6, 5.7). E5
+# is on hold and neither directory exists in the checkout yet; allowlisted
+# now so the first Terraform commit is a normal commit rather than one
+# that also has to reason about why its files are invisible to git.
+!/provider/
+!/remote-instances/
 # The folder is tracked so it exists in a fresh clone; what you clone into
 # it is not. VS Code still finds those repositories, because its scan walks
 # directories rather than consulting .gitignore.

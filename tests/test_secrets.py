@@ -106,6 +106,16 @@ def _composed_sample(case: dict[str, object], prefix: str) -> str:
     return f"{prefix}{case['positive_suffix']}"
 
 
+def _sample_sso_portal_url() -> str:
+    """A sso-portal-url-shaped sample, composed at run time (never stored assembled)."""
+    return f"https://{uuid.uuid4().hex}.awsapps.com/start"
+
+
+def _sample_account_id() -> str:
+    """A twelve-digit account-id-shaped sample, composed at run time (never stored assembled)."""
+    return str(uuid.uuid4().int)[:12]
+
+
 @pytest.mark.parametrize("case,prefix", _POSITIVE_CASES, ids=_POSITIVE_CASE_IDS)
 def test_positive_sample_yields_one_finding(case: dict[str, object], prefix: str) -> None:
     """AC-TEST-001: every positive sample yields exactly one correctly identified finding."""
@@ -288,7 +298,7 @@ def test_scan_lines_detector_ids_filter_restricts_detectors() -> None:
     """A detector_ids filter limits scanning to the named detectors only."""
     secrets = _import_secrets()
     sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
-    lines = [(1, "https://acme.invalid/start"), (2, "12345678901a")]
+    lines = [(1, _sample_sso_portal_url()), (2, _sample_account_id())]
 
     findings = secrets.scan_lines(lines, sources, detector_ids=("sso-portal-url",))
 
@@ -311,6 +321,27 @@ def test_scan_lines_touches_no_file_subprocess_or_network(monkeypatch: pytest.Mo
     findings = secrets.scan_lines([(1, "AKIA" + "B" * 16)], sources)
 
     assert len(findings) == 1
+
+
+def _own_source_lines() -> list[tuple[int, str]]:
+    """This test file's own source text, numbered like `scan_lines` expects."""
+    source = Path(__file__).resolve().read_text(encoding="utf-8")
+    return list(enumerate(source.splitlines(), start=1))
+
+
+def test_own_source_yields_no_findings_from_the_scanner_it_tests() -> None:
+    """This file's own committed bytes must not trip the very scanner it tests.
+
+    Every positive sample this file needs is composed at run time (see
+    `_composed_sample`, `_sample_sso_portal_url`, `_sample_account_id`) so no
+    physical line here ever matches a detector pattern.
+    """
+    secrets = _import_secrets()
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+
+    findings = secrets.scan_lines(_own_source_lines(), sources)
+
+    assert findings == ()
 
 
 def _imported_top_level_modules(tree: ast.Module) -> set[str]:
@@ -369,7 +400,7 @@ def test_scan_lines_end_to_end_multiple_detectors_and_lines() -> None:
         shell_env_lines=(shell_env_line,), catalog_secret_names=(catalog_name,)
     )
     lines = [
-        (1, "https://acme.invalid/start"),
+        (1, _sample_sso_portal_url()),
         (2, "nothing interesting here"),
         (3, shell_env_line),
         (4, f"value = lookup({catalog_name})"),

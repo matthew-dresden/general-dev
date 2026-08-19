@@ -18,19 +18,18 @@ dev = [
     "bandit",
 ]
 
-# pythonpath is required because devcontainer_config will live inside the
-# plugin tree at .claude/plugins/devcontainer/scripts, not on a conventional
-# source path such as src/ or the repository root. E1-F2-S1-T1 creates that
-# package. pytest resolves pythonpath at collection time, so once the package
-# exists there, every test that does `import devcontainer_config` resolves it
-# without a ModuleNotFoundError.
+# pythonpath is required because devcontainer_config lives inside the plugin
+# tree at .claude/plugins/devcontainer/scripts, not on a conventional source
+# path such as src/ or the repository root (E1-F2-S1-T1 created the package
+# there). pytest resolves pythonpath at collection time, so every test that
+# does `import devcontainer_config` resolves it without a ModuleNotFoundError.
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".claude/plugins/devcontainer/scripts"]
 
-# E1-F2-S1-T1 creates the devcontainer_config package at this path; it does
-# not exist yet. coverage resolves `source` at run time, so this entry is
-# inert (no source to measure) until that unit lands, not a typo.
+# devcontainer_config exists at this path (E1-F2-S1-T1 created the package).
+# coverage resolves `source` at run time and measures its statements against
+# this entry, not a typo or a placeholder for source that has yet to land.
 [tool.coverage.run]
 branch = true
 source = [".claude/plugins/devcontainer/scripts/devcontainer_config"]

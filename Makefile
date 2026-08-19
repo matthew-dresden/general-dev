@@ -19,6 +19,7 @@ UVX ?= uvx
 MARKDOWN_LINT ?= $(UVX) pymarkdownlnt --config .pymarkdown.json
 SPELL_LINT ?= $(UVX) codespell --builtin clear,rare,en-GB_to_en-US
 SHELL_LINT ?= $(UVX) --from shellcheck-py shellcheck
+PYTEST ?= uv run --group dev pytest
 # repos/ holds clones of other repositories. Their contents are not this
 # repo's to lint, and an unparseable file in one of them failed the build here.
 LINT_EXCLUDES ?= -not -path './.git/*' -not -path './devbench/*' -not -path './node_modules/*' -not -path './repos/*'
@@ -34,7 +35,7 @@ PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer
 .PHONY: help connect disconnect status shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-spell spell-fix format hooks-install hooks-uninstall hooks-run \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
-        keybindings validate
+        keybindings validate test
 
 help:
 	@printf '\n\033[1mgeneral-dev\033[0m devcontainer control. Project: \033[1m%s\033[0m   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
@@ -81,7 +82,8 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make spell-fix"        "host"   "Auto-fix spelling, British-to-American included, in the same set. Rewrites the files."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-install"    "host"   "Install pre-commit and pre-push hooks. Each is one line, 'exec make hooks-run', so they cannot drift."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-run"        "host"   "Exactly what the hooks run. Use it to reproduce a hook failure."
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make validate"         "host"   "The green-baseline contract automation depends on. Currently lint; gains test as suites land."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make test"             "host"   "Run the hermetic pytest suite in tests/. No docker, no AWS, no network."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make validate"         "host"   "The green-baseline contract automation depends on. Runs lint then test."
 	@printf '\n\033[1mOPTIONS\033[0m\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "CONTAINER=<name>"      ""       "Pick one instance when several clones of this repo exist. 'make status' lists them."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "FORCE=1"               ""       "Proceed past the unpushed-work and uncommitted-config guards."
@@ -91,7 +93,7 @@ help:
 	@printf '  %-23s %s\n' "container targets"     "docker"
 	@printf '  %-23s %s\n' "remote engine"         "aws, ssh, session-manager-plugin, and REMOTE_INSTANCE_ID in shell.env"
 	@printf '  %-23s %s\n' "build and rebuild"     "devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli"
-	@printf '  %-23s %s\n' "lint"                  "uv                                      brew install uv"
+	@printf '  %-23s %s\n' "lint, test"            "uv                                      brew install uv"
 	@printf '  %s\n' "Every target checks what it needs and fails with the command that installs it."
 	@printf '\n'
 
@@ -218,8 +220,13 @@ lint: lint-private lint-nested lint-json lint-sh lint-dispatch lint-md lint-spel
 # The single entry point external automation calls to decide whether this
 # checkout is green. Kept separate from lint so that adding a test suite widens
 # what "green" means without every caller having to learn a new target name.
-validate: lint
+validate: lint test
 	@printf '\033[0;32m[DONE]\033[0m validate passed\n'
+
+# Host only, hermetic: no docker, no AWS, no network (AC-10.14).
+test:
+	@printf '\033[0;36m[TEST]\033[0m running pytest suite\n'
+	@$(PYTEST) tests
 
 lint-nested:
 	@printf '\033[0;36m[LINT]\033[0m no nested repos tracked\n'

@@ -345,6 +345,22 @@ def _imported_top_level_modules(tree: ast.Module) -> set[str]:
     return modules
 
 
+def _is_sys_exit_call(node: ast.AST) -> bool:
+    """Whether `node` is a call to `sys.exit`.
+
+    The one definition of that shape, shared by `_sys_exit_call_sites` and every
+    assertion that needs the matching `ast.Call` node itself rather than just the
+    enclosing function.
+    """
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "exit"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "sys"
+    )
+
+
 def _sys_exit_call_sites(tree: ast.Module) -> list[ast.FunctionDef]:
     """Every function definition in `tree` whose body directly calls `sys.exit`."""
     call_sites: list[ast.FunctionDef] = []
@@ -352,26 +368,88 @@ def _sys_exit_call_sites(tree: ast.Module) -> list[ast.FunctionDef]:
         if not isinstance(node, ast.FunctionDef):
             continue
         for inner in ast.walk(node):
-            if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Attribute)
-                and inner.func.attr == "exit"
-                and isinstance(inner.func.value, ast.Name)
-                and inner.func.value.id == "sys"
-            ):
+            if _is_sys_exit_call(inner):
                 call_sites.append(node)
                 break
     return call_sites
 
 
-def test_sys_exit_appears_only_in_cli_main() -> None:
-    """AC-FUNC-006: `sys.exit` is called only in cli.py's `main`."""
+def _exit_call_sites_match_public_entry_points(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """The functions that call `sys.exit` and the module's public entry points.
+
+    AC-FUNC-006's invariant, stated in entry-point terms: 'only public
+    console entry points exit the process, never a private helper and never
+    library code'. Returns the pair (names of functions `_sys_exit_call_sites`
+    finds calling `sys.exit`, names of module-level function definitions
+    whose name does not begin with an underscore), so a caller can assert
+    the two sets are equal instead of comparing either one to a hard-coded
+    name literal.
+    """
+    exit_call_names = {node.name for node in _sys_exit_call_sites(tree)}
+    public_entry_point_names = {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
+    }
+    return exit_call_names, public_entry_point_names
+
+
+def test_sys_exit_pin_rejects_a_private_helper_that_exits() -> None:
+    """AC-TEST-001: a private helper calling `sys.exit` must not satisfy the pin."""
+    source = (
+        "import sys\n\ndef main() -> None:\n    pass\n\ndef _helper() -> None:\n    sys.exit(1)\n"
+    )
+    tree = ast.parse(source)
+
+    exit_call_names, public_entry_point_names = _exit_call_sites_match_public_entry_points(tree)
+
+    assert exit_call_names != public_entry_point_names
+
+
+def test_sys_exit_pin_rejects_a_public_function_that_never_exits() -> None:
+    """AC-TEST-002: a public function that never calls `sys.exit` must not satisfy the pin."""
+    source = (
+        "import sys\n"
+        "\n"
+        "def main() -> None:\n"
+        "    sys.exit(0)\n"
+        "\n"
+        "def report() -> None:\n"
+        "    print('report')\n"
+    )
+    tree = ast.parse(source)
+
+    exit_call_names, public_entry_point_names = _exit_call_sites_match_public_entry_points(tree)
+
+    assert exit_call_names != public_entry_point_names
+
+
+def test_sys_exit_call_sites_are_exactly_the_public_entry_points() -> None:
+    """AC-FUNC-006: only cli.py's public entry points call `sys.exit`.
+
+    Each calls it exactly once, as the terminal statement of that entry point's
+    function body, and there is at least one such entry point.
+    """
     cli_source = _plugin_scripts_module_path("cli.py").read_text(encoding="utf-8")
     cli_tree = ast.parse(cli_source)
 
-    call_sites = _sys_exit_call_sites(cli_tree)
+    exit_call_names, public_entry_point_names = _exit_call_sites_match_public_entry_points(cli_tree)
 
-    assert [node.name for node in call_sites] == ["main"]
+    assert exit_call_names == public_entry_point_names
+    assert exit_call_names != set()
+
+    entry_points_by_name = {
+        node.name: node
+        for node in cli_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in exit_call_names
+    }
+    for name in exit_call_names:
+        entry_point = entry_points_by_name[name]
+        exit_calls_in_body = [inner for inner in ast.walk(entry_point) if _is_sys_exit_call(inner)]
+        assert len(exit_calls_in_body) == 1, name
+        last_statement = entry_point.body[-1]
+        assert isinstance(last_statement, ast.Expr), name
+        assert last_statement.value is exit_calls_in_body[0]
 
 
 def test_secrets_module_never_calls_sys_exit() -> None:

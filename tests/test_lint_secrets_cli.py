@@ -1,17 +1,22 @@
 """Tests for devcontainer_config.cli: the `lint-secrets` command (spec Section 4.6).
 
 The `devcontainer_config` import is deferred into function bodies (via
-`_import_cli` / `_import_secrets`) instead of done once at module scope, for
-the same reason documented in `tests/test_repo.py`: the TDD RED gate stashes
-this unit's production-source files and re-runs a single named test node, and
-a module-level `from devcontainer_config.cli import ...` would fail
-COLLECTION for the whole file (pytest exit 2, no test outcome recorded)
-instead of failing the one test for the real reason.
+`gitfixtures.import_cli` / `gitfixtures.import_secrets`) instead of done once
+at module scope, for the same reason documented in `tests/test_repo.py`: the
+TDD RED gate stashes this unit's production-source files and re-runs a
+single named test node, and a module-level
+`from devcontainer_config.cli import ...` would fail COLLECTION for the
+whole file (pytest exit 2, no test outcome recorded) instead of failing the
+one test for the real reason.
 
 Every fixture repository here is a real, disposable git repository created
 under `tmp_path` by shelling out to the actual `git` binary, never a mocked
 filesystem, because the whole point of this module -- reading the index, not
 the working tree -- is a distinction only a real git repository can prove.
+The primitives that build those repositories live in `tests/gitfixtures.py`,
+shared with `tests/test_repo.py` today, rather than being redefined here.
+`tests/test_cli.py` and `tests/test_secrets_range.py` are pending consumers:
+E2-F1-S2-T1 owns wiring their imports to that module once it lands.
 
 No credential-shaped literal is ever stored pre-assembled in this file. A
 positive sample is built at run time from `devcontainer_config.secrets
@@ -30,24 +35,19 @@ import subprocess
 import uuid
 from pathlib import Path
 from types import ModuleType
+from typing import cast
 
 import pytest
-
-
-def _import_cli() -> ModuleType:
-    """Import devcontainer_config.cli from inside a function body.
-
-    See the module docstring for why this is not a module-level import.
-    """
-    return importlib.import_module("devcontainer_config.cli")
-
-
-def _import_secrets() -> ModuleType:
-    """Import devcontainer_config.secrets from inside a function body.
-
-    See the module docstring for why this is not a module-level import.
-    """
-    return importlib.import_module("devcontainer_config.secrets")
+from gitfixtures import (
+    credential_line,
+    generated_root,
+    import_cli,
+    import_secrets,
+    init_repo,
+    run_cli,
+    stage_bytes,
+    stage_text,
+)
 
 
 def _import_repo() -> ModuleType:
@@ -69,84 +69,18 @@ def _plugin_scripts_module_path(*parts: str) -> Path:
 
 def _repo_root() -> Path:
     """This repository's own root, found from this test file's location."""
-    return _import_repo().find_root(Path(__file__).resolve().parent)
-
-
-def _generated_root(tmp_path: Path) -> Path:
-    """A tmp_path subdirectory whose name is generated, never hard-coded."""
-    root = tmp_path / f"checkout-{uuid.uuid4().hex}"
-    root.mkdir()
-    return root
-
-
-def _init_repo(root: Path) -> None:
-    """A minimal, disposable git repository at root, ready to stage content."""
-    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(root), "config", "user.email", "devbench-test@example.com"],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(root), "config", "user.name", "devbench-test"],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(root), "config", "commit.gpgsign", "false"],
-        check=True,
-        capture_output=True,
-    )
-
-
-def _stage_text(root: Path, relative: str, content: str) -> Path:
-    """Write `content` to `relative` under `root` and `git add` it; the absolute path."""
-    path = root / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
-    subprocess.run(["git", "-C", str(root), "add", relative], check=True, capture_output=True)
-    return path
-
-
-def _stage_bytes(root: Path, relative: str, content: bytes) -> Path:
-    """Write raw `content` to `relative` under `root` and `git add` it; the absolute path."""
-    path = root / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content)
-    subprocess.run(["git", "-C", str(root), "add", relative], check=True, capture_output=True)
-    return path
-
-
-def _credential_line() -> str:
-    """A single line that the AWS-access-key-id detector matches, built at run time.
-
-    Composed from `SAMPLE_PREFIXES`, never stored pre-assembled: see the
-    module docstring for why.
-    """
-    secrets = _import_secrets()
-    prefix = secrets.SAMPLE_PREFIXES["aws-access-key-id"][0]
-    suffix = uuid.uuid4().hex.upper()[:16]
-    return f"CREDENTIAL={prefix}{suffix}\n"
-
-
-def _run_cli(monkeypatch: pytest.MonkeyPatch, root: Path, args: list[str]) -> int:
-    """Run `devcontainer_config.cli.main(args)` with cwd set to `root`; the exit code."""
-    cli = _import_cli()
-    monkeypatch.chdir(root)
-    with pytest.raises(SystemExit) as exc_info:
-        cli.main(args)
-    return int(exc_info.value.code)
+    return cast(Path, _import_repo().find_root(Path(__file__).resolve().parent))
 
 
 def test_staged_credential_reported_and_exit_code_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """AC-TEST-001 / AC-FUNC-001 / AC-FUNC-004: a staged credential is reported, exit 1."""
-    root = _generated_root(tmp_path)
-    _init_repo(root)
-    _stage_text(root, "src/config.py", _credential_line())
+    root = generated_root(tmp_path)
+    init_repo(root)
+    stage_text(root, "src/config.py", credential_line())
 
-    exit_code = _run_cli(monkeypatch, root, ["lint-secrets"])
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
 
     out = capsys.readouterr().out
     assert exit_code == 1
@@ -159,12 +93,12 @@ def test_index_scanned_not_working_tree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """AC-TEST-002: the staged index is scanned, not a working-tree edit made afterward."""
-    root = _generated_root(tmp_path)
-    _init_repo(root)
-    path = _stage_text(root, "src/config.py", _credential_line())
+    root = generated_root(tmp_path)
+    init_repo(root)
+    path = stage_text(root, "src/config.py", credential_line())
     path.write_text("CREDENTIAL=removed\n", encoding="utf-8")
 
-    exit_code = _run_cli(monkeypatch, root, ["lint-secrets"])
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
 
     out = capsys.readouterr().out
     assert exit_code == 1
@@ -176,11 +110,11 @@ def test_clean_staged_tree_exits_zero_with_header(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """AC-TEST-003 / AC-FUNC-002 / AC-FUNC-003: a clean staged file exits 0 with a header."""
-    root = _generated_root(tmp_path)
-    _init_repo(root)
-    _stage_text(root, "README.md", "nothing sensitive here\n")
+    root = generated_root(tmp_path)
+    init_repo(root)
+    stage_text(root, "README.md", "nothing sensitive here\n")
 
-    exit_code = _run_cli(monkeypatch, root, ["lint-secrets"])
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
 
     out = capsys.readouterr().out
     assert exit_code == 0
@@ -194,10 +128,10 @@ def test_empty_index_exits_zero_and_reports_zero_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """AC-TEST-003 / AC-FUNC-002: nothing staged exits 0 and says zero paths were scanned."""
-    root = _generated_root(tmp_path)
-    _init_repo(root)
+    root = generated_root(tmp_path)
+    init_repo(root)
 
-    exit_code = _run_cli(monkeypatch, root, ["lint-secrets"])
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
 
     out = capsys.readouterr().out
     assert exit_code == 0
@@ -208,13 +142,13 @@ def test_shell_env_lines_counted_in_header(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """AC-FUNC-003 / AC-3.1: shell.env is read through the repo module and counted."""
-    root = _generated_root(tmp_path)
-    _init_repo(root)
+    root = generated_root(tmp_path)
+    init_repo(root)
     marker = uuid.uuid4().hex
     (root / "shell.env").write_text(f"VAR_ONE={marker}\nVAR_TWO=example\n", encoding="utf-8")
-    _stage_text(root, "README.md", "nothing sensitive here\n")
+    stage_text(root, "README.md", "nothing sensitive here\n")
 
-    exit_code = _run_cli(monkeypatch, root, ["lint-secrets"])
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
 
     out = capsys.readouterr().out
     assert exit_code == 0
@@ -225,9 +159,9 @@ def test_outside_git_work_tree_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Error Handling Contract: invoked outside a git work tree, exit non-zero with ERROR."""
-    root = _generated_root(tmp_path)
+    root = generated_root(tmp_path)
 
-    exit_code = _run_cli(monkeypatch, root, ["lint-secrets"])
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
 
     err = capsys.readouterr().err
     assert exit_code != 0
@@ -237,8 +171,8 @@ def test_outside_git_work_tree_errors(
 
 def test_staged_paths_raises_when_root_is_not_a_git_work_tree(tmp_path: Path) -> None:
     """Error Handling Contract: `secrets.staged_paths` itself refuses a non-repository root."""
-    secrets = _import_secrets()
-    root = _generated_root(tmp_path)
+    secrets = import_secrets()
+    root = generated_root(tmp_path)
 
     with pytest.raises(secrets.SecretScanError, match="not a git work tree") as exc_info:
         secrets.staged_paths(root)
@@ -250,8 +184,8 @@ def test_staged_paths_raises_when_git_is_not_installed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Error Handling Contract: `secrets.staged_paths` names the missing `git` binary."""
-    secrets = _import_secrets()
-    root = _generated_root(tmp_path)
+    secrets = import_secrets()
+    root = generated_root(tmp_path)
     monkeypatch.setenv("PATH", "")
 
     with pytest.raises(secrets.SecretScanError, match="git is not installed"):
@@ -262,11 +196,11 @@ def test_non_utf8_staged_blob_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Error Handling Contract: a staged blob that is not valid UTF-8, exit non-zero with ERROR."""
-    root = _generated_root(tmp_path)
-    _init_repo(root)
-    _stage_bytes(root, "binary.dat", b"\xff\xfe\x00not-utf8")
+    root = generated_root(tmp_path)
+    init_repo(root)
+    stage_bytes(root, "binary.dat", b"\xff\xfe\x00not-utf8")
 
-    exit_code = _run_cli(monkeypatch, root, ["lint-secrets"])
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
 
     err = capsys.readouterr().err
     assert exit_code != 0
@@ -279,15 +213,15 @@ def test_unreadable_shell_env_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Error Handling Contract: an unreadable shell.env, exit non-zero with ERROR."""
-    root = _generated_root(tmp_path)
-    _init_repo(root)
-    _stage_text(root, "README.md", "nothing sensitive here\n")
+    root = generated_root(tmp_path)
+    init_repo(root)
+    stage_text(root, "README.md", "nothing sensitive here\n")
     shell_env = root / "shell.env"
     shell_env.write_text("VAR=example\n", encoding="utf-8")
     shell_env.chmod(0o000)
 
     try:
-        exit_code = _run_cli(monkeypatch, root, ["lint-secrets"])
+        exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
         err = capsys.readouterr().err
         assert exit_code != 0
         assert "ERROR:" in err
@@ -323,11 +257,11 @@ def test_staged_gitlink_errors_without_traceback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Error Handling Contract: `git show` cannot read a staged gitlink; ERROR, no traceback."""
-    root = _generated_root(tmp_path)
-    _init_repo(root)
+    root = generated_root(tmp_path)
+    init_repo(root)
     _stage_gitlink(root, "sub")
 
-    exit_code = _run_cli(monkeypatch, root, ["lint-secrets"])
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
 
     err = capsys.readouterr().err
     assert exit_code != 0
@@ -339,9 +273,9 @@ def test_staged_gitlink_errors_without_traceback(
 
 def test_staged_blob_raises_when_git_show_fails_on_a_gitlink(tmp_path: Path) -> None:
     """Error Handling Contract: `secrets.staged_blob` itself converts the git failure."""
-    secrets = _import_secrets()
-    root = _generated_root(tmp_path)
-    _init_repo(root)
+    secrets = import_secrets()
+    root = generated_root(tmp_path)
+    init_repo(root)
     _stage_gitlink(root, "sub")
 
     with pytest.raises(secrets.SecretScanError, match="cannot read staged content of sub"):
@@ -352,12 +286,12 @@ def test_render_redacts_credential_bearing_finding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Approach step 8: the worked report shape, with a credential-bearing match redacted."""
-    root = _generated_root(tmp_path)
-    _init_repo(root)
-    line = _credential_line()
-    _stage_text(root, "src/config.py", line)
+    root = generated_root(tmp_path)
+    init_repo(root)
+    line = credential_line()
+    stage_text(root, "src/config.py", line)
 
-    exit_code = _run_cli(monkeypatch, root, ["lint-secrets"])
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
 
     out = capsys.readouterr().out
     assert exit_code == 1
@@ -484,7 +418,7 @@ def test_cli_module_has_no_allowlist_or_bypass_mechanism() -> None:
 
 def test_lint_secrets_help_states_exit_code_contract(capsys: pytest.CaptureFixture[str]) -> None:
     """AC-DOC-002: the `lint-secrets --help` text states the exit-code contract."""
-    cli = _import_cli()
+    cli = import_cli()
 
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["lint-secrets", "--help"])
@@ -497,7 +431,7 @@ def test_lint_secrets_help_states_exit_code_contract(capsys: pytest.CaptureFixtu
 
 def test_cli_module_docstring_states_exit_code_and_no_ignore_list() -> None:
     """AC-DOC-002: the cli.py module docstring states the exit-code contract."""
-    cli = _import_cli()
+    cli = import_cli()
     doc = (cli.__doc__ or "").lower()
 
     assert "exit 1" in doc or "sys.exit" in doc

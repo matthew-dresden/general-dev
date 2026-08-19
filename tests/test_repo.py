@@ -29,6 +29,12 @@ detect. Comparing two same-time reads of the same cached module object
 would not be: both reads always agree with each other regardless of what
 PRIVATE_FILES actually holds, so the frozen constant is what makes the
 comparison meaningful.
+
+`generated_root`, `init_repo` and `commit_text` are imported from the shared
+`tests/gitfixtures.py` module rather than redefined here: every fixture
+repository in this file, whether or not the test goes on to commit, is built
+by the shared helper, so exactly one definition of each primitive exists
+across the test suite.
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from gitfixtures import commit_text, generated_root, init_repo
 
 
 def _import_repo() -> ModuleType:
@@ -54,18 +61,6 @@ def _import_repo() -> ModuleType:
     TDD RED gate.
     """
     return importlib.import_module("devcontainer_config.repo")
-
-
-def _generated_root(tmp_path: Path) -> Path:
-    """A tmp_path subdirectory whose name is generated, never hard-coded."""
-    root = tmp_path / f"checkout-{uuid.uuid4().hex}"
-    root.mkdir()
-    return root
-
-
-def _init_repo(root: Path) -> None:
-    """A minimal, disposable git repository at root, usable without commits."""
-    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
 
 
 def _private_files_for_parametrize() -> tuple[str, ...]:
@@ -124,7 +119,7 @@ def test_example_for_appends_suffix(relative: str) -> None:
 @pytest.mark.parametrize("relative", _PARAMETRIZE_PRIVATE_FILES)
 def test_private_paths_returns_absolute_path_per_entry(tmp_path: Path, relative: str) -> None:
     repo = _import_repo()
-    root = _generated_root(tmp_path)
+    root = generated_root(tmp_path)
 
     paths = repo.private_paths(root)
 
@@ -134,7 +129,7 @@ def test_private_paths_returns_absolute_path_per_entry(tmp_path: Path, relative:
 
 def test_private_paths_covers_every_private_file(tmp_path: Path) -> None:
     repo = _import_repo()
-    root = _generated_root(tmp_path)
+    root = generated_root(tmp_path)
 
     paths = repo.private_paths(root)
 
@@ -143,21 +138,21 @@ def test_private_paths_covers_every_private_file(tmp_path: Path) -> None:
 
 def test_workspace_name_is_generated_root_basename(tmp_path: Path) -> None:
     repo = _import_repo()
-    root = _generated_root(tmp_path)
+    root = generated_root(tmp_path)
 
     assert repo.workspace_name(root) == root.name
 
 
 def test_container_workspace_derives_from_generated_root(tmp_path: Path) -> None:
     repo = _import_repo()
-    root = _generated_root(tmp_path)
+    root = generated_root(tmp_path)
 
     assert repo.container_workspace(root) == f"/workspaces/{root.name}"
 
 
 def test_container_workspace_accepts_explicit_workspaces_root(tmp_path: Path) -> None:
     repo = _import_repo()
-    root = _generated_root(tmp_path)
+    root = generated_root(tmp_path)
     custom_root = f"/custom-{uuid.uuid4().hex}"
 
     assert repo.container_workspace(root, custom_root) == f"{custom_root}/{root.name}"
@@ -165,28 +160,9 @@ def test_container_workspace_accepts_explicit_workspaces_root(tmp_path: Path) ->
 
 def test_find_root_resolves_inside_a_worktree(tmp_path: Path) -> None:
     repo = _import_repo()
-    primary = _generated_root(tmp_path)
-    _init_repo(primary)
-    subprocess.run(
-        ["git", "-C", str(primary), "config", "user.email", "devbench-test@example.com"],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(primary), "config", "user.name", "devbench-test"],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(primary), "config", "commit.gpgsign", "false"],
-        check=True,
-        capture_output=True,
-    )
-    (primary / "README.md").write_text("seed\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(primary), "add", "README.md"], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(primary), "commit", "-m", "seed"], check=True, capture_output=True
-    )
+    primary = generated_root(tmp_path)
+    init_repo(primary)
+    commit_text(primary, "README.md", "seed\n", "seed")
 
     worktree = tmp_path / f"worktree-{uuid.uuid4().hex}"
     subprocess.run(
@@ -213,7 +189,7 @@ def test_find_root_raises_when_git_is_not_installed(
 
 def test_find_root_raises_when_start_is_outside_any_repository(tmp_path: Path) -> None:
     repo = _import_repo()
-    outside = _generated_root(tmp_path)
+    outside = generated_root(tmp_path)
 
     with pytest.raises(repo.RepoError, match=re.escape(str(outside))):
         repo.find_root(outside)
@@ -222,7 +198,7 @@ def test_find_root_raises_when_start_is_outside_any_repository(tmp_path: Path) -
 @pytest.mark.parametrize("selector", list(_PRESENT_SELECTORS))
 def test_missing_examples_reports_absent_examples(tmp_path: Path, selector: str) -> None:
     repo = _import_repo()
-    root = _generated_root(tmp_path)
+    root = generated_root(tmp_path)
     examples = tuple(repo.example_for(p) for p in repo.PRIVATE_FILES)
     present = _PRESENT_SELECTORS[selector](examples)
     for example in present:
@@ -238,8 +214,8 @@ def test_missing_examples_reports_absent_examples(tmp_path: Path, selector: str)
 def test_end_to_end_cycle_from_a_real_repository(tmp_path: Path) -> None:
     """AC-CYCLE-001: a real repo, a nested start point, and the whole chain."""
     repo = _import_repo()
-    root = _generated_root(tmp_path)
-    _init_repo(root)
+    root = generated_root(tmp_path)
+    init_repo(root)
     nested = root / "a" / "b" / "c"
     nested.mkdir(parents=True)
 

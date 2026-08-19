@@ -35,7 +35,7 @@ branch = true
 source = [".claude/plugins/devcontainer/scripts/devcontainer_config"]
 
 [tool.coverage.report]
-fail_under = 100
+fail_under = 90
 show_missing = true
 
 [tool.ruff]

@@ -37,7 +37,7 @@ PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer
 
 .DEFAULT_GOAL := help
 .PHONY: help connect disconnect status shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
-        lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run \
+        lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test
 
@@ -85,8 +85,9 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make format"           "host"   "Auto-fix what the markdown tooling can fix, then report what is left."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint-spell"       "host"   "US English spelling over this repo's markdown. SPELL_FILES overrides the set."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make spell-fix"        "host"   "Auto-fix spelling, British-to-American included, in the same set. Rewrites the files."
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-install"    "host"   "Install pre-commit and pre-push hooks. Each is one line, 'exec make hooks-run', so they cannot drift."
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-run"        "host"   "Exactly what the hooks run. Use it to reproduce a hook failure."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-install"    "host"   "Install pre-commit and pre-push hooks via devcontainer_config.githooks. Refuses to clobber a hook it did not write."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-run"        "host"   "Exactly what pre-commit runs. Use it to reproduce a pre-commit failure."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-run-push"   "host"   "Exactly what pre-push runs: lint, then a secrets scan of every commit in the pushed range."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make test"             "host"   "Run the hermetic pytest suite in tests/. No docker, no AWS, no network."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make validate"         "host"   "The green-baseline contract automation depends on. Runs lint then test."
 	@printf '\n\033[1mOPTIONS\033[0m\n'
@@ -305,13 +306,21 @@ spell-fix:
 
 hooks-run: lint
 
+# Runs on pre-push (E2-F2-S1-T1): the same lint pre-commit runs, then a
+# secrets scan of every commit in the pushed range, derived from git's own
+# pre-push stdin and read by devcontainer_config.githooks. lint runs first
+# so a pre-push failure never reaches the (slower) history scan needlessly;
+# git's stdin flows through both recipe lines unredirected, into whichever
+# one actually reads it.
+hooks-run-push: lint
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli hooks-pre-push
+
+# Hook content lives in devcontainer_config.githooks, not here (E2-F2-S1-T1):
+# this delegates instead of writing hook bodies inline, so that content has
+# exactly one source. install_hooks is idempotent and refuses to overwrite a
+# hook it did not author.
 hooks-install:
-	@mkdir -p .git/hooks
-	@for hook in pre-commit pre-push; do \
-		printf '#!/usr/bin/env sh\n# Installed by "make hooks-install". Runs the same checks as "make hooks-run".\nexec make hooks-run\n' > .git/hooks/$$hook; \
-		chmod +x .git/hooks/$$hook; \
-		printf '\033[0;32m[DONE]\033[0m installed .git/hooks/%s\n' "$$hook"; \
-	done
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli hooks-install
 
 hooks-uninstall:
 	@rm -f .git/hooks/pre-commit .git/hooks/pre-push

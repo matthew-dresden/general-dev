@@ -321,6 +321,42 @@ the token was current. Neither failure was visible while VS Code was attached,
 because the extension forwards the host's credentials; it surfaced only when an
 agent tried to push from a detached session.
 
+## Git hooks
+
+`make hooks-install` installs a pre-commit and a pre-push hook, both written
+by `devcontainer_config.githooks`, so hook content has exactly one source
+instead of being duplicated between the two `.git/hooks/*` files.
+
+- **pre-commit** execs `make hooks-run`, which is `make lint`: private files
+  untracked, no nested repos, JSON parses, shellcheck, markdown, US English
+  spelling, and a secrets scan of whatever is currently staged.
+- **pre-push** execs `make hooks-run-push`, which runs `lint` first and then
+  scans every commit in the pushed range, not just the tip. Git hands the
+  hook one `<local ref> <local sha> <remote ref> <remote sha>` line per ref
+  being pushed on stdin; `devcontainer_config.githooks.ranges_from_push_refs`
+  turns that into one `<a>..<b>` range per ref (an all-zero remote id, a
+  branch the remote has never seen, becomes every commit reachable from the
+  local tip that is not already reachable from a remote-tracking ref this
+  checkout knows about, so a branch forked from `main` scans only its own new
+  commits, not `main`'s history too; an all-zero local id, a delete,
+  contributes nothing to scan), and each range is scanned with the same
+  detectors staged mode uses. The whole range is scanned, not just the tip,
+  because a credential introduced early and removed later still reaches the
+  remote in history the moment the commit that added it is pushed; scanning
+  only the tip would miss it.
+
+Installing is idempotent: a second `make hooks-install` leaves the hooks
+byte-identical, and it refuses to overwrite a hook it did not write, in case
+a developer already has their own pre-commit or pre-push hook. To check for
+drift, whether an installed hook still matches what `make hooks-install`
+would write, without rewriting it, run:
+
+```sh
+PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.cli hooks-check
+```
+
+`make hooks-uninstall` removes both hooks.
+
 ## Creating the container (remote)
 
 `make build` does what VS Code's Clone Repository in Container Volume does, but

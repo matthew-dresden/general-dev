@@ -1,0 +1,385 @@
+"""Tests for devcontainer_config.secrets: the Scanner suite (spec Section 10.2).
+
+The `devcontainer_config` import is deferred into function bodies (via
+`_import_secrets`) instead of done once at module scope, and the case table
+at `tests/data/secret_scanner_cases.json` is loaded with plain `json.loads`
+that never imports `devcontainer_config`. Both choices exist for the same
+reason documented in `tests/test_repo.py`: the TDD RED gate stashes this
+unit's production-source files and re-runs a single named test node, and a
+module-level `from devcontainer_config.secrets import ...` would fail
+collection for the whole file (pytest exit 2, no test outcome recorded)
+instead of failing the one test for the real reason.
+
+Positive samples are never stored pre-assembled in the case table. Each case
+holds a `positive_prefix` (a literal string, or `null` meaning "pull every
+candidate from `devcontainer_config.secrets.SAMPLE_PREFIXES`") and a
+`positive_suffix`; only `test_positive_sample_yields_one_finding` (and the
+tests that reuse `_POSITIVE_CASES`) concatenate them, at run time, in memory.
+Storing the concatenated result as a single JSON literal would itself be a
+credential-shaped string this very scanner would flag the next time it ran
+over this repository, which is exactly the failure mode Approach step 1 of
+this work unit calls out.
+"""
+
+from __future__ import annotations
+
+import ast
+import importlib
+import json
+import re
+import socket
+import subprocess
+import uuid
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+
+
+def _import_secrets() -> ModuleType:
+    """Import devcontainer_config.secrets from inside a function body.
+
+    See the module docstring for why this is not a module-level import.
+    """
+    return importlib.import_module("devcontainer_config.secrets")
+
+
+def _secrets_module_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[1]
+        / ".claude"
+        / "plugins"
+        / "devcontainer"
+        / "scripts"
+        / "devcontainer_config"
+        / "secrets.py"
+    )
+
+
+def _load_cases() -> tuple[dict[str, object], ...]:
+    path = Path(__file__).resolve().parent / "data" / "secret_scanner_cases.json"
+    return tuple(json.loads(path.read_text(encoding="utf-8")))
+
+
+_CASES: tuple[dict[str, object], ...] = _load_cases()
+
+
+def _sample_prefixes_for(detector_id: str) -> tuple[str, ...]:
+    """Registry-declared prefixes for `detector_id`, or a placeholder tuple.
+
+    Called at collection time while building `_POSITIVE_CASES`. Falls back
+    to a single placeholder when `devcontainer_config` is not yet importable
+    (the TDD RED gate), so collection succeeds either way; each parametrized
+    case then fails inside the test body for the real reason instead of
+    failing collection for the whole file.
+    """
+    try:
+        secrets = _import_secrets()
+    except ModuleNotFoundError as exc:
+        if exc.name not in ("devcontainer_config", "devcontainer_config.secrets"):
+            raise
+        return ("<devcontainer_config unavailable>",)
+    return secrets.SAMPLE_PREFIXES.get(detector_id, (None,))
+
+
+def _positive_cases() -> tuple[tuple[dict[str, object], str], ...]:
+    pairs: list[tuple[dict[str, object], str]] = []
+    for case in _CASES:
+        literal_prefix = case["positive_prefix"]
+        prefixes = (
+            _sample_prefixes_for(str(case["detector_id"]))
+            if literal_prefix is None
+            else (str(literal_prefix),)
+        )
+        pairs.extend((case, prefix) for prefix in prefixes)
+    return tuple(pairs)
+
+
+_POSITIVE_CASES: tuple[tuple[dict[str, object], str], ...] = _positive_cases()
+_POSITIVE_CASE_IDS: list[str] = [
+    f"{case['detector_id']}:{prefix}" for case, prefix in _POSITIVE_CASES
+]
+_NEGATIVE_CASE_IDS: list[str] = [str(case["detector_id"]) for case in _CASES]
+
+
+def _composed_sample(case: dict[str, object], prefix: str) -> str:
+    return f"{prefix}{case['positive_suffix']}"
+
+
+@pytest.mark.parametrize("case,prefix", _POSITIVE_CASES, ids=_POSITIVE_CASE_IDS)
+def test_positive_sample_yields_one_finding(case: dict[str, object], prefix: str) -> None:
+    """AC-TEST-001: every positive sample yields exactly one correctly identified finding."""
+    secrets = _import_secrets()
+    sample = _composed_sample(case, prefix)
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+
+    findings = secrets.scan_lines([(1, sample)], sources)
+
+    assert len(findings) == 1
+    assert findings[0].detector_id == case["detector_id"]
+    assert findings[0].line_number == 1
+    assert findings[0].printable == case["printable"]
+
+
+@pytest.mark.parametrize("case", _CASES, ids=_NEGATIVE_CASE_IDS)
+def test_negative_lookalike_yields_no_findings(case: dict[str, object]) -> None:
+    """AC-TEST-002: a look-alike that must not match yields zero findings."""
+    secrets = _import_secrets()
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+
+    findings = secrets.scan_lines([(1, str(case["negative_sample"]))], sources)
+
+    assert findings == ()
+
+
+@pytest.mark.parametrize("case", _CASES, ids=_NEGATIVE_CASE_IDS)
+def test_detector_description_matches_case_table(case: dict[str, object]) -> None:
+    """AC-DOC-002: a detector's description is the exact text the case table expects."""
+    secrets = _import_secrets()
+    detector = secrets.DETECTORS_BY_ID[str(case["detector_id"])]
+
+    assert detector.description == case["description"]
+    assert detector.printable == case["printable"]
+
+
+@pytest.mark.parametrize("case,prefix", _POSITIVE_CASES, ids=_POSITIVE_CASE_IDS)
+def test_render_finding_never_contains_the_full_composed_sample(
+    case: dict[str, object], prefix: str
+) -> None:
+    """AC-TEST-006: a redacted render never contains the full composed sample."""
+    secrets = _import_secrets()
+    sample = _composed_sample(case, prefix)
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+    finding = secrets.scan_lines([(1, sample)], sources)[0]
+    detector = secrets.DETECTORS_BY_ID[finding.detector_id]
+
+    rendered = secrets.render_finding(finding, detector)
+
+    if case["printable"]:
+        assert rendered == finding.matched_text
+    else:
+        assert sample not in rendered
+        assert finding.matched_text not in rendered
+
+
+def test_shell_env_line_detector_flags_matching_line() -> None:
+    """AC-TEST-004: a line present in ScanSources.shell_env_lines is reported."""
+    secrets = _import_secrets()
+    shell_env_line = f"SOME_VAR=example-value-{uuid.uuid4().hex}"
+    sources = secrets.ScanSources(shell_env_lines=(shell_env_line,), catalog_secret_names=())
+
+    findings = secrets.scan_lines([(3, shell_env_line)], sources)
+
+    assert len(findings) == 1
+    assert findings[0].detector_id == "shell-env-line"
+    assert findings[0].line_number == 3
+    assert findings[0].matched_text == shell_env_line
+
+
+def test_shell_env_line_detector_ignores_unrelated_line() -> None:
+    """AC-TEST-004: an unrelated line yields no shell-env-line finding."""
+    secrets = _import_secrets()
+    sources = secrets.ScanSources(
+        shell_env_lines=(f"SOME_VAR=example-value-{uuid.uuid4().hex}",),
+        catalog_secret_names=(),
+    )
+
+    findings = secrets.scan_lines([(1, "an unrelated line of code")], sources)
+
+    assert findings == ()
+
+
+def test_catalog_secret_name_detector_flags_line_containing_name() -> None:
+    """AC-TEST-004: a line containing a name in ScanSources.catalog_secret_names is reported."""
+    secrets = _import_secrets()
+    name = f"CATALOG_SECRET_{uuid.uuid4().hex}"
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=(name,))
+    line = f"token = lookup({name})"
+
+    findings = secrets.scan_lines([(7, line)], sources)
+
+    assert len(findings) == 1
+    assert findings[0].detector_id == "catalog-secret-name"
+    assert findings[0].matched_text == name
+    assert findings[0].line_number == 7
+
+
+def test_catalog_secret_name_detector_ignores_line_without_any_name() -> None:
+    """AC-TEST-004: a line naming no catalog secret yields no finding."""
+    secrets = _import_secrets()
+    sources = secrets.ScanSources(
+        shell_env_lines=(), catalog_secret_names=(f"CATALOG_SECRET_{uuid.uuid4().hex}",)
+    )
+
+    findings = secrets.scan_lines([(1, "an unrelated line of code")], sources)
+
+    assert findings == ()
+
+
+def test_build_registry_rejects_duplicated_identifier() -> None:
+    """Error Handling Contract: a duplicated identifier names both descriptions."""
+    secrets = _import_secrets()
+    first = secrets.PatternDetector(
+        identifier="dup-id",
+        description="First description",
+        printable=False,
+        safe_prefix_len=4,
+        pattern=re.compile("first-marker"),
+    )
+    second = secrets.PatternDetector(
+        identifier="dup-id",
+        description="Second description",
+        printable=False,
+        safe_prefix_len=4,
+        pattern=re.compile("second-marker"),
+    )
+
+    with pytest.raises(secrets.SecretScanError, match="dup-id") as exc_info:
+        secrets.build_registry((first, second))
+
+    assert "First description" in str(exc_info.value)
+    assert "Second description" in str(exc_info.value)
+
+
+def test_scan_sources_rejects_blank_shell_env_line() -> None:
+    """Error Handling Contract: a blank shell_env_lines entry names the field and index."""
+    secrets = _import_secrets()
+
+    with pytest.raises(secrets.SecretScanError, match="shell_env_lines") as exc_info:
+        secrets.ScanSources(shell_env_lines=("VALID=1", "   "), catalog_secret_names=())
+
+    assert "index 1" in str(exc_info.value).lower()
+
+
+def test_scan_lines_rejects_unknown_detector_filter() -> None:
+    """Error Handling Contract: an unknown detector_ids entry lists the known identifiers."""
+    secrets = _import_secrets()
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+
+    with pytest.raises(secrets.SecretScanError, match="unknown-detector-id") as exc_info:
+        secrets.scan_lines([(1, "irrelevant")], sources, detector_ids=("unknown-detector-id",))
+
+    for identifier in secrets.DETECTORS_BY_ID:
+        assert identifier in str(exc_info.value)
+
+
+def test_render_finding_rejects_detector_mismatch() -> None:
+    """render_finding refuses to apply one detector's redaction to another's finding."""
+    secrets = _import_secrets()
+    finding = secrets.Finding(
+        detector_id="aws-access-key-id", line_number=1, matched_text="X" * 20, printable=False
+    )
+    wrong_detector = secrets.DETECTORS_BY_ID["github-token"]
+
+    with pytest.raises(secrets.SecretScanError, match="mismatch"):
+        secrets.render_finding(finding, wrong_detector)
+
+
+def test_scan_sources_requires_both_fields_explicitly() -> None:
+    """AC-FUNC-004: omitting catalog_secret_names is a TypeError, not a silent default."""
+    secrets = _import_secrets()
+    kwargs: dict[str, tuple[str, ...]] = {"shell_env_lines": ()}
+
+    with pytest.raises(TypeError, match="catalog_secret_names"):
+        secrets.ScanSources(**kwargs)
+
+
+def test_scan_lines_detector_ids_filter_restricts_detectors() -> None:
+    """A detector_ids filter limits scanning to the named detectors only."""
+    secrets = _import_secrets()
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+    lines = [(1, "https://acme.invalid/start"), (2, "12345678901a")]
+
+    findings = secrets.scan_lines(lines, sources, detector_ids=("sso-portal-url",))
+
+    assert len(findings) == 1
+    assert findings[0].detector_id == "sso-portal-url"
+
+
+def test_scan_lines_touches_no_file_subprocess_or_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-FUNC-003: scan_lines opens no file, spawns no subprocess, reaches no network."""
+    secrets = _import_secrets()
+
+    def _forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("scan_lines must not perform this operation")
+
+    monkeypatch.setattr("builtins.open", _forbidden)
+    monkeypatch.setattr(subprocess, "run", _forbidden)
+    monkeypatch.setattr(socket, "socket", _forbidden)
+
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+    findings = secrets.scan_lines([(1, "AKIA" + "B" * 16)], sources)
+
+    assert len(findings) == 1
+
+
+def _imported_top_level_modules(tree: ast.Module) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module.split(".")[0])
+    return modules
+
+
+def _defined_or_referenced_identifiers(tree: ast.Module) -> set[str]:
+    """Every name a bypass mechanism would need: a parameter, an attribute, or a constant.
+
+    Walking the AST instead of grepping raw text means this only inspects
+    actual code identifiers, never docstring prose that legitimately
+    describes the absence of these mechanisms in English.
+    """
+    identifiers: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            identifiers.add(node.id)
+        elif isinstance(node, ast.arg):
+            identifiers.add(node.arg)
+        elif isinstance(node, ast.Attribute):
+            identifiers.add(node.attr)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            identifiers.add(node.name)
+    return identifiers
+
+
+def test_module_source_has_no_allowlist_or_bypass_mechanism() -> None:
+    """AC-FUNC-007: no allowlist, inline marker or environment variable disables a detector."""
+    source = _secrets_module_path().read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    assert "os" not in _imported_top_level_modules(tree)
+
+    forbidden_substrings = ("allowlist", "allow_list", "ignorelist", "ignore_list", "suppress")
+    identifiers = _defined_or_referenced_identifiers(tree)
+    offending = {
+        identifier
+        for identifier in identifiers
+        if any(bad in identifier.lower() for bad in forbidden_substrings)
+    }
+    assert offending == set()
+
+
+def test_scan_lines_end_to_end_multiple_detectors_and_lines() -> None:
+    """AC-CYCLE-001 / AC-FINAL-010: several lines and detector kinds, scanned in one call."""
+    secrets = _import_secrets()
+    catalog_name = f"CATALOG_SECRET_{uuid.uuid4().hex}"
+    shell_env_line = f"SOME_VAR=example-{uuid.uuid4().hex}"
+    sources = secrets.ScanSources(
+        shell_env_lines=(shell_env_line,), catalog_secret_names=(catalog_name,)
+    )
+    lines = [
+        (1, "https://acme.invalid/start"),
+        (2, "nothing interesting here"),
+        (3, shell_env_line),
+        (4, f"value = lookup({catalog_name})"),
+    ]
+
+    findings = secrets.scan_lines(lines, sources)
+
+    by_line = {finding.line_number: finding.detector_id for finding in findings}
+    assert by_line[1] == "sso-portal-url"
+    assert 2 not in by_line
+    assert by_line[3] == "shell-env-line"
+    assert by_line[4] == "catalog-secret-name"
+    assert len(findings) == 3

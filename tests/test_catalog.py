@@ -60,6 +60,11 @@ def _seeded_value() -> str:
     return f"seeded-value-{uuid.uuid4().hex}"
 
 
+def _seeded_version() -> int:
+    """A generated placeholder `Version`, not an implementation literal."""
+    return uuid.uuid4().int % 90000 + 10000
+
+
 def _ok(payload: object) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(payload), stderr="")
 
@@ -158,12 +163,14 @@ def test_read_issues_get_parameter_with_decryption_and_returns_exact_value() -> 
 def test_write_issues_put_parameter_with_value_only_on_stdin() -> None:
     catalog = _import_catalog()
     runner = _FakeRunner()
-    runner.queue(_ok({"Version": 1, "Tier": "Standard"}))
+    version = _seeded_version()
+    runner.queue(_ok({"Version": version, "Tier": "Standard"}))
     client = catalog.CatalogClient(runner)
     value = _seeded_value()
 
-    client.write("shared", "NOTION_TOKEN", value)
+    result = client.write("shared", "NOTION_TOKEN", value)
 
+    assert result == version
     (argv, stdin) = runner.calls[0]
     assert "put-parameter" in argv
     assert value not in argv
@@ -173,6 +180,49 @@ def test_write_issues_put_parameter_with_value_only_on_stdin() -> None:
     assert document["Type"] == "SecureString"
     assert document["Name"] == "/devcontainer/shared/secrets/NOTION_TOKEN"
     assert document["Value"] == value
+
+
+def test_write_returns_the_version_put_parameter_reports() -> None:
+    """AC-FUNC-001, AC-TEST-001: `write` hands back the store's reported version."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    version = _seeded_version()
+    runner.queue(_ok({"Version": version}))
+    client = catalog.CatalogClient(runner)
+
+    result = client.write("shared", "NOTION_TOKEN", _seeded_value())
+
+    assert result == version
+
+
+@pytest.mark.parametrize(
+    "response,expected_reason",
+    [
+        (_ok({"Tier": "Standard"}), "no integer 'Version' field in the response"),
+        (_ok({"Version": "3"}), "no integer 'Version' field in the response"),
+        (
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr=""),
+            "the response is not valid JSON",
+        ),
+        (_ok({"Version": True}), "no integer 'Version' field in the response"),
+    ],
+    ids=["no-version-field", "version-not-an-integer", "not-json", "version-is-a-bool"],
+)
+def test_write_raises_catalog_error_for_malformed_response(
+    response: subprocess.CompletedProcess[str], expected_reason: str
+) -> None:
+    """AC-FUNC-003, AC-TEST-002: a malformed `put-parameter` response fails loudly."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(response)
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.CatalogError) as excinfo:
+        client.write("shared", "NOTION_TOKEN", _seeded_value())
+
+    assert expected_reason in str(excinfo.value)
+    assert "/devcontainer/shared/secrets/NOTION_TOKEN" in str(excinfo.value)
+    assert "put-parameter" in str(excinfo.value)
 
 
 def test_delete_issues_delete_parameter_for_exact_path() -> None:

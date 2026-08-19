@@ -426,10 +426,11 @@ def _malformed_response_message(path: str, operation: str, reason: str) -> str:
 def _parse_response_json(stdout: str, path: str, operation: str) -> dict[str, object]:
     """Parse `stdout` as the JSON object `aws ssm <operation>` returns for `path`.
 
-    The one place `read` and `list_secrets` turn a response body into data,
-    so a response that is not valid JSON, or that parses to something other
-    than a JSON object, raises a named `CatalogError` here instead of a bare
-    `json.JSONDecodeError` escaping from each call site individually.
+    The one place `read`, `write` and `list_secrets` turn a response body
+    into data, so a response that is not valid JSON, or that parses to
+    something other than a JSON object, raises a named `CatalogError` here
+    instead of a bare `json.JSONDecodeError` escaping from each call site
+    individually.
 
     Raises:
         CatalogError: `stdout` is not valid JSON, or does not parse to a
@@ -656,12 +657,17 @@ class CatalogClient:
             )
         return str(parameter["Value"])
 
-    def write(self, scope: str, name: str, value: str, *, exported: bool = False) -> None:
+    def write(self, scope: str, name: str, value: str, *, exported: bool = False) -> int:
         """Store `value` at `scope`/`name` as a SecureString, overwriting any existing version.
 
         `value` is handed to the child process on stdin inside a
         `--cli-input-json` document; it is never placed in argv, so it never
         reaches the process table (E3-F1-S1-T1 AC-FUNC-004).
+
+        Returns:
+            The integer `Version` the store assigned to the parameter it
+            just wrote, so a caller can name the resulting version without
+            issuing a second call (E3-F2-S1-T3 AC-FUNC-001).
 
         Raises:
             InvalidSecretNameError: `name` is not a valid identifier.
@@ -670,6 +676,8 @@ class CatalogClient:
             CatalogUnclassifiedError: the store rejected the operation for a
                 reason this client does not classify (for example
                 throttling, a validation failure, or an invalid region).
+            CatalogError: the response has no integer `Version` field, or is
+                not valid JSON.
         """
         path = parameter_path(scope, name)
         document = json.dumps(
@@ -682,7 +690,16 @@ class CatalogClient:
             }
         )
         argv = self._argv(PUT_PARAMETER_OP, "--cli-input-json", CLI_INPUT_STDIN_URI)
-        self._invoke(argv, document, path, operation=PUT_PARAMETER_OP)
+        result = self._invoke(argv, document, path, operation=PUT_PARAMETER_OP)
+        payload = _parse_response_json(result.stdout, path, PUT_PARAMETER_OP)
+        version = payload.get("Version")
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise CatalogError(
+                _malformed_response_message(
+                    path, PUT_PARAMETER_OP, "no integer 'Version' field in the response"
+                )
+            )
+        return version
 
     def delete(self, scope: str, name: str) -> None:
         """Delete the parameter at `scope`/`name`.

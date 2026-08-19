@@ -7,7 +7,8 @@ These tests pin two things a later change could silently break:
   own later, more specific entry;
 * the pytest and coverage values pyproject.toml configures are the ones this
   program depends on: the pythonpath entry that makes `import
-  devcontainer_config` resolve, and the coverage fail_under = 100 gate.
+  devcontainer_config` resolve, and the coverage fail_under = 90 gate that
+  spec decision D15 authorizes.
 """
 
 from __future__ import annotations
@@ -90,9 +91,9 @@ def _load_pyproject() -> dict[str, Any]:
     return tomllib.loads((_repo_root() / "pyproject.toml").read_text())
 
 
-def test_coverage_fail_under_is_100() -> None:
+def test_coverage_fail_under_is_90() -> None:
     data = _load_pyproject()
-    assert data["tool"]["coverage"]["report"]["fail_under"] == 100
+    assert data["tool"]["coverage"]["report"]["fail_under"] == 90
 
 
 def test_coverage_branch_is_enabled() -> None:

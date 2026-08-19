@@ -35,6 +35,16 @@ one `LintReport` that `render_lint_report` turns into the text
 `devcontainer_config.cli` prints. None of the three raise on a caller's
 behalf silently: an unreadable or undecodable source is a `SecretScanError`,
 never an empty result standing in for one.
+
+`commits_in_range`, `added_lines`, `_first_parent` and
+`_empty_tree_object_id` (E2-F1-S2-T1) are the equally impure shell for
+range mode: each spawns `git` to walk a pushed range instead of the index,
+so a credential introduced early and removed later is still scanned rather
+than missed because the tip is clean. `scan_range` composes them into one
+`RangeReport` that `render_range_report` turns into the text Section 4.6's
+worked example shows, reusing `scan_lines` and `PATTERNS` unchanged so
+staged mode and range mode can never drift onto two different pattern
+sets.
 """
 
 from __future__ import annotations
@@ -471,6 +481,8 @@ def _run_git(
     root: Path,
     not_installed_message: Callable[[], str],
     failure_message: Callable[[str], str],
+    input_bytes: bytes | None = None,
+    config: Mapping[str, str] = MappingProxyType({}),
 ) -> bytes:
     """Run `git <args>` under `root`; the raw stdout bytes on success.
 
@@ -480,15 +492,22 @@ def _run_git(
     at each call site (or, worse, omitted at one of them). The caller
     supplies the two message builders because only the caller knows which
     git invocation failed and what the operator should do about it.
+    `input_bytes` is optional and only `_empty_tree_object_id` (range mode)
+    supplies it, to feed `git hash-object --stdin` an empty tree. `config`
+    is optional and only `added_lines` supplies it, to run `diff-tree` with
+    `core.quotepath=false`, so a non-ASCII path in the diff it reads is not
+    quoted and octal-escaped in the first place.
 
     Raises:
         SecretScanError: built from `not_installed_message` if the `git`
             binary is not on PATH, or from `failure_message` (given git's
             decoded stderr) if git exits non-zero.
     """
+    config_args = [flag for key, value in config.items() for flag in ("-c", f"{key}={value}")]
     try:
         completed = subprocess.run(
-            ["git", "-C", str(root), *args],
+            ["git", *config_args, "-C", str(root), *args],
+            input=input_bytes,
             capture_output=True,
             check=True,
         )
@@ -629,6 +648,24 @@ class LintReport:
     findings: tuple[StagedFinding, ...]
 
 
+def _grouped_findings(
+    lines_by_path: Mapping[str, Sequence[tuple[int, str]]], sources: ScanSources
+) -> tuple[tuple[str, Finding], ...]:
+    """`(path, finding)` for every finding across `lines_by_path`, one `scan_lines` call per path.
+
+    Both `run_staged_scan` and `scan_range` reduce to the same thing --
+    "for each path, scan its numbered lines and pair every finding with
+    that path" -- and differ only in how they collect `lines_by_path`
+    (`staged_blob` per staged path, versus `added_lines` grouped per commit).
+    This is that shared reduction, written once so the two modes cannot
+    each grow their own slightly different version of it.
+    """
+    results: list[tuple[str, Finding]] = []
+    for path, lines in lines_by_path.items():
+        results.extend((path, finding) for finding in scan_lines(lines, sources))
+    return tuple(results)
+
+
 def run_staged_scan(root: Path) -> LintReport:
     """Scan every path staged for the next commit under `root`; the full report.
 
@@ -645,18 +682,17 @@ def run_staged_scan(root: Path) -> LintReport:
     catalog_secret_names: tuple[str, ...] = ()
     sources = ScanSources(shell_env_lines=shell_env, catalog_secret_names=catalog_secret_names)
 
-    findings: list[StagedFinding] = []
-    for path in paths:
-        lines = staged_blob(root, path)
-        findings.extend(
-            StagedFinding(path=path, finding=finding) for finding in scan_lines(lines, sources)
-        )
+    lines_by_path = {path: staged_blob(root, path) for path in paths}
+    findings = tuple(
+        StagedFinding(path=path, finding=finding)
+        for path, finding in _grouped_findings(lines_by_path, sources)
+    )
 
     return LintReport(
         staged_path_count=len(paths),
         shell_env_line_count=len(shell_env),
         catalog_secret_name_count=len(catalog_secret_names),
-        findings=tuple(findings),
+        findings=findings,
     )
 
 
@@ -682,5 +718,608 @@ def render_lint_report(report: LintReport) -> str:
         rendered = render_finding(staged.finding, detector)
         lines.append(
             f"{staged.path}:{staged.finding.line_number}: {detector.description}: {rendered}"
+        )
+    return "\n".join(lines)
+
+
+# --- Range mode (spec Section 4.6, E2-F1-S2-T1) ---
+#
+# Scanning only the tip would miss a secret introduced earlier in a pushed
+# range and removed later, which still reaches the remote in history. Range
+# mode enumerates every commit in `<a>..<b>` oldest first and scans the
+# lines each commit adds, so that credential is still reported and
+# attributed to the commit that introduced it. It reuses `scan_lines` and
+# `PATTERNS` unchanged (AC-FUNC-005): only the content collection differs
+# from staged mode.
+
+_RANGE_SEPARATOR = ".."
+
+_HUNK_HEADER_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+# `git diff-tree` emits the unquoted form below for a path with no byte an
+# unquoted path cannot represent literally. It falls back to the C-quoted
+# form when the path holds a double quote or a backslash -- run under
+# `-c core.quotepath=false` (see `added_lines`), that is the only remaining
+# reason a path would be quoted, since that setting already stops a
+# non-ASCII byte alone from triggering it.
+_DIFF_NEW_FILE_HEADER_PATTERN = re.compile(r"^\+\+\+ b/(.+)$")
+_DIFF_NEW_FILE_HEADER_QUOTED_PATTERN = re.compile(r'^\+\+\+ "((?:[^"\\]|\\.)*)"$')
+
+# `git diff-tree` emits this exact line, rather than `+++ b/<path>`, as the
+# post-image header of a file section that has no post-image: the delete
+# side of a deletion, and (since `added_lines` runs `-r` without rename
+# detection) the delete half of a rename as well. Neither header pattern
+# above matches it, and it must not be treated as an uninterpretable
+# header, because a section with no post-image contributes no `+` lines --
+# there is nothing for an unresolved `current_path` to hide.
+_DIFF_DELETED_FILE_HEADER = "+++ /dev/null"
+
+# `git diff-tree -p` emits no `+++ `/hunk section at all for a file whose
+# first 8000 bytes hold a NUL byte -- git's own binary heuristic -- only
+# this one line in place of everything else a file section would
+# otherwise carry. `.+` on the pre-image side is deliberately permissive
+# (mirroring the two file-header patterns above): only the post-image
+# side, captured as `dst`, is ever read, either the literal `/dev/null` of
+# a deletion (no post-image, same as `_DIFF_DELETED_FILE_HEADER`) or a
+# `b/<path>` / C-quoted `"b/<path>"` token identical in shape to what a
+# `+++ ` header would carry, resolved through the very same
+# `_diff_new_file_path` a text file's header goes through.
+_DIFF_BINARY_FILE_HEADER_PATTERN = re.compile(
+    r'^Binary files .+ and (?P<dst>/dev/null|b/.+|"(?:[^"\\]|\\.)*") differ$'
+)
+
+# Byte-for-byte the escape tokens git's quote_c_style() emits: a doubled
+# backslash or double quote, one of the seven single-letter C escapes, or a
+# three-digit octal byte value (matched separately in
+# `_unescape_git_quoted_path`, not listed here since it is not one fixed
+# token).
+_GIT_QUOTE_SIMPLE_ESCAPES: Mapping[bytes, bytes] = MappingProxyType(
+    {
+        b"\\": b"\\",
+        b'"': b'"',
+        b"a": b"\a",
+        b"b": b"\b",
+        b"f": b"\f",
+        b"n": b"\n",
+        b"r": b"\r",
+        b"t": b"\t",
+        b"v": b"\v",
+    }
+)
+_GIT_QUOTE_ESCAPE_PATTERN = re.compile(rb"\\([0-7]{3}|.)", re.DOTALL)
+
+
+def _parse_range(revision_range: str) -> tuple[str, str]:
+    """`(base, tip)` parsed from `revision_range`, which must be exactly `<a>..<b>`.
+
+    Rejects the three-dot symmetric-difference form (`<a>...<b>`) and any
+    string that does not split into exactly two non-empty endpoints on the
+    two-dot separator, because `commits_in_range` and the range report's
+    header both need one unambiguous base and one unambiguous tip, not a
+    general git range expression this module would have to special-case.
+
+    Raises:
+        SecretScanError: if `revision_range` does not have the `<a>..<b>`
+            shape, naming what was received and what is expected instead.
+    """
+    malformed = SecretScanError(
+        f"ERROR: malformed range argument: {revision_range!r}\n"
+        "scan_range expects exactly '<a>..<b>', two non-empty git revisions "
+        "separated by '..', for example 'main..HEAD'.\n"
+        "Pass a range in that shape, not a single revision or a three-dot "
+        "('...') range."
+    )
+    if "..." in revision_range:
+        raise malformed
+    parts = revision_range.split(_RANGE_SEPARATOR)
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise malformed
+    return parts[0], parts[1]
+
+
+def commits_in_range(root: Path, revision_range: str) -> tuple[str, ...]:
+    """Commit SHAs in `revision_range`, oldest first (`git rev-list --reverse`).
+
+    Oldest first because a credential added early and removed later must be
+    attributed to the commit that added it; scanning in that order is what
+    lets `scan_range` group findings under the correct commit without a
+    second pass to reorder them.
+
+    Raises:
+        SecretScanError: if `revision_range` is not `<a>..<b>` (see
+            `_parse_range`); if the `git` binary is not on PATH; or if git
+            cannot resolve one or both endpoints, naming the range and
+            git's own message.
+    """
+    _parse_range(revision_range)
+    stdout = _run_git(
+        ["rev-list", "--reverse", revision_range],
+        root=root,
+        not_installed_message=lambda: (
+            "ERROR: git is not installed\n"
+            f"commits_in_range needs the git binary to enumerate {revision_range} "
+            f"under {root} and none was found on PATH.\n"
+            "Install git and ensure it is on PATH, then retry."
+        ),
+        failure_message=lambda stderr: (
+            f"ERROR: cannot resolve range {revision_range}\n"
+            f"commits_in_range ran 'git rev-list --reverse {revision_range}' "
+            f"in {root} and git reported: {stderr}\n"
+            "Confirm both endpoints exist in this repository, for example "
+            "with 'git rev-parse <endpoint>', then retry."
+        ),
+    )
+    text = stdout.decode("utf-8")
+    return tuple(line for line in text.splitlines() if line)
+
+
+def _empty_tree_object_id(root: Path) -> str:
+    """Git's empty-tree object id for `root`'s hash algorithm, computed rather than assumed.
+
+    A root commit's `added_lines` needs something to diff against that
+    represents "nothing" (spec Section 4.6, AC-FUNC-002). The empty-tree id
+    is a mathematical constant of the object format a repository uses
+    (SHA-1 or SHA-256), not a value this codebase chooses, so it is derived
+    with `git hash-object` on every call rather than hard-coded as a
+    literal SHA-1 hex string that would be silently wrong for a SHA-256
+    repository.
+
+    Raises:
+        SecretScanError: if the `git` binary is not on PATH, or if git
+            cannot compute the object id under `root`.
+    """
+    stdout = _run_git(
+        ["hash-object", "-t", "tree", "--stdin"],
+        root=root,
+        input_bytes=b"",
+        not_installed_message=lambda: (
+            "ERROR: git is not installed\n"
+            f"_empty_tree_object_id needs the git binary to derive the empty "
+            f"tree id under {root} and none was found on PATH.\n"
+            "Install git and ensure it is on PATH, then retry."
+        ),
+        failure_message=lambda stderr: (
+            f"ERROR: cannot derive the empty tree object id under {root}\n"
+            f"'git hash-object -t tree --stdin' reported: {stderr}\n"
+            "Run this from inside a git checkout, or pass the checkout root "
+            "explicitly instead of relying on discovery."
+        ),
+    )
+    return stdout.decode("utf-8").strip()
+
+
+def _first_parent(root: Path, commit: str) -> str | None:
+    """`commit`'s first parent SHA, or `None` if `commit` is a root commit.
+
+    Reads `git rev-list --parents -n1 <commit>`, whose output is the commit
+    itself followed by zero or more parent SHAs; a root commit has none, so
+    the split has exactly one token.
+
+    Raises:
+        SecretScanError: if the `git` binary is not on PATH, or if `commit`
+            cannot be inspected.
+    """
+    stdout = _run_git(
+        ["rev-list", "--parents", "-n1", commit],
+        root=root,
+        not_installed_message=lambda: (
+            "ERROR: git is not installed\n"
+            f"_first_parent needs the git binary to inspect {commit} under "
+            f"{root} and none was found on PATH.\n"
+            "Install git and ensure it is on PATH, then retry."
+        ),
+        failure_message=lambda stderr: (
+            f"ERROR: cannot inspect commit {commit}\n"
+            f"_first_parent ran 'git rev-list --parents -n1 {commit}' in "
+            f"{root} and git reported: {stderr}\n"
+            f"Confirm {commit} exists in this repository."
+        ),
+    )
+    tokens = stdout.decode("utf-8").split()
+    return tokens[1] if len(tokens) > 1 else None
+
+
+def _unescape_git_quoted_path(quoted: str, *, commit: str, header: str) -> str:
+    """Reverse git's C-style quoting of one diff header path.
+
+    Git quotes a path in a diff header whenever it holds a byte an unquoted
+    path cannot represent literally: a double quote or a backslash, escaped
+    here as `\\"` or `\\\\`, or (absent `core.quotepath=false`, which
+    `added_lines` already sets) a non-ASCII byte, escaped as a three-digit
+    octal value. `quoted` is the text between the outer double quotes, not
+    including them.
+
+    Raises:
+        SecretScanError: naming `commit` and `header`, if an escape token in
+            `quoted` is not one git's own `quote_c_style` ever emits, or the
+            unescaped bytes do not decode as UTF-8.
+    """
+
+    def _replace(match: re.Match[bytes]) -> bytes:
+        token = match.group(1)
+        if len(token) == 3 and all(0x30 <= byte <= 0x37 for byte in token):
+            return bytes([int(token, 8)])
+        simple = _GIT_QUOTE_SIMPLE_ESCAPES.get(token)
+        if simple is not None:
+            return simple
+        raise SecretScanError(
+            f"ERROR: cannot parse the diff header for commit {commit}\n"
+            "added_lines found an escape sequence 'git diff-tree' does not "
+            f"emit in this quoted path: {header!r}\n"
+            f"Review the commit by hand with 'git show {commit}' before "
+            "trusting this range scan."
+        )
+
+    try:
+        unescaped = _GIT_QUOTE_ESCAPE_PATTERN.sub(_replace, quoted.encode("utf-8"))
+        return unescaped.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SecretScanError(
+            f"ERROR: cannot parse the diff header for commit {commit}\n"
+            f"added_lines decoded a quoted path from {header!r} that is not "
+            f"valid UTF-8: {exc}\n"
+            f"Review the commit by hand with 'git show {commit}' before "
+            "trusting this range scan."
+        ) from exc
+
+
+def _diff_new_file_path(line: str, *, commit: str) -> str:
+    """The repo-relative path named by one `+++ ...` diff file header line.
+
+    Handles both the plain `+++ b/<path>` form and the C-quoted
+    `+++ "b/<escaped>"` form git falls back to whenever a path holds a
+    literal double quote or backslash -- the non-ASCII case is already
+    avoided by running the diff under `core.quotepath=false` (see
+    `added_lines`), but a real quote or backslash in a path still triggers
+    quoting regardless of that setting.
+
+    Raises:
+        SecretScanError: naming `commit` and `line`, if neither form
+            matches. A caller must never narrow its scan to whatever it
+            could parse when a header cannot be interpreted.
+    """
+    plain_match = _DIFF_NEW_FILE_HEADER_PATTERN.match(line)
+    if plain_match:
+        return plain_match.group(1)
+    quoted_match = _DIFF_NEW_FILE_HEADER_QUOTED_PATTERN.match(line)
+    if quoted_match:
+        unescaped = _unescape_git_quoted_path(quoted_match.group(1), commit=commit, header=line)
+        if unescaped.startswith("b/"):
+            return unescaped[len("b/") :]
+    raise SecretScanError(
+        f"ERROR: cannot parse the diff header for commit {commit}\n"
+        f"added_lines could not interpret this 'git diff-tree' file header: {line!r}\n"
+        "This scanner refuses to narrow its scan to whatever it could parse; "
+        f"review the commit by hand with 'git show {commit}' before trusting "
+        "this range scan."
+    )
+
+
+def _binary_post_image_lines(root: Path, commit: str, path: str) -> tuple[str, ...]:
+    """`path`'s full post-image content at `commit`, split into lines.
+
+    `git diff-tree -p` never prints the content of a file section it
+    classifies as binary -- only a `Binary files ... differ` line, no
+    hunks -- so `_parse_added_lines` calls this to read that content the
+    same way `staged_blob` already reads the index: `git show
+    <commit>:<path>`, the whole post-image blob, not a diff against it.
+    That keeps a binary-classified addition scanned exactly as its staged
+    counterpart already is (AC-FUNC-005: staged mode and range mode must
+    not diverge).
+
+    Raises:
+        SecretScanError: naming `commit` and `path`, if `git show` cannot
+            read the blob, or if the blob it read does not decode as
+            UTF-8. Skipping an undecodable blob would let a credential
+            through inside content the scanner declined to read, so this
+            refuses the whole scan instead of narrowing it silently.
+    """
+    stdout = _run_git(
+        ["show", f"{commit}:{path}"],
+        root=root,
+        not_installed_message=lambda: (
+            "ERROR: git is not installed\n"
+            f"added_lines needs the git binary to read the blob {path} at "
+            f"commit {commit} under {root} and none was found on PATH.\n"
+            "Install git and ensure it is on PATH, then retry."
+        ),
+        failure_message=lambda stderr: (
+            f"ERROR: cannot read blob {path} at commit {commit}\n"
+            f"added_lines ran 'git show {commit}:{path}' in {root} and git "
+            f"reported: {stderr}\n"
+            f"Confirm {path} exists at commit {commit} in this repository."
+        ),
+    )
+    try:
+        return tuple(stdout.decode("utf-8").splitlines())
+    except UnicodeDecodeError as exc:
+        raise SecretScanError(
+            f"ERROR: commit {commit} contains a blob that is not valid UTF-8\n"
+            f"added_lines could not decode the binary-classified blob {path} "
+            f"at {commit}: {exc}\n"
+            "This scanner reads text content only; a binary file whose "
+            "content is not valid UTF-8 cannot be scanned and must be "
+            "reviewed by hand before this range is pushed."
+        ) from exc
+
+
+def _parse_added_lines(
+    diff_text: str, *, commit: str, root: Path
+) -> tuple[tuple[str, int, str], ...]:
+    """`(path, post_image_line_number, text)` for every added line in `diff_text`.
+
+    `diff_text` is `git diff-tree -p -U0`'s output: zero context means every
+    non-header line is either an addition or a removal, never unrelated
+    context that could be mistaken for one. The post-image line number
+    comes from each hunk's `@@ -a,b +c,d @@` header and advances by one for
+    every added line that follows it, so a finding names the line as it
+    exists in the commit rather than an offset into the patch.
+
+    A `+++ ...` line is read as a file header only while still inside a
+    file's header block -- between its `diff --git` line and the first
+    `@@` hunk header that follows. An added line whose own content starts
+    with `++ ` reads back, once git prefixes it with the single `+` that
+    marks every addition, as `+++ <that content>`; outside the header
+    block that is content, never a header, and is scanned like any other
+    added line rather than being mistaken for one and silently discarding
+    the rest of the file.
+
+    A file section whose post-image header is `+++ /dev/null` -- the
+    delete side of a deletion, or the delete half of a rename, since this
+    parser is fed diffs taken without rename detection -- leaves
+    `current_path` unresolved rather than raising: that section has no
+    post-image, so it contributes no `+` lines and there is nothing for an
+    unresolved path to hide.
+
+    A file section git classifies as binary (any NUL byte in its first
+    8000 bytes) carries no `+++ `/hunk structure at all, only a `Binary
+    files ... differ` line -- also read only while still inside a file's
+    header block, the same guard the `+++ ` branch above uses, so an added
+    line whose own content happens to start with that exact text is never
+    mistaken for one. Its post-image side, resolved through
+    `_diff_new_file_path` exactly as a `+++ ` header's path is, names
+    `/dev/null` when the section has no post-image (a binary deletion, or
+    the delete half of a rename), which contributes no lines for the same
+    reason the `+++ /dev/null` case above does not; otherwise
+    `_binary_post_image_lines` reads the whole post-image blob directly
+    with `git show`, and every one of its lines is recorded as added,
+    numbered from 1, rather than the section falling through unread.
+
+    Raises:
+        SecretScanError: naming `commit`, if a `+++ ` or binary file
+            header names a path this parser cannot interpret (see
+            `_diff_new_file_path`), if a binary section's post-image blob
+            cannot be read or decoded (see `_binary_post_image_lines`), or
+            if an added line is reached with no file path or hunk position
+            resolved -- a diff shape this parser does not understand,
+            never silently narrowed to whatever it could parse.
+    """
+    added: list[tuple[str, int, str]] = []
+    current_path: str | None = None
+    next_line_number: int | None = None
+    in_file_header = False
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            current_path = None
+            next_line_number = None
+            in_file_header = True
+            continue
+        if in_file_header and line.startswith("+++ "):
+            if line == _DIFF_DELETED_FILE_HEADER:
+                current_path = None
+                next_line_number = None
+                in_file_header = False
+                continue
+            current_path = _diff_new_file_path(line, commit=commit)
+            next_line_number = None
+            continue
+        if in_file_header and line.startswith("Binary files "):
+            binary_match = _DIFF_BINARY_FILE_HEADER_PATTERN.match(line)
+            if binary_match is None:
+                raise SecretScanError(
+                    f"ERROR: cannot parse the diff header for commit {commit}\n"
+                    "added_lines could not interpret this 'git diff-tree' "
+                    f"binary-file marker: {line!r}\n"
+                    "This scanner refuses to narrow its scan to whatever it "
+                    f"could parse; review the commit by hand with 'git show "
+                    f"{commit}' before trusting this range scan."
+                )
+            in_file_header = False
+            destination = binary_match.group("dst")
+            if destination == "/dev/null":
+                current_path = None
+                next_line_number = None
+                continue
+            binary_path = _diff_new_file_path(f"+++ {destination}", commit=commit)
+            for line_number, text in enumerate(
+                _binary_post_image_lines(root, commit, binary_path), start=1
+            ):
+                added.append((binary_path, line_number, text))
+            current_path = None
+            next_line_number = None
+            continue
+        if line.startswith("--- "):
+            continue
+        hunk_match = _HUNK_HEADER_PATTERN.match(line)
+        if hunk_match:
+            next_line_number = int(hunk_match.group(1))
+            in_file_header = False
+            continue
+        if line.startswith("+"):
+            if current_path is None or next_line_number is None:
+                raise SecretScanError(
+                    f"ERROR: cannot parse the diff for commit {commit}\n"
+                    "added_lines reached an added line before resolving both "
+                    f"a file path and a hunk position: {line!r}\n"
+                    "This is either a 'git diff-tree' output shape this "
+                    "parser does not understand or a parser state bug; "
+                    f"review the commit by hand with 'git show {commit}' "
+                    "before trusting this range scan."
+                )
+            added.append((current_path, next_line_number, line[1:]))
+            next_line_number += 1
+        elif line.startswith("-") or line.startswith("\\"):
+            continue
+    return tuple(added)
+
+
+def added_lines(root: Path, commit: str) -> tuple[tuple[str, int, str], ...]:
+    """`(path, post_image_line_number, text)` for every line `commit` adds.
+
+    Diffed against `commit`'s first parent with zero context
+    (`git diff-tree -p -U0 -r`), or against the empty tree when `commit` is
+    a root commit, so a repository's first commit is scanned rather than
+    skipped for want of a parent (spec Section 4.6, AC-FUNC-002). For an
+    ordinary commit that diff is the one line of work it adds on top of its
+    parent. For a merge commit it is `git diff-tree -p <first-parent>
+    <merge>`'s actual output: everything the merge's tree holds that its
+    first parent's tree does not, which is the whole side branch the first
+    time a merge with unresolved (fast-forwardable) content is diffed this
+    way, not only a conflict resolution. That over-reports rather than
+    under-reports -- a credential the side branch already introduced is
+    reported twice, once against the commit that added it and once against
+    the merge -- which is the safe direction for a scanner whose job is
+    never missing a credential that reaches history.
+
+    Run under `-c core.quotepath=false`, so a diff header naming a path
+    with a non-ASCII byte prints that byte literally instead of quoting and
+    octal-escaping the whole path (`_diff_new_file_path` still handles the
+    quoted form, for a path holding a literal quote or backslash, which
+    triggers quoting regardless of this setting).
+
+    Raises:
+        SecretScanError: if the `git` binary is not on PATH; if `commit`
+            cannot be diffed; if the diff `git diff-tree` produced does not
+            decode as UTF-8 -- which happens only for a file section git
+            classified as text but whose content is not valid UTF-8, since
+            a section it classified as binary never prints its bytes into
+            this diff at all, only a `Binary files ... differ` marker
+            (see `_parse_added_lines`) -- naming the commit rather than
+            silently narrowing the scan to whatever did decode; or if a
+            file header or an added line inside that diff cannot be
+            parsed (see `_parse_added_lines`), for the same reason.
+    """
+    parent = _first_parent(root, commit)
+    base = parent if parent is not None else _empty_tree_object_id(root)
+    stdout = _run_git(
+        ["diff-tree", "-p", "--no-color", "-U0", "-r", base, commit],
+        root=root,
+        config={"core.quotepath": "false"},
+        not_installed_message=lambda: (
+            "ERROR: git is not installed\n"
+            f"added_lines needs the git binary to diff {commit} under {root} "
+            "and none was found on PATH.\n"
+            "Install git and ensure it is on PATH, then retry."
+        ),
+        failure_message=lambda stderr: (
+            f"ERROR: cannot diff commit {commit}\n"
+            f"added_lines ran 'git diff-tree -p --no-color -U0 -r {base} "
+            f"{commit}' in {root} and git reported: {stderr}\n"
+            f"Confirm {commit} exists in this repository."
+        ),
+    )
+    try:
+        diff_text = stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SecretScanError(
+            f"ERROR: commit {commit} contains a blob that is not valid UTF-8\n"
+            f"added_lines could not decode the diff for {commit}: {exc}\n"
+            "This scanner reads text content only; a file in this commit "
+            "that git diffed as text but whose content is not valid UTF-8 "
+            "cannot be scanned and must be reviewed by hand before this "
+            "range is pushed."
+        ) from exc
+    return _parse_added_lines(diff_text, commit=commit, root=root)
+
+
+@dataclass(frozen=True)
+class RangeFinding:
+    """One `Finding` together with the commit and repo-relative path it came from."""
+
+    commit: str
+    path: str
+    finding: Finding
+
+
+@dataclass(frozen=True)
+class RangeReport:
+    """The range scanned, how many commits it held, and every finding from `scan_range`."""
+
+    revision_range: str
+    range_base: str
+    commit_count: int
+    findings: tuple[RangeFinding, ...]
+
+
+def scan_range(root: Path, revision_range: str) -> RangeReport:
+    """Scan every commit in `revision_range`, oldest first; the full range report.
+
+    Each commit's added lines (`added_lines`) are grouped by path and
+    scanned with the same `scan_lines` and `PATTERNS` registry staged mode
+    uses (AC-FUNC-005): no second pattern list exists for history. A
+    credential added in one commit and removed in a later commit is still
+    reported, attributed to the commit that added it (AC-FUNC-001), because
+    each commit is diffed and scanned independently rather than the range
+    being collapsed into one net diff.
+    """
+    base, _tip = _parse_range(revision_range)
+    commits = commits_in_range(root, revision_range)
+    shell_env = shell_env_lines(root)
+    catalog_secret_names: tuple[str, ...] = ()
+    sources = ScanSources(shell_env_lines=shell_env, catalog_secret_names=catalog_secret_names)
+
+    findings: list[RangeFinding] = []
+    for commit in commits:
+        lines_by_path: dict[str, list[tuple[int, str]]] = {}
+        for path, line_number, text in added_lines(root, commit):
+            lines_by_path.setdefault(path, []).append((line_number, text))
+        findings.extend(
+            RangeFinding(commit=commit, path=path, finding=finding)
+            for path, finding in _grouped_findings(lines_by_path, sources)
+        )
+
+    return RangeReport(
+        revision_range=revision_range,
+        range_base=base,
+        commit_count=len(commits),
+        findings=tuple(findings),
+    )
+
+
+def render_range_report(report: RangeReport) -> str:
+    """The `[LINT]` range report text for `report` (spec Section 4.6's worked example shape).
+
+    The header names the scanned range and how many commits it held, even
+    when the range is empty, so "zero commits were scanned" is a fact the
+    header states rather than an empty screen the operator has to
+    interpret. Each finding names the commit, the path, the line and the
+    detector description; the value itself comes from `render_finding`, so
+    redaction cannot diverge between staged mode and range mode. When any
+    finding exists, the report closes with the sentence Section 4.6
+    requires -- the value is in history, so removing it now is not enough
+    -- followed by both remedies: an interactive rebase to edit the
+    offending commit out, or rotating the exposed value and pushing
+    deliberately with a recorded approval.
+    """
+    lines = [
+        f"[LINT] secrets in pushed range {report.revision_range}",
+        f"  commits scanned: {report.commit_count}",
+    ]
+    for item in report.findings:
+        detector = DETECTORS_BY_ID[item.finding.detector_id]
+        rendered = render_finding(item.finding, detector)
+        lines.append(
+            f"  ERROR commit {item.commit}  {item.path}:{item.finding.line_number}  "
+            f"{detector.description}"
+        )
+        lines.append(f"        {rendered}")
+    if report.findings:
+        lines.append("  The value is in history, so removing it now is not enough.")
+        lines.append(
+            f"  Rewrite:  git rebase -i {report.range_base}    "
+            "(edit the offending commit, remove, continue)"
+        )
+        lines.append(
+            "  Or:       rotate the exposed value and push deliberately with a recorded approval."
         )
     return "\n".join(lines)

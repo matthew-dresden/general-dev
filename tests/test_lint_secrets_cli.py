@@ -14,9 +14,8 @@ under `tmp_path` by shelling out to the actual `git` binary, never a mocked
 filesystem, because the whole point of this module -- reading the index, not
 the working tree -- is a distinction only a real git repository can prove.
 The primitives that build those repositories live in `tests/gitfixtures.py`,
-shared with `tests/test_repo.py` today, rather than being redefined here.
-`tests/test_cli.py` and `tests/test_secrets_range.py` are pending consumers:
-E2-F1-S2-T1 owns wiring their imports to that module once it lands.
+shared with `tests/test_repo.py`, `tests/test_cli.py` and
+`tests/test_secrets_range.py`, rather than being redefined here.
 
 No credential-shaped literal is ever stored pre-assembled in this file. A
 positive sample is built at run time from `devcontainer_config.secrets

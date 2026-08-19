@@ -67,6 +67,20 @@ def _test_recipe_body(makefile_text: str) -> str:
     return match.group(1)
 
 
+def _lint_secrets_recipe_body(makefile_text: str) -> str:
+    """The recipe lines (tab-indented) that follow the `lint-secrets:` target header."""
+    match = re.search(r"^lint-secrets:.*\n((?:\t.*\n?)*)", makefile_text, re.MULTILINE)
+    assert match is not None, "no lint-secrets target found in Makefile"
+    return match.group(1)
+
+
+def _help_recipe_body(makefile_text: str) -> str:
+    """The recipe lines (tab-indented) that follow the `help:` target header."""
+    match = re.search(r"^help:.*\n((?:\t.*\n?)*)", makefile_text, re.MULTILINE)
+    assert match is not None, "no help target found in Makefile"
+    return match.group(1)
+
+
 def test_test_target_is_phony() -> None:
     """AC-FUNC-003 / AC-TEST-001: `test` is declared `.PHONY`."""
     assert "test" in _phony_targets(_makefile_text())
@@ -86,3 +100,18 @@ def test_test_recipe_has_no_off_machine_token(token: str) -> None:
     """AC-FUNC-005 / AC-TEST-003: the `test` recipe reaches nothing off this machine."""
     recipe = _test_recipe_body(_makefile_text())
     assert token not in recipe.lower()
+
+
+def test_lint_secrets_recipe_forwards_range_variable_to_the_cli() -> None:
+    """AC-FUNC-006: `make lint-secrets RANGE=<a>..<b>` forwards RANGE to `--range`."""
+    recipe = _lint_secrets_recipe_body(_makefile_text())
+    assert "RANGE" in recipe
+    assert "--range" in recipe
+
+
+def test_help_documents_the_range_form_of_lint_secrets() -> None:
+    """AC-DOC-001: `make help` describes the range form of `make lint-secrets`."""
+    help_recipe = _help_recipe_body(_makefile_text())
+    lint_secrets_rows = [line for line in help_recipe.splitlines() if '"make lint-secrets"' in line]
+    assert len(lint_secrets_rows) == 1
+    assert "RANGE" in lint_secrets_rows[0]

@@ -37,7 +37,7 @@ behalf silently: an unreadable or undecodable source is a `SecretScanError`,
 never an empty result standing in for one.
 
 `commits_in_range`, `added_lines`, `_first_parent` and
-`_empty_tree_object_id` (E2-F1-S2-T1) are the equally impure shell for
+`empty_tree_object_id` (E2-F1-S2-T1) are the equally impure shell for
 range mode: each spawns `git` to walk a pushed range instead of the index,
 so a credential introduced early and removed later is still scanned rather
 than missed because the tip is clean. `scan_range` composes them into one
@@ -45,6 +45,14 @@ than missed because the tip is clean. `scan_range` composes them into one
 worked example shows, reusing `scan_lines` and `PATTERNS` unchanged so
 staged mode and range mode can never drift onto two different pattern
 sets.
+
+`run_git` (E2-F2-S1-T3) is the single `subprocess` wrapper every function
+above spawns `git` through, in both staged mode and range mode. It is
+public, taking a keyword-only `error_type: type[Exception] = SecretScanError`
+so a caller outside this module -- the git-hooks installer, for one -- gets
+its own exception type back on a not-installed or nonzero-exit failure
+instead of always receiving a `SecretScanError`. `empty_tree_object_id`
+forwards its own `error_type` into `run_git` unchanged, for the same reason.
 """
 
 from __future__ import annotations
@@ -475,7 +483,7 @@ def render_finding(finding: Finding, detector: Detector) -> str:
 _CATALOG_SECRET_NAMES_NOT_WIRED_NOTE = "catalog client not yet wired into this scan"
 
 
-def _run_git(
+def run_git(
     args: Sequence[str],
     *,
     root: Path,
@@ -483,25 +491,33 @@ def _run_git(
     failure_message: Callable[[str], str],
     input_bytes: bytes | None = None,
     config: Mapping[str, str] = MappingProxyType({}),
+    error_type: type[Exception] = SecretScanError,
 ) -> bytes:
     """Run `git <args>` under `root`; the raw stdout bytes on success.
 
-    `staged_paths` and `staged_blob` both need "run a git subprocess and
-    turn a failure into a `SecretScanError`", differing only in the message
-    each raises, so that shape lives here once instead of being duplicated
-    at each call site (or, worse, omitted at one of them). The caller
-    supplies the two message builders because only the caller knows which
-    git invocation failed and what the operator should do about it.
-    `input_bytes` is optional and only `_empty_tree_object_id` (range mode)
-    supplies it, to feed `git hash-object --stdin` an empty tree. `config`
-    is optional and only `added_lines` supplies it, to run `diff-tree` with
+    Public (E2-F2-S1-T3) so a caller outside this module -- the git-hooks
+    installer, for one -- can reuse "run a git subprocess and turn a
+    failure into an exception" instead of copy-pasting this subprocess
+    shape. `staged_paths` and `staged_blob` both need exactly that,
+    differing only in the message each raises, so that shape lives here
+    once instead of being duplicated at each call site (or, worse, omitted
+    at one of them). The caller supplies the two message builders because
+    only the caller knows which git invocation failed and what the
+    operator should do about it. `input_bytes` is optional and only
+    `empty_tree_object_id` (range mode) supplies it, to feed
+    `git hash-object --stdin` an empty tree. `config` is optional and only
+    `added_lines` supplies it, to run `diff-tree` with
     `core.quotepath=false`, so a non-ASCII path in the diff it reads is not
-    quoted and octal-escaped in the first place.
+    quoted and octal-escaped in the first place. `error_type` is
+    keyword-only and defaults to `SecretScanError`; a caller outside this
+    module supplies its own exception type so a git failure surfaces as
+    that caller's own error rather than as this module's.
 
     Raises:
-        SecretScanError: built from `not_installed_message` if the `git`
-            binary is not on PATH, or from `failure_message` (given git's
-            decoded stderr) if git exits non-zero.
+        error_type: built from `not_installed_message` if the `git` binary
+            is not on PATH, or from `failure_message` (given git's decoded
+            stderr) if git exits non-zero. `SecretScanError` unless the
+            caller supplies a different `error_type`.
     """
     config_args = [flag for key, value in config.items() for flag in ("-c", f"{key}={value}")]
     try:
@@ -512,10 +528,10 @@ def _run_git(
             check=True,
         )
     except FileNotFoundError as exc:
-        raise SecretScanError(not_installed_message()) from exc
+        raise error_type(not_installed_message()) from exc
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode("utf-8", errors="replace").strip() if exc.stderr else ""
-        raise SecretScanError(failure_message(stderr)) from exc
+        raise error_type(failure_message(stderr)) from exc
     return completed.stdout
 
 
@@ -532,7 +548,7 @@ def staged_paths(root: Path) -> tuple[str, ...]:
         SecretScanError: if the `git` binary is not on PATH, or if `root` is
             not inside a git work tree.
     """
-    stdout = _run_git(
+    stdout = run_git(
         ["diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"],
         root=root,
         not_installed_message=lambda: (
@@ -571,7 +587,7 @@ def staged_blob(root: Path, path: str) -> tuple[tuple[int, str], ...]:
             inside content the scanner declined to read, so every one of
             these refuses the whole scan instead of narrowing it silently.
     """
-    stdout = _run_git(
+    stdout = run_git(
         ["show", f":{path}"],
         root=root,
         not_installed_message=lambda: (
@@ -832,7 +848,7 @@ def commits_in_range(root: Path, revision_range: str) -> tuple[str, ...]:
             git's own message.
     """
     _parse_range(revision_range)
-    stdout = _run_git(
+    stdout = run_git(
         ["rev-list", "--reverse", revision_range],
         root=root,
         not_installed_message=lambda: (
@@ -853,28 +869,35 @@ def commits_in_range(root: Path, revision_range: str) -> tuple[str, ...]:
     return tuple(line for line in text.splitlines() if line)
 
 
-def _empty_tree_object_id(root: Path) -> str:
+def empty_tree_object_id(root: Path, *, error_type: type[Exception] = SecretScanError) -> str:
     """Git's empty-tree object id for `root`'s hash algorithm, computed rather than assumed.
 
-    A root commit's `added_lines` needs something to diff against that
-    represents "nothing" (spec Section 4.6, AC-FUNC-002). The empty-tree id
-    is a mathematical constant of the object format a repository uses
-    (SHA-1 or SHA-256), not a value this codebase chooses, so it is derived
-    with `git hash-object` on every call rather than hard-coded as a
-    literal SHA-1 hex string that would be silently wrong for a SHA-256
-    repository.
+    Public (E2-F2-S1-T3) so a caller outside this module -- the git-hooks
+    installer, for one -- can derive the same constant without duplicating
+    this `git hash-object` invocation. A root commit's `added_lines` needs
+    something to diff against that represents "nothing" (spec Section 4.6,
+    AC-FUNC-002). The empty-tree id is a mathematical constant of the
+    object format a repository uses (SHA-1 or SHA-256), not a value this
+    codebase chooses, so it is derived with `git hash-object` on every call
+    rather than hard-coded as a literal SHA-1 hex string that would be
+    silently wrong for a SHA-256 repository. `error_type` is keyword-only
+    and defaults to `SecretScanError`; it is forwarded to `run_git`
+    unchanged, so a caller outside this module gets its own exception type
+    back rather than `SecretScanError`.
 
     Raises:
-        SecretScanError: if the `git` binary is not on PATH, or if git
-            cannot compute the object id under `root`.
+        error_type: if the `git` binary is not on PATH, or if git cannot
+            compute the object id under `root`. `SecretScanError` unless
+            the caller supplies a different `error_type`.
     """
-    stdout = _run_git(
+    stdout = run_git(
         ["hash-object", "-t", "tree", "--stdin"],
         root=root,
         input_bytes=b"",
+        error_type=error_type,
         not_installed_message=lambda: (
             "ERROR: git is not installed\n"
-            f"_empty_tree_object_id needs the git binary to derive the empty "
+            f"empty_tree_object_id needs the git binary to derive the empty "
             f"tree id under {root} and none was found on PATH.\n"
             "Install git and ensure it is on PATH, then retry."
         ),
@@ -899,7 +922,7 @@ def _first_parent(root: Path, commit: str) -> str | None:
         SecretScanError: if the `git` binary is not on PATH, or if `commit`
             cannot be inspected.
     """
-    stdout = _run_git(
+    stdout = run_git(
         ["rev-list", "--parents", "-n1", commit],
         root=root,
         not_installed_message=lambda: (
@@ -1014,7 +1037,7 @@ def _binary_post_image_lines(root: Path, commit: str, path: str) -> tuple[str, .
             through inside content the scanner declined to read, so this
             refuses the whole scan instead of narrowing it silently.
     """
-    stdout = _run_git(
+    stdout = run_git(
         ["show", f"{commit}:{path}"],
         root=root,
         not_installed_message=lambda: (
@@ -1200,8 +1223,8 @@ def added_lines(root: Path, commit: str) -> tuple[tuple[str, int, str], ...]:
             parsed (see `_parse_added_lines`), for the same reason.
     """
     parent = _first_parent(root, commit)
-    base = parent if parent is not None else _empty_tree_object_id(root)
-    stdout = _run_git(
+    base = parent if parent is not None else empty_tree_object_id(root)
+    stdout = run_git(
         ["diff-tree", "-p", "--no-color", "-U0", "-r", base, commit],
         root=root,
         config={"core.quotepath": "false"},

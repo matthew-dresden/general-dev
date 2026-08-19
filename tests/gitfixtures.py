@@ -1,10 +1,11 @@
 """Shared git-repository test primitives (spec Section 4.6 test suite).
 
 Consumed by `tests/test_lint_secrets_cli.py`, `tests/test_repo.py`,
-`tests/test_cli.py` and `tests/test_secrets_range.py`, all of which build
-real, disposable git repositories under `tmp_path` by shelling out to the
-actual `git` binary rather than mocking one, so the primitives that do that
-work belong in exactly one place instead of being copied into each file.
+`tests/test_cli.py`, `tests/test_secrets_range.py` and `tests/test_secrets.py`,
+all of which build real, disposable git repositories under `tmp_path` by
+shelling out to the actual `git` binary rather than mocking one, so the
+primitives that do that work belong in exactly one place instead of being
+copied into each file.
 That place is this module, `tests/gitfixtures.py`, and deliberately not
 `tests/conftest.py`, because that path is already claimed by another work
 unit's unrelated answers-payload builders. pytest's default prepend import

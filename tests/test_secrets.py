@@ -34,6 +34,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from gitfixtures import generated_root, init_repo
 
 
 def _import_secrets() -> ModuleType:
@@ -42,6 +43,28 @@ def _import_secrets() -> ModuleType:
     See the module docstring for why this is not a module-level import.
     """
     return importlib.import_module("devcontainer_config.secrets")
+
+
+class _CallerDefinedRunGitError(Exception):
+    """A caller-defined exception type deliberately not a `SecretScanError` subclass.
+
+    `run_git` and `empty_tree_object_id` (E2-F2-S1-T3) accept a
+    keyword-only `error_type` so a caller outside `devcontainer_config.secrets`
+    -- the git-hooks installer, for one -- gets its own exception type back
+    from a git failure rather than `SecretScanError`. This type stands in
+    for that caller here, and is deliberately unrelated to `SecretScanError`
+    so a test that asserts the raised type is this one would fail if the
+    production code silently still raised `SecretScanError` instead.
+    """
+
+
+def _monkeypatch_subprocess_run_raises(
+    monkeypatch: pytest.MonkeyPatch, raised: BaseException
+) -> None:
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise raised
+
+    monkeypatch.setattr(subprocess, "run", _raise)
 
 
 def _secrets_module_path() -> Path:
@@ -414,3 +437,100 @@ def test_scan_lines_end_to_end_multiple_detectors_and_lines() -> None:
     assert by_line[3] == "shell-env-line"
     assert by_line[4] == "catalog-secret-name"
     assert len(findings) == 3
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        pytest.param(FileNotFoundError(), id="git-not-installed"),
+        pytest.param(
+            subprocess.CalledProcessError(1, ["git"], output=b"", stderr=b"synthetic stderr"),
+            id="git-nonzero-exit",
+        ),
+    ],
+)
+def test_run_git_raises_caller_supplied_error_type(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, raised: BaseException
+) -> None:
+    """AC-SHARED-001 / AC-SHARED-004: a non-SecretScanError error_type is the type raised."""
+    secrets = _import_secrets()
+    _monkeypatch_subprocess_run_raises(monkeypatch, raised)
+    not_installed_message = f"ERROR: synthetic not-installed message {uuid.uuid4().hex}"
+
+    def _failure_message(stderr: str) -> str:
+        return f"ERROR: synthetic failure message for stderr={stderr!r}"
+
+    with pytest.raises(_CallerDefinedRunGitError) as exc_info:
+        secrets.run_git(
+            ["status"],
+            root=tmp_path,
+            not_installed_message=lambda: not_installed_message,
+            failure_message=_failure_message,
+            error_type=_CallerDefinedRunGitError,
+        )
+
+    expected = (
+        not_installed_message
+        if isinstance(raised, FileNotFoundError)
+        else _failure_message("synthetic stderr")
+    )
+    assert str(exc_info.value) == expected
+
+
+def test_run_git_default_error_type_is_secret_scan_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """AC-SHARED-005: omitting error_type still raises SecretScanError."""
+    secrets = _import_secrets()
+    _monkeypatch_subprocess_run_raises(monkeypatch, FileNotFoundError())
+
+    with pytest.raises(secrets.SecretScanError):
+        secrets.run_git(
+            ["status"],
+            root=tmp_path,
+            not_installed_message=lambda: "ERROR: git is not installed",
+            failure_message=lambda stderr: f"ERROR: {stderr}",
+        )
+
+
+def test_empty_tree_object_id_forwards_caller_supplied_error_type(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """AC-SHARED-002: empty_tree_object_id forwards error_type to run_git's failure path."""
+    secrets = _import_secrets()
+    _monkeypatch_subprocess_run_raises(monkeypatch, FileNotFoundError())
+
+    with pytest.raises(_CallerDefinedRunGitError):
+        secrets.empty_tree_object_id(tmp_path, error_type=_CallerDefinedRunGitError)
+
+
+def test_empty_tree_object_id_default_error_type_is_secret_scan_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """AC-SHARED-005: omitting error_type on empty_tree_object_id still raises SecretScanError."""
+    secrets = _import_secrets()
+    _monkeypatch_subprocess_run_raises(monkeypatch, FileNotFoundError())
+
+    with pytest.raises(secrets.SecretScanError):
+        secrets.empty_tree_object_id(tmp_path)
+
+
+def test_empty_tree_object_id_matches_independent_git_hash_object(tmp_path: Path) -> None:
+    """AC-SHARED-006: the derived id equals an independently invoked git hash-object."""
+    secrets = _import_secrets()
+    root = generated_root(tmp_path)
+    init_repo(root)
+
+    derived = secrets.empty_tree_object_id(root)
+
+    independent = (
+        subprocess.run(
+            ["git", "-C", str(root), "hash-object", "-t", "tree", "--stdin"],
+            input=b"",
+            capture_output=True,
+            check=True,
+        )
+        .stdout.decode("utf-8")
+        .strip()
+    )
+    assert derived == independent

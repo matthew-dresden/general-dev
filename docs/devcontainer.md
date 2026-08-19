@@ -247,10 +247,17 @@ EC2 reference, troubleshooting) live in
 2. **Postcreate: configuration.** Installs nothing, everything installable is
    a feature. Each step is a function in `.devcontainer.postcreate.sh`, states
    the dependency it needs, and is skipped with a banner when that dependency
-   is absent rather than aborting the build. The resmon link is the exception:
-   `postAttachCommand` runs it unconditionally, so a container that cannot
-   provide it fails on every attach, and the build stops instead of shipping
-   one:
+   is absent rather than aborting the build, except for every step the table
+   below marks `required`: the VS Code server volumes handed to the container
+   user, because a path that is not a mount point refills from empty on every
+   rebuild and a volume an earlier build left root-owned cannot be written by
+   the container user; the resmon-disks postAttach link, because
+   `postAttachCommand` runs it unconditionally and a container that cannot
+   provide it fails on every attach; the vscode-settings-sync postAttach
+   link, for the same postAttach reason; and the git hooks step, because a
+   container whose hooks did not install would run `git commit` with no
+   secret scan. Each of those aborts the build through `exit_with_error`
+   instead of shipping a container missing the guarantee:
 
    | Step | Depends on |
    |---|---|
@@ -267,6 +274,7 @@ EC2 reference, troubleshooting) live in
    | `~/.aws/config` from `aws-profile-map.json` | `jq` + a non-empty map |
    | host proxy reachability | `HOST_PROXY=true` |
    | git identity and credential helper | `git` |
+   | pre-commit and pre-push hooks, via `make hooks-install` | the workspace `.git` directory, required |
    | `.gitmodules` per repository, for live repo detection | `git` |
 
    It then hands `$HOME` back to the container user and runs
@@ -356,6 +364,20 @@ PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.c
 ```
 
 `make hooks-uninstall` removes both hooks.
+
+On the remote engine the workspace is cloned into a volume, so the container
+has its own `.git` directory, one `make hooks-install` on the host never
+touches. Without a second install, a commit made from a container terminal
+-- where most work in this repository happens -- would run no secret scan at
+all, the unguarded path becoming the common one instead of the exception.
+postCreate closes that gap: after the workspace and its `.git` directory are
+in place, it runs the identical `make hooks-install` the host uses, so the
+container renders the same hook content from the same
+`devcontainer_config.githooks` module rather than a second copy. A failed
+install aborts postCreate rather than continuing with no hooks in place: a
+container that reached the prompt with no guard would run `git commit` with
+no secret scan, at the moment a developer is least likely to be reading the
+setup log.
 
 ## Creating the container (remote)
 

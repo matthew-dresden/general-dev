@@ -452,6 +452,23 @@ configure_git() {
   log_section_done "Git configuration"
 }
 
+install_git_hooks() {
+  [ -d "${WORK_DIR}/.git" ] || exit_with_error "$(printf '%s\n' \
+    "no .git directory at ${WORK_DIR}, so hooks cannot be installed." \
+    "confirm the workspace was cloned into place before postCreate runs, then retry.")"
+
+  log_section "Git hooks" "pre-commit and pre-push, via 'make hooks-install'"
+  (cd "${WORK_DIR}" && make hooks-install) || exit_with_error "$(printf '%s\n' \
+    "'make hooks-install' failed in ${WORK_DIR}." \
+    "rerun 'make hooks-install' from ${WORK_DIR} once the failure above is resolved.")"
+  # This script runs as root (postcreate-wrapper.sh's 'sudo -E ... bash'), so the
+  # hooks 'make hooks-install' just wrote land root-owned inside a workspace that
+  # belongs to CONTAINER_USER. Every other root-side workspace writer in this file
+  # restores ownership the same way (declare_unclaimed_path, configure_repo_detection).
+  chown -R "${CONTAINER_USER}:${CONTAINER_USER}" "${WORK_DIR}/.git/hooks"
+  log_section_done "Git hooks"
+}
+
 declare_unclaimed_path() {
   local file="$1/.gitmodules" relative_path="$2"
   git config -f "${file}" "submodule.${relative_path}.path" "${relative_path}"
@@ -557,6 +574,7 @@ main() {
   configure_aws_profiles
   validate_proxy
   configure_git
+  install_git_hooks
   configure_repo_detection
   fix_ownership
   report_warnings

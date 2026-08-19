@@ -22,4 +22,34 @@ jobs:
           enable-cache: true
 
       - name: make lint
+        shell: bash
         run: make lint
+
+  # Independent of lint (no `needs: lint`): the two jobs run in parallel so a
+  # test failure surfaces without waiting on lint, and vice versa.
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # A red step here means a broken test: run `make test` locally to
+      # reproduce.
+      - name: make test
+        shell: bash
+        run: make test
+
+      # A red step here means the suite passes but coverage of
+      # devcontainer_config fell under the 90% gate enforced by this step's
+      # own --cov-fail-under=90 flag (which overrides pyproject.toml
+      # [tool.coverage.report] fail_under if the two ever diverge): run the
+      # same command locally with --cov-report=term-missing to find the
+      # uncovered lines.
+      - name: coverage gate
+        shell: bash
+        run: uv run --group dev pytest --cov=.claude/plugins/devcontainer/scripts/devcontainer_config --cov-fail-under=90

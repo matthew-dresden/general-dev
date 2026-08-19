@@ -9,6 +9,10 @@ SHELL_SH := $(RD_DIR)/shell.sh
 SECRETS_SH := $(RD_DIR)/push-secrets.sh
 PROXY_SH := .devcontainer/tinyproxy-daemon.sh
 KEYBINDINGS_PY := .devcontainer/vscode-keybindings-install.py
+# Where devcontainer_config lives (spec Section 4.5). Named once here so no
+# target hardcodes this path inline; PYTHONPATH is set to it, not the
+# repository root, because the package is not importable from there.
+DEVCONTAINER_SCRIPTS_DIR := .claude/plugins/devcontainer/scripts
 
 PROXY_ENV = set -a; . $(CONFIG); set +a;
 
@@ -33,7 +37,7 @@ PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer
 
 .DEFAULT_GOAL := help
 .PHONY: help connect disconnect status shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
-        lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-spell spell-fix format hooks-install hooks-uninstall hooks-run \
+        lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test
 
@@ -76,7 +80,8 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-restart"    "local"  "Stop then start, picking up changed settings."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-stop"       "local"  "Stop it. Settings come from $(CONFIG); set HOST_PROXY=true in shell.env to make the container use it."
 	@printf '\n\033[1mQUALITY\033[0m\n'
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint"             "host"   "Private files untracked, no nested repos, JSON parses, shellcheck, markdown, US English. Non-zero on any finding."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint"             "host"   "Private files untracked, no nested repos, JSON parses, shellcheck, markdown, US English, staged secrets. Non-zero on any finding."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint-secrets"     "host"   "Scan staged content for secrets. Exit 1 on any finding; there is no ignore list."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make format"           "host"   "Auto-fix what the markdown tooling can fix, then report what is left."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint-spell"       "host"   "US English spelling over this repo's markdown. SPELL_FILES overrides the set."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make spell-fix"        "host"   "Auto-fix spelling, British-to-American included, in the same set. Rewrites the files."
@@ -214,7 +219,7 @@ proxy-restart:
 proxy-status:
 	@$(PROXY_ENV) $(PROXY_SH) status
 
-lint: lint-private lint-nested lint-json lint-sh lint-dispatch lint-md lint-spell
+lint: lint-private lint-nested lint-json lint-sh lint-dispatch lint-md lint-spell lint-secrets
 	@printf '\033[0;32m[DONE]\033[0m all checks passed\n'
 
 # The single entry point external automation calls to decide whether this
@@ -274,6 +279,11 @@ lint-private:
 		fi; \
 	done
 	@printf '  none tracked\n'
+
+# Staged content only (spec Section 4.6); the pushed-range half is
+# E2-F1-S2-T1. Exit 1 on any finding; there is no ignore list.
+lint-secrets:
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli lint-secrets
 
 format:
 	@printf '\033[0;36m[FORMAT]\033[0m markdown (%s files)\n' "$(words $(MD_FILES))"

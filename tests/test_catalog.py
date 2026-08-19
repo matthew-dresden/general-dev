@@ -863,3 +863,502 @@ def test_end_to_end_write_list_read_delete_then_not_found() -> None:
     )
     with pytest.raises(catalog.SecretNotFoundError):
         client.read("shared", "NOTION_TOKEN")
+
+
+# ---------------------------------------------------------------------------
+# RED, malformed top-level responses (carry-forward from E3-F1-S1-T1 review)
+# ---------------------------------------------------------------------------
+
+
+def test_read_raises_catalog_error_for_response_missing_parameter_value() -> None:
+    """code_review, E3-F1-S1-T1: a malformed response must not escape as a bare KeyError."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(_ok({"Parameter": {"Name": "/devcontainer/shared/secrets/NOTION_TOKEN"}}))
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.CatalogError) as excinfo:
+        client.read("shared", "NOTION_TOKEN")
+
+    assert not isinstance(excinfo.value, KeyError)
+    assert "/devcontainer/shared/secrets/NOTION_TOKEN" in str(excinfo.value)
+
+
+def test_read_raises_catalog_error_for_non_json_response() -> None:
+    """code_review, E3-F1-S1-T1: a non-JSON response must not escape as a bare JSONDecodeError."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr=""))
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.CatalogError) as excinfo:
+        client.read("shared", "NOTION_TOKEN")
+
+    assert not isinstance(excinfo.value, json.JSONDecodeError)
+
+
+def test_read_raises_catalog_error_for_response_that_is_valid_json_but_not_an_object() -> None:
+    """A response that parses (a JSON array, here) but is not an object is still malformed."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(_ok([]))
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.CatalogError):
+        client.read("shared", "NOTION_TOKEN")
+
+
+def test_list_secrets_raises_catalog_error_for_response_missing_parameters_field() -> None:
+    """code_review, E3-F1-S1-T1: same guard on the listing response envelope."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(_ok({"NotParameters": []}))
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.CatalogError) as excinfo:
+        client.list_secrets("shared")
+
+    assert not isinstance(excinfo.value, KeyError)
+    assert "/devcontainer/shared/secrets" in str(excinfo.value)
+
+
+def test_list_secrets_raises_catalog_error_for_non_json_response() -> None:
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr=""))
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.CatalogError) as excinfo:
+        client.list_secrets("shared")
+
+    assert not isinstance(excinfo.value, json.JSONDecodeError)
+
+
+def test_list_secrets_raises_catalog_error_for_non_string_next_token() -> None:
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(
+        _ok(
+            {
+                "Parameters": [
+                    {
+                        "Name": "/devcontainer/shared/secrets/NOTION_TOKEN",
+                        "LastModifiedDate": 1700000000.0,
+                        "Description": json.dumps({"exported": True}),
+                    }
+                ],
+                "NextToken": 12345,
+            }
+        )
+    )
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.CatalogError) as excinfo:
+        client.list_secrets("shared")
+
+    assert "NextToken" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# RED, the scope set (Approach step 1)
+# ---------------------------------------------------------------------------
+
+
+def _seeded_instance() -> str:
+    """A generated instance name, unique per call, valid against `_SCOPE_PATTERN`."""
+    return f"instance-{uuid.uuid4().hex}"
+
+
+@pytest.mark.parametrize(
+    ("instance", "expected"),
+    [
+        ("sandbox", ("sandbox", "shared")),
+        (None, ("shared",)),
+        ("shared", ("shared",)),
+    ],
+    ids=["with-instance", "no-instance", "instance-named-shared"],
+)
+def test_scope_set_is_instance_first_then_shared(
+    instance: str | None, expected: tuple[str, ...]
+) -> None:
+    catalog = _import_catalog()
+    assert catalog.scope_set(instance) == expected
+    assert catalog.SHARED_SCOPE == "shared"
+
+
+@pytest.mark.parametrize(
+    "instance", ["", "with/slash", "with space"], ids=["empty", "path-separator", "space"]
+)
+def test_scope_set_rejects_invalid_instance(instance: str) -> None:
+    catalog = _import_catalog()
+    with pytest.raises(catalog.InvalidScopeError):
+        catalog.scope_set(instance)
+
+
+@pytest.mark.parametrize("scope", ["", "a/b"], ids=["empty", "path-separator"])
+def test_parameter_path_rejects_invalid_scope(scope: str) -> None:
+    catalog = _import_catalog()
+    with pytest.raises(catalog.InvalidScopeError) as excinfo:
+        catalog.parameter_path(scope, "NOTION_TOKEN")
+    assert repr(scope) in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# RED, resolve (Approach step 2)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_returns_value_and_answering_scope_from_shared_only() -> None:
+    """AC-FUNC-003: a name present only in the shared scope resolves with scope 'shared'."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    value = f"{_seeded_value()}\n"
+    runner.queue(
+        _err("An error occurred (ParameterNotFound) when calling the GetParameter operation:")
+    )
+    runner.queue(_ok({"Parameter": {"Value": value}}))
+    client = catalog.CatalogClient(runner)
+
+    resolved = catalog.resolve(client, "sandbox", "NOTION_TOKEN")
+
+    assert resolved.value == value
+    assert resolved.scope == "shared"
+    assert len(runner.calls) == 2
+
+
+def test_resolve_stops_at_instance_scope_without_querying_shared() -> None:
+    """AC-FUNC-004 / AC-TEST-002: an instance hit never requests the shared parameter path."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    value = f"{_seeded_value()}\n"
+    runner.queue(_ok({"Parameter": {"Value": value}}))
+    client = catalog.CatalogClient(runner)
+
+    resolved = catalog.resolve(client, "sandbox", "JENKINS_API_TOKEN")
+
+    assert resolved.value == value
+    assert resolved.scope == "sandbox"
+    assert len(runner.calls) == 1
+    (argv, _stdin) = runner.calls[0]
+    assert argv[argv.index("--name") + 1] == "/devcontainer/sandbox/secrets/JENKINS_API_TOKEN"
+    paths_requested = [call_argv[call_argv.index("--name") + 1] for call_argv, _ in runner.calls]
+    assert "/devcontainer/shared/secrets/JENKINS_API_TOKEN" not in paths_requested
+
+
+def test_resolve_raises_not_found_naming_both_scopes_in_order() -> None:
+    """AC-FUNC-005 / AC-TEST-003: the message names both scopes searched, in search order."""
+    catalog = _import_catalog()
+    instance = _seeded_instance()
+    runner = _FakeRunner()
+    runner.queue(
+        _err("An error occurred (ParameterNotFound) when calling the GetParameter operation:")
+    )
+    runner.queue(
+        _err("An error occurred (ParameterNotFound) when calling the GetParameter operation:")
+    )
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.SecretNotFoundError) as excinfo:
+        catalog.resolve(client, instance, "NOTION_TOKEN")
+
+    message = str(excinfo.value)
+    assert instance in message
+    assert catalog.SHARED_SCOPE in message
+    assert message.index(instance) < message.index(catalog.SHARED_SCOPE)
+    assert "devsecret list" in message
+
+
+def test_resolve_with_no_instance_searches_shared_scope_only() -> None:
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(
+        _err("An error occurred (ParameterNotFound) when calling the GetParameter operation:")
+    )
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.SecretNotFoundError) as excinfo:
+        catalog.resolve(client, None, "NOTION_TOKEN")
+
+    assert len(runner.calls) == 1
+    assert catalog.SHARED_SCOPE in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# RED, authorization on resolve (Approach step 4)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_authorization_denied_on_instance_stops_before_shared_queried() -> None:
+    """AC-FUNC-008 / AC-TEST-005: a denial on the instance prefix surfaces, not a partial result.
+
+    A `SecretNotFoundError` from one scope means "keep searching"; an
+    `AccessDeniedException` does not. Proven by mutation: widening
+    `resolve`'s `except SecretNotFoundError:` to `except CatalogError:`
+    would swallow this denial and fall through to the shared answer queued
+    behind it, so this test must fail against that mutation.
+    """
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    value = f"{_seeded_value()}\n"
+    runner.queue(
+        _err(
+            "An error occurred (AccessDeniedException) when calling the "
+            "GetParameter operation: User is not authorized"
+        )
+    )
+    runner.queue(_ok({"Parameter": {"Value": value}}))
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.CatalogUnauthorizedError) as excinfo:
+        catalog.resolve(client, "sandbox", "NOTION_TOKEN")
+
+    assert "/devcontainer/sandbox/secrets/NOTION_TOKEN" in str(excinfo.value)
+    assert len(runner.calls) == 1
+
+
+def test_resolve_authorization_denied_on_shared_after_instance_not_found() -> None:
+    """AC-FUNC-008 / AC-TEST-005, the mirror direction: shared denied after instance not-found.
+
+    The instance scope answering `ParameterNotFound` means "keep
+    searching", so the shared prefix is queried next; that prefix's
+    `AccessDeniedException` must surface as `CatalogUnauthorizedError`, not
+    be reported as `SecretNotFoundError`, so a denial is never mistaken for
+    "the name does not exist anywhere".
+    """
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(
+        _err("An error occurred (ParameterNotFound) when calling the GetParameter operation:")
+    )
+    runner.queue(
+        _err(
+            "An error occurred (AccessDeniedException) when calling the "
+            "GetParameter operation: User is not authorized"
+        )
+    )
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.CatalogUnauthorizedError) as excinfo:
+        catalog.resolve(client, "sandbox", "NOTION_TOKEN")
+
+    assert "/devcontainer/shared/secrets/NOTION_TOKEN" in str(excinfo.value)
+    assert len(runner.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# RED, listing (Approach step 3)
+# ---------------------------------------------------------------------------
+
+
+def _describe_response(
+    entries: list[tuple[str, str, float, bool]],
+) -> subprocess.CompletedProcess[str]:
+    """Build a `describe-parameters` payload from `(name, scope, last_modified, exported)` rows."""
+    return _ok(
+        {
+            "Parameters": [
+                {
+                    "Name": f"/devcontainer/{scope}/secrets/{name}",
+                    "LastModifiedDate": last_modified,
+                    "Description": json.dumps({"exported": exported}),
+                }
+                for (name, scope, last_modified, exported) in entries
+            ]
+        }
+    )
+
+
+def test_list_resolved_returns_one_record_per_stored_parameter_with_shadow_marking() -> None:
+    """AC-FUNC-006: both tiers' records are returned; the shared one is marked shadowed."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(
+        _describe_response(
+            [
+                ("JENKINS_API_TOKEN", "sandbox", 1700000000.0, False),
+                ("NOTION_TOKEN", "sandbox", 1700000100.0, True),
+            ]
+        )
+    )
+    runner.queue(
+        _describe_response(
+            [
+                ("ANTHROPIC_API_KEY", "shared", 1700000200.0, True),
+                ("NOTION_TOKEN", "shared", 1700000300.0, True),
+            ]
+        )
+    )
+    client = catalog.CatalogClient(runner)
+
+    records = catalog.list_resolved(client, "sandbox")
+
+    assert len(records) == 4
+    by_scope_and_name = {(r.scope, r.name): r for r in records}
+    assert by_scope_and_name[("sandbox", "JENKINS_API_TOKEN")].in_effect is True
+    assert by_scope_and_name[("sandbox", "NOTION_TOKEN")].in_effect is True
+    assert by_scope_and_name[("shared", "ANTHROPIC_API_KEY")].in_effect is True
+    assert by_scope_and_name[("shared", "NOTION_TOKEN")].in_effect is False
+
+
+def test_list_resolved_never_requests_decryption_or_exposes_a_value() -> None:
+    """AC-FUNC-007 / AC-TEST-004: no call on the listing path decrypts anything."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(_describe_response([("JENKINS_API_TOKEN", "sandbox", 1700000000.0, False)]))
+    runner.queue(_describe_response([("ANTHROPIC_API_KEY", "shared", 1700000100.0, True)]))
+    client = catalog.CatalogClient(runner)
+
+    records = catalog.list_resolved(client, "sandbox")
+
+    assert len(records) == 2
+    for record in records:
+        assert not hasattr(record, "value")
+    for argv, stdin in runner.calls:
+        assert "--with-decryption" not in argv
+        assert stdin is None
+
+
+def test_list_resolved_authorization_denied_on_shared_after_instance_answered() -> None:
+    """AC-FUNC-008 / AC-TEST-005: a denial on the second scope surfaces, not a partial result."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(_describe_response([("JENKINS_API_TOKEN", "sandbox", 1700000000.0, False)]))
+    runner.queue(
+        _err(
+            "An error occurred (AccessDeniedException) when calling the "
+            "DescribeParameters operation: User is not authorized"
+        )
+    )
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.CatalogUnauthorizedError) as excinfo:
+        catalog.list_resolved(client, "sandbox")
+
+    assert "/devcontainer/shared/secrets" in str(excinfo.value)
+
+
+def test_list_resolved_authorization_denied_on_instance_stops_before_shared_queried() -> None:
+    """AC-FUNC-008 / AC-TEST-005, the mirror direction: instance denied, shared never queried."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(
+        _err(
+            "An error occurred (AccessDeniedException) when calling the "
+            "DescribeParameters operation: User is not authorized"
+        )
+    )
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.CatalogUnauthorizedError) as excinfo:
+        catalog.list_resolved(client, "sandbox")
+
+    assert "/devcontainer/sandbox/secrets" in str(excinfo.value)
+    assert len(runner.calls) == 1
+
+
+def test_list_resolved_rejects_unknown_scope_before_any_subprocess() -> None:
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    client = catalog.CatalogClient(runner)
+
+    with pytest.raises(catalog.UnknownScopeError) as excinfo:
+        catalog.list_resolved(client, "sandbox", scope="prod")
+
+    assert "prod" in str(excinfo.value)
+    assert "sandbox" in str(excinfo.value)
+    assert "shared" in str(excinfo.value)
+    assert runner.calls == []
+
+
+def test_list_resolved_narrows_to_one_scope_when_given() -> None:
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(_describe_response([("ANTHROPIC_API_KEY", "shared", 1700000000.0, True)]))
+    client = catalog.CatalogClient(runner)
+
+    records = catalog.list_resolved(client, "sandbox", scope="shared")
+
+    assert [r.name for r in records] == ["ANTHROPIC_API_KEY"]
+    assert len(runner.calls) == 1
+
+
+def test_list_resolved_narrowed_scope_never_shadows_against_an_unqueried_tier() -> None:
+    """Pins `SecretRecord.in_effect`'s documented narrowed-scope contract.
+
+    A narrowed, single-scope `list_resolved` call never queries any other
+    tier, so `in_effect` is computed only across the scope this call
+    actually queried -- even when a name also exists in a scope earlier in
+    the full resolution order that this call never queried. This is the
+    documented behavior (see `SecretRecord.in_effect`'s docstring); a
+    caller that needs shadowing across the whole resolution set must call
+    `list_resolved` without `scope`, which
+    `test_list_resolved_returns_one_record_per_stored_parameter_with_shadow_marking`
+    pins separately.
+    """
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(_describe_response([("NOTION_TOKEN", "shared", 1700000000.0, True)]))
+    client = catalog.CatalogClient(runner)
+
+    records = catalog.list_resolved(client, "sandbox", scope="shared")
+
+    assert len(runner.calls) == 1
+    assert [(r.scope, r.name, r.in_effect) for r in records] == [("shared", "NOTION_TOKEN", True)]
+
+
+# ---------------------------------------------------------------------------
+# AC-CYCLE-001: end to end with the injected runner, instance-first then shared
+# ---------------------------------------------------------------------------
+
+
+def test_end_to_end_resolve_and_list_across_instance_and_shared_scopes() -> None:
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    client = catalog.CatalogClient(runner)
+    anthropic_value = f"{_seeded_value()}\n"
+    jenkins_value = f"{_seeded_value()}\n"
+    notion_value = f"{_seeded_value()}\n"
+
+    # Seed: shared holds ANTHROPIC_API_KEY; sandbox holds JENKINS_API_TOKEN;
+    # both hold NOTION_TOKEN.
+    runner.queue(
+        _err("An error occurred (ParameterNotFound) when calling the GetParameter operation:")
+    )
+    runner.queue(_ok({"Parameter": {"Value": anthropic_value}}))
+    resolved_anthropic = catalog.resolve(client, "sandbox", "ANTHROPIC_API_KEY")
+    assert resolved_anthropic.value == anthropic_value
+    assert resolved_anthropic.scope == "shared"
+
+    runner.queue(_ok({"Parameter": {"Value": jenkins_value}}))
+    resolved_jenkins = catalog.resolve(client, "sandbox", "JENKINS_API_TOKEN")
+    assert resolved_jenkins.value == jenkins_value
+    assert resolved_jenkins.scope == "sandbox"
+
+    runner.queue(_ok({"Parameter": {"Value": notion_value}}))
+    resolved_notion = catalog.resolve(client, "sandbox", "NOTION_TOKEN")
+    assert resolved_notion.value == notion_value
+    assert resolved_notion.scope == "sandbox"
+
+    runner.queue(
+        _describe_response(
+            [
+                ("JENKINS_API_TOKEN", "sandbox", 1700000000.0, False),
+                ("NOTION_TOKEN", "sandbox", 1700000100.0, True),
+            ]
+        )
+    )
+    runner.queue(
+        _describe_response(
+            [
+                ("ANTHROPIC_API_KEY", "shared", 1700000200.0, True),
+                ("NOTION_TOKEN", "shared", 1700000300.0, True),
+            ]
+        )
+    )
+    records = catalog.list_resolved(client, "sandbox")
+
+    assert len(records) == 4
+    shadowed = [r for r in records if not r.in_effect]
+    assert len(shadowed) == 1
+    assert shadowed[0].name == "NOTION_TOKEN"
+    assert shadowed[0].scope == "shared"

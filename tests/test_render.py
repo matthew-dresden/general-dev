@@ -36,18 +36,21 @@ rather than growing the shared builders' parameter surface for one caller.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import os
 import re
 import stat
 import subprocess
-import uuid
 from pathlib import Path
 from types import ModuleType
 
+import conftest
 import pytest
 from conftest import (
+    _example_root,
+    _generated_dir,
     _synthetic_account_id,
     _valid_aws_profile,
     _valid_local_payload,
@@ -72,32 +75,6 @@ def _import_render() -> ModuleType:
     See the module docstring for why this is not a module-level import.
     """
     return importlib.import_module("devcontainer_config.render")
-
-
-def _generated_dir(parent: Path, prefix: str) -> Path:
-    """A `parent` subdirectory whose name is generated, never hard-coded."""
-    generated = parent / f"{prefix}-{uuid.uuid4().hex}"
-    generated.mkdir(parents=True)
-    return generated
-
-
-def _example_root(tmp_path: Path) -> Path:
-    """A tmp_path checkout root holding copies of the three real `.example` files.
-
-    Copied byte-for-byte from the real checkout (resolved via
-    `repo.find_root`) rather than reconstructed as literal strings, so every
-    assertion in this file runs against the examples this repository
-    actually ships (AC-TEST-001).
-    """
-    root = _generated_dir(tmp_path, "checkout")
-    real_root = repo.find_root(Path(__file__).resolve().parent)
-    for relative in repo.PRIVATE_FILES:
-        example_relative = repo.example_for(relative)
-        source = real_root / example_relative
-        destination = root / example_relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(source.read_bytes())
-    return root
 
 
 def _export_value(text: str, variable: str) -> str:
@@ -730,3 +707,34 @@ def test_end_to_end_remote_render_write_source_and_parse(tmp_path: Path) -> None
 
     aws_profile_map_document = json.loads((root / repo.AWS_PROFILE_MAP).read_text(encoding="utf-8"))
     assert not _PLACEHOLDER_PATTERN.search(json.dumps(aws_profile_map_document))
+
+
+# ---------------------------------------------------------------------------
+# AC-DRY-001 / AC-DRY-002: _generated_dir and _example_root live in conftest.
+# ---------------------------------------------------------------------------
+
+
+def test_shared_fixture_helpers_are_defined_once() -> None:
+    """tests/conftest.py owns _generated_dir and _example_root, this file does not.
+
+    tests/test_verify.py needs the identical byte-for-byte fixture builders
+    this file uses; carrying independent copies in each file risks silent
+    divergence on the next change to repo.PRIVATE_FILES or repo.example_for.
+    This pins that conftest exposes both helpers and that this file's own
+    parsed source defines neither of them locally, so a re-introduced
+    duplicate fails this test instead of drifting unnoticed.
+    """
+    assert hasattr(conftest, "_generated_dir"), "conftest must define _generated_dir"
+    assert hasattr(conftest, "_example_root"), "conftest must define _example_root"
+
+    source = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    local_helper_names = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name in {"_generated_dir", "_example_root"}
+    }
+    assert local_helper_names == set(), (
+        f"tests/test_render.py must not locally define {local_helper_names}; "
+        "import both from conftest instead"
+    )

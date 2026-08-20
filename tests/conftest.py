@@ -5,12 +5,22 @@ directly. Before this extraction it carried its own copy of
 `_valid_aws_profile`, `_valid_local_payload` and `_valid_remote_payload`;
 those builders now live here so any future consumer under `tests/` can
 share them instead of re-declaring the same payload shape.
+
+`_generated_dir` and `_example_root` are shared fixture-tree builders for
+`tests/test_render.py` and `tests/test_verify.py`. Both files need an
+identical, byte-for-byte-copied checkout of the three real `.example` files
+this repository ships; before this extraction each file carried its own
+copy of both functions, which risked silently diverging on the next change
+to `repo.PRIVATE_FILES` or `repo.example_for`.
 """
 
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from typing import Any
+
+from devcontainer_config import repo
 
 
 def _synthetic_account_id() -> str:
@@ -110,3 +120,29 @@ def _valid_remote_payload() -> dict[str, Any]:
     payload["remote_aws_profile"] = "default"
     payload["remote_ssh_key_path"] = "/home/dev/.ssh/example-key.pem"
     return payload
+
+
+def _generated_dir(parent: Path, prefix: str) -> Path:
+    """A `parent` subdirectory whose name is generated, never hard-coded."""
+    generated = parent / f"{prefix}-{uuid.uuid4().hex}"
+    generated.mkdir(parents=True)
+    return generated
+
+
+def _example_root(tmp_path: Path) -> Path:
+    """A tmp_path checkout root holding copies of the three real `.example` files.
+
+    Copied byte-for-byte from the real checkout (resolved via
+    `repo.find_root`) rather than reconstructed as literal strings, so every
+    assertion in this file runs against the examples this repository
+    actually ships (AC-TEST-001).
+    """
+    root = _generated_dir(tmp_path, "checkout")
+    real_root = repo.find_root(Path(__file__).resolve().parent)
+    for relative in repo.PRIVATE_FILES:
+        example_relative = repo.example_for(relative)
+        source = real_root / example_relative
+        destination = root / example_relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+    return root

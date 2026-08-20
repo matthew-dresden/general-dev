@@ -48,9 +48,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
-from collections.abc import Callable, Sequence
+import tempfile
+import uuid
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from pathlib import Path
 from re import Pattern
 from typing import NoReturn
 
@@ -221,6 +226,48 @@ class CatalogUnclassifiedError(CatalogError):
     store's raw stderr: a `put-parameter` failure's stderr can contain the
     submitted document, and this module never echoes store output that
     might carry a secret value (spec Section 7.1, 7.4).
+    """
+
+
+class SecretCacheExposureError(CatalogError):
+    """`run`'s transient directory would expose a secret outside the process.
+
+    Raised by `secret_cache_dir` before the directory is created and before
+    any secret is fetched (spec Section 7.3), for any of three conditions:
+    the resolved directory lies inside the repository root or the
+    container's persistent workspace layer (spec Section 5.4: "never the
+    workspace and never the container's persistent layer"); a mount table
+    is available and names an entry covering the resolved directory, but
+    that entry's filesystem is not RAM-backed; or a mount table is
+    available but names no entry covering the resolved directory at all,
+    which this module refuses rather than treats as verified, since
+    "cannot classify" must not be read as "allow". No condition falls back
+    to a different location; the message names the resolved path and the
+    `SECRET_CACHE_DIR` variable the operator overrides to fix it.
+    """
+
+
+class SecretCacheUnavailableError(CatalogError):
+    """The transient directory contract could not be honored (spec Section 7.3).
+
+    Distinct from `SecretCacheExposureError`, which refuses a resolved path
+    this module judges unsafe by policy before any filesystem operation is
+    attempted: this class instead reports that `secret_cache_dir` could not
+    establish or trust a supporting condition the directory's contract
+    requires. Four sites raise it: `secret_cache_dir`'s own `mkdir` that
+    creates the per-invocation directory; the `rmtree` that removes it on
+    the way out; the writability probe's cleanup `rmdir` run while
+    selecting a default RAM-backed mount point (`_mount_point_is_writable`),
+    which can fail before any per-invocation directory exists; and an
+    unparsable `/proc/mounts` line (`default_mount_table_reader`), which
+    can fail before `secret_cache_dir` runs at all. The first two report
+    that the filesystem itself refused a requested operation (for example
+    `SECRET_CACHE_DIR` is overridden to a path this process cannot write
+    to); the latter two report that this module cannot trust the mount
+    table it depends on to enforce the RAM-backed check safely. The
+    message names the relevant path and the `SECRET_CACHE_DIR` variable
+    the operator overrides to fix it, the same shape `CatalogError`'s other
+    subclasses use.
     """
 
 
@@ -903,3 +950,416 @@ def list_resolved(
             seen_names.add(record.name)
             records.append(replace(record, in_effect=in_effect))
     return tuple(records)
+
+
+# ---------------------------------------------------------------------------
+# The transient secret-cache directory `run` materializes (spec Section 5.4,
+# 7.3; E3-F2-S1-T2): never the workspace, never the container's persistent
+# layer, and it does not survive the process. `SECRET_CACHE_DIR` and its
+# default are declared once, here, so no call site anywhere in this package
+# hard-codes either (spec Section 7.3, AC-FUNC-011).
+# ---------------------------------------------------------------------------
+
+SECRET_CACHE_DIR_ENV_VAR = "SECRET_CACHE_DIR"
+
+# Where a real mount table lives on the one platform this module knows how
+# to read one from. A test overrides this attribute to point at a fixture
+# file instead of monkeypatching the whole function, per AC-TEST-002's
+# injected-reader requirement.
+_PROC_MOUNTS_PATH = Path("/proc/mounts")
+
+# The filesystem types this module accepts as RAM-backed (spec Section 5.4):
+# tmpfs is the common Linux in-memory filesystem; ramfs is its
+# non-size-bounded predecessor. Neither ever writes through to a persistent
+# block device.
+_RAM_BACKED_FILESYSTEM_TYPES = frozenset({"tmpfs", "ramfs"})
+
+_CACHE_DIR_PREFIX = "devsecret-run-"
+_CACHE_DIR_MODE = 0o700
+
+
+@dataclass(frozen=True)
+class MountEntry:
+    """One row of a mount table: where it is mounted, and what filesystem backs it.
+
+    `secret_cache_dir` matches a resolved path against the entry whose
+    `mount_point` is its longest matching ancestor path (`_mount_entry_for`,
+    via `Path.is_relative_to`), the same rule a real mount table uses to
+    decide which filesystem actually backs a given path.
+    """
+
+    mount_point: str
+    filesystem_type: str
+
+
+# Injected into `secret_cache_dir` so a test can simulate a RAM-backed mount,
+# a non-RAM-backed mount, or a platform that exposes no mount table at all
+# (`None`), with no network and no privileged operation (E3-F2-S1-T2
+# AC-TEST-002).
+MountTableReader = Callable[[], "tuple[MountEntry, ...] | None"]
+
+
+def _unparsable_mount_table_line_message(line: str) -> str:
+    return (
+        f"ERROR: {_PROC_MOUNTS_PATH} contains a line this module cannot parse\n"
+        f"Line: {line!r}\n"
+        "A mount-table row needs at least a device, a mount point and a "
+        "filesystem type field; a row this module cannot classify must not "
+        "be silently skipped, since the RAM-backed check that protects a "
+        "secret's transient directory (spec Section 5.4) depends on every "
+        "row being read.\n"
+        f"Set {SECRET_CACHE_DIR_ENV_VAR} to a path outside this platform's "
+        "mount-table check, or correct the malformed row, then retry."
+    )
+
+
+def default_mount_table_reader() -> tuple[MountEntry, ...] | None:
+    """The production MountTableReader: parses `/proc/mounts` where it exists.
+
+    Returns `None` on a platform with no `/proc/mounts` (for example macOS),
+    which `secret_cache_dir` treats as "no mount table available" and skips
+    the RAM-backed check entirely, per spec Section 5.4's "where a mount
+    table is available" qualifier.
+
+    Raises `SecretCacheUnavailableError` rather than skipping a line with
+    fewer than the three required fields: a row this parser cannot
+    classify is a table this module cannot trust to protect the
+    RAM-backed check, so it must fail closed instead of silently reading a
+    partial table.
+    """
+    if not _PROC_MOUNTS_PATH.is_file():
+        return None
+    entries: list[MountEntry] = []
+    for line in _PROC_MOUNTS_PATH.read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if len(fields) < 3:
+            raise SecretCacheUnavailableError(_unparsable_mount_table_line_message(line))
+        entries.append(MountEntry(mount_point=fields[1], filesystem_type=fields[2]))
+    return tuple(entries)
+
+
+def _mount_point_is_writable(mount_point: str) -> bool:
+    """True if this process can create and remove a directory under `mount_point`.
+
+    A real permission probe, not a mode-bit inspection: ownership and
+    mount options vary by platform and by container runtime, so the only
+    reliable signal that `secret_cache_dir`'s later `mkdir` will succeed
+    under a candidate mount point is attempting the same kind of operation
+    here and catching the `OSError` family `mkdir` itself would raise. A
+    representative Linux container mounts a small, root-owned `tmpfs` at
+    `/dev` (`mode=755`, a size-bounded device filesystem) ahead of the
+    world-writable `/dev/shm` in kernel mount order; picking the first
+    `tmpfs`/`ramfs` row regardless of writability would select `/dev`, and
+    a non-root container user's later `mkdir` there raises
+    `PermissionError` on every invocation (spec Section 7.3).
+
+    Raises `SecretCacheUnavailableError` rather than discarding an
+    `OSError` from the cleanup `rmdir`: a probe that can create a
+    directory but not remove it again leaves a `devsecret-run-probe-*`
+    directory behind on the candidate mount point, and that failure must
+    surface with a named, non-zero outcome rather than disappear. This
+    call runs only while selecting a default mount point (`SECRET_CACHE_DIR`
+    unset), before any per-invocation cache directory exists, so the
+    message names the probe path and the candidate mount point being
+    probed rather than a `SECRET_CACHE_DIR` cache directory.
+    """
+    probe = Path(mount_point) / f"{_CACHE_DIR_PREFIX}probe-{uuid.uuid4().hex}"
+    try:
+        probe.mkdir(mode=_CACHE_DIR_MODE)
+    except OSError:
+        return False
+    try:
+        probe.rmdir()
+    except OSError as exc:
+        raise SecretCacheUnavailableError(
+            _mount_point_probe_cleanup_unavailable_message(probe, mount_point, exc)
+        ) from exc
+    return True
+
+
+def _select_ram_backed_mount_point(
+    mount_table: Sequence[MountEntry],
+    *,
+    repository_root: Path,
+    container_workspace_root: Path,
+) -> str | None:
+    """The first WRITABLE, out-of-boundary RAM-backed mount point `mount_table` reports, or `None`.
+
+    `mount_table` is read in kernel mount order (`default_mount_table_reader`
+    parses `/proc/mounts` top to bottom), so this picks the first row whose
+    `filesystem_type` this module accepts as RAM-backed rather than naming
+    any specific mount point (for example `/dev/shm`) itself: the choice
+    comes entirely FROM the platform's own mount table, per spec Section
+    7.3's "no call site hard-codes a path". Writability is verified with a
+    real probe (`_mount_point_is_writable`) rather than trusted from kernel
+    mount order alone, so a root-owned or read-only RAM-backed row (for
+    example `/dev` or a read-only `/sys/fs/cgroup`) is skipped in favor of
+    the next candidate instead of being selected and failing later.
+
+    A candidate whose `mount_point` itself lies inside `repository_root` or
+    `container_workspace_root` is skipped BEFORE `_mount_point_is_writable`
+    runs its probe: that probe performs a real `mkdir`, and probing a
+    mount point inside the very boundary this module exists to protect
+    would write there ahead of `_refuse_if_inside_boundary`, which only
+    ever sees the final resolved path, not each candidate considered along
+    the way.
+    """
+    boundaries = (repository_root.resolve(), container_workspace_root.resolve())
+    for entry in mount_table:
+        if entry.filesystem_type not in _RAM_BACKED_FILESYSTEM_TYPES:
+            continue
+        candidate = Path(entry.mount_point).resolve()
+        if _matching_boundary(candidate, boundaries) is not None:
+            continue
+        if _mount_point_is_writable(entry.mount_point):
+            return entry.mount_point
+    return None
+
+
+def _resolve_secret_cache_base(
+    mount_table_reader: MountTableReader,
+    *,
+    repository_root: Path,
+    container_workspace_root: Path,
+) -> Path:
+    """`SECRET_CACHE_DIR`, or a RAM-backed default chosen from the mount table (spec Section 7.3).
+
+    With no override, the default is chosen FROM `mount_table_reader`'s
+    table: `_select_ram_backed_mount_point` picks a writable `tmpfs`/`ramfs`
+    row outside `repository_root` and `container_workspace_root`, so the
+    default is actually usable, RAM-backed, and never probed inside the
+    boundary those two roots protect. `tempfile.gettempdir()` alone is not
+    a safe default there -- on a typical container's Linux mount table it
+    names a path on the persistent overlay layer, not a `tmpfs`, which
+    would make `_refuse_if_not_ram_backed` refuse every invocation. Only
+    when no mount table is available at all (`None`, for example macOS),
+    or no candidate row is both RAM-backed and writable outside the
+    boundary, does this fall back to the platform temporary directory;
+    `_refuse_if_not_ram_backed` then either has nothing to check against,
+    or still refuses that fallback when the mount table contradicts it.
+    """
+    configured = os.environ.get(SECRET_CACHE_DIR_ENV_VAR)
+    if configured:
+        return Path(configured)
+    mount_table = mount_table_reader()
+    if mount_table is not None:
+        ram_backed_mount_point = _select_ram_backed_mount_point(
+            mount_table,
+            repository_root=repository_root,
+            container_workspace_root=container_workspace_root,
+        )
+        if ram_backed_mount_point is not None:
+            return Path(ram_backed_mount_point)
+    return Path(tempfile.gettempdir())
+
+
+def process_environment() -> dict[str, str]:
+    """A mutable copy of this process's environment (spec Section 4.3, `run`).
+
+    `run` (`cli._run_devsecret_run`) is this function's only caller: "adds
+    those names and only those names to a copy of the current environment"
+    starts from this copy, not from `os.environ` itself, so nothing `run`
+    does can mutate this process's own environment, and `cli.py` -- which
+    handles no other environment-variable concern -- never has to import
+    `os` on its own account to read it.
+    """
+    return dict(os.environ)
+
+
+def _cache_dir_exposure_message(path: Path, boundary: Path) -> str:
+    return (
+        f"ERROR: {SECRET_CACHE_DIR_ENV_VAR} resolves inside a protected boundary\n"
+        f"Resolved path: {path}\n"
+        f"Protected boundary: {boundary}\n"
+        "A secret materialized here must never reach the workspace or the "
+        "container's persistent layer (spec Section 5.4).\n"
+        f"Set {SECRET_CACHE_DIR_ENV_VAR} to a path outside this boundary, then retry."
+    )
+
+
+def _cache_dir_not_ram_backed_message(path: Path, filesystem_type: str) -> str:
+    return (
+        f"ERROR: {SECRET_CACHE_DIR_ENV_VAR} is not RAM-backed\n"
+        f"Resolved path: {path}\n"
+        f"The filesystem backing it is {filesystem_type!r}, not tmpfs or ramfs.\n"
+        f"Set {SECRET_CACHE_DIR_ENV_VAR} to a RAM-backed path, then retry."
+    )
+
+
+def _cache_dir_no_covering_mount_message(path: Path) -> str:
+    return (
+        f"ERROR: {SECRET_CACHE_DIR_ENV_VAR} matches no entry in the mount table\n"
+        f"Resolved path: {path}\n"
+        "A mount table is available but names no filesystem entry covering "
+        "this path, so whether it is RAM-backed cannot be verified (spec "
+        "Section 5.4); an unclassifiable path is refused, not allowed.\n"
+        f"Set {SECRET_CACHE_DIR_ENV_VAR} to a path the mount table covers, then retry."
+    )
+
+
+def _cache_dir_unavailable_message(path: Path, operation: str, exc: OSError) -> str:
+    reason = exc.strerror if exc.strerror else exc.__class__.__name__
+    return (
+        f"ERROR: {SECRET_CACHE_DIR_ENV_VAR} directory could not be {operation}d\n"
+        f"Resolved path: {path}\n"
+        f"Reason: {reason}\n"
+        f"Set {SECRET_CACHE_DIR_ENV_VAR} to a path this process can write to, then retry."
+    )
+
+
+def _mount_point_probe_cleanup_unavailable_message(
+    probe: Path, mount_point: str, exc: OSError
+) -> str:
+    reason = exc.strerror if exc.strerror else exc.__class__.__name__
+    return (
+        f"ERROR: a writability probe directory could not be removed\n"
+        f"Probe path: {probe}\n"
+        f"Candidate mount point: {mount_point}\n"
+        f"Reason: {reason}\n"
+        f"Set {SECRET_CACHE_DIR_ENV_VAR} to a path outside this mount point, or grant this "
+        "process permission to remove the probe directory, then retry."
+    )
+
+
+def _matching_boundary(resolved: Path, boundaries: Sequence[Path]) -> Path | None:
+    """The first entry of `boundaries` that `resolved` lies inside, or `None`.
+
+    Shared by `_refuse_if_inside_boundary` (which raises on a match against
+    the final resolved cache directory) and
+    `_select_ram_backed_mount_point` (which uses a match to skip a
+    candidate mount point before probing it), so both call sites use the
+    same "is this path inside that boundary" rule (`Path.relative_to`) --
+    a raw string comparison would treat a sibling directory that merely
+    extends a boundary's name as being inside it.
+    """
+    for boundary in boundaries:
+        try:
+            resolved.relative_to(boundary)
+        except ValueError:
+            continue
+        return boundary
+    return None
+
+
+def _refuse_if_inside_boundary(
+    resolved: Path, *, repository_root: Path, container_workspace_root: Path
+) -> None:
+    boundaries = (repository_root.resolve(), container_workspace_root.resolve())
+    boundary = _matching_boundary(resolved, boundaries)
+    if boundary is not None:
+        raise SecretCacheExposureError(_cache_dir_exposure_message(resolved, boundary))
+
+
+def _mount_entry_for(resolved: Path, mount_table: Sequence[MountEntry]) -> MountEntry | None:
+    """The entry whose `mount_point` is `resolved`'s longest matching ancestor.
+
+    Matches by path component (`Path.is_relative_to`), not by raw string
+    prefix: a raw `str.startswith` comparison would treat a sibling
+    directory whose name merely extends a mount point's name (`/tmpfoo`
+    against a `/tmp` row) as being backed by that mount, which defeats the
+    RAM-backed refusal for every such sibling.
+    """
+    candidates = [
+        entry for entry in mount_table if resolved.is_relative_to(Path(entry.mount_point))
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda entry: len(entry.mount_point))
+
+
+def _refuse_if_not_ram_backed(resolved: Path, mount_table_reader: MountTableReader) -> None:
+    """Refuses unless a resolved path is verified RAM-backed by an available mount table.
+
+    "Cannot classify" is not "allow": when a mount table IS available but
+    names no entry covering `resolved` (`_mount_entry_for` returns
+    `None`), this refuses rather than skipping the check, because a
+    control that exists to keep secret material off persistent storage
+    must fail closed on a path it cannot verify, not treat an
+    unclassifiable path the same as a verified one.
+    """
+    mount_table = mount_table_reader()
+    if mount_table is None:
+        return
+    entry = _mount_entry_for(resolved, mount_table)
+    if entry is None:
+        raise SecretCacheExposureError(_cache_dir_no_covering_mount_message(resolved))
+    if entry.filesystem_type in _RAM_BACKED_FILESYSTEM_TYPES:
+        return
+    raise SecretCacheExposureError(
+        _cache_dir_not_ram_backed_message(resolved, entry.filesystem_type)
+    )
+
+
+@contextmanager
+def secret_cache_dir(
+    *,
+    repository_root: Path,
+    container_workspace_root: Path,
+    mount_table_reader: MountTableReader = default_mount_table_reader,
+) -> Iterator[Path]:
+    """A per-invocation directory under `SECRET_CACHE_DIR`, owner-only, gone on exit.
+
+    `run` is this context manager's only caller (spec Section 4.3): it is
+    where a tool that can read only a file, not an environment variable,
+    gets a path (spec Section 5.4). All three refusals below run before
+    the directory is created and before `run` fetches any secret (spec
+    Section 7.3), so a `SecretCacheExposureError` never leaves a
+    half-created directory or a fetched value behind.
+
+    Refuses (`SecretCacheExposureError`, exit 5 in `cli.main_devsecret`)
+    when the resolved directory lies inside `repository_root` or
+    `container_workspace_root` -- spec Section 5.4's "never the workspace
+    and never the container's persistent layer" -- or, where
+    `mount_table_reader` returns an actual mount table rather than `None`,
+    when the filesystem backing the resolved directory is not RAM-backed,
+    or when that mount table names no entry covering the resolved
+    directory at all (fail closed rather than treat "cannot classify" as
+    "verified RAM-backed").
+
+    The directory and everything under it are removed on the way out of
+    this context manager's `with` block, whether that block exits
+    normally, by exception, or because the caller's child process was
+    terminated: the `finally` below runs in every one of those cases (spec
+    Section 5.4: "does not survive the process").
+
+    Raises:
+        SecretCacheExposureError: the resolved directory is inside a
+            protected boundary, is not RAM-backed where a mount table
+            covers it, or is not covered by any entry in an available
+            mount table.
+        SecretCacheUnavailableError: this call's own `mkdir` or `rmtree`
+            against the resolved directory failed with an `OSError` (for
+            example `SECRET_CACHE_DIR` is overridden to a path this
+            process cannot write to); or a supporting step this call
+            depends on before the directory exists failed -- the
+            writability probe's cleanup `rmdir` while selecting a default
+            RAM-backed mount point, or an unparsable `/proc/mounts` line
+            while reading the mount table.
+    """
+    base = _resolve_secret_cache_base(
+        mount_table_reader,
+        repository_root=repository_root,
+        container_workspace_root=container_workspace_root,
+    )
+    resolved = (base / f"{_CACHE_DIR_PREFIX}{uuid.uuid4().hex}").resolve()
+    _refuse_if_inside_boundary(
+        resolved,
+        repository_root=repository_root,
+        container_workspace_root=container_workspace_root,
+    )
+    _refuse_if_not_ram_backed(resolved, mount_table_reader)
+    try:
+        resolved.mkdir(mode=_CACHE_DIR_MODE, parents=True, exist_ok=False)
+    except OSError as exc:
+        raise SecretCacheUnavailableError(
+            _cache_dir_unavailable_message(resolved, "create", exc)
+        ) from exc
+    try:
+        yield resolved
+    finally:
+        try:
+            shutil.rmtree(resolved, ignore_errors=False)
+        except OSError as exc:
+            raise SecretCacheUnavailableError(
+                _cache_dir_unavailable_message(resolved, "remove", exc)
+            ) from exc

@@ -47,10 +47,13 @@ discipline `tests/test_catalog.py` documents for its own case table.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import io
 import json
+import signal
 import subprocess
+import sys
 import tomllib
 import uuid
 from collections.abc import Callable
@@ -820,7 +823,7 @@ def test_devsecret_list_malformed_response_exits_three_via_generic_catalog_error
     """AC-FUNC-011: a bare `catalog.CatalogError` (no named subclass) also exits 3.
 
     `catalog._record_from_entry` raises `CatalogError` directly, not one of
-    the seven named subclasses `_DEVSECRET_EXIT_CODES` lists explicitly, for
+    the nine named subclasses `_DEVSECRET_EXIT_CODES` lists explicitly, for
     a listing entry missing a required field. This exercises
     `_devsecret_exit_code_for`'s trailing fallback row (the only row that
     can ever match a `CatalogError` none of the earlier rows recognizes),
@@ -847,10 +850,10 @@ def test_devsecret_list_malformed_response_exits_three_via_generic_catalog_error
     assert "LastModifiedDate" in err
 
 
-def test_devsecret_help_renders_four_commands_scopes_and_exit_codes(
+def test_devsecret_help_renders_six_commands_scopes_and_exit_codes(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """AC-TEST-005: --help lists get/list/set/rm and renders the scopes and exit-code blocks."""
+    """AC-FUNC-012 / AC-TEST-005: --help lists all six commands and the scopes/exit-code blocks."""
     cli = import_cli()
 
     with pytest.raises(SystemExit) as exc_info:
@@ -863,6 +866,8 @@ def test_devsecret_help_renders_four_commands_scopes_and_exit_codes(
     assert "never prints a value" in normalized
     assert "read the value from stdin. never from an argument" in normalized
     assert "delete after confirmation" in normalized
+    assert "run <cmd> with only those secrets in its environment" in normalized
+    assert "names marked exported, for shell startup" in normalized
     assert "scopes:" in normalized
     assert "every engine and instance" in normalized
     assert "one environment. resolved before shared" in normalized
@@ -1146,3 +1151,784 @@ def test_devsecret_exit_code_matrix(
     exit_code = run_devsecret(monkeypatch, args, client=client, stdin=io.StringIO(stdin_text))
 
     assert exit_code == expected_exit
+
+
+# ---------------------------------------------------------------------------
+# devsecret: run, export-list (spec Section 4.3; E3-F2-S1-T2)
+# ---------------------------------------------------------------------------
+
+# A small Python program, run as the child of `devsecret run` in every test
+# below, that reports what it actually saw: its own environment, its own
+# argv, and whether SECRET_CACHE_DIR named a directory that existed while it
+# ran (it also writes a marker file into that directory, so the cleanup
+# assertion after `run` returns covers "a file was written into it" per the
+# Approach). Written to a report file named by its first argument rather than
+# printed to stdout, so it never collides with -- or gets lost in -- whatever
+# capsys captures from devsecret's own output.
+_ENV_REPORTER_SCRIPT = (
+    "import json, os, sys\n"
+    "report_path = sys.argv[1]\n"
+    "cache_dir = os.environ.get('SECRET_CACHE_DIR')\n"
+    "existed_during_run = bool(cache_dir) and os.path.isdir(cache_dir)\n"
+    "if cache_dir:\n"
+    "    with open(os.path.join(cache_dir, 'token.txt'), 'w', encoding='utf-8') as marker:\n"
+    "        marker.write('written-by-child')\n"
+    "payload = {\n"
+    "    'env': dict(os.environ),\n"
+    "    'argv': sys.argv,\n"
+    "    'cache_dir': cache_dir,\n"
+    "    'existed_during_run': existed_during_run,\n"
+    "}\n"
+    "with open(report_path, 'w', encoding='utf-8') as fh:\n"
+    "    json.dump(payload, fh)\n"
+)
+
+
+def _env_reporter_command(report_path: Path) -> list[str]:
+    return [sys.executable, "-c", _ENV_REPORTER_SCRIPT, str(report_path)]
+
+
+def _read_report(report_path: Path) -> dict[str, object]:
+    data = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise AssertionError(f"reporter wrote a non-object payload: {data!r}")
+    return data
+
+
+def run_devsecret_in_repo(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    args: list[str],
+    *,
+    client: object,
+    stdin: io.StringIO | None = None,
+) -> int:
+    """Like `run_devsecret`, but chdir's into `root` first.
+
+    `run` resolves the repository root via `repo.find_root(Path.cwd())` (the
+    same primitive `hooks-install` and `lint-secrets` already use), so its
+    tests need a real, disposable git repository as cwd rather than whatever
+    directory pytest happened to start in.
+    """
+    monkeypatch.chdir(root)
+    return run_devsecret(monkeypatch, args, client=client, stdin=stdin)
+
+
+@pytest.fixture
+def devsecret_run_repo(tmp_path: Path) -> Path:
+    """A real, disposable git repository `run`'s tests chdir into."""
+    root = generated_root(tmp_path)
+    init_repo(root)
+    return root
+
+
+@pytest.fixture
+def secret_cache_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A dedicated SECRET_CACHE_DIR base, so cleanup can be asserted by checking it is empty."""
+    base = tmp_path / f"secret-cache-base-{uuid.uuid4().hex}"
+    base.mkdir()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(base))
+    return base
+
+
+def test_devsecret_run_child_receives_only_named_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    tmp_path: Path,
+) -> None:
+    """AC-FUNC-001 / AC-TEST-003: the child sees the named secret and not an unnamed one."""
+    monkeypatch.delenv("NOTION_TOKEN", raising=False)
+    monkeypatch.delenv("JENKINS_API_TOKEN", raising=False)
+    runner = _FakeCatalogRunner()
+    value = _seeded_value()
+    runner.queue(_ok({"Parameter": {"Value": value}}))
+    client = _devsecret_client(runner)
+    report_path = tmp_path / "report.json"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "NOTION_TOKEN", "--", *_env_reporter_command(report_path)],
+        client=client,
+    )
+
+    assert exit_code == 0
+    report = _read_report(report_path)
+    assert report["env"]["NOTION_TOKEN"] == value
+    assert "JENKINS_API_TOKEN" not in report["env"]
+    assert list(secret_cache_base.iterdir()) == []
+
+
+def test_devsecret_run_environment_is_otherwise_the_parents(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    tmp_path: Path,
+) -> None:
+    """AC-FUNC-001: an unrelated parent env var reaches the child unchanged."""
+    marker_name = f"DEVSECRET_TEST_MARKER_{uuid.uuid4().hex}"
+    marker_value = _seeded_value()
+    monkeypatch.setenv(marker_name, marker_value)
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+    report_path = tmp_path / "report.json"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "", "--", *_env_reporter_command(report_path)],
+        client=client,
+    )
+
+    assert exit_code == 0
+    report = _read_report(report_path)
+    assert report["env"][marker_name] == marker_value
+
+
+def test_devsecret_run_empty_secrets_list_runs_with_no_secrets_and_fetches_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    tmp_path: Path,
+) -> None:
+    """AC-FUNC-002: an empty --secrets list runs the command with no secrets, not all of them."""
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+    report_path = tmp_path / "report.json"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "", "--", *_env_reporter_command(report_path)],
+        client=client,
+    )
+
+    assert exit_code == 0
+    assert runner.calls == []
+    assert _read_report(report_path)["cache_dir"] is not None
+
+
+def test_devsecret_run_name_absent_from_every_scope_exits_four_before_child_created(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-FUNC-003 / AC-TEST-004: a not-found name exits 4 and no child is ever created."""
+    runner = _FakeCatalogRunner()
+    runner.queue(_err("ParameterNotFound"))
+    client = _devsecret_client(runner)
+    report_path = tmp_path / "report.json"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "MISSING_TOKEN", "--", *_env_reporter_command(report_path)],
+        client=client,
+    )
+
+    err = capsys.readouterr().err
+    assert exit_code == 4
+    assert "shared" in err
+    assert not report_path.exists()
+    assert list(secret_cache_base.iterdir()) == []
+
+
+def test_devsecret_run_value_never_appears_in_child_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    tmp_path: Path,
+) -> None:
+    """AC-FUNC-005: the resolved value reaches the child only through its environment."""
+    runner = _FakeCatalogRunner()
+    value = _seeded_value()
+    runner.queue(_ok({"Parameter": {"Value": value}}))
+    client = _devsecret_client(runner)
+    report_path = tmp_path / "report.json"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "NOTION_TOKEN", "--", *_env_reporter_command(report_path)],
+        client=client,
+    )
+
+    assert exit_code == 0
+    report = _read_report(report_path)
+    assert value not in json.dumps(report["argv"])
+
+
+def test_devsecret_run_propagates_a_non_zero_child_exit_status_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+) -> None:
+    """AC-FUNC-004: a non-zero child exit status is propagated unchanged."""
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+    child_exit_status = 7
+    exit_script = f"import sys; sys.exit({child_exit_status})"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "", "--", sys.executable, "-c", exit_script],
+        client=client,
+    )
+
+    assert exit_code == child_exit_status
+    assert list(secret_cache_base.iterdir()) == []
+
+
+def test_devsecret_run_child_terminated_by_signal_reports_128_plus_signal_number(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+) -> None:
+    """AC-FUNC-004 / AC-TEST-004: a signal-terminated child reports 128 plus the signal number."""
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+    kill_script = f"import os, signal; os.kill(os.getpid(), signal.{signal.SIGTERM.name})"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "", "--", sys.executable, "-c", kill_script],
+        client=client,
+    )
+
+    assert exit_code == 128 + signal.SIGTERM
+    assert list(secret_cache_base.iterdir()) == []
+
+
+def test_devsecret_run_cache_directory_exists_during_the_child_and_is_gone_after(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    tmp_path: Path,
+) -> None:
+    """AC-FUNC-006: created before the child runs (a file can be written into it), gone after."""
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+    report_path = tmp_path / "report.json"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "", "--", *_env_reporter_command(report_path)],
+        client=client,
+    )
+
+    assert exit_code == 0
+    report = _read_report(report_path)
+    assert report["existed_during_run"] is True
+    cache_dir = report["cache_dir"]
+    assert isinstance(cache_dir, str)
+    assert not Path(cache_dir).exists()
+    assert list(secret_cache_base.iterdir()) == []
+
+
+def test_devsecret_run_missing_command_exits_two(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No command after '--' is a usage error, not a silent no-op."""
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch, devsecret_run_repo, ["run", "--secrets", "", "--"], client=client
+    )
+
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert err.strip() != ""
+    assert list(secret_cache_base.iterdir()) == []
+
+
+def test_devsecret_run_command_without_a_leading_separator_still_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    tmp_path: Path,
+) -> None:
+    """The '--' separator is how a human spells the boundary; omitting it still works.
+
+    argparse's REMAINDER captures everything from the first unrecognized
+    token onward regardless of whether it is a literal '--', so
+    `_devsecret_run_command` must also accept a command that never carried
+    one.
+    """
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+    report_path = tmp_path / "report.json"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "", *_env_reporter_command(report_path)],
+        client=client,
+    )
+
+    assert exit_code == 0
+    assert _read_report(report_path)["cache_dir"] is not None
+
+
+def test_devsecret_run_secret_cache_dir_inside_repository_root_exits_five(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-FUNC-007: end to end through the real CLI, not just at the catalog layer.
+
+    `_run_devsecret_run` resolves `repository_root` from the same repo `run`
+    was invoked in; pointing `SECRET_CACHE_DIR` at a directory inside it
+    reaches `catalog.secret_cache_dir`'s exposure refusal via the production
+    `main_devsecret` wiring, mapped to exit 5 by `_DEVSECRET_EXIT_CODES`.
+    """
+    inside_repo = devsecret_run_repo / "inside-repo-cache"
+    inside_repo.mkdir()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(inside_repo))
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+    report_path = tmp_path / "report.json"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "", "--", *_env_reporter_command(report_path)],
+        client=client,
+    )
+
+    err = capsys.readouterr().err
+    assert exit_code == 5
+    assert str(inside_repo) in err
+    assert not report_path.exists()
+    assert list(inside_repo.iterdir()) == []
+
+
+def test_devsecret_run_secret_cache_dir_not_ram_backed_exits_five(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-FUNC-008: end to end through the real CLI's default mount-table reader.
+
+    `_run_devsecret_run` never passes its own `mount_table_reader`, so
+    `catalog.secret_cache_dir` falls back to `catalog.default_mount_table_reader`,
+    which reads `catalog._PROC_MOUNTS_PATH`; pointing that at a fixture mount
+    table naming `secret_cache_base` as a non-RAM-backed filesystem reaches
+    the same refusal `test_secret_cache_dir_refuses_non_ram_backed_mount`
+    exercises directly, through the real CLI this time.
+    """
+    catalog = _import_catalog()
+    fake_mounts = tmp_path / "mounts"
+    fake_mounts.write_text(
+        f"/dev/sda1 {secret_cache_base} ext4 rw,relatime 0 0\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(catalog, "_PROC_MOUNTS_PATH", fake_mounts)
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+    report_path = tmp_path / "report.json"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "", "--", *_env_reporter_command(report_path)],
+        client=client,
+    )
+
+    err = capsys.readouterr().err
+    assert exit_code == 5
+    assert "ext4" in err
+    assert not report_path.exists()
+    assert list(secret_cache_base.iterdir()) == []
+
+
+def test_devsecret_run_command_not_found_exits_two_after_removing_the_transient_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A command that cannot be executed exits 2, naming it, after cleanup has run."""
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+    missing_command = f"devsecret-test-no-such-command-{uuid.uuid4().hex}"
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "", "--", missing_command],
+        client=client,
+    )
+
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert missing_command in err
+    assert list(secret_cache_base.iterdir()) == []
+
+
+def test_devsecret_run_outside_a_git_checkout_exits_two_with_no_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`devsecret` is on PATH in the container and on the host, so a cwd
+    outside any git checkout is an ordinary invocation, not a crash.
+    `repo.find_root` raises `repo.RepoError` there, and `main_devsecret`
+    must map it onto the exit-code contract with the standard `ERROR: ...`
+    message, not let it escape as a traceback at exit 1.
+    """
+    not_a_repo = generated_root(tmp_path)
+    monkeypatch.chdir(not_a_repo)
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+
+    exit_code = run_devsecret(
+        monkeypatch, ["run", "--secrets", "", "--", "echo", "hi"], client=client
+    )
+
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert err.startswith("ERROR:")
+    assert "Traceback" not in err
+
+
+def test_devsecret_run_command_not_executable_exits_two_after_removing_the_transient_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A file with the exec bit set but no valid executable format raises
+    `OSError` (`Exec format error`), not `FileNotFoundError` or
+    `PermissionError`; it must still map onto the same exit-2 usage-error
+    contract as a missing command, after the transient directory is removed.
+    """
+    not_executable = tmp_path / f"devsecret-test-not-executable-{uuid.uuid4().hex}"
+    not_executable.write_text("not a real executable\n", encoding="utf-8")
+    not_executable.chmod(0o755)
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "", "--", str(not_executable)],
+        client=client,
+    )
+
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert str(not_executable) in err
+    assert "Exec format error" in err
+    assert list(secret_cache_base.iterdir()) == []
+
+
+def test_devsecret_run_with_a_non_writable_secret_cache_dir_exits_five_with_no_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round-3 code_review finding 2: an OSError from `secret_cache_dir`'s `mkdir`
+    must map onto the documented exit-code contract with the standard
+    `ERROR: ...` message, not escape as an uncaught traceback at exit 1.
+    `SECRET_CACHE_DIR` is overridden to a directory this process cannot
+    write to, simulating a mis-set override. The mount table is forced
+    unavailable so this reproduces the same `SecretCacheUnavailableError`
+    path regardless of the host platform's real `/proc/mounts`.
+    """
+    catalog = _import_catalog()
+    monkeypatch.setattr(catalog, "_PROC_MOUNTS_PATH", tmp_path / "does-not-exist")
+    unwritable_base = tmp_path / f"devsecret-unwritable-{uuid.uuid4().hex}"
+    unwritable_base.mkdir(mode=0o755)
+    unwritable_base.chmod(0o500)
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(unwritable_base))
+    runner = _FakeCatalogRunner()
+    client = _devsecret_client(runner)
+
+    try:
+        exit_code = run_devsecret_in_repo(
+            monkeypatch,
+            devsecret_run_repo,
+            ["run", "--secrets", "", "--", "echo", "hi"],
+            client=client,
+        )
+    finally:
+        unwritable_base.chmod(0o755)
+
+    err = capsys.readouterr().err
+    assert exit_code == 5
+    assert err.startswith("ERROR:")
+    assert "Traceback" not in err
+    assert "SECRET_CACHE_DIR" in err
+    assert str(unwritable_base) in err
+
+
+def test_devsecret_run_help_documents_the_secrets_and_command_syntax(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli = import_cli()
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main_devsecret(["run", "--help"])
+
+    out = capsys.readouterr().out
+    assert exc_info.value.code == 0
+    assert "--secrets" in out
+
+
+def test_devsecret_export_list_prints_only_exported_names_no_value(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-FUNC-009 / AC-TEST-005: only exported names, one per line, no value anywhere."""
+    runner = _FakeCatalogRunner()
+    value = _seeded_value()
+    runner.queue(
+        _ok(
+            {
+                "Parameters": [
+                    {
+                        "Name": "/devcontainer/shared/secrets/NOTION_TOKEN",
+                        "LastModifiedDate": 1700000000.0,
+                        "Description": json.dumps({"exported": True}),
+                        "Value": value,
+                    },
+                    {
+                        "Name": "/devcontainer/shared/secrets/INTERNAL_ONLY",
+                        "LastModifiedDate": 1700000100.0,
+                        "Description": json.dumps({"exported": False}),
+                    },
+                ]
+            }
+        )
+    )
+    client = _devsecret_client(runner)
+
+    exit_code = run_devsecret(monkeypatch, ["export-list"], client=client)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == "NOTION_TOKEN\n"
+    assert value not in captured.out
+    assert value not in captured.err
+    assert "INTERNAL_ONLY" not in captured.out
+
+
+def test_devsecret_export_list_nothing_exported_prints_nothing_and_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-FUNC-010: a catalog with nothing exported prints nothing and exits 0."""
+    runner = _FakeCatalogRunner()
+    runner.queue(
+        _ok(
+            {
+                "Parameters": [
+                    {
+                        "Name": "/devcontainer/shared/secrets/INTERNAL_ONLY",
+                        "LastModifiedDate": 1700000000.0,
+                        "Description": json.dumps({"exported": False}),
+                    }
+                ]
+            }
+        )
+    )
+    client = _devsecret_client(runner)
+
+    exit_code = run_devsecret(monkeypatch, ["export-list"], client=client)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == ""
+
+
+def test_devsecret_export_list_name_exported_in_both_tiers_is_printed_once() -> None:
+    """AC-FUNC-009 / AC-TEST-005: a name exported in both queried tiers is printed once.
+
+    Exercises `cli._export_list_names` directly against two records sharing a
+    name but carrying different scopes, the shape `catalog.list_resolved`
+    produces for a name present in both an instance and the shared tier
+    (E3-F1-S2-T1 AC-FUNC-006). devsecret's own commands resolve against
+    `catalog.scope_set(None)` (no instance-detection mechanism exists yet,
+    per this module's docstring), so this dedup rule is asserted directly
+    against the renderer rather than through a two-tier CLI invocation that
+    the current single-scope wiring cannot produce.
+    """
+    catalog = _import_catalog()
+    cli = import_cli()
+    records = (
+        catalog.SecretRecord(
+            name="NOTION_TOKEN", scope="sandbox", last_modified="1", exported=True, in_effect=True
+        ),
+        catalog.SecretRecord(
+            name="NOTION_TOKEN", scope="shared", last_modified="2", exported=True, in_effect=False
+        ),
+    )
+
+    names = cli._export_list_names(records)
+
+    assert names == ["NOTION_TOKEN"]
+
+
+def test_devsecret_export_list_honors_in_effect_over_a_shadowed_exported_marker() -> None:
+    """AC-FUNC-009: a name is named only on the authority of its in-effect record.
+
+    The in-effect (instance) record here is NOT exported; the shadowed
+    (shared) record for the same name IS exported. `list_resolved` already
+    decided the instance record is the one in effect (E3-F1-S2-T1
+    AC-FUNC-006), so `_export_list_names` must not print the name on the
+    strength of the shadowed record's marker: E3-F2-S2-T1's shell startup
+    would then export a name whose in-effect record was never marked for
+    export, defeating clearing the marker at the instance tier.
+    """
+    catalog = _import_catalog()
+    cli = import_cli()
+    records = (
+        catalog.SecretRecord(
+            name="NOTION_TOKEN",
+            scope="sandbox",
+            last_modified="1",
+            exported=False,
+            in_effect=True,
+        ),
+        catalog.SecretRecord(
+            name="NOTION_TOKEN", scope="shared", last_modified="2", exported=True, in_effect=False
+        ),
+    )
+
+    names = cli._export_list_names(records)
+
+    assert names == []
+
+
+def test_cli_source_never_hardcodes_the_secret_cache_dir_env_var_name() -> None:
+    """AC-FUNC-011: cli.py never spells out "SECRET_CACHE_DIR" as its own string literal.
+
+    `catalog.SECRET_CACHE_DIR_ENV_VAR` is the one declaration of that name
+    (asserted in `tests/test_catalog.py`); this checks cli.py never composes
+    its own copy of the literal as a `str`/`bytes` constant, which a plain
+    substring search cannot do without also flagging the constant's own name,
+    `SECRET_CACHE_DIR_ENV_VAR`, at every reference to it.
+    """
+    root = Path(__file__).resolve().parents[1]
+    cli_path = (
+        root / ".claude" / "plugins" / "devcontainer" / "scripts" / "devcontainer_config" / "cli.py"
+    )
+
+    tree = ast.parse(cli_path.read_text(encoding="utf-8"))
+
+    literals = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and node.value == "SECRET_CACHE_DIR"
+    ]
+    assert literals == []
+
+
+def test_devsecret_end_to_end_export_list_then_run_narrows_to_the_named_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    devsecret_run_repo: Path,
+    secret_cache_base: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-CYCLE-001: export-list shows the reachable exported name and hides an unreachable one;
+
+    `run --secrets` narrows the child's catalog-derived environment to
+    exactly the named secret, leaking neither the other secret's name (via
+    export-list) nor its value (via run); the transient directory created
+    for the `run` invocation is gone once it returns.
+
+    devsecret's commands resolve against `catalog.scope_set(None)` -- the
+    shared scope alone, no instance-detection mechanism exists yet (this
+    module's docstring) -- so JENKINS_API_TOKEN is seeded into a scope
+    (`sandbox`) this injected catalog holds but neither `export-list` nor
+    `run` ever queries, in place of a live instance address. That is what
+    proves both commands: `export-list` never names anything outside the
+    single scope it actually queries, and `run` never exposes anything
+    beyond the one name it was asked for, even though the same catalog
+    instance holds another exported secret entirely.
+    """
+    monkeypatch.delenv("NOTION_TOKEN", raising=False)
+    monkeypatch.delenv("JENKINS_API_TOKEN", raising=False)
+    runner = _FakeCatalogRunner()
+    catalog = _import_catalog()
+    client = catalog.CatalogClient(runner)
+    notion_value = _seeded_value()
+    jenkins_value = _seeded_value()
+
+    # Seeded directly at the catalog layer to establish that JENKINS_API_TOKEN
+    # really does exist, exported, in this injected catalog -- in a scope
+    # devsecret's current wiring never queries -- before proving neither CLI
+    # command surfaces it.
+    sandbox_runner = _FakeCatalogRunner()
+    sandbox_runner.queue(
+        _ok(
+            {
+                "Parameters": [
+                    {
+                        "Name": "/devcontainer/sandbox/secrets/JENKINS_API_TOKEN",
+                        "LastModifiedDate": 1700000000.0,
+                        "Description": json.dumps({"exported": True}),
+                        "Value": jenkins_value,
+                    }
+                ]
+            }
+        )
+    )
+    sandbox_client = catalog.CatalogClient(sandbox_runner)
+    sandbox_records = sandbox_client.list_secrets("sandbox")
+    assert [r.name for r in sandbox_records] == ["JENKINS_API_TOKEN"]
+
+    runner.queue(
+        _ok(
+            {
+                "Parameters": [
+                    {
+                        "Name": "/devcontainer/shared/secrets/NOTION_TOKEN",
+                        "LastModifiedDate": 1700000000.0,
+                        "Description": json.dumps({"exported": True}),
+                    }
+                ]
+            }
+        )
+    )
+    exit_code = run_devsecret_in_repo(
+        monkeypatch, devsecret_run_repo, ["export-list"], client=client
+    )
+    export_out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert export_out == "NOTION_TOKEN\n"
+    assert "JENKINS_API_TOKEN" not in export_out
+    assert jenkins_value not in export_out
+
+    runner.queue(_ok({"Parameter": {"Value": notion_value}}))
+    report_path = tmp_path / "report.json"
+    exit_code = run_devsecret_in_repo(
+        monkeypatch,
+        devsecret_run_repo,
+        ["run", "--secrets", "NOTION_TOKEN", "--", *_env_reporter_command(report_path)],
+        client=client,
+    )
+
+    assert exit_code == 0
+    report = _read_report(report_path)
+    assert report["env"]["NOTION_TOKEN"] == notion_value
+    assert "JENKINS_API_TOKEN" not in report["env"]
+    cache_dir = report["cache_dir"]
+    assert isinstance(cache_dir, str)
+    assert not Path(cache_dir).exists()
+    assert list(secret_cache_base.iterdir()) == []
+    assert jenkins_value not in json.dumps(report)

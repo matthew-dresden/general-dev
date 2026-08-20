@@ -26,7 +26,9 @@ from __future__ import annotations
 import ast
 import importlib
 import json
+import stat
 import subprocess
+import tempfile
 import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -1412,3 +1414,635 @@ def test_end_to_end_resolve_and_list_across_instance_and_shared_scopes() -> None
     assert len(shadowed) == 1
     assert shadowed[0].name == "NOTION_TOKEN"
     assert shadowed[0].scope == "shared"
+
+
+# ---------------------------------------------------------------------------
+# The transient secret-cache directory `run` materializes (spec Section 5.4,
+# 7.3; E3-F2-S1-T2 AC-FUNC-006/007/008, AC-TEST-001/002)
+# ---------------------------------------------------------------------------
+
+
+def _no_mount_table() -> tuple[object, ...] | None:
+    """A MountTableReader that reports no mount table is available (macOS-like)."""
+    return None
+
+
+def test_secret_cache_dir_creates_owner_only_directory_removed_on_normal_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-TEST-001: created with owner-only permissions, gone after a normal exit."""
+    catalog = _import_catalog()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(tmp_path))
+
+    with catalog.secret_cache_dir(
+        repository_root=tmp_path / "repo",
+        container_workspace_root=tmp_path / "workspace",
+        mount_table_reader=_no_mount_table,
+    ) as cache_dir:
+        assert cache_dir.is_dir()
+        assert stat.S_IMODE(cache_dir.stat().st_mode) == 0o700
+
+    assert not cache_dir.exists()
+
+
+def test_secret_cache_dir_removes_a_written_file_on_normal_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-TEST-001: a file written inside it is gone too, after a normal exit."""
+    catalog = _import_catalog()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(tmp_path))
+
+    with catalog.secret_cache_dir(
+        repository_root=tmp_path / "repo",
+        container_workspace_root=tmp_path / "workspace",
+        mount_table_reader=_no_mount_table,
+    ) as cache_dir:
+        (cache_dir / "token.txt").write_text(_seeded_value(), encoding="utf-8")
+
+    assert not cache_dir.exists()
+
+
+def test_secret_cache_dir_removes_directory_and_written_file_on_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-TEST-001: still removed, file and all, when the block exits by exception."""
+    catalog = _import_catalog()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(tmp_path))
+    captured: list[Path] = []
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with catalog.secret_cache_dir(
+            repository_root=tmp_path / "repo",
+            container_workspace_root=tmp_path / "workspace",
+            mount_table_reader=_no_mount_table,
+        ) as cache_dir:
+            captured.append(cache_dir)
+            (cache_dir / "token.txt").write_text(_seeded_value(), encoding="utf-8")
+            raise RuntimeError("boom")
+
+    assert len(captured) == 1
+    assert not captured[0].exists()
+
+
+def test_secret_cache_dir_defaults_to_the_platform_temporary_directory_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-011: with no override, the base is the platform temporary directory."""
+    catalog = _import_catalog()
+    monkeypatch.delenv("SECRET_CACHE_DIR", raising=False)
+
+    with catalog.secret_cache_dir(
+        repository_root=tmp_path / "repo",
+        container_workspace_root=tmp_path / "workspace",
+        mount_table_reader=_no_mount_table,
+    ) as cache_dir:
+        assert cache_dir.is_relative_to(Path(tempfile.gettempdir()).resolve())
+
+
+def test_secret_cache_dir_defaults_to_a_ram_backed_mount_when_a_mount_table_is_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-008/011: on a platform with a mount table, the unset default is RAM-backed.
+
+    Reproduces the project's own devcontainer: `SECRET_CACHE_DIR` is unset,
+    a mount table is available, and the persistent overlay root -- what
+    `tempfile.gettempdir()` resolves onto in that container, since nothing
+    there mounts a tmpfs at `/tmp` -- is not RAM-backed. Falling back to
+    `tempfile.gettempdir()` regardless of the mount table would make
+    `secret_cache_dir` refuse itself on every invocation there
+    (`_refuse_if_not_ram_backed` would raise `SecretCacheExposureError`);
+    the default must instead be chosen from a RAM-backed row the mount
+    table itself reports.
+    """
+    catalog = _import_catalog()
+    monkeypatch.delenv("SECRET_CACHE_DIR", raising=False)
+    ram_backed_mount = tmp_path / "dev-shm"
+    ram_backed_mount.mkdir()
+    mount_table = (
+        catalog.MountEntry(mount_point="/", filesystem_type="overlay"),
+        catalog.MountEntry(mount_point=str(ram_backed_mount), filesystem_type="tmpfs"),
+    )
+
+    with catalog.secret_cache_dir(
+        repository_root=tmp_path / "repo",
+        container_workspace_root=tmp_path / "workspace",
+        mount_table_reader=lambda: mount_table,
+    ) as cache_dir:
+        assert cache_dir.is_relative_to(ram_backed_mount.resolve())
+
+    assert list(ram_backed_mount.iterdir()) == []
+
+
+def test_secret_cache_dir_refuses_tempdir_fallback_when_mount_table_has_no_ram_backed_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-008/011: a mount table with no `tmpfs`/`ramfs` row anywhere is still refused.
+
+    `_select_ram_backed_mount_point` returns `None` here, so
+    `_resolve_secret_cache_base` falls through to `tempfile.gettempdir()`
+    -- the same default as when no mount table is available at all -- but
+    the mount table IS available and reports that path's filesystem as not
+    RAM-backed, so `_refuse_if_not_ram_backed` still refuses it: falling
+    back to a default the caller's own mount table already contradicts
+    must not silently bypass the refusal.
+    """
+    catalog = _import_catalog()
+    monkeypatch.delenv("SECRET_CACHE_DIR", raising=False)
+    mount_table = (catalog.MountEntry(mount_point="/", filesystem_type="ext4"),)
+
+    with pytest.raises(catalog.SecretCacheExposureError) as exc_info:
+        with catalog.secret_cache_dir(
+            repository_root=tmp_path / "repo",
+            container_workspace_root=tmp_path / "workspace",
+            mount_table_reader=lambda: mount_table,
+        ):
+            pass
+
+    assert "ext4" in str(exc_info.value)
+    assert "SECRET_CACHE_DIR" in str(exc_info.value)
+
+
+def test_secret_cache_dir_defaults_to_a_writable_ram_backed_mount_over_an_unwritable_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-008/011: the unset default skips an unwritable tmpfs row for a writable one.
+
+    Reproduces a representative Linux container `/proc/mounts`: a small,
+    root-owned `tmpfs` mounted at `/dev` (`mode=755`, a 64 KiB budget) and a
+    read-only `tmpfs` at `/sys/fs/cgroup` both precede the world-writable
+    `/dev/shm` in kernel mount order. Picking the FIRST `tmpfs`/`ramfs` row
+    regardless of writability selects the `/dev`-like row: under the
+    non-root container user CLAUDE.md mandates, the later
+    `resolved.mkdir(...)` then raises `PermissionError` on every
+    invocation. `_select_ram_backed_mount_point` must skip an unwritable
+    candidate and pick the next writable one instead.
+    """
+    catalog = _import_catalog()
+    monkeypatch.delenv("SECRET_CACHE_DIR", raising=False)
+
+    overlay_root = tmp_path / "overlay-root"
+    overlay_root.mkdir()
+    device_tmpfs = tmp_path / "dev"
+    device_tmpfs.mkdir(mode=0o755)
+    device_tmpfs.chmod(0o555)
+    cgroup_tmpfs = tmp_path / "sys-fs-cgroup"
+    cgroup_tmpfs.mkdir(mode=0o555)
+    dev_shm = tmp_path / "dev-shm"
+    dev_shm.mkdir()
+    run_tmpfs = tmp_path / "run"
+    run_tmpfs.mkdir()
+    mount_table = (
+        catalog.MountEntry(mount_point=str(overlay_root), filesystem_type="overlay"),
+        catalog.MountEntry(mount_point=str(device_tmpfs), filesystem_type="tmpfs"),
+        catalog.MountEntry(mount_point=str(cgroup_tmpfs), filesystem_type="tmpfs"),
+        catalog.MountEntry(mount_point=str(dev_shm), filesystem_type="tmpfs"),
+        catalog.MountEntry(mount_point=str(run_tmpfs), filesystem_type="tmpfs"),
+    )
+
+    try:
+        with catalog.secret_cache_dir(
+            repository_root=tmp_path / "repo",
+            container_workspace_root=tmp_path / "workspace",
+            mount_table_reader=lambda: mount_table,
+        ) as cache_dir:
+            assert cache_dir.is_relative_to(dev_shm.resolve())
+        assert list(dev_shm.iterdir()) == []
+        assert list(device_tmpfs.iterdir()) == []
+        assert list(cgroup_tmpfs.iterdir()) == []
+    finally:
+        device_tmpfs.chmod(0o755)
+        cgroup_tmpfs.chmod(0o755)
+
+
+def test_secret_cache_dir_refuses_tempdir_fallback_when_every_ram_backed_row_is_unwritable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-008/011: an unwritable-only tmpfs row is treated as no RAM-backed row at all.
+
+    `device_tmpfs` simulates a root-owned `/dev`-style tmpfs mount this
+    process cannot write to. `_select_ram_backed_mount_point` must skip it
+    rather than select it and let the later `mkdir` fail with an uncaught
+    permission error; with no writable candidate,
+    `_resolve_secret_cache_base` falls through to `tempfile.gettempdir()`,
+    which the `/` row's `ext4` entry still refuses.
+    """
+    catalog = _import_catalog()
+    monkeypatch.delenv("SECRET_CACHE_DIR", raising=False)
+    device_tmpfs = tmp_path / "dev"
+    device_tmpfs.mkdir(mode=0o755)
+    device_tmpfs.chmod(0o555)
+    mount_table = (
+        catalog.MountEntry(mount_point="/", filesystem_type="ext4"),
+        catalog.MountEntry(mount_point=str(device_tmpfs), filesystem_type="tmpfs"),
+    )
+
+    try:
+        with pytest.raises(catalog.SecretCacheExposureError) as exc_info:
+            with catalog.secret_cache_dir(
+                repository_root=tmp_path / "repo",
+                container_workspace_root=tmp_path / "workspace",
+                mount_table_reader=lambda: mount_table,
+            ):
+                pass
+        assert "ext4" in str(exc_info.value)
+        assert "SECRET_CACHE_DIR" in str(exc_info.value)
+        assert list(device_tmpfs.iterdir()) == []
+    finally:
+        device_tmpfs.chmod(0o755)
+
+
+def test_secret_cache_dir_raises_secret_cache_unavailable_error_when_mkdir_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-3 code_review finding 2: an OSError from `mkdir` must not escape uncaught.
+
+    `SECRET_CACHE_DIR` points at a directory this process cannot write to
+    (a 0o500 directory, simulating a mis-set override rather than the
+    chosen default). `resolved.mkdir(...)` then raises `PermissionError`,
+    which must surface as a `catalog.CatalogError` subclass carrying the
+    standard `ERROR: ...` message shape naming the resolved path and
+    `SECRET_CACHE_DIR`, not an uncaught `OSError`.
+    """
+    catalog = _import_catalog()
+    unwritable_base = tmp_path / "unwritable-base"
+    unwritable_base.mkdir(mode=0o755)
+    unwritable_base.chmod(0o500)
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(unwritable_base))
+
+    try:
+        with pytest.raises(catalog.SecretCacheUnavailableError) as exc_info:
+            with catalog.secret_cache_dir(
+                repository_root=tmp_path / "repo",
+                container_workspace_root=tmp_path / "workspace",
+                mount_table_reader=lambda: None,
+            ):
+                pass
+    finally:
+        unwritable_base.chmod(0o755)
+
+    assert isinstance(exc_info.value, catalog.CatalogError)
+    assert str(unwritable_base) in str(exc_info.value)
+    assert "SECRET_CACHE_DIR" in str(exc_info.value)
+    assert list(unwritable_base.iterdir()) == []
+
+
+def test_secret_cache_dir_raises_secret_cache_unavailable_error_when_rmtree_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round-3 code_review finding 2: an OSError from cleanup `rmtree` must not escape uncaught.
+
+    The directory is created successfully, then made unwritable from the
+    outside (simulating another process changing permissions mid-flight)
+    so the cleanup `shutil.rmtree` in the `finally` fails. The resulting
+    error is still a `catalog.CatalogError` subclass, never a raw
+    `OSError`.
+    """
+    catalog = _import_catalog()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(tmp_path))
+    captured: list[Path] = []
+
+    try:
+        with pytest.raises(catalog.SecretCacheUnavailableError) as exc_info:
+            with catalog.secret_cache_dir(
+                repository_root=tmp_path / "repo",
+                container_workspace_root=tmp_path / "workspace",
+                mount_table_reader=lambda: None,
+            ) as cache_dir:
+                captured.append(cache_dir)
+                cache_dir.parent.chmod(0o500)
+    finally:
+        captured[0].parent.chmod(0o755)
+
+    assert isinstance(exc_info.value, catalog.CatalogError)
+    assert "SECRET_CACHE_DIR" in str(exc_info.value)
+
+
+def test_secret_cache_dir_refuses_path_inside_repository_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-TEST-002 / AC-FUNC-007: a resolved path inside the repository root is refused."""
+    catalog = _import_catalog()
+    repository_root = tmp_path / "repo"
+    repository_root.mkdir()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(repository_root))
+
+    with pytest.raises(catalog.SecretCacheExposureError) as exc_info:
+        with catalog.secret_cache_dir(
+            repository_root=repository_root,
+            container_workspace_root=tmp_path / "workspace",
+            mount_table_reader=_no_mount_table,
+        ):
+            pass
+
+    assert str(repository_root) in str(exc_info.value)
+    assert "SECRET_CACHE_DIR" in str(exc_info.value)
+    assert list(repository_root.iterdir()) == []
+
+
+def test_secret_cache_dir_refuses_path_inside_container_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-TEST-002 / AC-FUNC-007: a resolved path inside the container workspace root is refused."""
+    catalog = _import_catalog()
+    workspace_root = tmp_path / "workspaces" / "general-dev"
+    workspace_root.mkdir(parents=True)
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(workspace_root))
+
+    with pytest.raises(catalog.SecretCacheExposureError) as exc_info:
+        with catalog.secret_cache_dir(
+            repository_root=tmp_path / "repo",
+            container_workspace_root=workspace_root,
+            mount_table_reader=_no_mount_table,
+        ):
+            pass
+
+    assert str(workspace_root) in str(exc_info.value)
+
+
+def test_secret_cache_dir_refuses_non_ram_backed_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-TEST-002 / AC-FUNC-008: a mount table reporting a non-RAM-backed filesystem is refused."""
+    catalog = _import_catalog()
+    base = tmp_path / "cache-base"
+    base.mkdir()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(base))
+    mount_table = (
+        catalog.MountEntry(mount_point="/", filesystem_type="ext4"),
+        catalog.MountEntry(mount_point=str(base), filesystem_type="ext4"),
+    )
+
+    with pytest.raises(catalog.SecretCacheExposureError) as exc_info:
+        with catalog.secret_cache_dir(
+            repository_root=tmp_path / "repo",
+            container_workspace_root=tmp_path / "workspace",
+            mount_table_reader=lambda: mount_table,
+        ):
+            pass
+
+    assert "ext4" in str(exc_info.value)
+    assert "SECRET_CACHE_DIR" in str(exc_info.value)
+    assert list(base.iterdir()) == []
+
+
+def test_secret_cache_dir_allows_ram_backed_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-008: a mount table reporting tmpfs is allowed."""
+    catalog = _import_catalog()
+    base = tmp_path / "cache-base"
+    base.mkdir()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(base))
+    mount_table = (catalog.MountEntry(mount_point=str(base), filesystem_type="tmpfs"),)
+
+    with catalog.secret_cache_dir(
+        repository_root=tmp_path / "repo",
+        container_workspace_root=tmp_path / "workspace",
+        mount_table_reader=lambda: mount_table,
+    ) as cache_dir:
+        assert cache_dir.is_dir()
+
+    assert list(base.iterdir()) == []
+
+
+def test_secret_cache_dir_refuses_sibling_path_sharing_only_a_string_prefix_with_a_tmpfs_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-008: matching must be by path component, not by raw string prefix.
+
+    `tmpfs_mount` and `base` are siblings under `tmp_path`: `base`'s name
+    merely starts with `tmpfs_mount`'s name as a string
+    (`.../tmp` is a string prefix of `.../tmpfoo`), but `base` is not a
+    descendant of `tmpfs_mount` on the filesystem. A resolved cache directory
+    under `base` is actually backed by the `ext4` root entry, so it must be
+    refused; a raw `str.startswith` match would instead select the `tmpfs`
+    entry by longest-string-prefix and wrongly allow it, defeating the
+    RAM-backed refusal for every sibling directory whose name happens to
+    extend a real mount point's name.
+    """
+    catalog = _import_catalog()
+    tmpfs_mount = tmp_path / "tmp"
+    tmpfs_mount.mkdir()
+    base = tmp_path / "tmpfoo"
+    base.mkdir()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(base))
+    mount_table = (
+        catalog.MountEntry(mount_point=str(tmp_path), filesystem_type="ext4"),
+        catalog.MountEntry(mount_point=str(tmpfs_mount), filesystem_type="tmpfs"),
+    )
+
+    with pytest.raises(catalog.SecretCacheExposureError) as exc_info:
+        with catalog.secret_cache_dir(
+            repository_root=tmp_path / "repo",
+            container_workspace_root=tmp_path / "workspace",
+            mount_table_reader=lambda: mount_table,
+        ):
+            pass
+
+    assert "ext4" in str(exc_info.value)
+    assert list(base.iterdir()) == []
+
+
+def test_secret_cache_dir_refuses_a_non_empty_mount_table_with_no_matching_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A "cannot classify" mount table result must not mean "allow".
+
+    `_mount_entry_for` returns `None` when nothing in the table is a prefix
+    of the resolved path (the production reader always includes a `/` row,
+    so this only exercises a synthetic table a test can construct). A
+    control whose purpose is keeping secret material off persistent storage
+    must refuse, not allow, when a mount table IS available but names no
+    entry covering the resolved path: "cannot verify RAM-backed" is not the
+    same guarantee as "verified RAM-backed".
+    """
+    catalog = _import_catalog()
+    base = tmp_path / "cache-base"
+    base.mkdir()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(base))
+    mount_table = (catalog.MountEntry(mount_point="/some/unrelated/mount", filesystem_type="ext4"),)
+
+    with pytest.raises(catalog.SecretCacheExposureError) as exc_info:
+        with catalog.secret_cache_dir(
+            repository_root=tmp_path / "repo",
+            container_workspace_root=tmp_path / "workspace",
+            mount_table_reader=lambda: mount_table,
+        ):
+            pass
+
+    assert str(base) in str(exc_info.value)
+    assert "SECRET_CACHE_DIR" in str(exc_info.value)
+    assert list(base.iterdir()) == []
+
+
+def test_secret_cache_dir_skips_ram_check_when_no_mount_table_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-008: "where a mount table is available" -- None skips the check entirely."""
+    catalog = _import_catalog()
+    base = tmp_path / "cache-base"
+    base.mkdir()
+    monkeypatch.setenv("SECRET_CACHE_DIR", str(base))
+
+    with catalog.secret_cache_dir(
+        repository_root=tmp_path / "repo",
+        container_workspace_root=tmp_path / "workspace",
+        mount_table_reader=_no_mount_table,
+    ) as cache_dir:
+        assert cache_dir.is_dir()
+
+
+def test_secret_cache_dir_raises_secret_cache_unavailable_error_when_writability_probe_rmdir_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed cleanup `rmdir` in the writability probe must not be swallowed.
+
+    `_mount_point_is_writable` creates a real probe directory to test
+    writability, then removes it. Discarding the trailing `rmdir`'s
+    `OSError` leaves the probe directory behind on the RAM-backed mount
+    with no diagnostic and no non-zero exit. The failure must surface as a
+    `SecretCacheUnavailableError` naming the probe path and
+    `SECRET_CACHE_DIR`, the same shape every other filesystem failure in
+    this module uses (see `secret_cache_dir`'s own `mkdir`/`rmtree`
+    handling).
+    """
+    catalog = _import_catalog()
+    monkeypatch.delenv("SECRET_CACHE_DIR", raising=False)
+    ram_backed_mount = tmp_path / "dev-shm"
+    ram_backed_mount.mkdir()
+    mount_table = (catalog.MountEntry(mount_point=str(ram_backed_mount), filesystem_type="tmpfs"),)
+
+    real_rmdir = Path.rmdir
+    probe_prefix = f"{catalog._CACHE_DIR_PREFIX}probe-"
+
+    def _failing_rmdir(self: Path) -> None:
+        if self.name.startswith(probe_prefix):
+            raise OSError(13, "Permission denied")
+        real_rmdir(self)
+
+    monkeypatch.setattr(Path, "rmdir", _failing_rmdir)
+
+    with pytest.raises(catalog.SecretCacheUnavailableError) as exc_info:
+        with catalog.secret_cache_dir(
+            repository_root=tmp_path / "repo",
+            container_workspace_root=tmp_path / "workspace",
+            mount_table_reader=lambda: mount_table,
+        ):
+            pass
+
+    assert isinstance(exc_info.value, catalog.CatalogError)
+    assert "SECRET_CACHE_DIR" in str(exc_info.value)
+    assert str(ram_backed_mount) in str(exc_info.value)
+
+
+def test_secret_cache_dir_skips_ram_backed_mount_inside_repo_root_before_probing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boundary refusal must run before any write probe.
+
+    `_mount_point_is_writable`'s writability probe performs a real
+    `mkdir`. A tmpfs row mounted under the repository root is a real
+    container topology this module must never write to while selecting a
+    default: the candidate must be excluded before any probe touches the
+    filesystem, so the next candidate outside the boundary is chosen
+    instead, and no `mkdir` call is ever made under the excluded one.
+    """
+    catalog = _import_catalog()
+    monkeypatch.delenv("SECRET_CACHE_DIR", raising=False)
+    repository_root = tmp_path / "repo"
+    repository_root.mkdir()
+    tmpfs_inside_repo = repository_root / "tmpfs-mount"
+    tmpfs_inside_repo.mkdir()
+    tmpfs_outside_repo = tmp_path / "dev-shm"
+    tmpfs_outside_repo.mkdir()
+    mount_table = (
+        catalog.MountEntry(mount_point=str(tmpfs_inside_repo), filesystem_type="tmpfs"),
+        catalog.MountEntry(mount_point=str(tmpfs_outside_repo), filesystem_type="tmpfs"),
+    )
+
+    created: list[Path] = []
+    real_mkdir = Path.mkdir
+
+    def _spy_mkdir(
+        self: Path, mode: int = 0o777, parents: bool = False, exist_ok: bool = False
+    ) -> None:
+        created.append(self)
+        real_mkdir(self, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", _spy_mkdir)
+
+    with catalog.secret_cache_dir(
+        repository_root=repository_root,
+        container_workspace_root=tmp_path / "workspace",
+        mount_table_reader=lambda: mount_table,
+    ) as cache_dir:
+        assert cache_dir.is_relative_to(tmpfs_outside_repo.resolve())
+
+    assert not any(path.is_relative_to(tmpfs_inside_repo) for path in created)
+
+
+def test_secret_cache_dir_env_var_declared_exactly_once_in_source() -> None:
+    """AC-FUNC-011: the literal env var name is declared exactly once, on its own constant."""
+    source = _catalog_module_path().read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    literals = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and node.value == "SECRET_CACHE_DIR"
+    ]
+    assert len(literals) == 1
+
+
+def test_default_mount_table_reader_parses_proc_mounts_when_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production MountTableReader parses a real mount table's mount point and fstype."""
+    catalog = _import_catalog()
+    fake_mounts = tmp_path / "mounts"
+    fake_mounts.write_text(
+        "tmpfs /tmp tmpfs rw,relatime 0 0\n/dev/sda1 / ext4 rw,relatime 0 0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(catalog, "_PROC_MOUNTS_PATH", fake_mounts)
+
+    entries = catalog.default_mount_table_reader()
+
+    assert entries == (
+        catalog.MountEntry(mount_point="/tmp", filesystem_type="tmpfs"),
+        catalog.MountEntry(mount_point="/", filesystem_type="ext4"),
+    )
+
+
+def test_default_mount_table_reader_raises_on_an_unparsable_mount_table_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unparsable mount-table line must not be silently skipped.
+
+    Silently `continue`-ing past a `/proc/mounts` line with fewer than the
+    three fields this parser requires can drop the very row
+    `_refuse_if_not_ram_backed` needed to classify a resolved path,
+    silently downgrading a real refusal into an allow. A malformed line
+    must raise, not be skipped.
+    """
+    catalog = _import_catalog()
+    fake_mounts = tmp_path / "mounts"
+    fake_mounts.write_text(
+        "tmpfs /tmp tmpfs rw,relatime 0 0\nmalformed-line-too-few-fields\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(catalog, "_PROC_MOUNTS_PATH", fake_mounts)
+
+    with pytest.raises(catalog.SecretCacheUnavailableError) as exc_info:
+        catalog.default_mount_table_reader()
+
+    assert "malformed-line-too-few-fields" in str(exc_info.value)
+
+
+def test_default_mount_table_reader_returns_none_when_proc_mounts_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `/proc/mounts` (for example macOS) is "no mount table available", not an error."""
+    catalog = _import_catalog()
+    monkeypatch.setattr(catalog, "_PROC_MOUNTS_PATH", tmp_path / "does-not-exist")
+
+    assert catalog.default_mount_table_reader() is None

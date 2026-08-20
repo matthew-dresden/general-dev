@@ -31,34 +31,40 @@ own pre-push stdin contract, derives the pushed range for every ref with
 `devcontainer_config.githooks.ranges_from_push_refs`, and scans each range
 with `scan_range`, exiting 1 if any of them found something.
 
-`devsecret` (spec Section 4.3, decision D13; E3-F2-S1-T1) is this module's
-second console entry point, `main_devsecret`, installed by its own console
-script (spec Section 4.3: "on PATH in the container and on the host") rather
-than as a subcommand of `devcontainer_config`. It exposes four record
-commands so far -- `get`, `list`, `set` and `rm` -- with `run` and
-`export-list` left to E3-F2-S1-T2, which extends `_build_devsecret_parser`
-rather than restructuring it. Its exit codes (spec Section 4.3, 14.2) are
-declared once as named constants (`EXIT_SUCCESS`, `EXIT_USAGE_ERROR`,
-`EXIT_BACKEND_ERROR`, `EXIT_NOT_FOUND`, `EXIT_VALUE_EXPOSURE_REFUSED`) and
-mapped from the `devcontainer_config.catalog.CatalogError` hierarchy by
+`devsecret` (spec Section 4.3, decision D13; E3-F2-S1-T1, E3-F2-S1-T2) is
+this module's second console entry point, `main_devsecret`, installed by its
+own console script (spec Section 4.3: "on PATH in the container and on the
+host") rather than as a subcommand of `devcontainer_config`. It exposes all
+six commands Section 4.3 names: the four record commands from E3-F2-S1-T1
+-- `get`, `list`, `set` and `rm` -- plus `run` and `export-list` from
+E3-F2-S1-T2. Its exit codes (spec Section 4.3, 14.2) are declared once as
+named constants (`EXIT_SUCCESS`, `EXIT_USAGE_ERROR`, `EXIT_BACKEND_ERROR`,
+`EXIT_NOT_FOUND`, `EXIT_VALUE_EXPOSURE_REFUSED`) and mapped from the
+`devcontainer_config.catalog.CatalogError` hierarchy by
 `_devsecret_exit_code_for`, the single place that mapping is made, so no
-handler chooses a number for itself (AC-FUNC-011). Two rules keep a secret
-value from ever reaching a place it should not: `list` calls
-`catalog.list_resolved`, which is built on `describe-parameters` and never
-requests decryption, so a value is never held in memory on the listing path
-at all (AC-4.3); `set` reads the value from stdin only -- a value supplied
-as a positional argument is refused (exit 5) with no part of it echoed,
-because arguments reach the process table where any other user on the
-machine can read them. No instance-detection mechanism exists yet (Section
-9's addressing is later, separate work), so every command here resolves or
-narrows against `catalog.scope_set(None)` -- the shared scope alone, the
-correct answer for an engine with no instance (decision D11), not a partial
-implementation of instance-first resolution.
+handler chooses a number for itself (AC-FUNC-011). Rules that keep a secret
+value from ever reaching a place it should not: `list` and `export-list`
+call `catalog.list_resolved`, which is built on `describe-parameters` and
+never requests decryption, so a value is never held in memory on the
+listing path at all (AC-4.3); `set` reads the value from stdin only -- a
+value supplied as a positional argument is refused (exit 5) with no part of
+it echoed, because arguments reach the process table where any other user
+on the machine can read them; `run` resolves every named secret and hands
+each one to the child through its environment only, never through argv, and
+does so inside `catalog.secret_cache_dir`, which refuses (also exit 5) to
+materialize its transient directory anywhere a value could leak into the
+workspace or a persistent layer (spec Section 5.4, 7.3). No
+instance-detection mechanism exists yet (Section 9's addressing is later,
+separate work), so every command here resolves or narrows against
+`catalog.scope_set(None)` -- the shared scope alone, the correct answer for
+an engine with no instance (decision D11), not a partial implementation of
+instance-first resolution.
 """
 
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -256,8 +262,8 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# devsecret: get, list, set, rm (spec Section 4.3, 14.2; E3-F2-S1-T1). `run`
-# and `export-list` are E3-F2-S1-T2's addition to this same section.
+# devsecret: get, list, set, rm, run, export-list (spec Section 4.3, 14.2;
+# E3-F2-S1-T1, E3-F2-S1-T2).
 # ---------------------------------------------------------------------------
 
 # The five exit codes spec Section 4.3 and 14.2 fix, declared once so no
@@ -278,6 +284,16 @@ _DEVSECRET_SET_HELP = (
     "set <NAME> [--scope <scope>] [--exported]: read the value from stdin. Never from an argument."
 )
 _DEVSECRET_RM_HELP = "rm <NAME> --scope <scope>: delete after confirmation."
+_DEVSECRET_RUN_HELP = (
+    "run --secrets A,B -- <cmd>: run <cmd> with only those secrets in its environment."
+)
+_DEVSECRET_EXPORT_LIST_HELP = "export-list: names marked exported, for shell startup."
+
+_DEVSECRET_RUN_SECRETS_HELP = (
+    "Comma-separated secret names to add to the child's environment. Empty (the "
+    "default) runs the command with no secrets, never with all of them."
+)
+_DEVSECRET_RUN_COMMAND_HELP = "The command to execute, after a '--' separator."
 
 # Rendered verbatim in `devsecret --help` (AC-TEST-005), matching the scopes
 # and exit-codes blocks of spec Section 14.2 exactly; the full snapshot test
@@ -304,6 +320,8 @@ _DEVSECRET_EXIT_CODES: tuple[tuple[type[catalog.CatalogError], int], ...] = (
     (catalog.UnknownScopeError, EXIT_USAGE_ERROR),
     (catalog.InvalidScopeError, EXIT_USAGE_ERROR),
     (catalog.InvalidSecretNameError, EXIT_USAGE_ERROR),
+    (catalog.SecretCacheExposureError, EXIT_VALUE_EXPOSURE_REFUSED),
+    (catalog.SecretCacheUnavailableError, EXIT_VALUE_EXPOSURE_REFUSED),
     (catalog.CatalogUnauthorizedError, EXIT_BACKEND_ERROR),
     (catalog.CatalogUnavailableError, EXIT_BACKEND_ERROR),
     (catalog.CatalogUnclassifiedError, EXIT_BACKEND_ERROR),
@@ -384,15 +402,13 @@ def _require_known_scope(scope: str) -> None:
 
 
 def _build_devsecret_parser() -> argparse.ArgumentParser:
-    """The `devsecret` top-level parser: get, list, set and rm (spec Section 4.3).
+    """The `devsecret` top-level parser: get, list, set, rm, run, export-list (spec Section 4.3).
 
     A separate parser from `_build_parser`'s (this module's other console
     entry point, `devcontainer_config`'s own lint-secrets/hooks-* commands):
     `devsecret` is installed as its own command (spec Section 4.3, decision
     D13) with its own `prog` and its own `--help` reference (spec Section
-    14.2), not a subcommand of `devcontainer_config`. `run` and
-    `export-list` (E3-F2-S1-T2) are two more subparsers added here, not a
-    restructuring of this function.
+    14.2), not a subcommand of `devcontainer_config`.
     """
     parser = argparse.ArgumentParser(
         prog=_DEVSECRET_PROG,
@@ -453,6 +469,23 @@ def _build_devsecret_parser() -> argparse.ArgumentParser:
         help="Required: the scope to delete from.",
     )
     rm_parser.set_defaults(handler=_run_devsecret_rm)
+
+    run_parser = subparsers.add_parser("run", help=_DEVSECRET_RUN_HELP)
+    run_parser.add_argument(
+        "--secrets", metavar="<A,B>", default="", help=_DEVSECRET_RUN_SECRETS_HELP
+    )
+    # REMAINDER, not a fixed positional count: everything from the first
+    # unrecognized token onward is the command to execute, including its own
+    # flags (for example a child's own "-la"), which must never be parsed as
+    # devsecret's flags. argparse's REMAINDER keeps a leading '--' token
+    # rather than stripping it; `_devsecret_run_command` strips it.
+    run_parser.add_argument(
+        "command", nargs=argparse.REMAINDER, metavar="-- <cmd>", help=_DEVSECRET_RUN_COMMAND_HELP
+    )
+    run_parser.set_defaults(handler=_run_devsecret_run)
+
+    export_list_parser = subparsers.add_parser("export-list", help=_DEVSECRET_EXPORT_LIST_HELP)
+    export_list_parser.set_defaults(handler=_run_devsecret_export_list)
 
     return parser
 
@@ -558,6 +591,142 @@ def _run_devsecret_rm(args: argparse.Namespace, client: catalog.CatalogClient) -
     return EXIT_SUCCESS
 
 
+def _parse_secrets_list(raw: str) -> tuple[str, ...]:
+    """The ordered secret names `--secrets` names; empty for an empty string (AC-FUNC-002).
+
+    An empty string is not "no names given, so an empty split produces one
+    name that happens to be empty" -- it is the empty list itself, so `run`
+    resolves nothing and fetches nothing, rather than raising
+    `InvalidSecretNameError` on a single blank name.
+    """
+    if raw == "":
+        return ()
+    return tuple(raw.split(","))
+
+
+def _devsecret_run_command(raw_command: Sequence[str]) -> list[str]:
+    """`args.command` with the leading '--' argparse's REMAINDER preserves, stripped off."""
+    if raw_command and raw_command[0] == "--":
+        return list(raw_command[1:])
+    return list(raw_command)
+
+
+def _devsecret_run_missing_command_message() -> str:
+    return (
+        "ERROR: no command given to run\n"
+        "devsecret run --secrets A,B -- <cmd> requires a command after the "
+        "'--' separator.\n"
+        "Pass the command to execute after '--'."
+    )
+
+
+def _devsecret_run_command_not_found_message(command_name: str, os_reason: str) -> str:
+    return (
+        f"ERROR: cannot execute {command_name!r}\n"
+        f"The command was not found on PATH, is not executable, or is not a "
+        f"valid executable for this platform ({os_reason}).\n"
+        "Check the command name, and that it is installed and executable, then retry."
+    )
+
+
+def _devsecret_child_exit_code(returncode: int) -> int:
+    """AC-FUNC-004: `Popen.returncode`'s negative-signal convention, translated to 128+signal.
+
+    A negative `returncode` is Python's own convention for "this process was
+    terminated by signal `-returncode`" on POSIX; translating it to 128 plus
+    the signal number matches the exit status a shell reports for a killed
+    foreground job. A non-negative `returncode` is the child's own exit
+    status, propagated unchanged.
+    """
+    if returncode < 0:
+        return 128 - returncode
+    return returncode
+
+
+def _run_devsecret_run(args: argparse.Namespace, client: catalog.CatalogClient) -> int:
+    """AC-FUNC-001 through 008: resolve named secrets into a copy of the environment, then exec.
+
+    Order matters. `catalog.secret_cache_dir` -- with all of its exposure
+    refusals -- runs before any secret is resolved (AC-FUNC-007: "before any
+    secret is fetched"), and every named secret is resolved before the child
+    process is created (AC-FUNC-003: every failure this command owns happens
+    before the child exists), so no failure ever reaches a partially
+    populated child, and the transient directory is always removed on the
+    way out, whatever the child's outcome (AC-FUNC-006).
+
+    The directory named by `catalog.SECRET_CACHE_DIR_ENV_VAR` this command
+    hands the child (spec Section 7.3) is never the workspace and never the
+    container's persistent layer, and it does not survive this process
+    (spec Section 5.4); `catalog.secret_cache_dir` is where that contract is
+    enforced, not here.
+    """
+    command = _devsecret_run_command(args.command)
+    if not command:
+        print(_devsecret_run_missing_command_message(), file=sys.stderr)
+        return EXIT_USAGE_ERROR
+    names = _parse_secrets_list(args.secrets)
+    repository_root = repo.find_root(Path.cwd())
+    container_workspace_root = Path(repo.container_workspace(repository_root))
+    with catalog.secret_cache_dir(
+        repository_root=repository_root,
+        container_workspace_root=container_workspace_root,
+    ) as cache_dir:
+        child_env = catalog.process_environment()
+        child_env[catalog.SECRET_CACHE_DIR_ENV_VAR] = str(cache_dir)
+        for name in names:
+            resolved = catalog.resolve(client, None, name)
+            child_env[name] = resolved.value
+        try:
+            process = subprocess.Popen(command, env=child_env)
+        except OSError as exc:
+            # `FileNotFoundError` (not on PATH) and `PermissionError` (not
+            # executable) are both `OSError` subclasses; so is the case
+            # `Popen` raises for a file that exists and has the exec bit set
+            # but is not a valid executable format (`OSError: [Errno 8] Exec
+            # format error`). All three are the same contract: the command
+            # cannot be executed, exit 2, naming it, after cleanup has run.
+            # `exc.strerror` (the OS's own reason, for example "Exec format
+            # error") is included so an unrelated `OSError` (`ENOMEM`,
+            # `EMFILE`) is not misdiagnosed as "not found on PATH" with the
+            # real reason discarded.
+            os_reason = exc.strerror if exc.strerror else exc.__class__.__name__
+            print(
+                _devsecret_run_command_not_found_message(command[0], os_reason),
+                file=sys.stderr,
+            )
+            return EXIT_USAGE_ERROR
+        process.wait()
+    return _devsecret_child_exit_code(process.returncode)
+
+
+def _export_list_names(records: Sequence[catalog.SecretRecord]) -> list[str]:
+    """The exported names in `records`, in `records` order (AC-FUNC-009).
+
+    `list_resolved` (spec Section 5.4) already decided which record is in
+    effect and stamped exactly one `in_effect=True` record per name; this
+    function trusts that decision rather than re-deriving it. Filtering on
+    `in_effect` before `exported` means a name whose in-effect record is not
+    exported is never printed here even when a shadowed record for the same
+    name is exported, so a name marked exported in more than one scope is
+    both printed once and printed on the authority of the record a shell
+    export at E3-F2-S2-T1 actually uses.
+    """
+    return [record.name for record in records if record.in_effect and record.exported]
+
+
+def _run_devsecret_export_list(args: argparse.Namespace, client: catalog.CatalogClient) -> int:
+    """AC-FUNC-009/010: the exported names, one per line, never a value.
+
+    Built on `catalog.list_resolved`, the same metadata-only listing `list`
+    uses (AC-4.3): the store's `describe-parameters` response has no field
+    that could carry a value, so this command structurally cannot print one.
+    """
+    records = catalog.list_resolved(client, None)
+    for name in _export_list_names(records):
+        print(name)
+    return EXIT_SUCCESS
+
+
 def _build_production_catalog_client() -> catalog.CatalogClient:
     """The default CatalogClient `devsecret` constructs outside a test.
 
@@ -582,6 +751,13 @@ def main_devsecret(
     exit-code contract (spec Section 4.3, AC-FUNC-011) is applied in exactly
     one place, `_devsecret_exit_code_for`: no handler above chooses a number
     for itself.
+
+    `run` (`_run_devsecret_run`) is the one handler that also calls
+    `repo.find_root`, and `devsecret` is on PATH in the container and on the
+    host, so a cwd outside any git checkout is an ordinary invocation, not a
+    crash: `repo.RepoError` is mapped to `EXIT_USAGE_ERROR` here, the same
+    `ERROR: ...` shape and no traceback as every other error this entry
+    point owns.
     """
     parser = _build_devsecret_parser()
     args = parser.parse_args(argv)
@@ -591,6 +767,9 @@ def main_devsecret(
     except catalog.CatalogError as exc:
         print(str(exc), file=sys.stderr)
         exit_code = _devsecret_exit_code_for(exc)
+    except repo.RepoError as exc:
+        print(str(exc), file=sys.stderr)
+        exit_code = EXIT_USAGE_ERROR
     sys.exit(exit_code)
 
 

@@ -363,7 +363,9 @@ would write, without rewriting it, run:
 PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.cli hooks-check
 ```
 
-`make hooks-uninstall` removes both hooks.
+`make hooks-uninstall` removes both hooks; running that command (or any of
+the other patterns the Bypass denial section below lists) through Claude
+Code's `Bash` tool is itself a denied bypass.
 
 On the remote engine the workspace is cloned into a volume, so the container
 has its own `.git` directory, one `make hooks-install` on the host never
@@ -378,6 +380,81 @@ install aborts postCreate rather than continuing with no hooks in place: a
 container that reached the prompt with no guard would run `git commit` with
 no secret scan, at the moment a developer is least likely to be reading the
 setup log.
+
+## Bypass denial
+
+Section 3.6.2 ("Boundaries, and what each defends") of
+`repos/spec/devcontainer-platform.md` names the threat this control
+answers: not a secret reaching the repository, but an agent or a human
+disabling the controls above under time pressure. Section 4.6.1 ("Bypass
+denial") of the same document fixes the denied surface. A `PreToolUse`
+hook on the `Bash` matcher, `.claude/hooks/deny_bypass.py`, registered in
+`.claude/settings.json`, denies every structurally recognized attempt made
+through Claude Code's `Bash` tool to run one of the following, naming the
+rule and the fix instead of only refusing. This hook intercepts only
+commands issued through that tool; a command a human (or an agent working
+outside Claude Code) types directly into a host or container terminal is
+not intercepted here at all, and stays covered, if at all, only by the git
+hooks the previous section describes:
+
+- `git commit --no-verify`, its `-n` alias (bare or bundled with another
+  short option, for example `-vn`), and `git commit --no-gpg-sign`.
+- `git push --no-verify`.
+- Any `HUSKY=`, `SKIP=` or `PRE_COMMIT_ALLOW_NO_CONFIG=` assignment,
+  whatever the value, whether written inline before the program or behind
+  `env`, wherever in a chained command they appear.
+- `git add -f` / `--force` of a path `.gitignore` excludes.
+- `rm` or `chmod` targeting anything under `.git/hooks`.
+- `make hooks-uninstall`, including the `make -C <dir> hooks-uninstall`
+  spelling.
+
+Evaluation is structural: a command line chained with `&&`, `||`, `;`, a
+pipe, a bare `&` background operator, simply a newline (the ordinary shape
+of a multi-line Bash-tool command), or a statement wrapped in a subshell
+`( )` or a brace group `{ }`, is denied when any segment matches, not only
+the first, and a denial is decided from the tokenized program, arguments
+and leading assignments, never a substring search over the raw text. The
+program name is compared by its basename, so `/usr/bin/git commit
+--no-verify` and `/bin/rm .git/hooks/pre-commit` are denied the same as
+the unprefixed spellings. A bare-word launcher ahead of the program
+(`sudo`, `env`, `command`, `nohup`, `time`, `doas`, `nice`, `ionice`,
+`setsid`, any number of them chained) and a shell reserved word that would
+otherwise be misread as the program after a `;` inside a compound
+statement (`then`, `else`, `elif`, `do`, `done`, `fi`, `while`, `until`,
+`case`, `esac`, `in`, `function`, `if`, `!`) are both walked past the same
+way, so `sudo git commit --no-verify` and `if true; then git commit
+--no-verify; fi` deny exactly as the unprefixed, unwrapped spelling does.
+
+Known limitations, so this section does not claim broader coverage than
+the hook delivers: a denied command nested inside a quoted string this
+hook cannot re-parse -- `bash -c "<command>"`, `sh -c "<command>"` and
+`eval "<command>"` -- is not recovered from that string; a `git -c
+core.hooksPath=<path>` global config assignment is walked past without
+its value being inspected; a launcher combined with its own flags (`sudo
+-u root`, `env -i`, `nice -n 10`) is not walked past, only the bare word
+is; and a wrapper that requires a positional argument before the command
+it runs (`timeout <n>`, `stdbuf <opts>`, `xargs`) is not treated as a
+launcher at all. Each of these is documented here, in the module
+docstring, as a hardening candidate for a follow-up unit, not asserted as
+covered.
+
+`git push --dry-run` is permitted: under `push`, `-n` means dry run, a
+rehearsal that changes nothing, not the `commit` alias for `--no-verify`.
+The same two characters are read in the context of the subcommand they
+follow rather than matched blindly, so `git commit -n` is denied while
+`git push -n` is not.
+
+The default is deny for anything the hook cannot understand: an
+untokenizable command line, an event on stdin that is not valid JSON or
+carries no command, or a `git add -f` whose ignore check cannot run, all
+deny rather than allow.
+
+A denial that looks wrong is not worked around with a different spelling
+of the same bypass. Fix the underlying problem the flag was reaching for
+(a genuinely broken hook, a signing key that needs configuring), or
+escalate to a human operator, who can evaluate whether the denied action
+is legitimate; only a human, not this hook and not the agent it stopped,
+approves running a command it lists above.
 
 ## Creating the container (remote)
 

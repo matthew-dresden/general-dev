@@ -8,12 +8,25 @@ module-level import would fail COLLECTION for the whole file (pytest exit
 code 2, no test outcome recorded) rather than failing the one test that
 actually exercises the missing module (pytest exit 1, a real FAILED result).
 
-Every helper below (`_valid_local_payload`, `_valid_remote_payload`,
-`_valid_aws_profile`) builds a complete, independently-valid answer set from
-literal values shaped like the real committed examples
-(`shell.env.example`, `.devcontainer/aws-profile-map.json.example`) rather
-than inventing arbitrary strings, so a test that asserts "no problems" is
-actually proving the validator accepts realistic input.
+`_valid_local_payload`, `_valid_remote_payload` and `_valid_aws_profile`
+(imported from `tests/conftest.py`) each build a complete,
+independently-valid answer set from values shaped like the real committed
+examples (`shell.env.example`, `.devcontainer/aws-profile-map.json.example`)
+rather than inventing arbitrary strings, so a test that asserts "no
+problems" is actually proving the validator accepts realistic input. The
+account-id, remote-instance-id and SSO-portal-URL fields are the deliberate
+exception, but not in the same way. The account-id and remote-instance-id
+fields are generated at runtime by `tests/conftest.py._synthetic_account_id`
+and `tests/conftest.py._synthetic_instance_id`, the same pattern
+`tests/test_secrets.py._sample_account_id` already uses for the identical
+detector -- no AWS-shaped digit or hex run is ever a literal in this file's
+or `tests/conftest.py`'s source text, and each test run exercises a freshly
+generated value rather than a fixed one. The SSO-portal-URL field is
+different: its *literal value* intentionally departs from
+`.devcontainer/aws-profile-map.json.example`'s
+`https://<your-sso-portal>.awsapps.com/start` shape, using a non-AWS
+placeholder domain instead. See `tests/conftest.py._valid_aws_profile` for
+why that departure is required rather than merely permitted.
 """
 
 from __future__ import annotations
@@ -23,6 +36,13 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from conftest import (
+    _synthetic_account_id,
+    _synthetic_instance_id,
+    _valid_aws_profile,
+    _valid_local_payload,
+    _valid_remote_payload,
+)
 
 
 def _import_answers() -> ModuleType:
@@ -32,58 +52,6 @@ def _import_answers() -> ModuleType:
     import time.
     """
     return importlib.import_module("devcontainer_config.answers")
-
-
-def _valid_aws_profile(name: str = "dev", account_id: str = "12345678901a") -> dict[str, str]:
-    """One well-formed aws_profiles entry, all seven sub-fields present."""
-    return {
-        "name": name,
-        "region": "us-east-1",
-        "sso_start_url": "https://example-sso.invalid/start",
-        "sso_region": "us-east-1",
-        "account_name": "dev-account",
-        "account_id": account_id,
-        "role_name": "AdministratorAccess",
-    }
-
-
-def _valid_local_payload(
-    *, aws_config_enabled: bool = False, host_proxy: bool = False
-) -> dict[str, Any]:
-    """A complete, valid local-backend answer set.
-
-    The eight always-required answers plus whichever branch-conditional
-    answers `aws_config_enabled` and `host_proxy` turn on, mirroring the
-    branching rule under test (AC-FUNC-002).
-    """
-    payload: dict[str, Any] = {
-        "backend": "local",
-        "developer_name": "Ada Lovelace",
-        "git_user": "ada",
-        "git_user_email": "ada@example.com",
-        "git_provider_url": "github.com",
-        "default_git_branch": "main",
-        "template_name": "python-service",
-        "aws_config_enabled": aws_config_enabled,
-        "local_docker_context": "desktop-linux",
-        "host_proxy": host_proxy,
-    }
-    if aws_config_enabled:
-        payload["aws_profiles"] = [_valid_aws_profile()]
-    if host_proxy:
-        payload["host_proxy_url"] = "http://proxy.example.com:8080"
-    return payload
-
-
-def _valid_remote_payload() -> dict[str, Any]:
-    """A complete, valid remote-backend answer set, including remote fields."""
-    payload = _valid_local_payload()
-    payload["backend"] = "remote"
-    payload["remote_instance_id"] = "i-0123456789abcdefg"
-    payload["remote_aws_region"] = "us-east-1"
-    payload["remote_aws_profile"] = "default"
-    payload["remote_ssh_key_path"] = "/home/dev/.ssh/example-key.pem"
-    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +174,16 @@ def test_required_fields_follows_branching(
 # validator. Every rejection asserts the message names the field.
 # ---------------------------------------------------------------------------
 
+# Generated via tests/conftest.py._synthetic_instance_id rather than a bare
+# literal: an 8-or-17-hex-char string prefixed with 'i-' is, by construction,
+# indistinguishable in shape from a real EC2 instance identifier -- the exact
+# shape devcontainer_config.secrets' ec2-instance-id detector keys on. Each
+# value still needs that exact valid shape to exercise the True (accepted)
+# rows of this table, so it is generated at runtime rather than written as a
+# source literal at all.
+_VALID_8HEX_INSTANCE_ID = _synthetic_instance_id(8)
+_VALID_17HEX_INSTANCE_ID = _synthetic_instance_id(17)
+
 _PATTERN_CASES: tuple[tuple[str, Any, bool], ...] = (
     # git_provider_url -- bare host, no scheme, no path (AC-FUNC-007)
     ("git_provider_url", "github.com", True),
@@ -216,8 +194,8 @@ _PATTERN_CASES: tuple[tuple[str, Any, bool], ...] = (
     ("git_provider_url", "<github-host>", False),  # placeholder branch
     ("git_provider_url", "", False),  # empty-string branch
     # remote_instance_id -- 'i-' plus exactly 8 or 17 hex chars (AC-FUNC-008)
-    ("remote_instance_id", "i-01234abg", True),
-    ("remote_instance_id", "i-0123456789abcdefg", True),
+    ("remote_instance_id", _VALID_8HEX_INSTANCE_ID, True),
+    ("remote_instance_id", _VALID_17HEX_INSTANCE_ID, True),
     ("remote_instance_id", "i-0123abc", False),
     ("remote_instance_id", "i-01234abg", False),
     ("remote_instance_id", "i-01234ABC", False),
@@ -357,6 +335,12 @@ def test_placeholder_fails_even_when_shape_is_otherwise_plausible() -> None:
 # AC-FUNC-009: aws_profiles error paths.
 # ---------------------------------------------------------------------------
 
+# Generated via tests/conftest.py._synthetic_account_id, the same rationale
+# as _VALID_8HEX_INSTANCE_ID / _VALID_17HEX_INSTANCE_ID above: this needs to
+# be a second, distinct valid 12-digit account id, generated at runtime
+# rather than written as a source literal at all.
+_OTHER_VALID_ACCOUNT_ID = _synthetic_account_id()
+
 
 def test_aws_profiles_rejects_non_list() -> None:
     answers = _import_answers()
@@ -435,7 +419,7 @@ def test_aws_profiles_rejects_duplicated_profile_name() -> None:
     answers = _import_answers()
     field = answers.FIELDS_BY_NAME["aws_profiles"]
     first = _valid_aws_profile(name="dev")
-    second = _valid_aws_profile(name="dev", account_id="21098765432a")
+    second = _valid_aws_profile(name="dev", account_id=_OTHER_VALID_ACCOUNT_ID)
 
     problems = field.validator("aws_profiles", [first, second])
 
@@ -450,7 +434,7 @@ def test_aws_profiles_accepts_a_well_formed_list() -> None:
         "aws_profiles",
         [
             _valid_aws_profile(name="dev"),
-            _valid_aws_profile(name="prod", account_id="21098765432a"),
+            _valid_aws_profile(name="prod", account_id=_OTHER_VALID_ACCOUNT_ID),
         ],
     )
 

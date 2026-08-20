@@ -3,10 +3,41 @@ name = "general-dev"
 version = "0.1.0"
 requires-python = ">=3.11"
 
+# devsecret puts the four record commands (spec Section 4.3; E3-F2-S1-T1) on
+# PATH once this project is installed. AC-FUNC-012 requires the console
+# script AND the package-discovery setting that makes `devcontainer_config`
+# importable once something actually builds or installs this project (a
+# container image layer or a host bootstrap step, per Section 4.3's "on
+# PATH in the container and on the host"); declaring only the console
+# script and no build backend would leave `devsecret` pointing at a module
+# no install can ever place on `sys.path`, since `devcontainer_config` lives
+# under `.claude/plugins/devcontainer/scripts`, outside every default
+# discovery root. `[tool.hatch.build.targets.wheel] packages` below names
+# that real directory explicitly instead of relying on flat-layout
+# auto-discovery, which would look under the repository root and find
+# nothing. `[tool.uv] package = false` (below) still keeps `uv run` and
+# `uv sync` from ever invoking this build backend, so `make test` and
+# `make validate` stay hermetic and network-free (AC-10.14) even with a
+# build backend declared; only a future explicit `uv build` or
+# `pip install .` exercises it.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+devsecret = "devcontainer_config.cli:main_devsecret"
+
+[tool.hatch.build.targets.wheel]
+packages = [".claude/plugins/devcontainer/scripts/devcontainer_config"]
+
 [tool.uv]
-# Nothing here is a Python package to build or install. This file exists so
-# `uv run` has a project, a dev dependency group, and tool configuration to
-# read, not so the repository can be packaged.
+# `package = false` keeps `uv run`/`uv sync` from ever attempting to build
+# this project via the `[build-system]` table above or fetch a build
+# backend, so `make test` and `make validate` stay hermetic (AC-10.14). The
+# build backend exists so a real install (a future container image layer or
+# host bootstrap step) has package-discovery configuration to build from;
+# it is declared but never invoked by anything `make test` or
+# `make validate` runs.
 package = false
 
 [dependency-groups]

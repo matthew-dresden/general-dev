@@ -1,8 +1,9 @@
 # Environment files
 
 Three files configure this devcontainer. All three are gitignored because they
-carry per-developer identity and secrets, and each has a committed `.example`
-alongside it.
+carry per-developer identity and configuration that must not reach git -- SSO
+profile selection, git identity, proxy settings and feature toggles -- and
+each has a committed `.example` alongside it.
 
 | File | Example | What it is |
 |---|---|---|
@@ -47,7 +48,7 @@ Read ~/.aws/config and .devcontainer/aws-profile-map.json.example, then build
 .devcontainer/aws-profile-map.json from the SSO profiles you find there.
 ```
 
-> Ask Claude to write these files, never to *fill in secrets it invents*. An
+> Ask Claude to write these files, never to *invent configuration values*. An
 > account ID or SSO URL that looks plausible but is wrong fails at `aws sso
 > login`, not at provisioning, which is a slower and more confusing failure.
 
@@ -160,13 +161,71 @@ for whatever is missing.
 
 ## Secrets
 
-`shell.env` is published to Parameter Store by `make push-secrets` so remote
-containers can bootstrap themselves. Consequences worth knowing:
+`shell.env` carries identity and configuration -- git identity, AWS profile
+selection, proxy settings -- and carries no credential. It is still
+published to Parameter Store by `make push-secrets` so a remote container
+can bootstrap itself; that mechanism is unchanged. What changed is what the
+file is allowed to hold: every credential now lives in the secret catalog,
+at its own parameter path, never in `shell.env`.
 
-- Anything in `shell.env` reaches AWS. That is intended for configuration, and
-  acceptable for secrets you would store in Parameter Store anyway.
-- The container's **git credential** does not come from here. It is copied from
-  the credential helper already working on your machine by
-  `make push-git-creds`, which `make build` runs automatically.
+### The secret catalog
+
+One backend, AWS Parameter Store: there is no second provider, no offline
+store and no fallback to a local copy. A secret lives at
+`/devcontainer/shared/secrets/<NAME>` or
+`/devcontainer/<instance>/secrets/<NAME>`, both `SecureString` parameters;
+the scope is a path prefix, so IAM enforces the boundary, not convention.
+Resolution is instance-first then shared: a name is looked up in the
+instance scope first, and in the shared scope only if the instance scope
+does not hold it.
+
+The `devsecret` CLI is the only way this repository reaches a catalog
+secret:
+
+- `devsecret get <NAME>` -- print one value on stdout, nothing else.
+- `devsecret list [--scope <scope>]` -- names, scopes, last-changed and the
+  exported flag; never a value.
+- `devsecret set <NAME> [--scope <scope>] [--exported]` -- write a value
+  read from stdin.
+- `devsecret rm <NAME> --scope <scope>` -- delete after confirmation.
+- `devsecret run --secrets A,B -- <cmd>` -- run `<cmd>` with only the named
+  secrets in its environment.
+- `devsecret export-list` -- names marked exported.
+
+Run `devsecret --help` for the full reference, including every exit code.
+
+A value is never accepted as a command-line argument. `devsecret set`
+refuses one with exit 5, since an argument reaches the process table, where
+any other user on this machine can read it. Pipe it on stdin instead:
+
+```bash
+printf '%s' "$VALUE" | devsecret set <NAME> --exported
+```
+
+`devsecret set` also refuses an interactive TTY paste with exit 2 unless
+`--stdin` confirms it is deliberate. No value is ever written to any
+filesystem by this client.
+
+Neither engine needs a stored credential: the remote engine reaches the
+store through the instance role over IMDSv2, and the local engine reaches
+it through the developer's already-valid AWS SSO session.
+
+### Configuration variables
+
+| Variable | Default | Governs |
+|---|---|---|
+| `AWS_PROFILE` | `default` | The AWS CLI profile the local engine resolves credentials from when reaching the catalog. Read only; never set by this repository. |
+| `SECRET_CACHE_DIR` | A writable, RAM-backed (`tmpfs`/`ramfs`) mount point chosen from the mount table, outside the repository and the container workspace. Falls back to the platform temporary directory in two cases: when no mount table is available at all (used directly, for example macOS); or when a mount table is available but names no such writable, out-of-boundary RAM-backed row, in which case that same mount table then refuses the fallback with exit 5 (`SecretCacheExposureError`) rather than using it. | The RAM-backed, per-invocation, owner-only directory `devsecret run` creates outside the repository and the container workspace and hands to the child, so a tool that can read a value only from a file, not an environment variable, has somewhere to write one. `devsecret` itself never writes a value there. The directory, and everything under it, is removed when the child process exits. |
+
+The certificate and transport variables join this table with the work
+units that implement them.
+
+### What did not change
+
+- `shell.env` is still published to Parameter Store by `make push-secrets`
+  so remote containers can bootstrap themselves.
 - `build` and `rebuild` publish `shell.env` themselves when it is newer than
   the stored copy, so editing it is enough, no separate step to remember.
+- The container's **git credential** does not come from `shell.env`. It is
+  copied from the credential helper already working on your machine by
+  `make push-git-creds`, which `make build` runs automatically.

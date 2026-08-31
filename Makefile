@@ -24,6 +24,13 @@ MARKDOWN_LINT ?= $(UVX) pymarkdownlnt --config .pymarkdown.json
 SPELL_LINT ?= $(UVX) codespell --builtin clear,rare,en-GB_to_en-US
 SHELL_LINT ?= $(UVX) --from shellcheck-py shellcheck
 PYTEST ?= uv run --group dev pytest
+# E3-F2-S2-T5 AC-DOC-001 / AC-FUNC-001: the `test` target's host prerequisite
+# tools and each one's install command, defined once so the PREREQUISITES
+# help row and the `test:` recipe's fail-fast guard read the same value and
+# can never document or print different remediation for the same tool.
+TEST_PREREQUISITE_TOOLS := uv zsh
+TEST_INSTALL_HINT_uv := brew install uv
+TEST_INSTALL_HINT_zsh := brew install zsh (macOS) or sudo apt-get install -y zsh (Linux, WSL)
 # repos/ holds clones of other repositories. Their contents are not this
 # repo's to lint, and an unparseable file in one of them failed the build here.
 LINT_EXCLUDES ?= -not -path './.git/*' -not -path './devbench/*' -not -path './node_modules/*' -not -path './repos/*'
@@ -99,7 +106,8 @@ help:
 	@printf '  %-23s %s\n' "container targets"     "docker"
 	@printf '  %-23s %s\n' "remote engine"         "aws, ssh, session-manager-plugin, and REMOTE_INSTANCE_ID in shell.env"
 	@printf '  %-23s %s\n' "build and rebuild"     "devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli"
-	@printf '  %-23s %s\n' "lint, test"            "uv                                      brew install uv"
+	@printf '  %-23s %s\n' "lint"                  "uv                                      brew install uv"
+	@printf '  %-23s %s\n' "test"                  "uv, zsh                                 uv: $(TEST_INSTALL_HINT_uv)   zsh: $(TEST_INSTALL_HINT_zsh)"
 	@printf '  %s\n' "Every target checks what it needs and fails with the command that installs it."
 	@printf '\n'
 
@@ -229,9 +237,23 @@ lint: lint-private lint-nested lint-json lint-sh lint-dispatch lint-md lint-spel
 validate: lint test
 	@printf '\033[0;32m[DONE]\033[0m validate passed\n'
 
-# Host only, hermetic: no docker, no AWS, no network (AC-10.14).
+# Host only, hermetic: no docker, no AWS, no network (AC-10.14). Every tool
+# named in the "test" PREREQUISITES row above is checked here, in one loop
+# over TEST_PREREQUISITE_TOOLS, before pytest ever runs, so a missing
+# prerequisite fails with the command that installs it instead of failing
+# deep inside the suite with no such hint.
 test:
 	@printf '\033[0;36m[TEST]\033[0m running pytest suite\n'
+	@for tool in $(TEST_PREREQUISITE_TOOLS); do \
+		command -v "$$tool" > /dev/null 2>&1 && continue; \
+		case "$$tool" in \
+			uv) hint="$(TEST_INSTALL_HINT_uv)" ;; \
+			zsh) hint="$(TEST_INSTALL_HINT_zsh)" ;; \
+		esac; \
+		printf '\033[0;31m[ERROR]\033[0m %s is not installed.\n' "$$tool" >&2; \
+		printf '        Install it: %s\n' "$$hint" >&2; \
+		exit 1; \
+	done
 	@$(PYTEST) tests
 
 lint-nested:

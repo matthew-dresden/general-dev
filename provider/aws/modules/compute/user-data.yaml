@@ -1,0 +1,234 @@
+#cloud-config
+# Rendered by templatefile() from provider/aws/modules/compute/main.tf.
+# Turns a bare Ubuntu 24.04 host into the rootless docker engine the
+# program talks to, reachable only through a loopback mTLS listener (D1,
+# D2 -- spec Section 13). Every value that varies by deployment -- the
+# daemon user, its data-root, the TLS listener's address and port, and the
+# docker package repository's base URL and channel -- arrives here as a
+# Terraform variable interpolated at render time.
+#
+# Paths rooted at /etc/apparmor.d, /etc/systemd/system and /home/<user>
+# below are OS-level and package conventions Docker, apparmor and systemd
+# read from a fixed, well-known location on every host, the same way
+# /etc/docker/daemon.json itself is not a candidate for externalization;
+# see the network module's main.tf for the same reasoning applied to the
+# default route's 0.0.0.0/0 destination. The same reasoning covers the
+# remaining literals below, none of which a caller has a reason to vary
+# deployment to deployment: the "amazon-ssm-agent --classic" snap name and
+# confinement mode are intrinsic to that specific Amazon-published package,
+# not a caller choice; the DOCKERDATA filesystem label and the "-i 8192"
+# mkfs inode ratio are this template's own internal convention for locating
+# and sizing the data volume it creates and never appear outside this file;
+# the fstab mount options (defaults,noatime,nofail) are the standard,
+# non-account-specific options for a mounted data volume; and
+# /etc/general-dev-provisioned is an internal readiness-marker path this
+# template alone reads and writes.
+#
+# This template reaches three separate outbound destinations, all over the
+# instance's own outbound path (the instance is never reachable from
+# outside except through the SSM port forward in E6): the Ubuntu package
+# archives, pulled by the package_update/packages cloud-config keys before
+# runcmd executes; var.docker_repo_base_url (download.docker.com by
+# default), for the apt signing key and the docker-ce/containerd packages;
+# and the Snap Store, for the amazon-ssm-agent snap.
+#
+# Deliberately absent: no `usermod -aG docker`. Group membership on a
+# rootful daemon is equivalent to host root (Section 1.5); this template
+# never leaves a rootful daemon enabled to join a group on in the first
+# place -- see the explicit disable of docker.service/docker.socket below.
+
+package_update: true
+
+# iptables is a hard prerequisite of dockerd-rootless-setuptool.sh, not an
+# optional convenience: rootless docker manages its own bridge NAT and
+# published-port DNAT through it, and the installer aborts with an
+# actionable diagnostic under the `set -e` above if it is absent. Installing
+# it here (rather than passing the installer's own --skip-iptables, which
+# would suppress that abort and permanently disable iptables management in
+# the generated docker.service) keeps the failure at provisioning time and
+# visible instead of a silently networking-broken daemon later.
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - uidmap
+  - dbus-user-session
+  - iptables
+
+write_files:
+  # AppArmor unprivileged-user-namespace relaxation (Section 8.1, silent
+  # failure 2 of 3): Ubuntu 24.04 restricts unprivileged user namespace
+  # creation by default. Without this profile, rootlesskit -- the
+  # component rootless docker uses to build the container's user
+  # namespace -- is denied by AppArmor, so the daemon starts cleanly and
+  # every container creation then fails.
+  - path: /etc/apparmor.d/rootlesskit
+    permissions: "0644"
+    content: |
+      abi <abi/4.0>,
+      include <tunables/global>
+
+      /usr/bin/rootlesskit flags=(unconfined) {
+        userns,
+        include if exists <local/rootlesskit>
+      }
+
+runcmd:
+  # cloud-init's cc_runcmd concatenates every runcmd entry below into one
+  # /bin/sh script and runs it as a single process; the script carries no
+  # `set -e` of its own, so this has to be the first entry for the option
+  # to cover the whole script, including the D1 control a few lines down.
+  # Once set, it stays in effect through every entry that follows.
+  - set -e
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL ${docker_repo_base_url}/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - |
+    . /etc/os-release
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] ${docker_repo_base_url} $VERSION_CODENAME ${docker_repo_channel}" > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli docker-ce-rootless-extras containerd.io
+  # docker-ce's own postinst enables and would start the rootful daemon;
+  # D1 (Section 13) rejects a rootful daemon outright, so it is disabled
+  # immediately and never started. Only the rootless daemon configured
+  # below ever runs on this host.
+  - systemctl disable --now docker.service docker.socket
+  # D1 post-condition: `disable --now` exiting 0 is not by itself proof the
+  # rootful daemon is gone, so this asserts the state it is required to
+  # leave behind. If either unit is still active or still enabled, the host
+  # would otherwise be left running the root-equivalent daemon D1 forbids
+  # with no non-zero exit and no diagnostic to show for it.
+  - |
+    if systemctl is-active --quiet docker.service || systemctl is-active --quiet docker.socket || systemctl is-enabled --quiet docker.service || systemctl is-enabled --quiet docker.socket; then
+      echo "FATAL: docker.service/docker.socket (rootful) still active or enabled after 'disable --now' - D1 requires the rootful daemon never run" | tee /dev/console
+      exit 1
+    fi
+  # SSM enablement runs before every daemon-user-specific step below that
+  # can fail, governed by the same `set -e` set as the first runcmd entry
+  # above, so an operator can always reach the host through the SSM port
+  # forward in E6 to diagnose a later failure, instead of a circular
+  # dependency where the failure itself removes the only way to observe
+  # it. This is reachability only, not a readiness signal -- the
+  # /etc/general-dev-provisioned marker is written solely by the final
+  # runcmd entry below, once provisioning has actually completed.
+  - |
+    systemctl start snapd.socket
+    systemctl start snapd.seeded.service
+    if ! snap list amazon-ssm-agent > /dev/null 2>&1; then
+      snap install amazon-ssm-agent --classic
+    fi
+    systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service
+  - id -u ${daemon_user} > /dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin ${daemon_user}
+  # Silent failure 1 of 3 (Section 8.1): without lingering, systemd tears
+  # down the daemon user's user manager, and the rootless daemon with it,
+  # the moment nobody is logged in as that user -- which for a dedicated
+  # daemon user with no interactive login is immediately after boot.
+  # `systemctl start` on the user manager unit blocks until it is active
+  # (no readiness polling needed), so /run/user/<uid> and its D-Bus socket
+  # exist before any later step tries to reach them.
+  - |
+    set -e
+    DAEMON_UID=$(id -u ${daemon_user})
+    loginctl enable-linger ${daemon_user}
+    systemctl start "user@$DAEMON_UID.service"
+  - apparmor_parser -r /etc/apparmor.d/rootlesskit
+  # Silent failure 3 of 3 (Section 8.1): without cgroup v2 controller
+  # delegation, systemd never hands the daemon user's own systemd --user
+  # instance control of the cpu, cpuset, io, memory and pids controllers,
+  # so rootless docker starts and creates containers cleanly, and every
+  # --cpus, --memory or --pids-limit flag a caller later passes is then
+  # silently unenforceable. Ubuntu 24.04 already delegates cpu, memory and
+  # pids to a user slice by default; cpuset and io are not delegated
+  # without this drop-in. The delegation takes effect only once the user
+  # manager unit is (re)started, which the restart below does explicitly.
+  - |
+    set -e
+    DAEMON_UID=$(id -u ${daemon_user})
+    install -d -m 0755 /etc/systemd/system/user@$DAEMON_UID.service.d
+    cat > /etc/systemd/system/user@$DAEMON_UID.service.d/delegate.conf <<'EOF_DELEGATE'
+    [Service]
+    Delegate=cpu cpuset io memory pids
+    EOF_DELEGATE
+    systemctl daemon-reload
+    systemctl restart "user@$DAEMON_UID.service"
+  - install -d -m 0700 -o ${daemon_user} -g ${daemon_user} /home/${daemon_user}/tls
+  - install -d -m 0755 -o ${daemon_user} -g ${daemon_user} ${data_root}
+%{ if create_data_volume }
+  - |
+    set -e
+    if ! blkid -L DOCKERDATA > /dev/null 2>&1; then
+      CANDIDATES=""
+      for dev in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print $1}'); do
+        if [ -z "$(lsblk -n -o FSTYPE "/dev/$dev" | tr -d '[:space:]')" ]; then
+          CANDIDATES="$CANDIDATES /dev/$dev"
+        fi
+      done
+      set -- $CANDIDATES
+      if [ "$#" -ne 1 ]; then
+        echo "FATAL: expected exactly 1 empty data disk, found $#:$CANDIDATES" | tee /dev/console
+        exit 1
+      fi
+      mkfs.ext4 -i 8192 -L DOCKERDATA "$1"
+    fi
+    grep -q "LABEL=DOCKERDATA" /etc/fstab || echo "LABEL=DOCKERDATA ${data_root} ext4 defaults,noatime,nofail 0 2" >> /etc/fstab
+    mount -a
+  - |
+    if ! mountpoint -q ${data_root}; then
+      echo "FATAL: ${data_root} is not a mountpoint - data volume missing or failed to mount" | tee /dev/console
+      exit 1
+    fi
+    chown ${daemon_user}:${daemon_user} ${data_root}
+%{ endif }
+  # Rootless install runs via `runuser -u`, which execs the command
+  # directly rather than through the daemon user's login shell, so the
+  # account's /usr/sbin/nologin shell (deliberately unchanged, so the
+  # account remains unusable for interactive login) is never consulted.
+  # HOME, XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are passed
+  # explicitly on the command line rather than exported beforehand,
+  # because `runuser -u` does not propagate the caller's environment by
+  # default and the user manager the daemon needs is reachable only
+  # through the runtime directory and bus address computed here.
+  - |
+    set -e
+    DAEMON_UID=$(id -u ${daemon_user})
+    runuser -u ${daemon_user} -- env HOME=/home/${daemon_user} XDG_RUNTIME_DIR=/run/user/$DAEMON_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$DAEMON_UID/bus PATH=/usr/bin:/usr/sbin:/bin:/sbin dockerd-rootless-setuptool.sh install
+    runuser -u ${daemon_user} -- env HOME=/home/${daemon_user} XDG_RUNTIME_DIR=/run/user/$DAEMON_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$DAEMON_UID/bus systemctl --user stop docker.service
+  # The TLS listener is bound to loopback only (var.docker_tls_listen_address
+  # is validated to be exactly 127.0.0.1), reachable through the SSM port
+  # forward in E6 and nothing else; the unix socket alongside it is the
+  # local Docker CLI's own default. Certificate material at
+  # /home/<user>/tls/{ca,server-cert,server-key}.pem is not written by this
+  # template -- this step installs the paths the daemon reads, not their
+  # content; E6 hands the certificate to the instance.
+  - |
+    set -e
+    install -d -m 0755 -o ${daemon_user} -g ${daemon_user} /home/${daemon_user}/.config/docker
+    cat > /home/${daemon_user}/.config/docker/daemon.json <<DAEMON_JSON
+    {
+      "data-root": "${data_root}",
+      "hosts": ["unix:///run/user/$(id -u ${daemon_user})/docker.sock", "tcp://${tls_listen_address}:${tls_listen_port}"],
+      "tls": true,
+      "tlsverify": true,
+      "tlscacert": "/home/${daemon_user}/tls/ca.pem",
+      "tlscert": "/home/${daemon_user}/tls/server-cert.pem",
+      "tlskey": "/home/${daemon_user}/tls/server-key.pem"
+    }
+    DAEMON_JSON
+    chown ${daemon_user}:${daemon_user} /home/${daemon_user}/.config/docker/daemon.json
+  # The daemon is enabled, not started: its first start reads the TLS
+  # paths above, which this module never populates -- E6 delivers that
+  # certificate and issues `systemctl --user start docker` once it has.
+  # Forcing a start here would make cloud-init depend on material this
+  # module does not deliver, aborting the remainder of this script under
+  # `set -e` and leaving the daemon enablement itself undone.
+  - |
+    set -e
+    DAEMON_UID=$(id -u ${daemon_user})
+    runuser -u ${daemon_user} -- env HOME=/home/${daemon_user} XDG_RUNTIME_DIR=/run/user/$DAEMON_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$DAEMON_UID/bus systemctl --user enable docker.service
+  # Written last, and only here: this is the sole place in the script
+  # where every step above -- rootless docker installed, the rootful
+  # daemon disabled and verified gone, linger/AppArmor/cgroup delegation
+  # applied, and docker.service enabled -- has already succeeded under
+  # `set -e`. A consumer polling this path for readiness must never see it
+  # before the module's actual work is done.
+  - date -u +"%Y-%m-%dT%H:%M:%SZ" > /etc/general-dev-provisioned

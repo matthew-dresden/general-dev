@@ -38,6 +38,19 @@ jobs:
         with:
           enable-cache: true
 
+      # tests/test_shellrc.py parametrizes its end-to-end cases over
+      # ("bash", "zsh"); ubuntu-latest's base image does not ship zsh
+      # (neither Ubuntu2204-Readme.md nor Ubuntu2404-Readme.md in
+      # actions/runner-images lists it), so it must be installed before
+      # `make test` runs or those cases fail on a missing interpreter
+      # instead of running for real.
+      - name: Install zsh
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zsh
+
       # A red step here means a broken test: run `make test` locally to
       # reproduce.
       - name: make test

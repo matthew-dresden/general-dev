@@ -33,6 +33,15 @@ The Makefile is read through `devcontainer_config.repo.find_root`, resolved
 from this test file's own location, so the assertions hold from any working
 directory a test runner is invoked from rather than assuming the repository
 root is the current directory.
+
+`_makefile_text` and `_resolve_make_refs` are imported from
+`tests/conftest.py` rather than defined here (`_make_variable`, the helper
+`_resolve_make_refs` calls internally, lives in `tests/conftest.py` too but
+is not imported directly by any test in this file): `tests/test_ci_workflow.py`
+needs the identical Makefile-variable-resolution logic for AC-TEST-006 (the
+cross-check that the CI `Install zsh` step and this file's PREREQUISITES row
+name the same package), and a private copy in each file risked one drifting
+from the other while its sibling suite stayed green.
 """
 
 from __future__ import annotations
@@ -44,6 +53,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import _makefile_text, _resolve_make_refs
 from devcontainer_config.repo import find_root
 
 # Spec Section 4.1.2 requires the `make test` row to stay "no docker, no AWS,
@@ -67,17 +77,6 @@ TEST_PREREQUISITE_TOOLS: tuple[str, ...] = ("uv", "zsh")
 # test, or every doctored run fails before the guard loop it exists to
 # exercise ever runs.
 _UNGUARDED_RECIPE_UTILITIES: tuple[str, ...] = ("printf",)
-
-
-def _makefile_text() -> str:
-    """The repository root `Makefile`, read fresh for every call.
-
-    Not cached at module scope: caching would let one test's assertion
-    about the file's content leak into another's failure message instead of
-    each test reading the file it is actually asserting about.
-    """
-    root = find_root(Path(__file__).resolve().parent)
-    return (root / "Makefile").read_text(encoding="utf-8")
 
 
 def _phony_targets(makefile_text: str) -> set[str]:
@@ -152,38 +151,6 @@ def _row_tool_names(row: str) -> list[str]:
     match = re.match(r"^([A-Za-z0-9_]+(?:,\s*[A-Za-z0-9_]+)*)\s{2,}", row)
     assert match is not None, f"PREREQUISITES row {row!r} has no leading comma-separated tool list"
     return [name.strip() for name in match.group(1).split(",")]
-
-
-def _make_variable(makefile_text: str, name: str) -> str:
-    """The literal value assigned by a `name := value` line in the Makefile.
-
-    Only supports the simple immediate-assignment form this Makefile uses for
-    `TEST_PREREQUISITE_TOOLS` and each `TEST_INSTALL_HINT_<tool>` -- the only
-    form `_resolve_make_refs` needs to look up.
-    """
-    match = re.search(r"^" + re.escape(name) + r"\s*:=\s*(.+)$", makefile_text, re.MULTILINE)
-    assert match is not None, f"no {name!r} variable assignment found in Makefile"
-    return match.group(1).strip()
-
-
-def _resolve_make_refs(makefile_text: str, text: str) -> str:
-    """`text` with every `$(NAME)` token replaced by `NAME`'s Makefile value.
-
-    E3-F2-S2-T5's PREREQUISITES row and `test:` guard both render their
-    install-command wording from shared `TEST_INSTALL_HINT_<tool>` Make
-    variables (single-sourced in the Makefile, not typed out twice), so text
-    captured out of the Makefile's source carries the literal `$(...)` token
-    rather than the value. This is a one-level, test-only substitution against
-    that source -- not a general Make evaluator -- so this suite still asserts
-    on real install-command text, and a row/guard that referenced different
-    variables (or that stopped referencing the same one) would still be
-    caught.
-    """
-
-    def _replace(match: re.Match[str]) -> str:
-        return _make_variable(makefile_text, match.group(1))
-
-    return re.sub(r"\$\(([A-Za-z0-9_]+)\)", _replace, text)
 
 
 def _install_hint(makefile_text: str, tool: str) -> str:

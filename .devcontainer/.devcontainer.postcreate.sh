@@ -43,6 +43,11 @@ REPOS_PATH="${WORK_DIR}/${DEVCONTAINER_REPOS_DIR}"
 RESMON_DISKS="${WORK_DIR}/.devcontainer/resmon-disks.py"
 VSCODE_SETTINGS_SYNC="${WORK_DIR}/.devcontainer/vscode-settings-sync.py"
 
+# Where devcontainer_config lives (Makefile:15 holds the same value for
+# 'make hooks-install' and friends). Named once here so configure_shell_env
+# does not hardcode this path inline.
+DEVCONTAINER_SCRIPTS_DIR="${WORK_DIR}/.claude/plugins/devcontainer/scripts"
+
 USER_BIN="${USER_HOME}/.local/bin"
 
 VSCODE_SERVER_DIR="${USER_HOME}/${DEVCONTAINER_VSCODE_SERVER_DIRNAME}"
@@ -51,6 +56,16 @@ WARNINGS=()
 is_cicd() { [ "${CICD,,}" = "true" ]; }
 
 export PATH="${DEVCONTAINER_EXTRA_PATH}:${USER_BIN}:${PATH}"
+
+# The devsecret export-list startup block for one shell (spec Section 11),
+# rendered by devcontainer_config.shellrc rather than hand-written here
+# (spec Section 3.5: all new logic is Python, no new shell script). Reused
+# for both shells configure_shell_env wires below so the render invocation
+# exists in exactly one place.
+render_devsecret_shell_block() {
+  local shell="$1"
+  PYTHONPATH="${DEVCONTAINER_SCRIPTS_DIR}" python3 -m devcontainer_config.shellrc "${shell}"
+}
 
 configure_shell_env() {
   [ -f "${SHELL_ENV}" ] || exit_with_error "shell.env not found at ${SHELL_ENV}"
@@ -68,6 +83,32 @@ configure_shell_env() {
     echo "source \"${SHELL_ENV}\""
     echo "${path_prepend}"
   } > "${ZSH_ENV}"
+
+  # A container whose shells silently lack their exported secrets is worse
+  # than a container that failed to create, so a non-zero render is fatal
+  # through exit_with_error rather than warned about or skipped.
+  local bash_block zsh_block
+  bash_block="$(render_devsecret_shell_block bash)" || exit_with_error "$(printf '%s\n' \
+    "devcontainer_config.shellrc failed to render the bash devsecret export-list block." \
+    "Rerun 'PYTHONPATH=${DEVCONTAINER_SCRIPTS_DIR} python3 -m devcontainer_config.shellrc bash'" \
+    "from ${WORK_DIR} to see the underlying error.")"
+  zsh_block="$(render_devsecret_shell_block zsh)" || exit_with_error "$(printf '%s\n' \
+    "devcontainer_config.shellrc failed to render the zsh devsecret export-list block." \
+    "Rerun 'PYTHONPATH=${DEVCONTAINER_SCRIPTS_DIR} python3 -m devcontainer_config.shellrc zsh'" \
+    "from ${WORK_DIR} to see the underlying error.")"
+
+  # Idempotent: a rebuild or a manual rerun of this function must not
+  # duplicate the block (AC-FUNC-006). Each rendered block's own first line
+  # is its marker (devcontainer_config.shellrc.MARKER); grepping the target
+  # startup file for that line before appending, the same
+  # 'grep -q ... || <action>' guard style already used elsewhere in this
+  # file, is what makes a second run a no-op instead of a second copy.
+  local bash_marker zsh_marker
+  bash_marker="$(printf '%s\n' "${bash_block}" | head -n 1)"
+  zsh_marker="$(printf '%s\n' "${zsh_block}" | head -n 1)"
+
+  grep -qF -- "${bash_marker}" "${BASH_RC}" || printf '%s\n' "${bash_block}" >> "${BASH_RC}"
+  grep -qF -- "${zsh_marker}" "${ZSH_ENV}" || printf '%s\n' "${zsh_block}" >> "${ZSH_ENV}"
 
   log_section_done "Shell environment"
 }

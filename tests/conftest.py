@@ -12,10 +12,25 @@ identical, byte-for-byte-copied checkout of the three real `.example` files
 this repository ships; before this extraction each file carried its own
 copy of both functions, which risked silently diverging on the next change
 to `repo.PRIVATE_FILES` or `repo.example_for`.
+
+`_makefile_text`, `_make_variable` and `_resolve_make_refs` are shared
+Makefile-parsing helpers for `tests/test_makefile_contract.py` and
+`tests/test_ci_workflow.py`. Both suites need the same `NAME := value`
+variable-resolution logic against the repository root `Makefile` --
+`tests/test_makefile_contract.py`'s PREREQUISITES-row and guard-loop
+assertions, and `tests/test_ci_workflow.py`'s AC-TEST-006 cross-check that
+the CI `Install zsh` step and the Makefile's documented Linux package name
+cannot drift apart. Before this extraction each file carried its own copy;
+`_make_variable` and `_resolve_make_refs` were byte-identical and
+`_makefile_text` was functionally identical, so a future change to the
+Makefile's assignment syntax would have had to be fixed in two places, and
+the AC-TEST-006 drift check itself could have silently mis-resolved while
+`tests/test_makefile_contract.py` stayed green.
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -146,3 +161,46 @@ def _example_root(tmp_path: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(source.read_bytes())
     return root
+
+
+def _makefile_text() -> str:
+    """The repository root `Makefile`, read fresh for every call.
+
+    Not cached at module scope: caching would let one test's assertion
+    about the file's content leak into another's failure message instead of
+    each test reading the file it is actually asserting about.
+    """
+    root = repo.find_root(Path(__file__).resolve().parent)
+    return (root / "Makefile").read_text(encoding="utf-8")
+
+
+def _make_variable(makefile_text: str, name: str) -> str:
+    """The literal value assigned by a `name := value` line in the Makefile.
+
+    Only supports the simple immediate-assignment form the Makefile uses for
+    `TEST_PREREQUISITE_TOOLS` and each `TEST_INSTALL_HINT_<tool>` -- the only
+    form `_resolve_make_refs` needs to look up.
+    """
+    match = re.search(r"^" + re.escape(name) + r"\s*:=\s*(.+)$", makefile_text, re.MULTILINE)
+    assert match is not None, f"no {name!r} variable assignment found in Makefile"
+    return match.group(1).strip()
+
+
+def _resolve_make_refs(makefile_text: str, text: str) -> str:
+    """`text` with every `$(NAME)` token replaced by `NAME`'s Makefile value.
+
+    The Makefile's PREREQUISITES row and its `test:` recipe guard, and CI's
+    `Install zsh` step documentation cross-check, all render their
+    install-command wording from shared `TEST_INSTALL_HINT_<tool>` Make
+    variables (single-sourced in the Makefile, not typed out twice), so text
+    captured out of the Makefile's source carries the literal `$(...)` token
+    rather than the value. This is a one-level, test-only substitution
+    against that source -- not a general Make evaluator -- so a caller still
+    asserts on real install-command text, and a reference that came to name
+    a different variable would still be caught.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        return _make_variable(makefile_text, match.group(1))
+
+    return re.sub(r"\$\(([A-Za-z0-9_]+)\)", _replace, text)

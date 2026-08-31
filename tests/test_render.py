@@ -60,12 +60,14 @@ from devcontainer_config import answers as answers_module
 from devcontainer_config import repo
 
 _PLACEHOLDER_PATTERN = re.compile(r"<[^<>]*>")
-# Deliberately excludes commented-out lines: the example's free-form
-# "Project-specific (optional)" section ships a commented sample
-# (DEVBENCH_NOTIFICATIONS_SLACK_WEBHOOK_URL) that no answers.Field governs
-# and render never touches, so its bracketed placeholder is expected to
-# survive rendering untouched. AC-CYCLE-001's "no placeholder remains"
-# property is about the active configuration the container actually uses.
+# Deliberately excludes commented-out lines: shell.env.example ships several
+# commented samples that no answers.Field governs and render never touches,
+# so their bracketed placeholders are expected to survive rendering
+# untouched -- the devsecret guidance's `<NAME>` placeholder (E3-F2-S2-T1),
+# and the Remote docker block's `<ec2-instance-id>` (REMOTE_INSTANCE_ID) and
+# `<your-key-pair-name>` (REMOTE_SSH_KEY_PATH) samples. AC-CYCLE-001's "no
+# placeholder remains" property is about the active configuration the
+# container actually uses.
 _ACTIVE_EXPORT_LINE_PATTERN = re.compile(r"^export[ \t]+\w+=.*$", re.MULTILINE)
 
 

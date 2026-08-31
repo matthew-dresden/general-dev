@@ -11,13 +11,16 @@ they are not interchangeable:
 
 * The real-path form (`as_directory=False`, the default) queries `path`
   exactly as given -- the same pathspec `git add path` would use. This is
-  correct for every path this module queries except the two directory
-  roots described below, including for paths that do not exist in the
-  checkout (a private file such as `.claude/settings.local.json` is
-  queried this way too). Appending a trailing slash to a query for a path
-  that is, or should be, a file is a defect, not a convenience: a trailing
-  slash makes directory-only `.gitignore` patterns eligible to match a
-  query that a real `git add` on that file would never present to them.
+  correct for every path this module queries, including for paths that do
+  not exist in the checkout (a private file such as
+  `.claude/settings.local.json` is queried this way too) and including the
+  two directory roots described below once either has an entry on disk;
+  the one exception is a directory-only re-include with nothing on disk
+  for git to stat, which needs the directory form below instead. Appending
+  a trailing slash to a query for a path that is, or should be, a file is
+  a defect, not a convenience: a trailing slash makes directory-only
+  `.gitignore` patterns eligible to match a query that a real `git add` on
+  that file would never present to them.
   Measured on git 2.50.1: changing the ignore entry
   `.claude/settings.local.json` to `.claude/settings.local.json/` (a
   directory-only pattern) leaves a real `git add .claude/settings.local.json`
@@ -27,12 +30,16 @@ they are not interchangeable:
   the file ignored regardless. Only a query in the file's own bare form
   avoids that hole.
 * The directory form (`as_directory=True`, a trailing slash appended to
-  the query) is for `provider` and `remote-instances` only: both are
-  directory-only re-includes (`!/provider/`, `!/remote-instances/`) for
-  trees E5 has not created yet (spec Sections 5.6, 5.7), and git cannot
-  stat an absent path to classify it. Without the slash, a query for
-  either falls through the directory-only re-include straight to the `/*`
-  root and reports a false ignored.
+  the query) is required whenever the queried path is a directory-only
+  re-include (`!/provider/`, `!/remote-instances/`, spec Sections 5.6,
+  5.7) with no entry on disk for git to stat and classify as a directory.
+  `directory_form_required` below decides this per call from the path's
+  own presence under `repo_root()`, never from a record of which of these
+  trees happened to be missing when this module was written, so its
+  answer changes on its own the moment either tree's first commit lands.
+  Without the slash, a query for a directory-only re-include with nothing
+  on disk falls through straight to the `/*` root and reports a false
+  ignored.
 
 `repo_root` is also shared with `tests/test_project_config.py`, which reads
 `pyproject.toml` from the checkout root but does not itself run
@@ -56,10 +63,11 @@ class GitIgnoreQueryError(RuntimeError):
     Real-path queries this module makes fall into two groups. A root-level
     path (`.claude`, `pyproject.toml`, `tests`) is decided by `.gitignore`
     line 12's `/*` rule at minimum. A nested private file
-    (`.claude/settings.local.json` at `.gitignore:56`,
-    `.devcontainer/aws-profile-map.json` at `.gitignore:53`) is decided by
-    its own explicit entry instead, since `/*` only governs root-level
-    paths, not paths nested inside an already re-included directory.
+    (`.claude/settings.local.json` and `.devcontainer/aws-profile-map.json`,
+    each listed by its own explicit entry in `.gitignore`'s "Per-developer
+    identity and secrets" block) is decided by that entry instead, since
+    `/*` only governs root-level paths, not paths nested inside an already
+    re-included directory.
     Either way, a query that matches no rule at all means the query itself
     is broken (for example, a path queried in directory form when it
     should have been queried in its real, bare form, or a nested path with
@@ -95,6 +103,32 @@ def repo_root() -> Path:
     otherwise read as a false pass.
     """
     return repo.find_root(Path(__file__).resolve().parent)
+
+
+# Root-level `.gitignore` re-includes that name a directory, never a file.
+# Durable, unlike a record of which of these trees currently holds
+# content: `!/provider/` and `!/remote-instances/` (spec Sections 5.6, 5.7)
+# are directory-only re-includes by construction, a fact fixed by their
+# `.gitignore` entry that the working tree's own contents can never change.
+# `directory_form_required` combines this declaration with the queried
+# path's live presence under `repo_root()` to decide, per call, whether
+# that path's `check_ignore` query needs the trailing slash.
+DIRECTORY_ONLY_REINCLUDES: frozenset[str] = frozenset({"provider", "remote-instances"})
+
+
+def directory_form_required(path: str) -> bool:
+    """Whether `check_ignore(path, as_directory=...)` must use the directory form.
+
+    True exactly when `path` is one of `DIRECTORY_ONLY_REINCLUDES` and has
+    no entry on disk under `repo_root()` -- the state in which git cannot
+    stat it to tell `check_ignore` it is a directory, so the query must say
+    so itself with a trailing slash. False for every other path, and False
+    once a `DIRECTORY_ONLY_REINCLUDES` member is present on disk, because
+    the real-path form already works once git can stat the path directly.
+    Recomputed at every call from the live checkout, so callers never pass
+    a literal boolean sourced from a hand-maintained membership list.
+    """
+    return path in DIRECTORY_ONLY_REINCLUDES and not (repo_root() / path).exists()
 
 
 def _run_check_ignore(query: str, *, root: Path) -> subprocess.CompletedProcess[str]:

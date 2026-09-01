@@ -545,14 +545,43 @@ slash command `/devcontainer:<name>`. Section 4.2 of
 `repos/spec/devcontainer-platform.md` names nine skills that will populate that
 directory: `setup-local`, `setup-remote`, `engine`, `launch`, `doctor`,
 `secrets`, `certs`, `teardown`, `quality`. Each lands in its own work unit as a
-Markdown-only change, because this plugin container already exists; the skill
-lint that reads it will be added by E4-F1-S1-T2.
+Markdown-only change, because this plugin container already exists;
+`tests/test_skill_lint.py` is the skill lint suite that checks it.
 
 The table below is the skill roster: one row per skill directory under
 `.claude/plugins/devcontainer/skills/`, added by that skill's own work unit.
-The skill lint suite added by E4-F1-S1-T2 will assert the row set and the
-directory set are equal, so the table will not be allowed to drift from what
-is actually installed.
+`tests/test_skill_lint.py`'s `check_plugin` asserts the row set and the
+directory set are equal, so the table cannot drift from what is actually
+installed, and enforces the rest of the plugin's structural contract in the
+same run:
+
+- `plugin.json`'s `name` equals the plugin directory name, and
+  `marketplace.json` has exactly one `plugins` entry whose `source` resolves
+  to that same directory.
+- `.claude/settings.json` registers the plugin directory as a `directory`
+  marketplace and enables it in `enabledPlugins`.
+- Every `SKILL.md` opens with a `---`-delimited frontmatter block holding a
+  non-empty `description` and a `name` matching its directory.
+- Every skill that declares `Interview backend: <backend>` restricts
+  `<backend>` to one of `answers.BACKENDS`, and gives a `## Questions` table
+  with header `| Field | Prompt |` whose `Field` column, as a set, equals
+  `answers.required_fields({"backend": <backend>, "aws_config_enabled": True,
+  "host_proxy": True})` -- the comparison always runs with the AWS and
+  host-proxy branches enabled, regardless of what the skill's own backend or
+  interview flow would actually ask, so `aws_profiles` and `host_proxy_url`
+  are always expected fields in every skill's table. A required field the
+  table omits and a declared field that is not a real `answers` field each
+  produce their own finding; a declared field that is a real `answers` field
+  but is not required for `<backend>` produces a third finding, distinct
+  from the invented-field case.
+- Every skill's `## Checks` table, when its header line matches exactly
+  `| Check | Prevents | Failure message | Remedy |`, must have a unique
+  `Check` name, a unique `Failure message`, and a non-empty `Remedy` in
+  every row. A `SKILL.md` with no `## Checks` table, or one whose header is
+  misspelled or reordered, is treated as having no such table and produces
+  no finding; the `Prevents` column's content is never validated.
+- Every `/devcontainer:<name>` reference, in any `SKILL.md` or in this
+  document, names a skill present in the roster below.
 
 | Skill | Invocation |
 |---|---|

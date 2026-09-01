@@ -586,3 +586,4 @@ same run:
 | Skill | Invocation |
 |---|---|
 | setup-local | `/devcontainer:setup-local` -- asks the local backend's required answers (Section 5.1), writes and verifies the three private files, checks prerequisites, and ends by naming `make build` |
+| setup-remote | `/devcontainer:setup-remote` -- asks the local backend's required answers plus instance name, id, region and profile (Section 5.1), verifies the SSO session and instance state, gates any Terragrunt apply behind PRECHECK-APPLY, issues certificates, creates the docker context and port forward, and ends by naming `make build INSTANCE=<name>` |

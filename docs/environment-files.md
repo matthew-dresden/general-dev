@@ -217,8 +217,58 @@ it through the developer's already-valid AWS SSO session.
 | `AWS_PROFILE` | `default` | The AWS CLI profile the local engine resolves credentials from when reaching the catalog. Read only; never set by this repository. |
 | `SECRET_CACHE_DIR` | A writable, RAM-backed (`tmpfs`/`ramfs`) mount point chosen from the mount table, outside the repository and the container workspace. Falls back to the platform temporary directory in two cases: when no mount table is available at all (used directly, for example macOS); or when a mount table is available but names no such writable, out-of-boundary RAM-backed row, in which case that same mount table then refuses the fallback with exit 5 (`SecretCacheExposureError`) rather than using it. | The RAM-backed, per-invocation, owner-only directory `devsecret run` creates outside the repository and the container workspace and hands to the child, so a tool that can read a value only from a file, not an environment variable, has somewhere to write one. `devsecret` itself never writes a value there. The directory, and everything under it, is removed when the child process exits. |
 
-The certificate and transport variables join this table with the work
-units that implement them.
+### Certificate lifetimes
+
+`.claude/plugins/devcontainer/scripts/devcontainer_config/certs.py` is the
+single definition site for these three variables (E6-F1-S1-T1): every
+`create_ca`, `issue_server` and `issue_client` call resolves its own
+lifetime from the matching variable below, never a literal at the call
+site. Spec Section 7.3 names four more certificate and transport variables
+that join this section once the work units that implement them land:
+`CERT_WARN_DAYS`, `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT` and
+`DOCKER_HANDSHAKE_TIMEOUT`.
+
+| Variable | Default | Defined in |
+|---|---|---|
+| `CERT_CA_DAYS` | `3650` | `certs.py`, read by `create_ca` |
+| `CERT_SERVER_DAYS` | `365` | `certs.py`, read by `issue_server` |
+| `CERT_CLIENT_DAYS` | `90` | `certs.py`, read by `issue_client` |
+
+Each of the three is optional: the default above applies whenever it is
+unset. When set, the value must be a positive whole number of days;
+`certs.py` rejects a non-integer value (exit naming the variable, "is not
+an integer") or a value that is zero or negative ("must be a positive
+integer") rather than silently falling back to the default or to an
+unbounded lifetime.
+
+`certs.py` shells out to the `openssl` binary on `PATH` for every operation
+above and requires OpenSSL 3.0 or later: signing a certificate passes
+`x509 -req -copy_extensions copy`, a flag OpenSSL added in 3.0 and that
+LibreSSL, including the `/usr/bin/openssl` macOS ships by default, does not
+implement (`unknown option -copy_extensions`). On macOS, `brew install
+openssl` installs the `openssl@3` keg; add `$(brew --prefix openssl@3)/bin`
+to the FRONT of `PATH` in the shell profile rather than relying on the
+Homebrew prefix's own `bin` directory already being ahead of `/usr/bin` --
+Homebrew does not guarantee `openssl@3` is symlinked into that shared
+prefix on every install -- then confirm `openssl version` reports `OpenSSL
+3.x`, not `LibreSSL`; on Linux/WSL, most current distributions'
+`apt-get install openssl` already satisfies the floor.
+`docs/mac-setup-prompt.md` step 2 lists this alongside the other host
+tools, and `certs/SKILL.md`'s `## Failure semantics` documents the failure
+this produces when the requirement is unmet.
+
+The certificate authority and client material these variables govern is
+never stored in this repository: it lives outside the checkout entirely,
+under `~/.docker/certs/<instance>/` (spec Section 5.5), the same "outside
+the repository, not merely ignored" rule this document's other private
+files (`shell.env`, `.devcontainer/aws-profile-map.json`,
+`devcontainer-environment-variables.json`) follow for a different reason
+higher up in this file. The server key and certificate are never persisted
+under that path: `certs.issue_server` generates both inside a
+`tempfile.TemporaryDirectory` at modes `0600` and `0644` respectively and
+removes that directory before returning, handing them back as PEM text for
+the caller to publish directly (`certs/SKILL.md`'s `## Material` states the
+same rule).
 
 ### What did not change
 

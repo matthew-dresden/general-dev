@@ -21,19 +21,40 @@ itself, it states the exact command, waits for the operator, then verifies
 the result before continuing, and nothing is assumed to have worked. This
 governs the one step below that needs the operator (`## Failure semantics`).
 
-`certs` (spec Section 4.5) does not exist yet at the point this skill is
-authored (Section 11.5, phase 1: all nine skills are authored and no AWS call
-is made), the identical gap `/devcontainer:setup-remote`'s own introduction
-already discloses for the same module; every step below that depends on it
-names `certs` as the module that will own it rather than a function this
-repository does not yet contain. Publishing to
-`/devcontainer/<instance>/tls/*` (`## Operations`, Section 5.3) is `certs`'s
-own path, never `catalog`'s or `devsecret`'s: Section 4.3's `devsecret` CLI
-and the `catalog` module `/devcontainer:secrets` wraps reach only
-`/devcontainer/<scope>/secrets/<NAME>` (`/devcontainer:secrets`'s own "never a
-second path to Parameter Store" concern), a disjoint prefix neither module has
-any operation for, so this skill's own publish calls are a distinct primitive,
-not a second implementation of one that already exists.
+`certs` (spec Section 4.5) is implemented at
+`.claude/plugins/devcontainer/scripts/devcontainer_config/certs.py`
+(E6-F1-S1-T1): `certs.create_ca`, `certs.issue_server` and
+`certs.issue_client` generate the material `## Operations` names below, and
+`certs.publication_set(instance)` declares exactly the Parameter Store
+entries Section 5.3 allows this instance's material to publish. Every
+operation below calls these functions directly rather than shelling out to
+`openssl` by hand -- `certs.py` is the one place that ever does that
+(Section 3.4's dependency rule) -- and every publish step iterates whatever
+`certs.publication_set(instance)` returns rather than a hand-written list of
+paths, so a Parameter Store path this skill publishes to can never drift
+from the set that module enforces. `ca-key.pem` is never among them:
+`certs.publication_set` raises rather than returning an entry for it under
+any spelling, the CA private key's own second, structural enforcement of the
+"never leaves the laptop" rule `## Material` states in prose (spec Section
+5.5). No AWS call is made from `certs.py` itself (Section 3.4, standard
+library only); publishing an entry `publication_set` returns is this
+skill's own responsibility, performed the same way
+`/devcontainer:secrets`'s own `## Operations` table publishes a `devsecret
+set` value. Publishing to `/devcontainer/<instance>/tls/*` (`## Operations`,
+Section 5.3) is `certs`'s own path, never `catalog`'s or `devsecret`'s:
+Section 4.3's `devsecret` CLI and the `catalog` module
+`/devcontainer:secrets` wraps reach only
+`/devcontainer/<scope>/secrets/<NAME>` (`/devcontainer:secrets`'s own "never
+a second path to Parameter Store" concern), a disjoint prefix neither module
+has any operation for, so this skill's own publish calls are a distinct
+primitive, not a second implementation of one that already exists.
+
+Generation is the only half of that module split landed so far: the
+inspection/expiry-arithmetic half Section 4.5 also assigns `certs` -- what
+`## Expiry`'s `make cert-status` reports below -- is E6-F1-S1-T2's, not yet
+implemented in this repository. `## Operations`'s "Report expiry" row and
+`## Expiry` document that operation's contract ahead of its landing, not a
+command available today.
 
 Instance selection reuses Section 4.1.1's own resolution order (`INSTANCE` on
 the command line, then `DEFAULT_REMOTE_INSTANCE`, then the sole directory
@@ -69,21 +90,22 @@ generation and its publication are described, not restated here.
 
 ## Operations
 
-Every row below states its inputs, the files it leaves on the laptop, the
-Parameter Store paths it publishes (Section 5.3, `String` or `SecureString`
-as Section 5.3's own layout fixes it), and the verification performed before
-the operation is reported complete. Every row that changes material this
-instance's docker context depends on ends with `## Docker context`'s rewrite
-and handshake, stated once there and cross-referenced here rather than
-repeated per row. Every row's SAN or key-usage requirement is stated once in
-`## Requirements` and cross-referenced here rather than restated per row.
+Every row below states its inputs, the function it calls in `certs.py`, the
+files it leaves on the laptop, the Parameter Store paths it publishes (each
+one an entry `certs.publication_set(instance)` returned, never a
+hand-written path), and the verification performed before the operation is
+reported complete. Every row that changes material this instance's docker
+context depends on ends with `## Docker context`'s rewrite and handshake,
+stated once there and cross-referenced here rather than repeated per row.
+Every row's SAN or key-usage requirement is stated once in `## Requirements`
+and cross-referenced here rather than restated per row.
 
 | Operation | Inputs | Resulting files | Parameter Store paths | Verification |
 |---|---|---|---|---|
-| Create CA | The instance name. Idempotent: if `~/.docker/certs/<instance>/ca/ca-key.pem` already exists, this operation changes nothing and reports the existing CA's expiry (`## Expiry`) rather than silently overwriting a private key that every issued certificate still depends on. | `ca-key.pem` (`0600`) and `ca.pem` (`0644`), lifetime `CERT_CA_DAYS` (`## Material`). | `/devcontainer/<instance>/tls/ca.pem` as `String` (Section 5.3; not secret, so not `SecureString`). | Parse the generated `ca.pem` to confirm its validity period matches a `CERT_CA_DAYS`-length lifetime, then read the published parameter back and compare its value against the local file's bytes -- an independent re-read after the publish, never trusted from the publish call's own exit code (Section 4.2.2's "nothing is assumed to have worked," the same pattern `/devcontainer:secrets`'s own `## Operations` table applies to a `devsecret set`). Ends with `## Docker context`. |
-| Issue server certificate | An existing CA (`## Failure semantics`'s precondition row states what happens when one is missing). No operator-chosen SANs: the SANs are fixed (`## Requirements`). | None persisted (`## Material`'s own note): generated and immediately published, never written to a path on the laptop. | `/devcontainer/<instance>/tls/server-key.pem` and `/devcontainer/<instance>/tls/server-cert.pem`, both `SecureString` (Section 5.3), lifetime `CERT_SERVER_DAYS`. | Parse the generated certificate before it is ever published, confirming it carries exactly the two required SANs and no other (`## Requirements`, AC-5.2), then read both published parameters back and compare against what was generated, the same independent-re-read rule Create CA's row states. Ends with `## Docker context`, whose completed handshake is this operation's own strongest confirmation that the instance-side daemon actually accepted the published material. |
-| Issue client certificate | An existing CA (`## Failure semantics`). | `cert.pem` (`0644`) and `key.pem` (`0600`) (`## Material`), lifetime `CERT_CLIENT_DAYS`, carrying `clientAuth` (`## Requirements`). | None: Section 5.3 names no client-certificate parameter path (`## Material`). | Parse the generated certificate to confirm it carries `clientAuth` (`## Requirements`, AC-5.2). Ends with `## Docker context`. |
-| Rotate client certificate | An existing CA and an existing client certificate to replace. The instance is left running throughout (AC-10.9); nothing about this operation touches the server certificate or requires the instance to be stopped, restarted or reconfigured, which is why it is a separate operation from "Issue server certificate" rather than the same one run again. | The identical files Issue client certificate produces, overwritten in place. | None, for the identical reason Issue client certificate names. | The identical parse-for-`clientAuth` check Issue client certificate performs. Ends with `## Docker context`. |
+| Create CA | The instance name, passed to `certs.create_ca`. Idempotent: if `~/.docker/certs/<instance>/ca/ca-key.pem` already exists, `certs.create_ca` raises naming the existing path rather than silently overwriting a private key that every issued certificate still depends on; this skill reports the existing CA's expiry (`## Expiry`) for that case instead of treating the raise as a failure. | `ca-key.pem` (`0600`) and `ca.pem` (`0644`), lifetime `CERT_CA_DAYS` (`## Material`). | The `ca.pem` entry `certs.publication_set(instance)` returns: `/devcontainer/<instance>/tls/ca.pem` as `String` (Section 5.3; not secret, so not `SecureString`). Never `ca-key.pem`: `publication_set` has no entry for it and raises if one is requested (this document's own introduction). | Parse the generated `ca.pem` to confirm its validity period matches a `CERT_CA_DAYS`-length lifetime, then read the published parameter back and compare its value against the local file's bytes -- an independent re-read after the publish, never trusted from the publish call's own exit code (Section 4.2.2's "nothing is assumed to have worked," the same pattern `/devcontainer:secrets`'s own `## Operations` table applies to a `devsecret set`). Ends with `## Docker context`. |
+| Issue server certificate | An existing CA (`## Failure semantics`'s precondition row states what happens when one is missing), passed to `certs.issue_server`. No operator-chosen SANs: the SANs are fixed (`## Requirements`). | None persisted (`## Material`'s own note): `certs.issue_server` generates the key and certificate inside a `tempfile.TemporaryDirectory` at mode `0600`/`0644` and removes that directory before returning, handing both back as text. Never persisted under `~/.docker/certs/<instance>/`; the private key does exist on disk, briefly, inside that removed temporary directory. | The `server-key.pem` and `server-cert.pem` entries `certs.publication_set(instance)` returns: `/devcontainer/<instance>/tls/server-key.pem` and `/devcontainer/<instance>/tls/server-cert.pem`, both `SecureString` (Section 5.3), lifetime `CERT_SERVER_DAYS`. | Parse the generated certificate before it is ever published, confirming it carries exactly the two required SANs and no other (`## Requirements`, AC-5.2), then read both published parameters back and compare against what was generated, the same independent-re-read rule Create CA's row states. Ends with `## Docker context`, whose completed handshake is this operation's own strongest confirmation that the instance-side daemon actually accepted the published material. |
+| Issue client certificate | An existing CA (`## Failure semantics`), passed to `certs.issue_client`. | `cert.pem` (`0644`) and `key.pem` (`0600`) (`## Material`), lifetime `CERT_CLIENT_DAYS`, carrying `clientAuth` (`## Requirements`). | None: `certs.publication_set` has no entry for the client certificate, matching Section 5.3's layout, which names no client-certificate parameter path (`## Material`). | Parse the generated certificate to confirm it carries `clientAuth` (`## Requirements`, AC-5.2). Ends with `## Docker context`. |
+| Rotate client certificate | An existing CA and an existing client certificate to replace, passed to the identical `certs.issue_client` call Issue client certificate makes: `certs.issue_client` overwrites rather than refusing an existing client certificate/key, which is what leaves the instance running throughout (AC-10.9) with nothing touching the server certificate or requiring the instance to be stopped, restarted or reconfigured -- the same call, invoked again, is why this is a separate operation from "Issue server certificate" rather than one run twice. | The identical files Issue client certificate produces, overwritten in place. | None, for the identical reason Issue client certificate names. | The identical parse-for-`clientAuth` check Issue client certificate performs. Ends with `## Docker context`. |
 | Report expiry | The instance name, or every configured instance when none is given. | None: this operation reads, never writes. | None: this operation reads, never writes. | `## Expiry` is this operation's own output shape and exit-code rule; there is nothing further to verify about a read. |
 
 ## Requirements
@@ -177,6 +199,7 @@ which operation in `## Operations` clears a given row.
 
 | Condition | Behavior |
 |---|---|
+| `openssl` is missing or too old | `certs.py`'s `_require_openssl` runs before any `mkdir` or `os.open` in every operation above, so a missing binary leaves no half-created instance directory or file behind; the reported error names the tool and its install command (`brew install openssl` on macOS, `apt-get install openssl` on Linux/WSL). `_require_openssl` checks only that a binary named `openssl` is on `PATH`, not that it supports the flags `certs.py` uses, so a *present but too old* `openssl` fails opaquely instead: `_issue_certificate`'s signing step passes `x509 -req -copy_extensions copy`, an OpenSSL 3.0+-only flag, and a pre-3.0 `openssl` (including the LibreSSL binary macOS ships at `/usr/bin/openssl`, still on `PATH` on an unconfigured host) rejects it with `unknown option -copy_extensions`, surfaced as an `openssl x509 failed` `CertsError` naming that raw stderr rather than the tool-version cause. `docs/mac-setup-prompt.md` step 2 and `docs/environment-files.md`'s certificate section document the OpenSSL 3.0+ requirement and the `brew`-before-`/usr/bin` `PATH` ordering it depends on; verifying the binary's actual capability rather than merely its presence on `PATH` is left to a later work unit rather than folded into this one. |
 | A precondition check fails | A client or server certificate requested for an instance whose CA private key is missing: stop naming the path, and state that creating a new CA invalidates every certificate it signed and requires reissuing and republishing the server certificate. Never create a second CA silently, because the resulting handshake failure later would name neither cause. A certificate found present but expired during Issue or Rotate: fail naming its role, its path and its expiry date, and name the `## Operations` row that reissues it. Never proceed with an expired certificate, and never report one as a warning -- only `## Expiry`'s own `RENEW` row, for a certificate still inside the warning window, is a warning. An instance name that resolves to no directory under `remote-instances/` (Section 4.1.1's own edge case): fail listing every configured instance, the same message every remote make target already gives for the same condition, rather than this skill inventing a second one. |
 | An action the skill took did not verify | Every row in `## Operations` parses what it generated before trusting it, and every row that publishes re-reads the parameter afterward rather than trusting the publish call's own exit code; every row that changes context-relevant material additionally requires `## Docker context`'s handshake to succeed. When a parse disagrees (a missing required SAN, a missing `clientAuth`), when a re-read disagrees with what was generated, or when the handshake still fails after `## Docker context`'s rewrite: this skill reports the material generated (and, for a publish, published), the verification that failed, and that the operation is not complete. It never retries the same generation or publish silently a second time; a second attempt is a fresh invocation the operator asks for, the same rule `/devcontainer:teardown`'s own "never retry silently" states for its own actions. |
 | A step needs the operator (SSO, `sudo`, a key) | Publishing to `/devcontainer/<instance>/tls/*` (`## Operations`) needs a valid AWS credential for the answered profile. On an unresolved credential or an expired SSO session, this skill states `aws sso login --profile <profile>` with the profile substituted, waits for the operator to complete the browser login, then re-probes with `hostprobe.probe_aws_identity(runner, profile=<profile>)` before continuing -- the identical remedy and re-probe `/devcontainer:setup-remote`'s own `## Checks` table states for the same condition, reused rather than a second implementation. Never assumes the login succeeded, and never falls back to any other credential source (Section 5.4: one backend). |

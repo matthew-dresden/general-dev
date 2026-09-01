@@ -19,11 +19,14 @@ a rendered file contains, or what "complete" means -- `answers`, `render`
 and `verify` (`.claude/plugins/devcontainer/scripts/devcontainer_config/`)
 own those questions, and `hostprobe` owns every fact about this machine.
 Certificate generation and instance resolution are owned by the `certs` and
-`instances` modules of that same section (spec Section 4.5); neither module
-exists yet at the point this skill is authored (spec Section 11.5, phase 1:
-all nine skills are authored and no AWS call is made), so every step below
-that depends on one names the module that will own it rather than a
-function this repository does not yet contain.
+`instances` modules of that same section (spec Section 4.5). `certs`
+(E6-F1-S1-T1) now exists for generation -- `certs.create_ca`,
+`certs.issue_server`, `certs.issue_client` and `certs.publication_set`,
+which Procedure step 9 below calls directly -- but `instances` does not yet
+exist, and neither does the inspection/expiry-status half of `certs` that
+`make cert-status` needs (E6-F1-S1-T2), so every step below that depends on
+one of those two still-missing pieces names the module that will own it
+rather than a function this repository does not yet contain.
 
 Where this skill cannot act itself -- a browser SSO login, an AWS resource
 that only an operator may create or destroy -- it states the exact
@@ -127,22 +130,26 @@ continuing.
    PRECHECK-APPLY automatically; doing so is a work-unit failure under
    AC-4.4. When no such change is needed, record that and continue.
 9. Create the CA for `<name>` if one does not already exist, then issue the
-   server and client certificates, per spec Section 5.5 (owned by the
-   `certs` module, spec Section 4.5, once it exists): CA private key at
-   `~/.docker/certs/<name>/ca/ca-key.pem` mode `0600`, CA public certificate
-   at `~/.docker/certs/<name>/ca/ca.pem` mode `0644`, lifetime
-   `CERT_CA_DAYS`; server certificate with SANs `IP:127.0.0.1` and
+   server and client certificates, per spec Section 5.5, by calling
+   `certs.create_ca`, `certs.issue_server` and `certs.issue_client`
+   (`.claude/plugins/devcontainer/scripts/devcontainer_config/certs.py`,
+   spec Section 4.5, E6-F1-S1-T1) rather than invoking `openssl` by hand:
+   CA private key at `~/.docker/certs/<name>/ca/ca-key.pem` mode `0600`, CA
+   public certificate at `~/.docker/certs/<name>/ca/ca.pem` mode `0644`,
+   lifetime `CERT_CA_DAYS`; server certificate with SANs `IP:127.0.0.1` and
    `DNS:localhost`, lifetime `CERT_SERVER_DAYS`; client certificate at
    `~/.docker/certs/<name>/cert.pem` mode `0644` and client key at
    `~/.docker/certs/<name>/key.pem` mode `0600`, lifetime `CERT_CLIENT_DAYS`.
    All four paths are outside the repository entirely, which removes the
    class of mistake rather than relying on an ignore rule.
 10. Publish the server key, the server certificate and the CA certificate to
-    the Parameter Store paths in spec Section 5.3:
+    the Parameter Store entries `certs.publication_set(<name>)` returns
+    (spec Section 5.3), never a hand-written path:
     `/devcontainer/<name>/tls/server-key.pem` (SecureString),
     `/devcontainer/<name>/tls/server-cert.pem` (SecureString), and
     `/devcontainer/<name>/tls/ca.pem` (String). The CA private key and the
-    client certificate and key never leave the laptop.
+    client certificate and key never leave the laptop: `certs.publication_set`
+    has no entry for any of the three and raises if one is requested.
 11. Create the docker context `general-dev-<name>` (spec Section 9's
     addressing table), addressed at the instance over the forward this
     procedure establishes next.
@@ -183,8 +190,10 @@ continuing.
   than self-approving.
 - Section 4.5: `answers`, `render`, `verify` and `hostprobe` are the only
   places a fact about the interview, a rendered file, or this machine is
-  decided; `certs` and `instances` will own certificate and instance facts
-  once they exist. This skill decides none of them itself.
+  decided; `certs` (E6-F1-S1-T1) now owns certificate generation, but
+  `instances` will own instance facts and the inspection/expiry-status half
+  of `certs` (E6-F1-S1-T2) will own certificate-expiry facts once they
+  exist. This skill decides none of them itself.
 - Section 5.1: the interview schema, including which fields are asked only
   when the backend is remote, and that `remote_ssh_key_path` is removed in
   phase 4.

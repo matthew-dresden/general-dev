@@ -54,6 +54,18 @@ Run this when provisioning a new Mac against an already-running instance.
      `make build` / `make rebuild`. Needs node/npm; if absent, stop and ask.
    - python3 and git are expected from the Xcode command line tools; verify
      both respond to a version command.
+   - OpenSSL 3.0 or later, required by the `certs` module
+     (`.claude/plugins/devcontainer/scripts/devcontainer_config/certs.py`,
+     E6-F1-S1-T1) for `openssl x509 -req -copy_extensions`: `brew install
+     openssl` installs the `openssl@3` keg. Add `$(brew --prefix
+     openssl@3)/bin` to the FRONT of `PATH` in the shell profile rather than
+     relying on the Homebrew prefix's own `bin` directory already being
+     ahead of `/usr/bin` on `PATH` -- Homebrew does not guarantee `openssl@3`
+     is symlinked into that shared prefix on every install, and the system
+     `/usr/bin/openssl` on macOS is LibreSSL, which rejects
+     `-copy_extensions`. After updating `PATH`, confirm `openssl version`
+     reports `OpenSSL 3.x`, not `LibreSSL`; if it still reports `LibreSSL`,
+     stop and ask.
 
 3. **AWS SSO profile.** Ensure `~/.aws/config` contains a `[profile default]`
    for the sandbox account. If a conflicting `default` profile exists for a

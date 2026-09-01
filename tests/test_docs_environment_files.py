@@ -26,6 +26,7 @@ import re
 from pathlib import Path
 
 import pytest
+from conftest import _normalize_whitespace
 from gitignore_check import repo_root
 
 _DOC_RELATIVE_PATH = "docs/environment-files.md"
@@ -55,18 +56,6 @@ def _doc_path() -> Path:
 
 def _doc_text() -> str:
     return _doc_path().read_text(encoding="utf-8")
-
-
-def _normalize_whitespace(text: str) -> str:
-    """`text` with every run of whitespace, including line breaks, collapsed to one space.
-
-    A catalog fact can span a Markdown line wrap (`.pymarkdown.json` disables
-    MD013, so this document wraps prose at whatever width reads well, not at
-    a fixed column). Collapsing whitespace is what lets a fact-presence
-    assertion match a fact by its wording without also asserting exactly
-    where the document happens to wrap it.
-    """
-    return re.sub(r"\s+", " ", text)
 
 
 def _secrets_section_text() -> str:

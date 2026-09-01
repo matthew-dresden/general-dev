@@ -26,6 +26,24 @@ cannot drift apart. Before this extraction each file carried its own copy;
 Makefile's assignment syntax would have had to be fixed in two places, and
 the AC-TEST-006 drift check itself could have silently mis-resolved while
 `tests/test_makefile_contract.py` stayed green.
+
+`_postcreate_text`, `_devcontainer_docs_text`, `_normalize_whitespace`,
+`_function_body`, `_provisioning_flow_table` and
+`_provisioning_flow_required_steps_prose` are shared
+`.devcontainer/.devcontainer.postcreate.sh` / `docs/devcontainer.md` text
+extractors for `tests/test_postcreate_hooks.py`, `tests/test_shellrc.py`
+and `tests/test_docs_environment_files.py`, plus a planned consumer,
+`tests/test_devcontainer_docs.py` (owned by E3-F2-S2-T3, not yet landed).
+These suites need a function body pulled out of the same postCreate
+script and the same provisioning-flow table and required-step enumeration
+pulled out of the same doc section; before this extraction
+`tests/test_postcreate_hooks.py` carried its own copy of all five
+reader/extractor shapes, one of which (`_function_body`, then named
+`_git_hooks_step`'s and `_main_body`'s inline regex) stopped at the first
+line beginning with a literal `}` rather than scanning brace depth, so a
+function body containing any nested `{ ... }` compound command before its
+own closing brace would have been truncated. `_function_body` scans brace
+depth instead, so no consumer can silently receive a truncated body again.
 """
 
 from __future__ import annotations
@@ -204,3 +222,129 @@ def _resolve_make_refs(makefile_text: str, text: str) -> str:
         return _make_variable(makefile_text, match.group(1))
 
     return re.sub(r"\$\(([A-Za-z0-9_]+)\)", _replace, text)
+
+
+def _postcreate_text() -> str:
+    """`.devcontainer/.devcontainer.postcreate.sh`, read fresh for every call.
+
+    Consumers: `tests/test_postcreate_hooks.py` (every assertion that reads
+    the script's text directly, plus `_git_hooks_step` and `_main_body` via
+    `_function_body`'s default source) and `tests/test_shellrc.py` (the
+    postCreate-wiring assertion that reads the script's text directly, plus
+    `_configure_shell_env_body` via `_function_body`'s default source). Not
+    cached at module scope, for the same reason `_makefile_text` above is
+    not: a cached value would let one test's assertion about the file leak
+    into another test's failure message instead of each test reading the
+    file it is actually asserting about.
+    """
+    root = repo.find_root(Path(__file__).resolve().parent)
+    return (root / ".devcontainer" / ".devcontainer.postcreate.sh").read_text(encoding="utf-8")
+
+
+def _devcontainer_docs_text() -> str:
+    """`docs/devcontainer.md`, read fresh for every call.
+
+    Consumers: `_provisioning_flow_table` and
+    `_provisioning_flow_required_steps_prose` below, which
+    `tests/test_postcreate_hooks.py`'s provisioning-flow regression tests
+    read through, rather than opening its own copy of the file, plus a
+    planned consumer, `tests/test_devcontainer_docs.py` (owned by
+    E3-F2-S2-T3, not yet landed).
+    """
+    root = repo.find_root(Path(__file__).resolve().parent)
+    return (root / "docs" / "devcontainer.md").read_text(encoding="utf-8")
+
+
+def _normalize_whitespace(text: str) -> str:
+    """`text` with every run of whitespace, including line breaks, collapsed to one space.
+
+    Consumers: `tests/test_docs_environment_files.py` (`.pymarkdown.json`
+    disables MD013, so `docs/environment-files.md` wraps prose at whatever
+    width reads well, not at a fixed column) and
+    `_provisioning_flow_required_steps_prose` below, which needs the same
+    collapse so its enumeration can be split on `; ` without an embedded
+    line wrap breaking one item in two.
+    """
+    return re.sub(r"\s+", " ", text)
+
+
+def _function_body(name: str, text: str | None = None) -> str:
+    """The body of shell function `name() { ... }`, scanned by brace depth.
+
+    Consumers: `tests/test_postcreate_hooks.py`'s `_git_hooks_step` and
+    `_main_body`, and `tests/test_shellrc.py`'s `_configure_shell_env_body`
+    -- all three read a function body out of
+    `.devcontainer/.devcontainer.postcreate.sh` (the default source, read
+    fresh via `_postcreate_text`). Scans brace depth from the opening `{`
+    of `name() {` to the `}` that returns depth to zero, so a body
+    containing any nested `{ ... }` compound command is captured in full.
+    The extraction this replaces,
+    `r"^name\\(\\)\\s*\\{(.*?)^\\}"` matched with `re.MULTILINE |
+    re.DOTALL`, stopped at the first line beginning with a literal `}`,
+    which is only ever the function's own closing brace when no nested
+    compound command's closing brace happens to sit at column 0. Raises an
+    `AssertionError` naming `name` when no such function is defined in the
+    scanned text, and again if the braces never balance.
+
+    `text` overrides the source scanned, so a caller (this module's own
+    nested-brace correctness test in `tests/test_postcreate_hooks.py`) can
+    point the scanner at a synthetic fragment instead of the real script.
+    """
+    source = _postcreate_text() if text is None else text
+    header_match = re.search(rf"^{re.escape(name)}\(\)\s*\{{", source, re.MULTILINE)
+    assert header_match is not None, f"no {name}() function found in the scanned script text"
+    depth = 1
+    index = header_match.end()
+    while depth > 0:
+        assert index < len(source), f"unbalanced braces scanning the {name}() function body"
+        character = source[index]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+        index += 1
+    return source[header_match.end() : index - 1]
+
+
+def _provisioning_flow_table() -> str:
+    """The `| Step | Depends on |` table inside `docs/devcontainer.md`.
+
+    Consumers: `tests/test_postcreate_hooks.py`'s step-order regression
+    test, plus a planned consumer, `tests/test_devcontainer_docs.py`'s
+    provisioning-flow row assertions (owned by E3-F2-S2-T3, not yet
+    landed). Bounded to the table's own rows (from its header row to
+    the next blank line) so a `make hooks-install` mention in the
+    section's surrounding prose -- the introductory paragraph and the
+    `## Git hooks` section both describe the same command -- cannot
+    satisfy an assertion meant for the step table itself.
+    """
+    doc_text = _devcontainer_docs_text()
+    match = re.search(
+        r"^   \| Step \| Depends on \|\n(.*?)(?=^\n)", doc_text, re.MULTILINE | re.DOTALL
+    )
+    assert match is not None, "no '| Step | Depends on |' table found in docs/devcontainer.md"
+    return match.group(1)
+
+
+def _provisioning_flow_required_steps_prose() -> str:
+    """The sentence enumerating which provisioning steps abort the build.
+
+    Consumers: `tests/test_postcreate_hooks.py`'s required-step-count
+    regression test, plus a planned consumer,
+    `tests/test_devcontainer_docs.py`'s exit_with_error-enumeration
+    assertion (owned by E3-F2-S2-T3, not yet landed). Bounded from "below
+    marks `required`:" to "Each of those aborts the build", so a
+    `required` mention anywhere else in the file (the table rows
+    themselves, or unrelated prose) cannot satisfy an assertion meant for
+    this one enumeration. Line wraps are collapsed to single spaces via
+    `_normalize_whitespace` so the semicolon-delimited items can be split
+    without an embedded newline breaking one in two.
+    """
+    doc_text = _devcontainer_docs_text()
+    match = re.search(
+        r"below marks `required`:(.*?)\. Each of those aborts the build",
+        doc_text,
+        re.DOTALL,
+    )
+    assert match is not None, "no provisioning-flow exception-step enumeration found"
+    return _normalize_whitespace(match.group(1))

@@ -26,6 +26,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from conftest import (
+    _function_body,
+    _postcreate_text,
+    _provisioning_flow_required_steps_prose,
+    _provisioning_flow_table,
+)
 from devcontainer_config.githooks import HOOK_NAMES, hook_body
 from devcontainer_config.repo import find_root
 
@@ -35,13 +41,6 @@ _FORGIVING_SUFFIXES: tuple[str, ...] = ("|| true", "|| :", "; true", "2>/dev/nul
 def _repo_root() -> Path:
     """The repository root, resolved from this test file's own location."""
     return find_root(Path(__file__).resolve().parent)
-
-
-def _postcreate_text() -> str:
-    """`.devcontainer/.devcontainer.postcreate.sh`, read fresh for every call."""
-    return (_repo_root() / ".devcontainer" / ".devcontainer.postcreate.sh").read_text(
-        encoding="utf-8"
-    )
 
 
 def _makefile_text() -> str:
@@ -66,15 +65,12 @@ def _git_hooks_step() -> str:
 
     Isolated by name so the fatal-on-failure and workspace-naming assertions
     below examine only the step this task adds, not some unrelated step that
-    happens to contain similar text elsewhere in the script.
+    happens to contain similar text elsewhere in the script. Delegates to
+    the shared `conftest._function_body` brace-depth scanner (AC-REPL-001)
+    rather than a local regex that stopped at the first line beginning with
+    a literal `}`.
     """
-    match = re.search(
-        r"^install_git_hooks\(\)\s*\{(.*?)^\}", _postcreate_text(), re.MULTILINE | re.DOTALL
-    )
-    assert match is not None, (
-        "no install_git_hooks function found in .devcontainer/.devcontainer.postcreate.sh"
-    )
-    return match.group(1)
+    return _function_body("install_git_hooks")
 
 
 def _main_body() -> str:
@@ -82,48 +78,35 @@ def _main_body() -> str:
 
     Isolated so step-order assertions read the actual call sequence rather
     than any incidental ordering of the step functions' own definitions.
+    Delegates to the shared `conftest._function_body` brace-depth scanner
+    (AC-REPL-001) rather than a local regex that stopped at the first line
+    beginning with a literal `}`.
     """
-    match = re.search(r"^main\(\)\s*\{(.*?)^\}", _postcreate_text(), re.MULTILINE | re.DOTALL)
-    assert match is not None, (
-        "no main() function found in .devcontainer/.devcontainer.postcreate.sh"
-    )
-    return match.group(1)
+    return _function_body("main")
 
 
-def _provisioning_flow_table() -> str:
-    """The `| Step | Depends on |` table inside `docs/devcontainer.md`.
+def test_function_body_includes_text_after_a_nested_brace_group() -> None:
+    """AC-CONF-003: proves the brace-depth scanner is correct where the
+    superseded first-closing-brace regex was wrong.
 
-    Bounded to the table's own rows (from its header row to the next blank
-    line) so a `make hooks-install` mention in the section's surrounding
-    prose -- the introductory paragraph and the `## Git hooks` section both
-    describe the same command -- cannot satisfy an assertion meant for the
-    step table itself.
+    The synthetic function below contains a nested `{ ... }` compound
+    command whose own closing brace sits at the start of its own line -- exactly
+    the shape the superseded `r"^name\\(\\)\\s*\\{(.*?)^\\}"` pattern (run
+    with `re.MULTILINE | re.DOTALL`) matched as if it were the function's
+    own closing brace, because that pattern is anchored on '^\\}' (the
+    first line that *begins* with '}'), not on the first '{' that opened
+    the function actually returning to brace depth zero. A brace-depth
+    scan is not fooled: it counts every '{' the nested group opens against
+    every '}' it closes, and only stops once the running depth returns to
+    zero at the function's actual closing brace, so the text following the
+    nested group survives extraction.
     """
-    doc_text = (_repo_root() / "docs" / "devcontainer.md").read_text(encoding="utf-8")
-    match = re.search(
-        r"^   \| Step \| Depends on \|\n(.*?)(?=^\n)", doc_text, re.MULTILINE | re.DOTALL
+    synthetic_script = "outer() {\n  {\necho nested\n}\n  echo after_nested\n}\n"
+    body = _function_body("outer", text=synthetic_script)
+    assert "echo after_nested" in body, (
+        "the scanner stopped at the nested group's own closing brace instead of "
+        "scanning to the function's actual closing brace"
     )
-    assert match is not None, "no '| Step | Depends on |' table found in docs/devcontainer.md"
-    return match.group(1)
-
-
-def _provisioning_flow_intro() -> str:
-    """The sentence enumerating which provisioning steps abort the build.
-
-    Bounded from "below marks `required`:" to "Each of those aborts the
-    build", so a `required` mention anywhere else in the file (the table
-    rows themselves, or unrelated prose) cannot satisfy an assertion meant
-    for this one enumeration. Line wraps are collapsed to single spaces so
-    the semicolon-delimited items can be split without embedded newlines.
-    """
-    doc_text = (_repo_root() / "docs" / "devcontainer.md").read_text(encoding="utf-8")
-    match = re.search(
-        r"below marks `required`:(.*?)\. Each of those aborts the build",
-        doc_text,
-        re.DOTALL,
-    )
-    assert match is not None, "no provisioning-flow exception-step enumeration found"
-    return " ".join(match.group(1).split())
 
 
 def test_postcreate_keeps_set_euo_pipefail() -> None:
@@ -285,7 +268,7 @@ def test_provisioning_flow_intro_enumerates_every_required_step() -> None:
     required_row_count = table.count(", required |")
     assert required_row_count > 0, "no `required` rows found in the provisioning-flow table"
 
-    intro = _provisioning_flow_intro()
+    intro = _provisioning_flow_required_steps_prose()
     enumerated_items = [item for item in intro.split("; ") if item.strip()]
     assert len(enumerated_items) == required_row_count, (
         f"provisioning-flow intro enumerates {len(enumerated_items)} step(s) but "

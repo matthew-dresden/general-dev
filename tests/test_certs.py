@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import ast
 import datetime
+import hashlib
 import importlib
 import shutil
 import socket
@@ -110,6 +111,37 @@ def _lifetime_days(pem_path: Path) -> int:
 
 def _file_mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
+
+
+def _serial(cert_path: Path) -> str:
+    """A real generated certificate's serial number, via `openssl x509 -noout -serial`."""
+    result = subprocess.run(
+        ["openssl", "x509", "-noout", "-serial", "-in", str(cert_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _verifies_against_ca(cert_path: Path, ca_cert_path: Path) -> bool:
+    """Whether `cert_path` verifies against `ca_cert_path`, via `openssl verify -CAfile`."""
+    result = subprocess.run(
+        ["openssl", "verify", "-CAfile", str(ca_cert_path), str(cert_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _hash_instance_directory(instance_dir: Path) -> dict[str, str]:
+    """Every regular file's sha256 hash under `instance_dir`, keyed by its relative path."""
+    return {
+        str(path.relative_to(instance_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(instance_dir.rglob("*"))
+        if path.is_file()
+    }
 
 
 @dataclass(frozen=True)
@@ -740,6 +772,193 @@ def test_issue_client_rotation_does_not_strand_developer_without_credential(
 
     assert paths.client_key.read_text(encoding="ascii") == original_key
     assert paths.client_cert.read_text(encoding="ascii") == original_cert
+
+
+# ---------------------------------------------------------------------------
+# E6-F1-S2-T1: rotate_client. AC-FUNC-001/AC-TEST-001 -- only cert.pem and
+# key.pem ever change; the CA and the server material an already-running
+# daemon depends on are untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_rotate_client_changes_only_cert_and_key_files(tmp_path: Path) -> None:
+    certs = _import_certs()
+    paths = certs.CertPaths(instance=f"rotate-hash-{uuid.uuid4().hex[:8]}", root=tmp_path)
+    certs.create_ca(paths)
+    server = certs.issue_server(paths)
+    certs.issue_client(paths)
+
+    before = _hash_instance_directory(paths.instance_dir)
+    certs.rotate_client(paths)
+    after = _hash_instance_directory(paths.instance_dir)
+
+    assert before.keys() == after.keys()
+    changed = {name for name in before if before[name] != after[name]}
+    assert changed == {certs.CLIENT_CERT_FILENAME, certs.CLIENT_KEY_FILENAME}
+
+    # The CA the daemon's already-issued server certificate was signed
+    # against is untouched: that server certificate (never persisted to
+    # disk -- module docstring) still verifies against the unchanged
+    # ca/ca.pem after the rotation.
+    server_cert_path = tmp_path / "server-cert-for-verify.pem"
+    server_cert_path.write_text(server.cert_pem, encoding="ascii")
+    assert _verifies_against_ca(server_cert_path, paths.ca_cert)
+
+
+# ---------------------------------------------------------------------------
+# AC-FUNC-002/AC-TEST-002 -- the replacement is a real replacement: a fresh
+# serial, a later notAfter, clientAuth, the fixed modes, and it verifies
+# against the unchanged CA.
+# ---------------------------------------------------------------------------
+
+
+def test_rotate_client_produces_a_genuinely_different_certificate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    certs = _import_certs()
+    paths = certs.CertPaths(instance=f"rotate-diff-{uuid.uuid4().hex[:8]}", root=tmp_path)
+    certs.create_ca(paths)
+    certs.issue_client(paths)
+    original_serial = _serial(paths.client_cert)
+    original_not_after = certs.not_after(paths.client_cert)
+
+    # A longer explicit lifetime for the rotation makes the later notAfter
+    # deterministic rather than depending on the wall clock advancing
+    # between two issuances -- openssl's own `-days` arithmetic has
+    # one-second granularity, and two issuances of the same lifetime can
+    # otherwise land in the same second and compare equal, not later.
+    monkeypatch.setenv("CERT_CLIENT_DAYS", "91")
+    certs.rotate_client(paths)
+
+    assert _serial(paths.client_cert) != original_serial
+    assert certs.not_after(paths.client_cert) > original_not_after
+    assert _file_mode(paths.client_key) == 0o600
+    assert _file_mode(paths.client_cert) == 0o644
+    assert "TLS Web Client Authentication" in _openssl_text(paths.client_cert)
+    assert _verifies_against_ca(paths.client_cert, paths.ca_cert)
+
+
+# ---------------------------------------------------------------------------
+# AC-FUNC-004/AC-TEST-003 -- atomicity: the final move (installing the
+# rotated pair, `_commit_pair`) failing must leave the previous, matched
+# pair in place, still verifying, with no temporary or backup file behind.
+# ---------------------------------------------------------------------------
+
+
+def test_rotate_client_final_move_failure_leaves_previous_pair_intact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    certs = _import_certs()
+    paths = certs.CertPaths(instance=f"rotate-move-fail-{uuid.uuid4().hex[:8]}", root=tmp_path)
+    certs.create_ca(paths)
+    certs.issue_client(paths)
+    original_key = paths.client_key.read_bytes()
+    original_cert = paths.client_cert.read_bytes()
+
+    real_replace = certs.os.replace
+
+    def _fail_on_cert_install(src: object, dst: object) -> None:
+        # Only the install of the freshly issued certificate (source name
+        # "issued-cert.pem", inside _issue_certificate's own temporary
+        # directory) is made to fail here -- never the backup this failure
+        # itself triggers inside `_commit_pair`'s `except` handler
+        # (source name "cert.pem.rotate-previous"), or its own rollback
+        # would recurse into this same simulated failure and never restore
+        # the previous certificate at all.
+        if Path(dst) == paths.client_cert and Path(src).name != certs.CLIENT_CERT_FILENAME + (
+            certs._PAIR_BACKUP_SUFFIX
+        ):
+            raise OSError("simulated disk failure installing the rotated certificate")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(certs.os, "replace", _fail_on_cert_install)
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.rotate_client(paths)
+
+    message = str(excinfo.value)
+    assert str(paths.client_key) in message
+    assert str(paths.client_cert) in message
+    assert paths.client_key.read_bytes() == original_key
+    assert paths.client_cert.read_bytes() == original_cert
+    assert _verifies_against_ca(paths.client_cert, paths.ca_cert)
+    assert list(paths.instance_dir.glob(f"*{certs._PAIR_BACKUP_SUFFIX}")) == []
+
+
+def test_commit_pair_failure_on_a_first_issuance_backs_up_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The symmetric case to the rotation above: a *first* issuance has no
+    previous key or certificate to back up, so `_commit_pair`'s own
+    `backed_up_key`/`backed_up_cert` both stay `False` and its rollback is a
+    no-op on this path -- distinct branch coverage from the rotation case,
+    where both are `True`."""
+    certs = _import_certs()
+    paths = certs.CertPaths(instance=f"first-issue-fail-{uuid.uuid4().hex[:8]}", root=tmp_path)
+    certs.create_ca(paths)
+
+    def _always_fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated disk failure on a first issuance")
+
+    monkeypatch.setattr(certs.os, "replace", _always_fail)
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.issue_client(paths)
+
+    message = str(excinfo.value)
+    assert str(paths.client_key) in message
+    assert str(paths.client_cert) in message
+    assert not paths.client_key.exists()
+    assert not paths.client_cert.exists()
+
+
+# ---------------------------------------------------------------------------
+# AC-FUNC-005/AC-TEST-003 -- rotate_client refuses when no CA exists for the
+# instance, names the skill invocation that creates one, and creates
+# nothing itself.
+# ---------------------------------------------------------------------------
+
+
+def test_rotate_client_refuses_when_no_ca_exists_and_creates_nothing(tmp_path: Path) -> None:
+    certs = _import_certs()
+    instance = f"rotate-no-ca-{uuid.uuid4().hex[:8]}"
+    paths = certs.CertPaths(instance=instance, root=tmp_path)
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.rotate_client(paths)
+
+    message = str(excinfo.value)
+    assert "no certificate authority" in message
+    assert f"/devcontainer:certs INSTANCE={instance}" in message
+    assert not paths.ca_key.exists()
+    assert not paths.ca_cert.exists()
+    assert not paths.client_key.exists()
+    assert not paths.client_cert.exists()
+
+
+# ---------------------------------------------------------------------------
+# AC-FUNC-003/AC-TEST-004 -- rotation implies no publication work.
+# ---------------------------------------------------------------------------
+
+
+def test_rotate_client_returns_no_publication_work(tmp_path: Path) -> None:
+    certs = _import_certs()
+    paths = certs.CertPaths(instance=f"rotate-no-publish-{uuid.uuid4().hex[:8]}", root=tmp_path)
+    certs.create_ca(paths)
+    certs.issue_client(paths)
+    before = certs.publication_set(paths.instance)
+
+    result = certs.rotate_client(paths)
+
+    assert result is None
+    after = certs.publication_set(paths.instance)
+    assert after == before
+    observed = {(entry.parameter_path, entry.parameter_type) for entry in after}
+    assert observed == {
+        (f"/devcontainer/{paths.instance}/tls/server-key.pem", "SecureString"),
+        (f"/devcontainer/{paths.instance}/tls/server-cert.pem", "SecureString"),
+        (f"/devcontainer/{paths.instance}/tls/ca.pem", "String"),
+    }
 
 
 # ---------------------------------------------------------------------------

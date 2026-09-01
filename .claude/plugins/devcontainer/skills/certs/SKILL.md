@@ -23,10 +23,11 @@ governs the one step below that needs the operator (`## Failure semantics`).
 
 `certs` (spec Section 4.5) is implemented at
 `.claude/plugins/devcontainer/scripts/devcontainer_config/certs.py`
-(E6-F1-S1-T1): `certs.create_ca`, `certs.issue_server` and
-`certs.issue_client` generate the material `## Operations` names below, and
-`certs.publication_set(instance)` declares exactly the Parameter Store
-entries Section 5.3 allows this instance's material to publish. Every
+(E6-F1-S1-T1): `certs.create_ca`, `certs.issue_server`, `certs.issue_client`
+and `certs.rotate_client` (E6-F1-S2-T1) generate the material `## Operations`
+names below, and `certs.publication_set(instance)` declares exactly the
+Parameter Store entries Section 5.3 allows this instance's material to
+publish. Every
 operation below calls these functions directly rather than shelling out to
 `openssl` by hand -- `certs.py` is the one place that ever does that
 (Section 3.4's dependency rule) -- and every publish step iterates whatever
@@ -105,7 +106,7 @@ and cross-referenced here rather than restated per row.
 | Create CA | The instance name, passed to `certs.create_ca`. Idempotent: if `~/.docker/certs/<instance>/ca/ca-key.pem` already exists, `certs.create_ca` raises naming the existing path rather than silently overwriting a private key that every issued certificate still depends on; this skill reports the existing CA's expiry (`## Expiry`) for that case instead of treating the raise as a failure. | `ca-key.pem` (`0600`) and `ca.pem` (`0644`), lifetime `CERT_CA_DAYS` (`## Material`). | The `ca.pem` entry `certs.publication_set(instance)` returns: `/devcontainer/<instance>/tls/ca.pem` as `String` (Section 5.3; not secret, so not `SecureString`). Never `ca-key.pem`: `publication_set` has no entry for it and raises if one is requested (this document's own introduction). | Parse the generated `ca.pem` to confirm its validity period matches a `CERT_CA_DAYS`-length lifetime, then read the published parameter back and compare its value against the local file's bytes -- an independent re-read after the publish, never trusted from the publish call's own exit code (Section 4.2.2's "nothing is assumed to have worked," the same pattern `/devcontainer:secrets`'s own `## Operations` table applies to a `devsecret set`). Ends with `## Docker context`. |
 | Issue server certificate | An existing CA (`## Failure semantics`'s precondition row states what happens when one is missing), passed to `certs.issue_server`. No operator-chosen SANs: the SANs are fixed (`## Requirements`). | None persisted (`## Material`'s own note): `certs.issue_server` generates the key and certificate inside a `tempfile.TemporaryDirectory` at mode `0600`/`0644` and removes that directory before returning, handing both back as text. Never persisted under `~/.docker/certs/<instance>/`; the private key does exist on disk, briefly, inside that removed temporary directory. | The `server-key.pem` and `server-cert.pem` entries `certs.publication_set(instance)` returns: `/devcontainer/<instance>/tls/server-key.pem` and `/devcontainer/<instance>/tls/server-cert.pem`, both `SecureString` (Section 5.3), lifetime `CERT_SERVER_DAYS`. | Parse the generated certificate before it is ever published, confirming it carries exactly the two required SANs and no other (`## Requirements`, AC-5.2), then read both published parameters back and compare against what was generated, the same independent-re-read rule Create CA's row states. Ends with `## Docker context`, whose completed handshake is this operation's own strongest confirmation that the instance-side daemon actually accepted the published material. |
 | Issue client certificate | An existing CA (`## Failure semantics`), passed to `certs.issue_client`. | `cert.pem` (`0644`) and `key.pem` (`0600`) (`## Material`), lifetime `CERT_CLIENT_DAYS`, carrying `clientAuth` (`## Requirements`). | None: `certs.publication_set` has no entry for the client certificate, matching Section 5.3's layout, which names no client-certificate parameter path (`## Material`). | Parse the generated certificate to confirm it carries `clientAuth` (`## Requirements`, AC-5.2). Ends with `## Docker context`. |
-| Rotate client certificate | An existing CA and an existing client certificate to replace, passed to the identical `certs.issue_client` call Issue client certificate makes: `certs.issue_client` overwrites rather than refusing an existing client certificate/key, which is what leaves the instance running throughout (AC-10.9) with nothing touching the server certificate or requiring the instance to be stopped, restarted or reconfigured -- the same call, invoked again, is why this is a separate operation from "Issue server certificate" rather than one run twice. | The identical files Issue client certificate produces, overwritten in place. | None, for the identical reason Issue client certificate names. | The identical parse-for-`clientAuth` check Issue client certificate performs. Ends with `## Docker context`. |
+| Rotate client certificate | An existing CA and an existing client certificate to replace, passed to `certs.rotate_client` (E6-F1-S2-T1), which calls `certs.issue_client` and nothing else. **This operation touches nothing on the instance**: the daemon holds only `ca.pem` and accepts any client certificate that chains to it, so the replacement is accepted the moment it is presented -- no parameter is written, the daemon is never restarted, no `terragrunt apply` runs, and no docker context update is structurally required (the rewrite below runs anyway, as a verification, never as a repair). `certs.rotate_client` refuses, naming the instance and the `/devcontainer:certs INSTANCE=<name>` invocation that creates one, if no CA exists yet for this instance, rather than creating one implicitly: a fresh CA would silently invalidate every certificate the previous one already signed, including the server certificate this same daemon is already serving (AC-10.9). | `cert.pem` and `key.pem`, overwritten in place as a single atomic unit (`certs._commit_pair`): a rotation that fails during the commit (a read-only material root or a cross-device destination, both raising `OSError`) leaves the previous, still-valid pair, never a half-written key or a mismatched pair; a killed process between the backup and the install is outside that guarantee and leaves an outage for the operator to detect and repair by hand. The CA key, the CA certificate and the server material are byte-identical/unchanged throughout. | None, for the identical reason Issue client certificate names. | The identical parse-for-`clientAuth` check Issue client certificate performs, plus a verification that the new certificate still chains to the unchanged CA (`openssl verify -CAfile`). Ends with `## Docker context`. |
 | Report expiry | None: `certs status` takes no instance selector and reports every instance under the certificate material root (`--root`, defaulting to `DEFAULT_CERTS_ROOT`). | None: this operation reads, never writes. | None: this operation reads, never writes. | `## Expiry` is this operation's own output shape and exit-code rule; there is nothing further to verify about a read. |
 
 ## Requirements
@@ -153,17 +154,26 @@ but not confirmed reachable, and never reports the operation complete.
 
 ## Revocation
 
-Docker supports neither CRL nor OCSP, so certificate revocation does not
-exist (Section 3.6.3); this skill states that plainly rather than performing
-a gesture that revokes nothing. Removing the principal's `ssm:StartSession`
-permission is the revocation mechanism instead: it is immediate, and it
-renders any certificate that principal holds inert, because a certificate is
-useless without the tunnel it authenticates inside. The certificate
-authenticates; IAM authorizes (Section 3.6.2's own boundary table states the
-same division for who may command the daemon versus who may open the
-tunnel). A request to revoke a certificate is answered with this explanation
-and the `ssm:StartSession` remedy, never with a report that a certificate was
-revoked, because nothing would have been revoked.
+**Rotation is not revocation, and this skill states so explicitly rather than
+letting an operator infer it.** Docker supports neither CRL nor OCSP, so
+certificate revocation does not exist (Section 3.6.3); this skill states that
+plainly rather than performing a gesture that revokes nothing. "Rotate client
+certificate" (`## Operations`) replaces `cert.pem`/`key.pem` with a fresh pair
+signed by the same CA -- the superseded certificate is never added to a
+revocation list, because there is no such list to add it to, and it stays
+cryptographically valid until its own `notAfter` passes (`## Material`'s own
+`CERT_CLIENT_DAYS` lifetime), exactly the same as any certificate this
+authority ever signed. Removing the principal's `ssm:StartSession` permission
+is the revocation mechanism instead: it is immediate, and it renders any
+certificate that principal holds inert, because a certificate is useless
+without the tunnel it authenticates inside. The certificate authenticates;
+IAM authorizes (Section 3.6.2's own boundary table states the same division
+for who may command the daemon versus who may open the tunnel). A request to
+revoke a certificate is answered with this explanation and the
+`ssm:StartSession` remedy, never with a report that a certificate was
+revoked, because nothing would have been revoked -- and never by rotating the
+certificate, which answers a different question ("issue a fresh one") than
+the one being asked ("make the old one stop working").
 
 ## Expiry
 

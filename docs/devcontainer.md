@@ -484,6 +484,48 @@ asdf was removed entirely (it managed zero tools; Python/Node come from
 features). If a future project needs asdf, that support must be reintroduced
 deliberately, nothing references it anymore.
 
+## Certificate lifecycle
+
+A remote engine is reached over mTLS: the docker daemon authenticates the
+laptop's client certificate, and the laptop authenticates the daemon's server
+certificate, both signed by a certificate authority created once per
+instance. Three lifetimes govern that material (`CERT_CA_DAYS`,
+`CERT_SERVER_DAYS`, `CERT_CLIENT_DAYS`; defaults and validation are
+documented in `docs/environment-files.md`'s "Certificate lifetimes"
+section, the single place they are defined):
+
+| Material | Default lifetime | Persisted at |
+|---|---|---|
+| CA (`ca-key.pem`, `ca.pem`) | 3650 days | `~/.docker/certs/<instance>/ca/` |
+| Server (key, certificate) | 365 days | Nowhere: generated and published to Parameter Store in one step, never written under `~/.docker/certs/<instance>/` |
+| Client (`key.pem`, `cert.pem`) | 90 days | `~/.docker/certs/<instance>/` |
+
+The client certificate's ninety-day lifetime is the one an operator actually
+lives with day to day, and it is sustainable only because rotating it is
+cheap: `make cert-status` reports a `RENEW` row, naming the exact
+`/devcontainer:certs INSTANCE=<name>` invocation that clears it, once a
+client certificate is inside its warning window (`CERT_WARN_DAYS`, default
+14 days); running that invocation's "Rotate client certificate" operation
+(`.claude/plugins/devcontainer/skills/certs/SKILL.md`) issues a fresh
+client key and certificate from the same CA and installs them atomically.
+
+**Rotating a client certificate touches nothing on the instance.** The daemon
+holds only `ca.pem` and accepts any client certificate that chains to it, so
+a replacement signed by the same CA is accepted the moment it is presented:
+no Parameter Store entry is written, the daemon is never restarted, no
+`terragrunt apply` runs, and the docker context needs no update since it
+already points at `cert.pem`/`key.pem` by path. The CA itself is never
+reissued by a rotation -- reissuing it would invalidate every certificate it
+already signed, including the server certificate the daemon is already
+serving, which would take the instance off the air until a new server key is
+published and the daemon restarted. This is also why a client rotation is
+not a substitute for revoking access: Docker supports neither CRL nor OCSP,
+so the superseded client certificate stays cryptographically valid until its
+own `notAfter` passes; removing the principal's `ssm:StartSession` grant is
+what actually renders a certificate inert, because a certificate
+authenticates but IAM authorizes, and a certificate is useless without the
+tunnel it authenticates inside.
+
 ## Secrets model
 
 ```text

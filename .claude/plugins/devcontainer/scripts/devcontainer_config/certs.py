@@ -118,6 +118,38 @@ same instance (a client certificate with no CA, or the reverse) is refused
 by name instead of being rendered as a blank row (Error Handling Contract),
 because that partial state means the instance's material is not what
 `create_ca`/`issue_client` would have left behind on their own.
+
+E6-F1-S2-T1 adds `rotate_client`, the standing name spec Section 4.5 and
+`certs/SKILL.md`'s "Rotate client certificate" row give the operation of
+replacing an already-issued client certificate while the instance keeps
+running (AC-10.9). It calls `issue_client` and nothing else: `issue_client`
+already overwrites an existing `cert.pem`/`key.pem` pair rather than
+refusing one, already refuses when `paths.instance` has no authority yet
+rather than creating one (`_require_ca`, never called with an implicit
+`create_ca` fallback -- a fresh CA would silently invalidate every
+certificate already signed by the old one, including the server certificate
+the running daemon is serving), and, since round 3's WARN C fix, already
+commits its replacement key and certificate through `_commit_pair` rather
+than two independent `os.replace` calls. `_commit_pair` is this task's own
+addition: the pre-existing implementation moved the new key into place and
+then the new certificate into place as two separate, unguarded operations,
+so a failure between the two committed a new key with no matching
+certificate (or the reverse) -- a mismatched pair neither the old nor the
+new material, which is worse than leaving the previous pair in place
+untouched. `_commit_pair` backs up whichever of the destination files
+already exist to a sibling path in the same directory before installing
+either replacement, and restores those backups on any `OSError` from the
+commit itself, so a rotation that raises `OSError` during the commit always
+leaves either the complete previous pair or the complete new one, never a
+mix of the two (AC-FUNC-004); a process terminated between the backup and
+the install, which no `except` clause runs after, is outside that guarantee
+and leaves an outage for the caller to detect and repair by hand.
+Nothing about a rotation is ever published: `rotate_client` returns `None`
+and calls no function in this module that touches Parameter Store, so no
+caller of it can infer that a parameter write follows (AC-FUNC-003) --
+`publication_set` has no entry for the client certificate at all (spec
+Section 5.3), the same fact `certs/SKILL.md`'s own "Rotate client
+certificate" row states in prose.
 """
 
 from __future__ import annotations
@@ -153,6 +185,13 @@ CA_KEY_FILENAME = "ca-key.pem"
 CA_CERT_FILENAME = "ca.pem"
 CLIENT_CERT_FILENAME = "cert.pem"
 CLIENT_KEY_FILENAME = "key.pem"
+
+# `_commit_pair`'s own bookkeeping suffix for the sibling path it moves a
+# pre-existing `key_out`/`cert_out` aside to before installing a
+# replacement, so a failed commit can restore exactly what was there before
+# it ran. Never left behind: `_commit_pair` unlinks both on every path,
+# success or failure (AC-FUNC-004).
+_PAIR_BACKUP_SUFFIX = ".rotate-previous"
 
 # spec Section 5.5's modes, applied through `os.chmod` after every write so
 # the process umask can never weaken them.
@@ -547,18 +586,28 @@ def _require_ca(paths: CertPaths) -> None:
     """Raise unless a usable authority already exists for `paths.instance`.
 
     `.claude/plugins/devcontainer/skills/certs/SKILL.md`'s own precondition
-    row for "Issue server certificate" and "Issue client certificate" names
-    exactly this requirement; both functions below check it before shelling
-    out to `openssl` at all. Beyond the existence check, each component is
-    also checked for being a parseable PEM file (`_require_parseable_ca_component`),
-    so a corrupt authority is rejected by name rather than reaching `openssl`
-    as an opaque failure.
+    row for "Issue server certificate", "Issue client certificate" and
+    "Rotate client certificate" names exactly this requirement; every
+    function below that needs an authority checks it before shelling out to
+    `openssl` at all, and none of them ever creates one implicitly on this
+    failure -- a fresh CA would silently invalidate every certificate the
+    previous one already signed, including the server certificate the
+    running daemon is serving (this task's Error Handling Contract,
+    AC-FUNC-005). The remedy names the exact skill invocation that creates
+    an authority (`_RENEW_INVOCATION_TEMPLATE`, the identical
+    `/devcontainer:certs INSTANCE=<name>` spelling `## Expiry`'s own `RENEW`
+    row already gives an operator, reused here rather than a second literal)
+    rather than the Python function name, since the operator driving this
+    module is the `certs` skill, never `certs.py` directly. Beyond the
+    existence check, each component is also checked for being a parseable
+    PEM file (`_require_parseable_ca_component`), so a corrupt authority is
+    rejected by name rather than reaching `openssl` as an opaque failure.
     """
     if not paths.ca_key.is_file() or not paths.ca_cert.is_file():
         raise CertsError(
             f"ERROR: no certificate authority exists for instance {paths.instance!r}\n"
             f"Expected {paths.ca_key} and {paths.ca_cert} to already exist.\n"
-            "Run create_ca for this instance first."
+            f"Run {_RENEW_INVOCATION_TEMPLATE.format(instance=paths.instance)} to create one first."
         )
     for component in (paths.ca_key, paths.ca_cert):
         _require_parseable_ca_component(component, paths.instance)
@@ -664,6 +713,69 @@ def create_ca(paths: CertPaths) -> None:
         raise
 
 
+def _commit_pair(key_out: Path, cert_out: Path, issued_key: Path, issued_cert: Path) -> None:
+    """Install `issued_key`/`issued_cert` at `key_out`/`cert_out` as a single unit.
+
+    Whichever of `key_out`/`cert_out` already exists is moved aside first,
+    to a sibling path in the same directory (`_PAIR_BACKUP_SUFFIX`) --
+    itself an `os.replace`, atomic on this filesystem -- before either
+    replacement is installed. This task's own atomicity requirement is
+    about the *pair*, not each file independently: installing the new key
+    with one `os.replace` and the new certificate with a second, unguarded
+    one left a failure between them free to commit a new key with no
+    matching certificate (or the reverse), a mismatched pair that is worse
+    than leaving the previous, matched pair untouched (this task's Error
+    Handling Contract, second bullet; AC-FUNC-004). On any `OSError` from
+    this function, whichever backup(s) were made are moved back to their
+    original paths before `CertsError` is raised naming both destination
+    paths, so a rotation that raises `OSError` at any point during the
+    commit always leaves either the complete previous pair or the complete
+    new one. This guarantee covers only the `OSError` path the `except`
+    clause below handles: a process terminated between the backup and the
+    install (a `SIGKILL`, for example, which no `except` clause can run
+    after) leaves both destination paths absent and the two
+    `_PAIR_BACKUP_SUFFIX` files as the only trace, an outage the caller must
+    detect and repair by hand rather than something this function recovers
+    from automatically.
+    First issuance (neither `key_out` nor `cert_out` exists yet) never
+    triggers a backup at all: a first-issuance failure at this point leaves
+    nothing at either path, matching `issue_client`'s existing "nothing
+    created" guarantee.
+
+    Raises:
+        CertsError: any `os.replace` call above raises `OSError` -- a
+            read-only material root, or a cross-device destination.
+    """
+    key_backup = key_out.with_name(key_out.name + _PAIR_BACKUP_SUFFIX)
+    cert_backup = cert_out.with_name(cert_out.name + _PAIR_BACKUP_SUFFIX)
+    backed_up_key = False
+    backed_up_cert = False
+    try:
+        if key_out.exists():
+            os.replace(key_out, key_backup)
+            backed_up_key = True
+        if cert_out.exists():
+            os.replace(cert_out, cert_backup)
+            backed_up_cert = True
+        os.replace(issued_key, key_out)
+        os.replace(issued_cert, cert_out)
+    except OSError as exc:
+        if backed_up_key:
+            os.replace(key_backup, key_out)
+        if backed_up_cert:
+            os.replace(cert_backup, cert_out)
+        raise CertsError(
+            f"ERROR: cannot install the replacement certificate at {key_out} and {cert_out}\n"
+            f"{exc.strerror or exc}\n"
+            "The previous key and certificate at these paths, if any, remain in place "
+            "unchanged. Check filesystem permissions for the certificate material root "
+            "and retry."
+        ) from exc
+    finally:
+        key_backup.unlink(missing_ok=True)
+        cert_backup.unlink(missing_ok=True)
+
+
 def _issue_certificate(
     paths: CertPaths,
     *,
@@ -687,18 +799,19 @@ def _issue_certificate(
 
     `key_out` and `cert_out` are never touched until both `openssl` calls
     have succeeded, at which point the freshly issued key and certificate
-    are moved into place with `os.replace` -- atomic on the same filesystem.
-    A mid-issuance failure therefore leaves whatever was already at
-    `key_out`/`cert_out` (nothing, for a first issuance; the previously
-    valid material, for a rotation) completely untouched, rather than
-    truncating or unlinking it first and only then attempting the
-    `openssl` calls that can fail. The pre-round-3 implementation prepared
-    `key_out` for writing (truncating any existing key) before the first
-    `openssl` call and unlinked both `key_out` and `cert_out` on failure, so
-    a failing `openssl` during `issue_client`'s rotation destroyed a
-    previously valid, still-trusted client certificate and key with nothing
-    to replace them -- stranding the developer without any client
-    credential (code_review, this unit, round 1: WARN 5; round 3: WARN C).
+    are committed as a single unit by `_commit_pair` -- atomic on the same
+    filesystem. A mid-issuance failure (inside either `openssl` call above)
+    therefore leaves whatever was already at `key_out`/`cert_out` (nothing,
+    for a first issuance; the previously valid material, for a rotation)
+    completely untouched, rather than truncating or unlinking it first and
+    only then attempting the `openssl` calls that can fail. The pre-round-3
+    implementation prepared `key_out` for writing (truncating any existing
+    key) before the first `openssl` call and unlinked both `key_out` and
+    `cert_out` on failure, so a failing `openssl` during `issue_client`'s
+    rotation destroyed a previously valid, still-trusted client certificate
+    and key with nothing to replace them -- stranding the developer without
+    any client credential (code_review, this unit, round 1: WARN 5; round 3:
+    WARN C).
     """
     with tempfile.TemporaryDirectory(
         prefix="devcontainer-certs-", dir=str(key_out.parent)
@@ -748,8 +861,7 @@ def _issue_certificate(
                 f"-{DIGEST}",
             ]
         )
-        os.replace(issued_key, key_out)
-        os.replace(issued_cert, cert_out)
+        _commit_pair(key_out, cert_out, issued_key, issued_cert)
 
 
 def issue_server(paths: CertPaths) -> ServerCertificate:
@@ -787,13 +899,12 @@ def issue_server(paths: CertPaths) -> ServerCertificate:
 
 
 def issue_client(paths: CertPaths) -> None:
-    """Issue (or rotate) the client certificate and key at `paths.client_cert`/`paths.client_key`.
+    """Issue the client certificate and key at `paths.client_cert`/`paths.client_key`.
 
     Unlike `create_ca`, an existing client certificate is overwritten rather
-    than rejected: `.claude/plugins/devcontainer/skills/certs/SKILL.md`'s own
-    "Rotate client certificate" operation is this same call repeated, and the
-    instance is left running throughout, which only works if reissuing never
-    refuses on an existing file.
+    than rejected: `rotate_client` below is this same call, under its own
+    name, and the instance is left running throughout, which only works if
+    reissuing never refuses on an existing file.
 
     Raises:
         CertsError: `openssl` is not on PATH, or no authority exists yet for
@@ -811,6 +922,50 @@ def issue_client(paths: CertPaths) -> None:
         key_out=paths.client_key,
         cert_out=paths.client_cert,
     )
+
+
+def rotate_client(paths: CertPaths) -> None:
+    """Rotate the client certificate and key at `paths.client_cert`/`paths.client_key` (AC-10.9).
+
+    Calls `issue_client` and does nothing else: it is the standing name spec
+    Section 4.5 and `.claude/plugins/devcontainer/skills/certs/SKILL.md`'s
+    own "Rotate client certificate" row give the operation `issue_client`
+    already performs, reused here rather than a second, independent
+    issuance path (this task's own Approach). Every invariant this task
+    proves belongs to `issue_client`/`_issue_certificate`/`_commit_pair`,
+    which this function inherits by delegating to them:
+
+    - Only `paths.client_cert` and `paths.client_key` ever change. The CA
+      key, the CA certificate, and the server material the running daemon
+      is already serving are never read, written, or reissued by any call
+      this function makes (AC-FUNC-001).
+    - The replacement carries a fresh serial (`_random_serial`) and its own
+      independently computed `notAfter`, `clientAuth` and the file modes
+      spec Section 5.5 fixes, and verifies against the unchanged CA
+      (AC-FUNC-002).
+    - Nothing is published: this function calls no function in this module
+      that touches Parameter Store and returns `None`, so no caller of it
+      can infer that a parameter write follows (AC-FUNC-003); the instance
+      itself is untouched, so no docker context update, daemon restart or
+      `terragrunt` run is implied by a call to this function either.
+    - The commit is atomic per `_commit_pair`: a rotation that raises
+      `OSError` during the commit leaves either the complete previous pair
+      or the complete new one, never a half-written key or a mismatched
+      pair (AC-FUNC-004); see `_commit_pair`'s own docstring for the
+      narrower failure mode -- a killed process -- that guarantee does not
+      cover.
+    - No certificate authority is ever created here: `_require_ca` (via
+      `issue_client`) raises rather than falling back to `create_ca`, naming
+      the skill invocation that creates one, because a fresh CA would
+      silently invalidate every certificate the previous one already
+      signed, including the server certificate the running daemon is
+      serving (AC-FUNC-005).
+
+    Raises:
+        CertsError: `openssl` is not on PATH, or no authority exists yet for
+            `paths.instance` -- never created implicitly.
+    """
+    issue_client(paths)
 
 
 def _is_ca_private_key_request(name: str) -> bool:
@@ -1174,7 +1329,7 @@ def _build_parser() -> argparse.ArgumentParser:
     issue_server_parser.set_defaults(handler=_run_issue_server)
 
     issue_client_parser = subparsers.add_parser(
-        "issue-client", help="Issue or rotate the client certificate and key."
+        "issue-client", help="Issue the client certificate and key."
     )
     add_instance_arguments(issue_client_parser)
     issue_client_parser.set_defaults(handler=_run_issue_client)

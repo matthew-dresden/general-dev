@@ -19,6 +19,27 @@ never touches it, the same reasoning `tests/test_makefile_contract.py` and
 `tests/test_postcreate_hooks.py` already document for their own top-level
 imports of that module.
 
+`_function_body` and `_postcreate_text` are imported from `tests/conftest.py`
+at module scope for the same reason `find_root` is: `tests/conftest.py` is
+not in this task's (E3-F2-S2-T7) Changes Manifest, so the TDD RED gate's
+stash never touches it either, and the whole-file COLLECTION hazard the
+deferred-import pattern above exists to avoid does not apply to it. They are
+shared rather than redefined locally because this file previously carried
+its own copies -- a local `_postcreate_text` and a `_configure_shell_env_body`
+built on a first-closing-brace regex that stopped scanning at the first line
+beginning with a literal `}` -- and that regex would truncate a function body
+containing its own nested compound command (an `if`, `while`, or subshell
+whose closing brace also lands at column 0), a class of bug the shared
+brace-depth scanner in `tests/conftest.py` does not have; a second private
+copy risked drifting from that fix the way the original three copies already
+had. As of this migration, `tests/conftest.py` does not yet define
+`_function_body` or `_postcreate_text`: relocating them there is
+`E3-F2-S2-T6`'s own Changes Manifest row, and `E3-F2-S2-T6` remains blocked,
+so this file currently fails COLLECTION with `ImportError: cannot import
+name '_function_body' from 'conftest'` until `E3-F2-S2-T6` lands. That
+failure is the expected state of this task-ordering dependency, not a defect
+in this file.
+
 The `.devcontainer/.devcontainer.postcreate.sh` and `shell.env.example`
 assertions below are text-level, the same discipline
 `tests/test_postcreate_hooks.py` documents: postCreate's very first
@@ -53,6 +74,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from conftest import _function_body, _postcreate_text
 from devcontainer_config.repo import find_root
 
 SUPPORTED_SHELLS = ("bash", "zsh")
@@ -70,13 +92,6 @@ def _repo_root() -> Path:
     return find_root(Path(__file__).resolve().parent)
 
 
-def _postcreate_text() -> str:
-    """`.devcontainer/.devcontainer.postcreate.sh`, read fresh for every call."""
-    return (_repo_root() / ".devcontainer" / ".devcontainer.postcreate.sh").read_text(
-        encoding="utf-8"
-    )
-
-
 def _shell_env_example_text() -> str:
     """`shell.env.example`, read fresh for every call."""
     return (_repo_root() / "shell.env.example").read_text(encoding="utf-8")
@@ -88,14 +103,13 @@ def _configure_shell_env_body() -> str:
     Isolated by name, the same pattern `tests/test_postcreate_hooks.py`
     uses for `install_git_hooks`, so an assertion meant for this step
     cannot be satisfied by unrelated text elsewhere in the 500-line script.
+    Delegates to the shared `conftest._function_body` brace-depth scanner
+    rather than a local regex that stopped at the first line beginning with
+    a literal `}`, which never mismatched here only because
+    `configure_shell_env`'s two nested `{ ... }` compound commands both
+    close at column 2, not column 0.
     """
-    match = re.search(
-        r"^configure_shell_env\(\)\s*\{(.*?)^\}", _postcreate_text(), re.MULTILINE | re.DOTALL
-    )
-    assert match is not None, (
-        "no configure_shell_env function found in .devcontainer/.devcontainer.postcreate.sh"
-    )
-    return match.group(1)
+    return _function_body("configure_shell_env")
 
 
 # ---------------------------------------------------------------------------

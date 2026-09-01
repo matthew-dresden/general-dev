@@ -585,3 +585,4 @@ same run:
 
 | Skill | Invocation |
 |---|---|
+| setup-local | `/devcontainer:setup-local` -- asks the local backend's required answers (Section 5.1), writes and verifies the three private files, checks prerequisites, and ends by naming `make build` |

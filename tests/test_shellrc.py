@@ -28,9 +28,9 @@ shared rather than redefined locally because this file previously carried
 its own copies -- a local `_postcreate_text` and a `_configure_shell_env_body`
 built on a first-closing-brace regex that stopped scanning at the first line
 beginning with a literal `}` -- and that regex would truncate a function body
-containing its own nested compound command (an `if`, `while`, or subshell
-whose closing brace also lands at column 0), a class of bug the shared
-brace-depth scanner in `tests/conftest.py` does not have; a second private
+containing its own nested `{ ... }` compound command or nested function
+definition whose closing brace also lands at column 0, a class of bug the
+shared brace-depth scanner in `tests/conftest.py` does not have; a second private
 copy risked drifting from that fix the way the original three copies already
 had. As of this migration, `tests/conftest.py` does not yet define
 `_function_body` or `_postcreate_text`: relocating them there is

@@ -32,13 +32,7 @@ containing its own nested `{ ... }` compound command or nested function
 definition whose closing brace also lands at column 0, a class of bug the
 shared brace-depth scanner in `tests/conftest.py` does not have; a second private
 copy risked drifting from that fix the way the original three copies already
-had. As of this migration, `tests/conftest.py` does not yet define
-`_function_body` or `_postcreate_text`: relocating them there is
-`E3-F2-S2-T6`'s own Changes Manifest row, and `E3-F2-S2-T6` remains blocked,
-so this file currently fails COLLECTION with `ImportError: cannot import
-name '_function_body' from 'conftest'` until `E3-F2-S2-T6` lands. That
-failure is the expected state of this task-ordering dependency, not a defect
-in this file.
+had.
 
 The `.devcontainer/.devcontainer.postcreate.sh` and `shell.env.example`
 assertions below are text-level, the same discipline

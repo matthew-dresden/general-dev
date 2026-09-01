@@ -248,6 +248,26 @@ def test_help_documents_the_range_form_of_lint_secrets() -> None:
     assert "RANGE" in lint_secrets_rows[0]
 
 
+def test_help_secrets_section_uses_the_certificates_heading() -> None:
+    """E4-F4-S1-T1 AC-FUNC-001: the secrets section heading matches spec Section 14.1.
+
+    Renamed from "SECRETS AND CREDENTIALS" to "SECRETS AND CERTIFICATES" so
+    the heading itself already reads the way spec Section 14.1 has it,
+    ahead of `make cert-status` (a later epic) landing under the same
+    heading.
+    """
+    help_recipe = _help_recipe_body(_makefile_text())
+    assert "SECRETS AND CERTIFICATES" in help_recipe
+    assert "SECRETS AND CREDENTIALS" not in help_recipe
+
+
+def test_help_quality_section_carries_test_and_lint_secrets_rows() -> None:
+    """E4-F4-S1-T1 AC-FUNC-001: QUALITY carries `make test` and `make lint-secrets` rows."""
+    help_recipe = _help_recipe_body(_makefile_text())
+    assert '"make test"' in help_recipe
+    assert '"make lint-secrets"' in help_recipe
+
+
 @pytest.mark.parametrize("tool", TEST_PREREQUISITE_TOOLS)
 def test_prerequisites_test_row_names_the_tool(tool: str) -> None:
     """E3-F2-S2-T5 AC-DOC-001 / AC-TEST-001: the `test` PREREQUISITES row names `uv` and `zsh`."""

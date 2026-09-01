@@ -44,12 +44,19 @@ line beginning with a literal `}` rather than scanning brace depth, so a
 function body containing any nested `{ ... }` compound command before its
 own closing brace would have been truncated. `_function_body` scans brace
 depth instead, so no consumer can silently receive a truncated body again.
+
+`FakeRunner` fakes `devcontainer_config.hostprobe.CommandRunner`, the
+runner seam `hostprobe.py` defines and `devcontainer_config.transport`
+imports and reuses rather than declaring a second, independent runner
+type. Both `tests/test_transport.py` and `tests/test_hostprobe.py` import
+this single definition (E6-F2-S1-T1); neither file declares its own copy.
 """
 
 from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +89,31 @@ def _synthetic_instance_id(hex_length: int) -> str:
     EC2-instance-id-shaped literal appears in source.
     """
     return "i-" + uuid.uuid4().hex[:hex_length]
+
+
+class FakeRunner:
+    """Records every command issued to it and answers from a fixed fixture map.
+
+    `responses` maps an exact command tuple to the `CommandResult` a real
+    invocation would have produced; `calls` accumulates `(command, timeout)`
+    pairs in issue order, so a test can assert the sequence a probe
+    function issued without any of those commands ever reaching a real
+    subprocess. A command not present in the fixture map is a
+    test-authoring bug, not a hermetic-suite escape hatch, so this raises
+    `AssertionError` naming the unexpected command rather than falling back
+    to a default result.
+    """
+
+    def __init__(self, responses: dict[tuple[str, ...], object]) -> None:
+        self._responses = responses
+        self.calls: list[tuple[tuple[str, ...], float | None]] = []
+
+    def __call__(self, command: Sequence[str], timeout_seconds: float | None) -> object:
+        key = tuple(command)
+        self.calls.append((key, timeout_seconds))
+        if key not in self._responses:
+            raise AssertionError(f"FakeRunner received an unrecorded command: {key!r}")
+        return self._responses[key]
 
 
 _DEFAULT_ACCOUNT_ID: str = _synthetic_account_id()

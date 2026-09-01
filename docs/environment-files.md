@@ -223,9 +223,7 @@ it through the developer's already-valid AWS SSO session.
 single definition site for these three variables (E6-F1-S1-T1): every
 `create_ca`, `issue_server` and `issue_client` call resolves its own
 lifetime from the matching variable below, never a literal at the call
-site. Spec Section 7.3 names three more certificate and transport variables
-that join this section once the work units that implement them land:
-`DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT` and `DOCKER_HANDSHAKE_TIMEOUT`.
+site.
 
 | Variable | Default | Defined in |
 |---|---|---|
@@ -304,6 +302,44 @@ under that path: `certs.issue_server` generates both inside a
 removes that directory before returning, handing them back as PEM text for
 the caller to publish directly (`certs/SKILL.md`'s `## Material` states the
 same rule).
+
+### Transport
+
+`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`
+(E6-F2-S1-T1) is the SSM port forward manager: it builds the
+`aws ssm start-session --document-name AWS-StartPortForwardingSession`
+argument vector that carries the docker API (no SSH element anywhere in
+it), allocates the local end of that forward, and detects when it is ready
+by waiting for the session process to report its port opened and then
+confirming it with a connection to the local port, rather than waiting a
+fixed amount of time.
+`.claude/plugins/devcontainer/scripts/devcontainer_config/hostprobe.py`
+(E1-F3-S1-T1) is the docker-handshake probe `engine`, `setup-local` and
+`setup-remote` share.
+
+| Variable | Default | Defined in |
+|---|---|---|
+| `DOCKER_TLS_PORT` | `2376` | `transport.py`, read by `build_start_session_argv` |
+| `SSM_FORWARD_TIMEOUT` | `30` | `transport.py`, read by `wait_ready` and `stop_forward` |
+| `DOCKER_HANDSHAKE_TIMEOUT` | `30` | `hostprobe.py`, read by `probe_docker`'s handshake check |
+
+`DOCKER_TLS_PORT` is the port the rootless docker daemon on the instance
+listens on, `127.0.0.1`-only, behind a security group with zero ingress
+rules (spec Section 5.6); `transport.py` reads it in exactly one place and
+never hardcodes `2376` at any call site. The local end of the forward is a
+different, per-instance port: allocated and recorded in the instance's
+docker context endpoint (never a fixed number, spec Section 9), reused
+across reconnects when that context already exists. `SSM_FORWARD_TIMEOUT`
+has two readers, and raising it affects both: `transport.wait_ready` bounds
+by it how long it waits for the session process to announce the port
+opened and then confirm that with a connection attempt, naming the
+instance, the port and this variable before raising; `transport.stop_forward`
+separately bounds by the same variable the grace period it gives the
+session process to exit cleanly after asking it to terminate, before
+escalating to a kill. All three variables are optional: each default above
+applies whenever the variable is unset, and each module rejects a
+non-numeric or non-positive value naming the variable and its value rather
+than silently falling back to the default.
 
 ### What did not change
 

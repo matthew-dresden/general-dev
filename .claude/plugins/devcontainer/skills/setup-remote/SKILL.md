@@ -24,9 +24,12 @@ Certificate generation and instance resolution are owned by the `certs` and
 `certs.issue_server`, `certs.issue_client` and `certs.publication_set`,
 which Procedure step 9 below calls directly -- and inspection/expiry status
 (`certs.status_rows`, `certs.classify`), the same functions `make cert-status`
-calls, but `instances` does not yet exist, so every step below that depends
-on it names the module that will own it rather than a function this
-repository does not yet contain.
+calls. `transport` (E6-F2-S1-T1) owns the SSM port forward itself: SSM agent
+status, per-instance local port allocation, the `aws ssm start-session`
+argument vector and its readiness detection, which Procedure steps 7 and 11
+through 12 below call directly. `instances` does not yet exist, so every
+step below that depends on it names the module that will own it rather than
+a function this repository does not yet contain.
 
 Where this skill cannot act itself -- a browser SSO login, an AWS resource
 that only an operator may create or destroy -- it states the exact
@@ -116,11 +119,15 @@ continuing.
    `hostprobe.probe_aws_identity(runner, profile=<remote_aws_profile>)`. On
    failure, follow the `## Checks` remedy above: state the exact
    `aws sso login` command, wait, then re-probe before continuing.
-7. Resolve the answered `remote_instance_id` and confirm the instance is
-   running with its SSM agent online (owned by the `instances` module, spec
-   Section 4.5, once it exists). On failure, follow the `## Checks` remedy
-   above: stop naming the instance id and the agent state, and do not
-   attempt the forward.
+7. Resolve the answered `remote_instance_id` (owned by the `instances`
+   module, spec Section 4.5, once it exists) and confirm its SSM agent
+   reports `Online` by calling `transport.ensure_agent_online`
+   (`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`,
+   E6-F2-S1-T1), which raises for any status other than `Online` -- naming
+   either the reported ping status, or that SSM has no record of the
+   instance at all, meaning it is stopped, terminated, or the configured id
+   is wrong. On failure, follow the `## Checks` remedy above: stop naming
+   the instance id and the agent state, and do not attempt the forward.
 8. If provisioning or changing this instance's `remote-instances/<name>`
    Terragrunt state is needed to proceed -- creating it for the first time,
    per spec Section 2 G5, or changing a resource that module owns -- reach
@@ -150,12 +157,31 @@ continuing.
     `/devcontainer/<name>/tls/ca.pem` (String). The CA private key and the
     client certificate and key never leave the laptop: `certs.publication_set`
     has no entry for any of the three and raises if one is requested.
-11. Create the docker context `general-dev-<name>` (spec Section 9's
-    addressing table), addressed at the instance over the forward this
-    procedure establishes next.
-12. Establish the SSM port forward to the instance's `DOCKER_TLS_PORT`,
+11. Allocate the local port this instance's forward binds to, by calling
+    `transport.allocate_local_port`
+    (`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`,
+    spec Section 4.5, E6-F2-S1-T1) rather than picking a port by hand: it
+    reuses the port already recorded in `general-dev-<name>`'s docker
+    context endpoint when that context already exists, or binds an
+    OS-assigned free port when it does not (spec Section 9: "never a fixed
+    number"). If the port already recorded for `general-dev-<name>` is held
+    by a foreign process, `transport.allocate_local_port` raises
+    `PortOccupiedError` naming the port and the context rather than silently
+    allocating a different one, since a silent move would strand every
+    docker context and configuration that recorded the old value: an
+    operator action (free the port, then retry), not a self-fix. Create the
+    docker context `general-dev-<name>` (spec Section 9's addressing table)
+    addressed at `tcp://127.0.0.1:<the allocated port>`, over the forward the
+    next step establishes on that same port.
+12. Establish the SSM port forward to the instance's `DOCKER_TLS_PORT` by
+    calling `transport.start_forward` with the port allocated in the
+    previous step, then confirm it answers by calling `transport.wait_ready`,
     bounded by `SSM_FORWARD_TIMEOUT`. A forward that does not answer within
-    that timeout is reported by name; it is never retried silently.
+    that timeout raises naming the instance, the local port and
+    `SSM_FORWARD_TIMEOUT`; it is never retried silently, and this skill never
+    reports a forward established because the session process is merely
+    still alive -- only `wait_ready` observing the local port accept a
+    connection does that.
 13. Complete the docker version handshake against the new context, bounded
     by `DOCKER_HANDSHAKE_TIMEOUT` (the same deadline
     `hostprobe.probe_docker`'s handshake check uses), reporting the server
@@ -192,8 +218,10 @@ continuing.
   places a fact about the interview, a rendered file, or this machine is
   decided; `certs` (E6-F1-S1-T1, E6-F1-S1-T2) now owns both certificate
   generation and certificate-expiry facts (`certs.status_rows`,
-  `certs.classify`), but `instances` will own instance facts once they
-  exist. This skill decides none of them itself.
+  `certs.classify`), and `transport` (E6-F2-S1-T1) now owns the SSM port
+  forward facts: SSM agent status, per-instance local port allocation, and
+  forward readiness. `instances` will own instance facts once they exist.
+  This skill decides none of them itself.
 - Section 5.1: the interview schema, including which fields are asked only
   when the backend is remote, and that `remote_ssh_key_path` is removed in
   phase 4.

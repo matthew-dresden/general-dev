@@ -34,11 +34,10 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
-from collections.abc import Sequence
 from types import ModuleType
 
 import pytest
-from conftest import _synthetic_account_id
+from conftest import FakeRunner, _synthetic_account_id
 
 
 def _import_hostprobe() -> ModuleType:
@@ -63,27 +62,6 @@ def _synthetic_dev_user_arn(account_id: str | None = None) -> str:
     it once and reuse it.
     """
     return f"arn:aws:iam::{account_id or _synthetic_account_id()}:user/dev"
-
-
-class FakeRunner:
-    """Records every command issued to it and answers from a fixed fixture map.
-
-    `responses` maps an exact command tuple to the `CommandResult` a real
-    invocation would have produced; `calls` accumulates `(command, timeout)`
-    pairs in issue order, so a test can assert the sequence a probe function
-    issued without any of those commands ever reaching a real subprocess.
-    """
-
-    def __init__(self, responses: dict[tuple[str, ...], object]) -> None:
-        self._responses = responses
-        self.calls: list[tuple[tuple[str, ...], float | None]] = []
-
-    def __call__(self, command: Sequence[str], timeout_seconds: float | None) -> object:
-        key = tuple(command)
-        self.calls.append((key, timeout_seconds))
-        if key not in self._responses:
-            raise AssertionError(f"FakeRunner received an unrecorded command: {key!r}")
-        return self._responses[key]
 
 
 # ---------------------------------------------------------------------------

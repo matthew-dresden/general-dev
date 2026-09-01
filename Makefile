@@ -46,7 +46,7 @@ PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer
 .PHONY: help connect disconnect status shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
-        keybindings validate test
+        keybindings validate test cert-status
 
 help:
 	@printf '\n\033[1mgeneral-dev\033[0m devcontainer control. Project: \033[1m%s\033[0m   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
@@ -81,6 +81,7 @@ help:
 	@printf '\n\033[1mSECRETS AND CERTIFICATES\033[0m\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make push-git-creds"   "both"   "Copy this machine's git credentials into the container so it can push with no editor attached."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-status"      "host"   "Client and CA expiry per instance."
 	@printf '\n\033[1mHOST PROXY\033[0m  only needed behind a corporate proxy; remote builds force HOST_PROXY=false\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-start"      "local"  "Run tinyproxy on this machine. Local containers reach it via host.docker.internal."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-status"     "local"  "Whether it is running, and on which port."
@@ -215,6 +216,13 @@ rebuild:
 
 push-secrets:
 	@$(SECRETS_SH)
+
+# spec Section 4.1.2 (E6-F1-S1-T2): client and CA expiry per instance, the
+# inspection half of the `certs` module. Exit 0 when every certificate is
+# outside the warning window (including a RENEW row for one still valid but
+# inside it), exit 1 when any has expired.
+cert-status:
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.certs status
 
 proxy-start:
 	@$(PROXY_ENV) $(PROXY_SH) start

@@ -49,12 +49,12 @@ a second path to Parameter Store" concern), a disjoint prefix neither module
 has any operation for, so this skill's own publish calls are a distinct
 primitive, not a second implementation of one that already exists.
 
-Generation is the only half of that module split landed so far: the
-inspection/expiry-arithmetic half Section 4.5 also assigns `certs` -- what
-`## Expiry`'s `make cert-status` reports below -- is E6-F1-S1-T2's, not yet
-implemented in this repository. `## Operations`'s "Report expiry" row and
-`## Expiry` document that operation's contract ahead of its landing, not a
-command available today.
+Generation and inspection are both landed now: `certs.not_after`,
+`certs.days_remaining`, `certs.classify` and `certs.status_rows`
+(E6-F1-S1-T2) are the inspection/expiry-arithmetic half Section 4.5 also
+assigns `certs`, behind `make cert-status` today, not a contract documented
+ahead of its landing. `## Operations`'s "Report expiry" row and `## Expiry`
+below describe that command as it runs now.
 
 Instance selection reuses Section 4.1.1's own resolution order (`INSTANCE` on
 the command line, then `DEFAULT_REMOTE_INSTANCE`, then the sole directory
@@ -106,7 +106,7 @@ and cross-referenced here rather than restated per row.
 | Issue server certificate | An existing CA (`## Failure semantics`'s precondition row states what happens when one is missing), passed to `certs.issue_server`. No operator-chosen SANs: the SANs are fixed (`## Requirements`). | None persisted (`## Material`'s own note): `certs.issue_server` generates the key and certificate inside a `tempfile.TemporaryDirectory` at mode `0600`/`0644` and removes that directory before returning, handing both back as text. Never persisted under `~/.docker/certs/<instance>/`; the private key does exist on disk, briefly, inside that removed temporary directory. | The `server-key.pem` and `server-cert.pem` entries `certs.publication_set(instance)` returns: `/devcontainer/<instance>/tls/server-key.pem` and `/devcontainer/<instance>/tls/server-cert.pem`, both `SecureString` (Section 5.3), lifetime `CERT_SERVER_DAYS`. | Parse the generated certificate before it is ever published, confirming it carries exactly the two required SANs and no other (`## Requirements`, AC-5.2), then read both published parameters back and compare against what was generated, the same independent-re-read rule Create CA's row states. Ends with `## Docker context`, whose completed handshake is this operation's own strongest confirmation that the instance-side daemon actually accepted the published material. |
 | Issue client certificate | An existing CA (`## Failure semantics`), passed to `certs.issue_client`. | `cert.pem` (`0644`) and `key.pem` (`0600`) (`## Material`), lifetime `CERT_CLIENT_DAYS`, carrying `clientAuth` (`## Requirements`). | None: `certs.publication_set` has no entry for the client certificate, matching Section 5.3's layout, which names no client-certificate parameter path (`## Material`). | Parse the generated certificate to confirm it carries `clientAuth` (`## Requirements`, AC-5.2). Ends with `## Docker context`. |
 | Rotate client certificate | An existing CA and an existing client certificate to replace, passed to the identical `certs.issue_client` call Issue client certificate makes: `certs.issue_client` overwrites rather than refusing an existing client certificate/key, which is what leaves the instance running throughout (AC-10.9) with nothing touching the server certificate or requiring the instance to be stopped, restarted or reconfigured -- the same call, invoked again, is why this is a separate operation from "Issue server certificate" rather than one run twice. | The identical files Issue client certificate produces, overwritten in place. | None, for the identical reason Issue client certificate names. | The identical parse-for-`clientAuth` check Issue client certificate performs. Ends with `## Docker context`. |
-| Report expiry | The instance name, or every configured instance when none is given. | None: this operation reads, never writes. | None: this operation reads, never writes. | `## Expiry` is this operation's own output shape and exit-code rule; there is nothing further to verify about a read. |
+| Report expiry | None: `certs status` takes no instance selector and reports every instance under the certificate material root (`--root`, defaulting to `DEFAULT_CERTS_ROOT`). | None: this operation reads, never writes. | None: this operation reads, never writes. | `## Expiry` is this operation's own output shape and exit-code rule; there is nothing further to verify about a read. |
 
 ## Requirements
 
@@ -169,15 +169,30 @@ revoked, because nothing would have been revoked.
 
 `make cert-status` (Section 4.1.2) is this skill's own "report expiry"
 operation; its output shape is reproduced here rather than restated
-elsewhere:
+elsewhere. It reports the `client` and `ca` roles: the two certificates
+`## Material` shows a persisted path for. The server certificate has no
+entry: `## Material`'s own note above states it is generated and published
+in one step with no persistent path on the laptop at all, so there is
+nothing under `~/.docker/certs/<instance>/` for this operation to inspect
+for it -- `certs.status_rows`'s own docstring states the identical rule.
+
+Rows are grouped by instance, instances in the alphabetical order
+`certs._discover_instances` returns, and both inspectable roles (`client`,
+then `ca`) are always present together for a fully-provisioned instance --
+`certs._instance_rows` raises rather than printing a row for a client
+certificate with no matching CA (`## Failure semantics`'s partial-material
+row). The block below is the literal output of `make cert-status` run
+against two fully-provisioned instances, `personal` (whose client
+certificate is inside the warning window) and `sandbox` (whose material is
+newly issued):
 
 ```console
 $ make cert-status
 INSTANCE   ROLE     EXPIRES       DAYS  STATUS
-sandbox    client   2026-11-16      90  ok
-sandbox    server   2027-08-18     365  ok
-sandbox    ca       2036-08-18    3650  ok
-personal   client   2026-08-29      11  RENEW   /devcontainer:certs INSTANCE=personal
+personal   client   2026-09-12      10  RENEW   /devcontainer:certs INSTANCE=personal
+personal   ca       2036-08-29    3649  ok
+sandbox    client   2026-11-30      89  ok
+sandbox    ca       2036-08-29    3649  ok
 ```
 
 Exit code `0` when every certificate is outside the warning window,

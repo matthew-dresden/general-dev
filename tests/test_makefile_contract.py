@@ -120,6 +120,16 @@ def _help_recipe_body(makefile_text: str) -> str:
     return match.group(1)
 
 
+def _cert_status_recipe_body(makefile_text: str) -> str:
+    """The recipe lines (tab-indented) that follow the `cert-status:` target header.
+
+    E6-F1-S1-T2's own addition to this Makefile.
+    """
+    match = re.search(r"^cert-status:.*\n((?:\t.*\n?)*)", makefile_text, re.MULTILINE)
+    assert match is not None, "no cert-status target found in Makefile"
+    return match.group(1)
+
+
 def _prerequisites_row(makefile_text: str, label: str) -> str:
     """The second column of the PREREQUISITES row whose first column is `label`.
 
@@ -253,7 +263,7 @@ def test_help_secrets_section_uses_the_certificates_heading() -> None:
 
     Renamed from "SECRETS AND CREDENTIALS" to "SECRETS AND CERTIFICATES" so
     the heading itself already reads the way spec Section 14.1 has it,
-    ahead of `make cert-status` (a later epic) landing under the same
+    ahead of `make cert-status` (E6-F1-S1-T2) landing under the same
     heading.
     """
     help_recipe = _help_recipe_body(_makefile_text())
@@ -335,3 +345,38 @@ def test_test_recipe_guard_fails_fast_when_a_tool_is_absent(tool: str, tmp_path:
     assert "passed" not in combined and "failed" not in combined, (
         "pytest must never run (partially or fully) when a prerequisite tool is missing"
     )
+
+
+# ---------------------------------------------------------------------------
+# E6-F1-S1-T2: the `cert-status` target this task adds, its `.PHONY` entry,
+# and its `make help` row. The help text reports the two roles `make
+# cert-status` actually renders -- `client` and `ca` -- rather than spec
+# Section 14.1's three-role wording verbatim: the server certificate is
+# never persisted under `~/.docker/certs/<instance>/` (certs.py's own module
+# docstring, `docs/environment-files.md`'s "Certificate expiry warning"
+# section), so a help row promising server-expiry monitoring the command
+# cannot perform would mislead the operator (code_review, E6-F1-S1-T2,
+# BLOCKING 1/2). AC-TEST-004 is satisfied against the reconciled text so
+# the target and the help surface cannot drift from each other.
+# ---------------------------------------------------------------------------
+
+
+def test_cert_status_target_is_phony() -> None:
+    assert "cert-status" in _phony_targets(_makefile_text())
+
+
+def test_cert_status_recipe_invokes_the_certs_status_module() -> None:
+    """The target shells out to `devcontainer_config.certs status` -- this task's own
+    Changes Manifest addition -- never a second, ad hoc report implementation
+    duplicated into the Makefile."""
+    recipe = _cert_status_recipe_body(_makefile_text())
+    assert "devcontainer_config.certs status" in recipe
+    assert "PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR)" in recipe
+
+
+def test_cert_status_help_row_matches_the_two_roles_the_command_reports() -> None:
+    help_recipe = _help_recipe_body(_makefile_text())
+    cert_status_rows = [line for line in help_recipe.splitlines() if '"make cert-status"' in line]
+    assert len(cert_status_rows) == 1
+    assert '"host"' in cert_status_rows[0]
+    assert "Client and CA expiry per instance." in cert_status_rows[0]

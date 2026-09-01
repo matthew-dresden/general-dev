@@ -20,13 +20,13 @@ and `verify` (`.claude/plugins/devcontainer/scripts/devcontainer_config/`)
 own those questions, and `hostprobe` owns every fact about this machine.
 Certificate generation and instance resolution are owned by the `certs` and
 `instances` modules of that same section (spec Section 4.5). `certs`
-(E6-F1-S1-T1) now exists for generation -- `certs.create_ca`,
+(E6-F1-S1-T1, E6-F1-S1-T2) now exists for both generation -- `certs.create_ca`,
 `certs.issue_server`, `certs.issue_client` and `certs.publication_set`,
-which Procedure step 9 below calls directly -- but `instances` does not yet
-exist, and neither does the inspection/expiry-status half of `certs` that
-`make cert-status` needs (E6-F1-S1-T2), so every step below that depends on
-one of those two still-missing pieces names the module that will own it
-rather than a function this repository does not yet contain.
+which Procedure step 9 below calls directly -- and inspection/expiry status
+(`certs.status_rows`, `certs.classify`), the same functions `make cert-status`
+calls, but `instances` does not yet exist, so every step below that depends
+on it names the module that will own it rather than a function this
+repository does not yet contain.
 
 Where this skill cannot act itself -- a browser SSO login, an AWS resource
 that only an operator may create or destroy -- it states the exact
@@ -190,9 +190,9 @@ continuing.
   than self-approving.
 - Section 4.5: `answers`, `render`, `verify` and `hostprobe` are the only
   places a fact about the interview, a rendered file, or this machine is
-  decided; `certs` (E6-F1-S1-T1) now owns certificate generation, but
-  `instances` will own instance facts and the inspection/expiry-status half
-  of `certs` (E6-F1-S1-T2) will own certificate-expiry facts once they
+  decided; `certs` (E6-F1-S1-T1, E6-F1-S1-T2) now owns both certificate
+  generation and certificate-expiry facts (`certs.status_rows`,
+  `certs.classify`), but `instances` will own instance facts once they
   exist. This skill decides none of them itself.
 - Section 5.1: the interview schema, including which fields are asked only
   when the backend is remote, and that `remote_ssh_key_path` is removed in

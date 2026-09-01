@@ -23,16 +23,15 @@ reachable proxy -- are host facts no module in this repository probes yet.
 neither is answered by `verify` either: no E1 unit owns them yet." This is the
 same situation `/devcontainer:setup-remote` was authored under for the
 `certs` and `instances` modules (spec Section 4.5). `certs` (E6-F1-S1-T1)
-now exists for certificate generation, but neither `instances` nor the
-inspection/expiry-status half of `certs` (`make cert-status`'s own
-"present and unexpired" check, E6-F1-S1-T2) exists yet, so every
-`## Checks` row and `## Procedure` step below that depends on one of those
-two still-missing pieces names the module that will own it -- `hostprobe`
-for the two host facts above, `instances` for remote instance resolution,
-`certs` for certificate expiry inspection, and the SSM port forward manager
-(E6-F2-S1-T1) for the tunnel -- rather than a function this repository does
-not yet contain. Naming the owner is this row's job; implementing the probe
-is a later work unit's.
+now exists for certificate generation, and its inspection/expiry-status half
+(`certs.classify`/`certs.status_rows`, E6-F1-S1-T2) now exists too, for the
+`client` and `ca` roles it persists locally; `instances` does not exist yet,
+so every `## Checks` row and `## Procedure` step below that depends on it
+names the module that will own it -- `hostprobe` for the two host facts
+above, `instances` for remote instance resolution, and the SSM port forward
+manager (E6-F2-S1-T1) for the tunnel -- rather than a function this
+repository does not yet contain. Naming the owner is this row's job;
+implementing the probe is a later work unit's.
 
 Where this skill cannot act itself -- installing an absent tool, starting a
 stopped engine, a browser SSO login, issuing a certificate, resolving an
@@ -76,7 +75,7 @@ merely of the `## Procedure` section that walks it.
 | SSO session valid | Depends on: none among the local checks above -- the first remote-only check, run only when step 1 of `## Procedure` resolves the backend to remote. Prevents everything remote depends on it: the SSM tunnel, Parameter Store, and the build that publishes to it (`hostprobe.probe_aws_identity`'s prevents text, verbatim). | The SSO session for the resolved `remote_aws_profile` has expired (`hostprobe.probe_aws_identity`'s `found` shape: `f"the SSO session for profile '{profile}' has expired"`); `aws is not on PATH` and `profile '<profile>' has no credentials at all` are the other two shapes the same function returns for this same check. | State `aws sso login --profile <profile>` with the resolved `remote_aws_profile` substituted (`hostprobe.probe_aws_identity`'s own `login_command`), wait for the operator to complete the browser login, then re-probe with `hostprobe.probe_aws_identity(runner, profile=<profile>)` before continuing -- an operator action. Never proceeds on the assumption the login succeeded, and never falls back to any other credential source. |
 | instance exists, is running, SSM agent online | Depends on: `SSO session valid`. Prevents the port forward and the docker version handshake, since neither can reach an instance whose SSM agent is not reporting online -- owned by the `instances` module (spec Section 4.5) once it exists; no function of this name exists in this repository yet, per this document's introduction. | The resolved `remote_instance_id` does not resolve to a running instance, or the instance is running but its SSM agent is not online. | Stop, name the instance id and the agent state, and state that the port forward cannot be established until the agent reports online -- an operator action; this skill does not attempt to start an instance or its SSM agent itself. Do not attempt the forward: its failure would name the wrong cause. |
 | port forward established and the local port answering | Depends on: `instance exists, is running, SSM agent online`. Prevents `make build INSTANCE=<name>`, and every command that needs the daemon reachable through the tunnel, from ever reaching the instance -- owned by the SSM port forward manager (E6-F2-S1-T1) once it exists; no function of this name exists in this repository yet. | The SSM port forward to the instance's `DOCKER_TLS_PORT` did not answer within `SSM_FORWARD_TIMEOUT` (the same deadline `/devcontainer:setup-remote` step 12 already waits on, spec Section 7.3). | This skill re-establishes the forward itself -- the second of the two actions `## What this skill fixes itself` names, since it is reversible and needs no operator credential beyond the already-verified SSO session. If the forward still does not answer after being re-established, stop, name the instance and the allocated local port (spec Section 9: "never a fixed number"), and state that the checks depending on this one (the tunnel handshake, remote disk headroom, unpushed work) were not run. |
-| client, server and CA certificates present and unexpired | Depends on: none among the remote checks above -- reads only the local certificate files under `~/.docker/certs/<name>/` once `<name>` is resolved (Section 4.1.1); needs neither the SSO session, the instance, nor the forward. Prevents `make build INSTANCE=<name>` presenting an expired or absent client certificate to a server that refuses it -- `certs.py` (E6-F1-S1-T1) exists for generation, but this check is the inspection/expiry-status half, and no function of this name exists in this repository yet (the still-missing half, E6-F1-S1-T2). | No certificate exists at the expected path under `~/.docker/certs/<name>/`, or one of the client, server or CA certificates has already expired. A certificate that has not yet expired but expires within `CERT_WARN_DAYS` is a `WARN`, not this failure; see `## Verdict`. | Issue or renew the missing or expired certificate with `certs.create_ca`, `certs.issue_server` or `certs.issue_client` (E6-F1-S1-T1). State the exact reissue action, wait for the operator to run it, then re-check the certificate's expiry before continuing -- an operator action. Never proceeds on the assumption that reissuing succeeded. |
+| client and CA certificates present and unexpired | Depends on: none among the remote checks above -- reads only the local certificate files under `~/.docker/certs/<name>/` once `<name>` is resolved (Section 4.1.1); needs neither the SSO session, the instance, nor the forward. Prevents `make build INSTANCE=<name>` presenting an expired or absent client certificate to a server that refuses it -- implemented by `certs.status_rows` and `certs.classify` (E6-F1-S1-T2), the identical function `make cert-status` calls, over the `client` and `ca` roles: the two certificates persisted under `~/.docker/certs/<name>/` (`certs.py`'s own module docstring). The server certificate has no local file to inspect -- it is generated and published in one step with no persisted path (`certs.issue_server`, E6-F1-S1-T1) -- so this check, like `make cert-status`, does not cover it. | No certificate exists at the expected path under `~/.docker/certs/<name>/`, or the client or CA certificate has already expired. A certificate that has not yet expired but expires within `CERT_WARN_DAYS` is a `WARN`, not this failure; see `## Verdict`. | Issue or renew the missing or expired certificate with `certs.create_ca` or `certs.issue_client` (E6-F1-S1-T1). State the exact reissue action, wait for the operator to run it, then re-check the certificate's expiry before continuing -- an operator action. Never proceeds on the assumption that reissuing succeeded. |
 | docker version handshake over the tunnel | Depends on: `port forward established and the local port answering`. Prevents `make build INSTANCE=<name>`, and every command that needs the daemon reachable through the tunnel (`hostprobe.probe_docker`'s handshake portion, run with the remote context selected). | The identical `no response within {timeout:g}s (DOCKER_HANDSHAKE_TIMEOUT)` string the local `the engine answers` row quotes (`hostprobe._probe_docker_handshake`), this time returned for the tunnel context `general-dev-<name>` rather than the local one. | Confirm the port forward is still established (`SSM_FORWARD_TIMEOUT` governs how long this skill waits for it) and that the daemon behind it is running, then re-probe with `hostprobe.probe_docker(runner, requested_context=<the created context>)` before continuing -- an operator action once the forward itself is confirmed established; re-establishing the forward is the self-fix the row above already performs. |
 | disk headroom on the data volume | Depends on: `docker version handshake over the tunnel` -- headroom on a volume behind an engine that cannot be reached is not a fact this check can obtain. Prevents the instance running out of space mid-build or mid-clone, checked before the build rather than discovered during it. | Free space on the remote instance's data volume, checked over the docker context rather than the local filesystem, is below the same minimum-headroom threshold the local `disk headroom` row describes, applied to a different mount. Not yet implemented in this repository, the same disclaimed gap the local row quotes from `hostprobe`'s own module docstring. | Reclaim space inside the container (`docker system prune`, run over the resolved remote context) or grow the data volume, then this skill waits and re-probes before continuing -- an operator action. |
 | no unpushed work in the volume | Depends on: `docker version handshake over the tunnel` -- listing commits inside the container needs the engine reachable to exec into it. Prevents `GATE-DESTROY` (spec Section 4.4) and a future teardown skill from destroying a volume that holds work nowhere else: "the volume holds no unpushed work" is one of `GATE-DESTROY`'s own requirements. | `N` commit(s) are not on `origin/<branch>` (the same shape `rdc_build_prereqs`'s `rd_fail` call already reports on the host side, `container.sh`, spec Section 3.1), this time listed from `git log --oneline origin/<branch>..HEAD` run inside the container over the resolved docker context rather than on the host. | List the commits and state the push command to run inside the container: `git push origin <branch>` (spec Section 4.1.4's own error handling contract for the "Unpushed work in a volume" row: exit 1, message contains the commits and the push command to run inside the container). This check fails rather than warns -- it never becomes a `WARN` row -- because a later teardown skill reads this verdict to decide whether destroying the volume is safe. Not a self-fix: state the exact commands, wait for the operator to push from inside the container, then re-run this check before continuing. |
@@ -138,14 +137,14 @@ merely of the `## Procedure` section that walks it.
     certificate check, is unaffected: its `## Checks` row depends on none of
     the remote checks above, so it still runs and is reported on its own
     merits rather than being folded into the not-run list.
-12. Run `client, server and CA certificates present and unexpired` against
-    the local certificate files under `~/.docker/certs/<name>/` (the
-    inspection/expiry-status half of the `certs` module, spec Section 4.5,
-    which E6-F1-S1-T2 owns and which does not exist yet; generation,
-    `certs.create_ca`/`issue_server`/`issue_client`, E6-F1-S1-T1, already
-    does). A certificate that has already expired, or is missing, is this
-    check's failure; a certificate that expires within `CERT_WARN_DAYS` but
-    has not yet expired is a `WARN` that does not stop the run
+12. Run `client and CA certificates present and unexpired` against the local
+    certificate files under `~/.docker/certs/<name>/`, via `certs.status_rows`
+    and `certs.classify` (E6-F1-S1-T2), the inspection/expiry-arithmetic
+    half of the `certs` module (spec Section 4.5); generation,
+    `certs.create_ca`/`issue_server`/`issue_client`, E6-F1-S1-T1, is the
+    other half. A certificate that has already expired, or is missing, is
+    this check's failure; a certificate that expires within `CERT_WARN_DAYS`
+    but has not yet expired is a `WARN` that does not stop the run
     (`## Verdict`).
 13. Run `docker version handshake over the tunnel` against the remote
     context the forward addresses. Apply this row's remedy on failure, and do
@@ -183,19 +182,25 @@ certificate inside `CERT_WARN_DAYS`).
 
 The successful-run transcript below depicts this skill's contract once
 every owning module named in `## Checks` exists (`hostprobe`'s disk-headroom
-and `HOST_PROXY` probes, the `instances` module, the inspection/expiry-status
-half of `certs`, and the SSM port forward manager, E6-F2-S1-T1). Until each
-of those exists, the row for the check it owns reports `NOT RUN` in place of
-the value shown here, per this document's introduction. The transcript's own
-trailing summary line states only the warning count and the remedy, per
-Section 4.2.1: the certificate inspection function E6-F1-S1-T2 owns (the
-"present and unexpired" half of `## Checks`' certificates row) is not yet in
-this repository, so this skill states the reissue action directly --
-`certs.create_ca` and `certs.issue_client` (E6-F1-S1-T1) already exist --
-rather than naming a slash command whose own precondition, detecting which
-certificate is missing or expired, cannot yet be evaluated, but that
-explanation belongs here in the prose, not in the operator-facing summary
-line itself.
+and `HOST_PROXY` probes, the `instances` module, and the SSM port forward
+manager, E6-F2-S1-T1). The inspection/expiry-status half of `certs`
+(`certs.status_rows`/`certs.classify`, E6-F1-S1-T2) now exists too, so the
+certificate row below is `ok`/`WARN` rather than one of the remaining
+`NOT RUN` rows. Until each of the still-missing modules exists, the row for
+the check it owns reports `NOT RUN` in place of the value shown here, per
+this document's introduction. The transcript's own trailing summary line
+states only the warning count and the remedy, per Section 4.2.1: even though
+the certificate check can now detect which certificate is missing or expired
+(`certs.status_rows`/`classify`, E6-F1-S1-T2), this skill's own `## Checks`
+row for the check (`client and CA certificates present and unexpired`) names
+the reissue action directly -- `certs.create_ca` and `certs.issue_client`
+(E6-F1-S1-T1) -- rather than delegating to the `/devcontainer:certs` skill
+the way `/devcontainer:doctor`'s equivalent remedy does. The
+`/devcontainer:certs` skill already exists (E4-F3-S2-T2, `certs/SKILL.md`)
+and offers the identical reissue as an operator-facing invocation; this
+skill's row simply predates it and states the lower-level functions its own
+remedy already named, unchanged by this task, since rewriting that row's
+remedy is outside this task's Changes Manifest.
 
 ```console
 $ /devcontainer:engine INSTANCE=sandbox
@@ -283,10 +288,12 @@ this skill on its own.
   this skill reaches.
 - Section 4.5: `verify` and `hostprobe` are the only places a fact about a
   rendered file or this machine is decided today; `certs` (E6-F1-S1-T1) now
-  owns certificate generation, but `instances` will own instance facts and
-  the inspection/expiry-status half of `certs` (E6-F1-S1-T2) will own
-  certificate-expiry facts once they exist, and the SSM port forward manager
-  (E6-F2-S1-T1) will own the tunnel. This skill decides none of them itself.
+  owns certificate generation, and its inspection/expiry-status half
+  (`certs.classify`/`certs.status_rows`, E6-F1-S1-T2) now owns the
+  certificate-expiry facts for the `client` and `ca` roles it persists
+  locally. `instances` will own instance facts once it exists, and the SSM
+  port forward manager (E6-F2-S1-T1) will own the tunnel. This skill decides
+  none of them itself.
 - Section 7.3: `CERT_WARN_DAYS`, `SSM_FORWARD_TIMEOUT` and
   `DOCKER_HANDSHAKE_TIMEOUT`, the timeouts this document names rather than
   values. The two disk-headroom rows in `## Checks` describe a

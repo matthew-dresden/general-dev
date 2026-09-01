@@ -1,8 +1,8 @@
 """Certificate authority, server and client issuance (spec Section 4.5: "certs").
 
 Section 4.5 splits `certs` into generation, inspection and expiry arithmetic.
-This module implements generation only; inspection and the expiry arithmetic
-behind `make cert-status` land in E6-F1-S1-T2. Section 13 decisions D3 and D4
+This module implements both halves: generation, and the inspection and expiry
+arithmetic behind `make cert-status`. Section 13 decisions D3 and D4
 fix the design: there is no CA server, no step-ca, no Vault and no AWS
 Private CA -- the authority is nothing more than a key pair and the `openssl`
 binary, driven by `.claude/plugins/devcontainer/skills/certs/SKILL.md`. Every
@@ -83,18 +83,54 @@ each resolves its own environment variable through `_resolve_lifetime_days`.
 Revocation is out of scope by design, not by omission: Docker supports
 neither CRL nor OCSP, so removing `ssm:StartSession` is the revocation
 mechanism (spec Section 3.6.3), and nothing here pretends otherwise.
+
+E6-F1-S1-T2 adds this module's other half: inspection and expiry arithmetic
+(spec Section 4.5), behind `make cert-status` (spec Section 4.1.2). `not_after`
+parses a certificate's `notAfter` timestamp with `openssl x509 -enddate`
+rather than a second, hand-rolled ASN.1 parser (spec Section 3.4/Section 6's
+stdlib-only rule, extended the same way `_require_parseable_ca_component`
+already leans on `openssl`'s own tooling instead of a parser this module
+would have to maintain). `days_remaining` and `classify` both take the
+reference time as an explicit parameter rather than calling
+`datetime.now()` internally, so the warning-window boundary is exact and
+testable without freezing the system clock (AC-FUNC-001) -- the identical
+dependency-injection shape `_resolve_lifetime_days` already gives every
+lifetime above, applied here to the clock instead of the environment.
+`CERT_WARN_DAYS` (default 14, spec Section 7.3) is read from the
+environment in exactly one place, `_resolve_cert_warn_days`, and threaded
+from there into every `classify` call `status_rows` makes; no call site
+anywhere in this module hardcodes `14` a second time (AC-FUNC-007).
+
+`status_rows` reports the `ca` and `client` roles for every instance
+directory it finds under a certificate material root: exactly the two
+roles `CertPaths` exposes a persisted path for. The server certificate is
+deliberately never one of them: `issue_server`'s own docstring above states
+that neither the server key nor the server certificate is ever written
+under `CertPaths.instance_dir`, and `certs/SKILL.md`'s `## Material` states
+the identical rule in prose -- there is no local file for this function to
+inspect. Spec Section 4.1.2's own worked example shows a `server` row
+because it illustrates the fully-featured report a persisted server
+artifact would produce; until a future task gives the server certificate a
+locally inspectable copy, `make cert-status` reports only the two roles
+this module actually persists, rather than inventing a placeholder value
+for a role it cannot read. A missing role alongside a present one for the
+same instance (a client certificate with no CA, or the reverse) is refused
+by name instead of being rendered as a blank row (Error Handling Contract),
+because that partial state means the instance's material is not what
+`create_ca`/`issue_client` would have left behind on their own.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import os
 import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -145,6 +181,35 @@ DIGEST = "sha256"
 SERVER_SAN = "IP:127.0.0.1,DNS:localhost"
 SERVER_EXTENDED_KEY_USAGE = "serverAuth"
 CLIENT_EXTENDED_KEY_USAGE = "clientAuth"
+
+# spec Section 7.3: the expiry-warning window `make cert-status` (spec
+# Section 4.1.2) applies, resolved in exactly one place, `_resolve_cert_warn_days`
+# (AC-FUNC-007) -- the literal `14` below is the only place this module ever
+# writes that number; every other reference to the window is this constant
+# or a value `_resolve_cert_warn_days` returned.
+CERT_WARN_DAYS_ENV_VAR = "CERT_WARN_DAYS"
+CERT_WARN_DAYS_DEFAULT = 14
+
+# The three `classify` outcomes spec Section 4.1.2 names, and the one
+# invocation template a `RENEW` row carries (AC-FUNC-005). Roles are the two
+# certificate kinds this module ever persists locally (module docstring),
+# ordered the way spec Section 4.1.2's own worked example orders them:
+# client before ca.
+STATUS_OK = "ok"
+STATUS_RENEW = "RENEW"
+STATUS_EXPIRED = "expired"
+_RENEW_INVOCATION_TEMPLATE = "/devcontainer:certs INSTANCE={instance}"
+ROLE_CLIENT = "client"
+ROLE_CA = "ca"
+_INSPECTABLE_ROLES: tuple[str, ...] = (ROLE_CLIENT, ROLE_CA)
+
+# spec Section 4.1.2's own column header, reproduced verbatim, and the line
+# `make cert-status` prints in place of any rows when no instance has any
+# certificate material yet (AC-FUNC-006's empty-inventory edge case).
+_REPORT_HEADER = "INSTANCE   ROLE     EXPIRES       DAYS  STATUS"
+_NO_CERTIFICATES_LINE = (
+    "No certificates found. Run /devcontainer:setup-remote to issue the first instance's material."
+)
 
 # spec Section 5.3's Parameter Store layout for TLS material. `PARAMETER_ROOT`
 # and `SECURE_STRING_TYPE` are `catalog.PATH_ROOT` and
@@ -808,6 +873,274 @@ def publication_set(
     return tuple(entries)
 
 
+def not_after(cert_path: Path) -> datetime.datetime:
+    """The `notAfter` timestamp `cert_path` carries, as a timezone-aware UTC `datetime`.
+
+    Parses `openssl x509 -noout -enddate`'s own output rather than a second,
+    hand-rolled ASN.1 reader (module docstring). Never reports a read or
+    parse failure as an expired certificate (Error Handling Contract): a
+    file that cannot be opened, or one `openssl` cannot parse as a
+    certificate at all, raises naming `cert_path` and the underlying
+    failure instead, because reporting either as "expired" would send the
+    operator to reissue material that may be perfectly valid.
+
+    Raises:
+        CertsError: `cert_path` cannot be read or is not a parseable
+            certificate.
+    """
+    result = subprocess.run(
+        [OPENSSL_EXECUTABLE, "x509", "-noout", "-enddate", "-in", str(cert_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise CertsError(
+            f"ERROR: cannot read certificate {cert_path}\n"
+            f"{result.stderr.strip()}\n"
+            "Confirm the file exists, is readable, and is a valid PEM certificate."
+        )
+    _, _, raw_date = result.stdout.strip().partition("=")
+    try:
+        parsed = datetime.datetime.strptime(raw_date.strip(), "%b %d %H:%M:%S %Y %Z")
+    except ValueError as exc:
+        raise CertsError(
+            f"ERROR: cannot parse the expiry date of {cert_path}\n"
+            f"openssl returned {result.stdout.strip()!r}, which is not a recognized "
+            "notAfter date.\n"
+            "Confirm the file is a valid PEM certificate."
+        ) from exc
+    return parsed.replace(tzinfo=datetime.UTC)
+
+
+def days_remaining(cert_not_after: datetime.datetime, reference_time: datetime.datetime) -> int:
+    """The whole number of days from `reference_time` until `cert_not_after`.
+
+    Negative once `cert_not_after` has already passed `reference_time`.
+    Never reads the system clock (AC-FUNC-001): both arguments are supplied
+    by the caller -- `status_rows`'s own `reference_time` parameter in
+    production, an injected clock in a test -- so this arithmetic is exact
+    and reproducible regardless of when it runs.
+    """
+    return (cert_not_after - reference_time).days
+
+
+def classify(
+    cert_not_after: datetime.datetime, reference_time: datetime.datetime, warn_days: int
+) -> str:
+    """`STATUS_EXPIRED`, `STATUS_RENEW` or `STATUS_OK` for one certificate (spec Section 4.1.2).
+
+    `STATUS_EXPIRED` once `cert_not_after` has passed `reference_time`;
+    `STATUS_RENEW` from that instant through `warn_days` days out inclusive
+    on both ends (a certificate expiring in exactly `warn_days` days is
+    `STATUS_RENEW`, one expiring in `warn_days + 1` days is `STATUS_OK`);
+    `STATUS_OK` beyond that. Takes `reference_time` and `warn_days` as
+    explicit parameters rather than reading the system clock or
+    `CERT_WARN_DAYS` itself (AC-FUNC-001, AC-FUNC-007): `_resolve_cert_warn_days`
+    is the one place the environment variable is read, and its result is
+    threaded through every call this module makes to this function.
+    """
+    remaining = days_remaining(cert_not_after, reference_time)
+    if remaining < 0:
+        return STATUS_EXPIRED
+    if remaining <= warn_days:
+        return STATUS_RENEW
+    return STATUS_OK
+
+
+def _resolve_cert_warn_days() -> int:
+    """`CERT_WARN_DAYS` (spec Section 7.3), read fresh, exactly once per report (AC-FUNC-007).
+
+    Zero is a valid window (only an already-expired certificate warns).
+    Raises before `status_rows` renders a single row, naming the variable,
+    its value and the expected form, rather than silently reverting to the
+    default of `CERT_WARN_DAYS_DEFAULT` (Error Handling Contract).
+
+    Raises:
+        CertsError: `CERT_WARN_DAYS` is set to a non-integer or a negative value.
+    """
+    raw = os.environ.get(CERT_WARN_DAYS_ENV_VAR)
+    if raw is None:
+        return CERT_WARN_DAYS_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise CertsError(
+            f"ERROR: {CERT_WARN_DAYS_ENV_VAR}={raw!r} is not an integer\n"
+            f"{CERT_WARN_DAYS_ENV_VAR} must be a whole number of days.\n"
+            f"Unset it to use the default of {CERT_WARN_DAYS_DEFAULT}, or set it to a "
+            "non-negative integer."
+        ) from exc
+    if value < 0:
+        raise CertsError(
+            f"ERROR: {CERT_WARN_DAYS_ENV_VAR}={raw!r} must not be negative\n"
+            f"A warning window of {value} days is not valid.\n"
+            f"Set a non-negative integer, or unset it to use the default of "
+            f"{CERT_WARN_DAYS_DEFAULT}."
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class CertStatusRow:
+    """One `INSTANCE ROLE EXPIRES DAYS STATUS` row of `make cert-status`'s report.
+
+    `days` and `status` are pre-computed at construction time (`status_rows`'s
+    own job) rather than derived lazily here, so `render_report` stays a pure
+    formatter with no arithmetic or clock of its own.
+    """
+
+    instance: str
+    role: str
+    not_after: datetime.datetime
+    days: int
+    status: str
+
+
+def _discover_instances(root: Path) -> tuple[str, ...]:
+    """Every instance name with a directory directly under `root`, sorted for a stable report.
+
+    `root` not existing at all is the identical "nothing configured yet"
+    case as an existing, empty `root` (AC-FUNC-006's empty-inventory edge
+    case): both return no instances rather than one raising `OSError` where
+    the other returns an empty tuple.
+    """
+    if not root.is_dir():
+        return ()
+    return tuple(sorted(entry.name for entry in root.iterdir() if entry.is_dir()))
+
+
+def _missing_role_message(instance: str, missing_role: str) -> str:
+    return (
+        f"ERROR: instance {instance!r} is missing its {missing_role} certificate\n"
+        f"Other certificate material exists for this instance, but its {missing_role} "
+        "certificate does not -- a partial material set is never reported as a row.\n"
+        f"Run /devcontainer:certs INSTANCE={instance} to reissue it."
+    )
+
+
+# Every role `status_rows` can resolve a certificate path for, mapped
+# explicitly rather than an `if/else` falling through to `ca_cert` for
+# anything that is not `ROLE_CLIENT`: that fallthrough would let a role
+# added to `_INSPECTABLE_ROLES` without a matching entry here silently
+# render CA expiry data under the new role's label instead of failing
+# (code_review, E6-F1-S1-T2, WARN 4: fail-fast/OCP on an unrecognized role).
+_ROLE_CERT_PATH_RESOLVERS: dict[str, Callable[[CertPaths], Path]] = {
+    ROLE_CLIENT: lambda paths: paths.client_cert,
+    ROLE_CA: lambda paths: paths.ca_cert,
+}
+
+
+def _role_cert_path(paths: CertPaths, role: str) -> Path:
+    """The on-disk certificate path `role` resolves to for `paths.instance`.
+
+    Raises:
+        CertsError: `role` has no entry in `_ROLE_CERT_PATH_RESOLVERS`. Every
+            caller today only ever passes a member of `_INSPECTABLE_ROLES`,
+            which is exactly `_ROLE_CERT_PATH_RESOLVERS`'s key set, so this
+            path is unreachable through the public API today; it exists so a
+            future role added to one without the other fails loudly instead
+            of resolving to the wrong certificate.
+    """
+    try:
+        resolver = _ROLE_CERT_PATH_RESOLVERS[role]
+    except KeyError as exc:
+        raise CertsError(
+            f"ERROR: unrecognized certificate role {role!r}\n"
+            f"status_rows only knows how to resolve a path for "
+            f"{sorted(_ROLE_CERT_PATH_RESOLVERS)}.\n"
+            "This is a bug in devcontainer_config.certs; report it rather than "
+            "adding a role to _INSPECTABLE_ROLES without a matching resolver here."
+        ) from exc
+    return resolver(paths)
+
+
+def _instance_rows(
+    paths: CertPaths, reference_time: datetime.datetime, warn_days: int
+) -> tuple[CertStatusRow, ...]:
+    """Every `CertStatusRow` for `paths.instance`, or raise for a partial material set.
+
+    An instance directory with neither role's certificate present yet
+    contributes no rows (a `create_ca` in progress, or an instance directory
+    left over with nothing in it); one role present without the other is a
+    partial material set and raises naming the missing role, rather than
+    rendering a table with a blank row (Error Handling Contract).
+    """
+    present = {role: _role_cert_path(paths, role).is_file() for role in _INSPECTABLE_ROLES}
+    if not any(present.values()):
+        return ()
+    for role, is_present in present.items():
+        if not is_present:
+            raise CertsError(_missing_role_message(paths.instance, role))
+    rows = []
+    for role in _INSPECTABLE_ROLES:
+        cert_path = _role_cert_path(paths, role)
+        expiry = not_after(cert_path)
+        rows.append(
+            CertStatusRow(
+                instance=paths.instance,
+                role=role,
+                not_after=expiry,
+                days=days_remaining(expiry, reference_time),
+                status=classify(expiry, reference_time, warn_days),
+            )
+        )
+    return tuple(rows)
+
+
+def status_rows(
+    root: Path, reference_time: datetime.datetime, warn_days: int
+) -> tuple[CertStatusRow, ...]:
+    """Every `CertStatusRow` for every instance found under `root` (`make cert-status`).
+
+    Raises:
+        CertsError: an unreadable or unparseable certificate file (`not_after`),
+            or a partial material set for one instance (`_instance_rows`).
+    """
+    rows: list[CertStatusRow] = []
+    for instance in _discover_instances(root):
+        paths = CertPaths(instance=instance, root=root)
+        rows.extend(_instance_rows(paths, reference_time, warn_days))
+    return tuple(rows)
+
+
+def _format_row(row: CertStatusRow) -> str:
+    line = (
+        f"{row.instance:<11}{row.role:<9}{row.not_after.strftime('%Y-%m-%d'):<10}"
+        f"{row.days:>8}  {row.status}"
+    )
+    if row.status == STATUS_RENEW:
+        line += f"   {_RENEW_INVOCATION_TEMPLATE.format(instance=row.instance)}"
+    return line
+
+
+def render_report(rows: Sequence[CertStatusRow]) -> str:
+    """The full `make cert-status` report text for `rows` (spec Section 4.1.2), header included.
+
+    An empty `rows` is not an error (AC-FUNC-006): the header still prints,
+    followed by a line directing the operator to `/devcontainer:setup-remote`
+    rather than a bare header with nothing underneath it.
+    """
+    lines = [_REPORT_HEADER]
+    if not rows:
+        lines.append(_NO_CERTIFICATES_LINE)
+    else:
+        lines.extend(_format_row(row) for row in rows)
+    return "\n".join(lines)
+
+
+def _current_time() -> datetime.datetime:
+    """The real clock, read through this one seam so `main`'s `status` command is testable.
+
+    Every other function above takes its reference time as a parameter
+    (AC-FUNC-001); this is the one place `main` itself resolves "now" from,
+    so a test can monkeypatch this single function to force any `status_rows`
+    outcome deterministically instead of waiting real time for a certificate
+    to age.
+    """
+    return datetime.datetime.now(datetime.UTC)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="devcontainer_config.certs",
@@ -855,6 +1188,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     publication_set_parser.set_defaults(handler=_run_publication_set)
 
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Report client and CA certificate expiry for every instance (make cert-status).",
+    )
+    status_parser.add_argument(
+        "--root",
+        type=Path,
+        default=DEFAULT_CERTS_ROOT,
+        help=f"Certificate material root (default: {DEFAULT_CERTS_ROOT}).",
+    )
+    status_parser.set_defaults(handler=_run_status)
+
     return parser
 
 
@@ -886,6 +1231,20 @@ def _run_publication_set(args: argparse.Namespace) -> int:
     for entry in publication_set(args.instance):
         print(f"{entry.parameter_path} {entry.parameter_type}")
     return 0
+
+
+def _run_status(args: argparse.Namespace) -> int:
+    """`make cert-status`'s own command: render the report and return its exit code.
+
+    `CERT_WARN_DAYS` is resolved before `status_rows` computes a single row
+    (Error Handling Contract: a bad value fails before any row renders), and
+    `_current_time` is the one clock read in this whole command, so a test
+    can force any outcome by monkeypatching that single function.
+    """
+    warn_days = _resolve_cert_warn_days()
+    rows = status_rows(args.root, _current_time(), warn_days)
+    print(render_report(rows))
+    return 1 if any(row.status == STATUS_EXPIRED for row in rows) else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

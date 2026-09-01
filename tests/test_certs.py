@@ -772,3 +772,466 @@ def test_parameter_root_and_secure_string_type_are_reused_from_catalog() -> None
         and node.value.value.id == "catalog"
     }
     assert reused_from_catalog == {"PARAMETER_ROOT", "SECURE_STRING_TYPE"}
+
+
+# ---------------------------------------------------------------------------
+# E6-F1-S1-T2: expiry arithmetic and `make cert-status`. AC-FUNC-001,
+# AC-FUNC-002, AC-TEST-001: `classify` and `days_remaining` take the
+# reference time as a parameter, so the warning-window boundary is
+# exercised with a fixed, injected clock rather than the real one -- every
+# case below is exact and reproducible regardless of when the suite runs.
+# ---------------------------------------------------------------------------
+
+_REFERENCE_TIME = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+
+
+@pytest.mark.parametrize(
+    "days_offset,expected_status",
+    [
+        (90, "ok"),
+        (14, "RENEW"),
+        (15, "ok"),
+        (0, "RENEW"),
+        (-1, "expired"),
+    ],
+)
+def test_classify_boundary_from_both_sides(days_offset: int, expected_status: str) -> None:
+    certs = _import_certs()
+    cert_not_after = _REFERENCE_TIME + datetime.timedelta(days=days_offset)
+    assert (
+        certs.classify(cert_not_after, _REFERENCE_TIME, certs.CERT_WARN_DAYS_DEFAULT)
+        == expected_status
+    )
+
+
+@pytest.mark.parametrize("days_offset", [90, -30, 0, 3650])
+def test_days_remaining_returns_the_signed_day_delta(days_offset: int) -> None:
+    certs = _import_certs()
+    cert_not_after = _REFERENCE_TIME + datetime.timedelta(days=days_offset)
+    assert certs.days_remaining(cert_not_after, _REFERENCE_TIME) == days_offset
+
+
+def test_classify_boundary_moves_with_a_custom_warn_days_value() -> None:
+    """The window is a parameter, never a constant baked into classify (AC-FUNC-007)."""
+    certs = _import_certs()
+    cert_not_after = _REFERENCE_TIME + datetime.timedelta(days=20)
+    assert certs.classify(cert_not_after, _REFERENCE_TIME, 14) == "ok"
+    assert certs.classify(cert_not_after, _REFERENCE_TIME, 20) == "RENEW"
+
+
+# ---------------------------------------------------------------------------
+# AC-FUNC-007: CERT_WARN_DAYS is read from the environment in exactly one
+# place, defaults to 14, and rejects a non-integer or negative override
+# before any row of the report is rendered.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_cert_warn_days_defaults_to_fourteen_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    certs = _import_certs()
+    monkeypatch.delenv("CERT_WARN_DAYS", raising=False)
+    assert certs._resolve_cert_warn_days() == 14
+
+
+def test_resolve_cert_warn_days_honors_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    certs = _import_certs()
+    monkeypatch.setenv("CERT_WARN_DAYS", "30")
+    assert certs._resolve_cert_warn_days() == 30
+
+
+def test_resolve_cert_warn_days_accepts_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    certs = _import_certs()
+    monkeypatch.setenv("CERT_WARN_DAYS", "0")
+    assert certs._resolve_cert_warn_days() == 0
+
+
+@pytest.mark.parametrize("raw_value", ["not-a-number", "-1", "-30"])
+def test_resolve_cert_warn_days_rejects_non_integer_or_negative_values(
+    monkeypatch: pytest.MonkeyPatch, raw_value: str
+) -> None:
+    certs = _import_certs()
+    monkeypatch.setenv("CERT_WARN_DAYS", raw_value)
+    with pytest.raises(certs.CertsError, match="CERT_WARN_DAYS"):
+        certs._resolve_cert_warn_days()
+
+
+def test_cert_warn_days_env_var_is_read_in_exactly_one_place() -> None:
+    """AC-FUNC-007: no call site anywhere in this module reads the environment a second time."""
+    source = _certs_module_path().read_text(encoding="utf-8")
+    assert source.count("os.environ.get(CERT_WARN_DAYS_ENV_VAR") == 1
+
+
+def test_literal_fourteen_appears_exactly_once_in_the_module() -> None:
+    """AC-FUNC-007: no call site hardcodes 14; only CERT_WARN_DAYS_DEFAULT's own literal does."""
+    source = _certs_module_path().read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    fourteen_constants = [
+        node for node in ast.walk(tree) if isinstance(node, ast.Constant) and node.value == 14
+    ]
+    assert len(fourteen_constants) == 1
+
+
+# ---------------------------------------------------------------------------
+# not_after: real, on-disk certificates, parsed genuinely -- never re-reading
+# the arguments this module passed to its own openssl calls (module
+# docstring's own testing rule, extended to this new read path). Error path
+# 1 of this task's Error Handling Contract: an unreadable or unparseable
+# file raises naming the path, never silently classified as expired.
+# ---------------------------------------------------------------------------
+
+
+def test_not_after_matches_an_independent_openssl_parse(issued_material: _IssuedMaterial) -> None:
+    certs = issued_material.certs
+    result = subprocess.run(
+        ["openssl", "x509", "-noout", "-enddate", "-in", str(issued_material.paths.ca_cert)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    _, _, raw_date = result.stdout.strip().partition("=")
+    expected = datetime.datetime.strptime(raw_date.strip(), "%b %d %H:%M:%S %Y %Z").replace(
+        tzinfo=datetime.UTC
+    )
+    assert certs.not_after(issued_material.paths.ca_cert) == expected
+
+
+def test_not_after_raises_naming_path_for_an_unreadable_file(tmp_path: Path) -> None:
+    certs = _import_certs()
+    target = tmp_path / "unreadable-cert.pem"
+    target.write_bytes(b"-----BEGIN CERTIFICATE-----\nnot really a certificate\n")
+    target.chmod(0o000)
+    try:
+        with pytest.raises(certs.CertsError) as excinfo:
+            certs.not_after(target)
+    finally:
+        target.chmod(0o600)
+    assert str(target) in str(excinfo.value)
+
+
+def test_not_after_raises_naming_path_for_corrupt_content(tmp_path: Path) -> None:
+    certs = _import_certs()
+    target = tmp_path / "corrupt-cert.pem"
+    target.write_bytes(b"not a certificate at all")
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.not_after(target)
+    assert str(target) in str(excinfo.value)
+
+
+def test_not_after_raises_when_openssl_succeeds_but_the_date_is_unparseable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A malicious or malformed `openssl` build that exits 0 with a nonsense
+    `notAfter=` line is refused by name rather than crashing on a raw
+    `ValueError` (Error Handling Contract)."""
+    certs = _import_certs()
+    target = tmp_path / "cert.pem"
+    target.write_bytes(b"-----BEGIN CERTIFICATE-----\nplaceholder\n")
+
+    class _FakeCompletedProcess:
+        returncode = 0
+        stdout = "notAfter=not a real date\n"
+        stderr = ""
+
+    monkeypatch.setattr(certs.subprocess, "run", lambda *args, **kwargs: _FakeCompletedProcess())
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.not_after(target)
+    assert str(target) in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# status_rows: instance discovery, the ca/client roles this module actually
+# persists (module docstring's own note on why no server row exists), and
+# the partial-material error path (Error Handling Contract, error path 3).
+# ---------------------------------------------------------------------------
+
+
+def test_status_rows_returns_nothing_for_a_root_that_does_not_exist(tmp_path: Path) -> None:
+    certs = _import_certs()
+    missing_root = tmp_path / "does-not-exist"
+    rows = certs.status_rows(missing_root, _REFERENCE_TIME, certs.CERT_WARN_DAYS_DEFAULT)
+    assert rows == ()
+
+
+def test_status_rows_returns_nothing_for_an_empty_root(tmp_path: Path) -> None:
+    certs = _import_certs()
+    rows = certs.status_rows(tmp_path, _REFERENCE_TIME, certs.CERT_WARN_DAYS_DEFAULT)
+    assert rows == ()
+
+
+def test_status_rows_reports_ca_and_client_roles_for_an_instance(tmp_path: Path) -> None:
+    certs = _import_certs()
+    instance = f"status-{uuid.uuid4().hex[:8]}"
+    paths = certs.CertPaths(instance=instance, root=tmp_path)
+    certs.create_ca(paths)
+    certs.issue_client(paths)
+
+    rows = certs.status_rows(tmp_path, _REFERENCE_TIME, certs.CERT_WARN_DAYS_DEFAULT)
+
+    assert {row.role for row in rows} == {"ca", "client"}
+    assert all(row.instance == instance for row in rows)
+
+
+def test_status_rows_reports_every_instance_under_root(tmp_path: Path) -> None:
+    certs = _import_certs()
+    instances = [f"status-multi-{uuid.uuid4().hex[:8]}" for _ in range(2)]
+    for instance in instances:
+        paths = certs.CertPaths(instance=instance, root=tmp_path)
+        certs.create_ca(paths)
+        certs.issue_client(paths)
+
+    rows = certs.status_rows(tmp_path, _REFERENCE_TIME, certs.CERT_WARN_DAYS_DEFAULT)
+
+    assert {row.instance for row in rows} == set(instances)
+
+
+def test_status_rows_skips_an_instance_directory_with_no_material_yet(tmp_path: Path) -> None:
+    """An instance directory that exists but holds neither role's certificate yet
+    (for example, one left over from an interrupted `create_ca`) contributes
+    no rows and raises nothing -- only a genuinely partial set (one role
+    present, the other missing) is an error."""
+    certs = _import_certs()
+    instance = f"empty-{uuid.uuid4().hex[:8]}"
+    (tmp_path / instance).mkdir()
+
+    rows = certs.status_rows(tmp_path, _REFERENCE_TIME, certs.CERT_WARN_DAYS_DEFAULT)
+
+    assert rows == ()
+
+
+def test_status_rows_raises_naming_missing_ca_when_only_client_material_exists(
+    tmp_path: Path,
+) -> None:
+    certs = _import_certs()
+    instance = f"partial-{uuid.uuid4().hex[:8]}"
+    instance_dir = tmp_path / instance
+    instance_dir.mkdir()
+    (instance_dir / "cert.pem").write_bytes(b"placeholder")
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.status_rows(tmp_path, _REFERENCE_TIME, certs.CERT_WARN_DAYS_DEFAULT)
+
+    message = str(excinfo.value)
+    assert instance in message
+    assert "ca" in message
+
+
+def test_status_rows_raises_naming_missing_client_when_only_ca_material_exists(
+    tmp_path: Path,
+) -> None:
+    certs = _import_certs()
+    instance = f"partial-{uuid.uuid4().hex[:8]}"
+    paths = certs.CertPaths(instance=instance, root=tmp_path)
+    certs.create_ca(paths)
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.status_rows(tmp_path, _REFERENCE_TIME, certs.CERT_WARN_DAYS_DEFAULT)
+
+    message = str(excinfo.value)
+    assert instance in message
+    assert "client" in message
+
+
+def test_role_cert_path_raises_naming_the_role_for_an_unrecognized_role(
+    tmp_path: Path,
+) -> None:
+    """`_role_cert_path` resolves through an explicit mapping (code_review,
+    E6-F1-S1-T2, WARN 4), so a role outside `_INSPECTABLE_ROLES` fails
+    loudly naming itself instead of silently resolving to the CA
+    certificate's path."""
+    certs = _import_certs()
+    paths = certs.CertPaths(instance=f"role-{uuid.uuid4().hex[:8]}", root=tmp_path)
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs._role_cert_path(paths, "server")
+
+    message = str(excinfo.value)
+    assert "server" in message
+    assert certs._role_cert_path(paths, certs.ROLE_CA) == paths.ca_cert
+
+
+# ---------------------------------------------------------------------------
+# render_report: the Section 4.1.2 column shape, the RENEW reissue
+# invocation (AC-FUNC-005), and the empty-inventory edge case (AC-FUNC-006).
+# Built from CertStatusRow values directly so the exact layout is pinned
+# without needing real certificate files.
+# ---------------------------------------------------------------------------
+
+
+def test_render_report_matches_the_section_4_1_2_column_shape() -> None:
+    certs = _import_certs()
+    row = certs.CertStatusRow(
+        instance="sandbox",
+        role="client",
+        not_after=datetime.datetime(2026, 11, 16, tzinfo=datetime.UTC),
+        days=90,
+        status="ok",
+    )
+    lines = certs.render_report([row]).splitlines()
+    assert lines[0] == "INSTANCE   ROLE     EXPIRES       DAYS  STATUS"
+    assert lines[1] == "sandbox    client   2026-11-16      90  ok"
+
+
+def test_render_report_pads_large_day_counts_correctly() -> None:
+    certs = _import_certs()
+    row = certs.CertStatusRow(
+        instance="sandbox",
+        role="ca",
+        not_after=datetime.datetime(2036, 8, 18, tzinfo=datetime.UTC),
+        days=3650,
+        status="ok",
+    )
+    lines = certs.render_report([row]).splitlines()
+    assert lines[1] == "sandbox    ca       2036-08-18    3650  ok"
+
+
+def test_render_report_renew_row_names_the_reissue_invocation() -> None:
+    certs = _import_certs()
+    row = certs.CertStatusRow(
+        instance="personal",
+        role="client",
+        not_after=datetime.datetime(2026, 8, 29, tzinfo=datetime.UTC),
+        days=11,
+        status="RENEW",
+    )
+    lines = certs.render_report([row]).splitlines()
+    assert lines[1] == (
+        "personal   client   2026-08-29      11  RENEW   /devcontainer:certs INSTANCE=personal"
+    )
+
+
+def test_render_report_with_no_rows_prints_header_and_setup_remote_line() -> None:
+    certs = _import_certs()
+    report = certs.render_report([])
+    lines = report.splitlines()
+    assert lines[0] == "INSTANCE   ROLE     EXPIRES       DAYS  STATUS"
+    assert "/devcontainer:setup-remote" in report
+
+
+# ---------------------------------------------------------------------------
+# AC-FUNC-004, AC-TEST-002, AC-FINAL-010: the three-valued exit contract,
+# exercised through the real `main(["status", ...])` CLI entry point against
+# genuinely issued material. `_current_time` is the one seam `main`'s status
+# command reads the real clock through; monkeypatching it forces `ok`,
+# `RENEW` and `expired` outcomes deterministically instead of waiting real
+# days for a certificate to age.
+# ---------------------------------------------------------------------------
+
+
+def test_main_status_exits_zero_when_every_certificate_is_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    certs = _import_certs()
+    instance = f"status-ok-{uuid.uuid4().hex[:8]}"
+    paths = certs.CertPaths(instance=instance, root=tmp_path)
+    certs.create_ca(paths)
+    certs.issue_client(paths)
+    client_not_after = certs.not_after(paths.client_cert)
+    monkeypatch.setattr(
+        certs, "_current_time", lambda: client_not_after - datetime.timedelta(days=30)
+    )
+
+    exit_code = certs.main(["status", "--root", str(tmp_path)])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert instance in captured.out
+    assert "RENEW" not in captured.out
+    assert "expired" not in captured.out
+
+
+def test_main_status_exits_zero_with_a_renew_row_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    certs = _import_certs()
+    instance = f"status-renew-{uuid.uuid4().hex[:8]}"
+    paths = certs.CertPaths(instance=instance, root=tmp_path)
+    certs.create_ca(paths)
+    certs.issue_client(paths)
+    client_not_after = certs.not_after(paths.client_cert)
+    monkeypatch.setattr(
+        certs, "_current_time", lambda: client_not_after - datetime.timedelta(days=5)
+    )
+
+    exit_code = certs.main(["status", "--root", str(tmp_path)])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "RENEW" in captured.out
+    assert f"/devcontainer:certs INSTANCE={instance}" in captured.out
+
+
+def test_main_status_exits_one_when_a_certificate_has_expired(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    certs = _import_certs()
+    instance = f"status-expired-{uuid.uuid4().hex[:8]}"
+    paths = certs.CertPaths(instance=instance, root=tmp_path)
+    certs.create_ca(paths)
+    certs.issue_client(paths)
+    client_not_after = certs.not_after(paths.client_cert)
+    monkeypatch.setattr(
+        certs, "_current_time", lambda: client_not_after + datetime.timedelta(days=1)
+    )
+
+    exit_code = certs.main(["status", "--root", str(tmp_path)])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "expired" in captured.out
+
+
+def test_main_status_no_certificates_exits_zero_and_directs_to_setup_remote(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    certs = _import_certs()
+    exit_code = certs.main(["status", "--root", str(tmp_path)])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "/devcontainer:setup-remote" in captured.out
+
+
+def test_main_status_unreadable_certificate_exits_nonzero_naming_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    certs = _import_certs()
+    instance = f"status-unreadable-{uuid.uuid4().hex[:8]}"
+    paths = certs.CertPaths(instance=instance, root=tmp_path)
+    certs.create_ca(paths)
+    certs.issue_client(paths)
+    paths.client_cert.chmod(0o000)
+
+    try:
+        exit_code = certs.main(["status", "--root", str(tmp_path)])
+    finally:
+        paths.client_cert.chmod(0o644)
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "ERROR" in captured.err
+    assert str(paths.client_cert) in captured.err
+
+
+def test_main_status_respects_cert_warn_days_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    certs = _import_certs()
+    instance = f"status-window-{uuid.uuid4().hex[:8]}"
+    paths = certs.CertPaths(instance=instance, root=tmp_path)
+    certs.create_ca(paths)
+    certs.issue_client(paths)
+    client_not_after = certs.not_after(paths.client_cert)
+    monkeypatch.setattr(
+        certs, "_current_time", lambda: client_not_after - datetime.timedelta(days=20)
+    )
+    monkeypatch.delenv("CERT_WARN_DAYS", raising=False)
+
+    exit_code = certs.main(["status", "--root", str(tmp_path)])
+    assert exit_code == 0
+    assert "RENEW" not in capsys.readouterr().out
+
+    monkeypatch.setenv("CERT_WARN_DAYS", "20")
+    exit_code = certs.main(["status", "--root", str(tmp_path)])
+    assert exit_code == 0
+    assert "RENEW" in capsys.readouterr().out

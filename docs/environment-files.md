@@ -223,10 +223,9 @@ it through the developer's already-valid AWS SSO session.
 single definition site for these three variables (E6-F1-S1-T1): every
 `create_ca`, `issue_server` and `issue_client` call resolves its own
 lifetime from the matching variable below, never a literal at the call
-site. Spec Section 7.3 names four more certificate and transport variables
+site. Spec Section 7.3 names three more certificate and transport variables
 that join this section once the work units that implement them land:
-`CERT_WARN_DAYS`, `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT` and
-`DOCKER_HANDSHAKE_TIMEOUT`.
+`DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT` and `DOCKER_HANDSHAKE_TIMEOUT`.
 
 | Variable | Default | Defined in |
 |---|---|---|
@@ -240,6 +239,42 @@ unset. When set, the value must be a positive whole number of days;
 an integer") or a value that is zero or negative ("must be a positive
 integer") rather than silently falling back to the default or to an
 unbounded lifetime.
+
+### Certificate expiry warning
+
+`CERT_WARN_DAYS` (E6-F1-S1-T2) governs `make cert-status`'s warning window
+(spec Section 4.1.2, Section 7.3), read in exactly one place,
+`certs._resolve_cert_warn_days`, and threaded from there into every
+`certs.classify` call the report makes -- never a second literal `14`
+anywhere else in `certs.py`.
+
+| Variable | Default | Defined in |
+|---|---|---|
+| `CERT_WARN_DAYS` | `14` | `certs.py`, read by `_resolve_cert_warn_days` for `make cert-status` |
+
+`CERT_WARN_DAYS` is optional; the default of `14` applies whenever it is
+unset. When set, it must be a non-negative whole number of days: `certs.py`
+rejects a non-integer value or a negative value, naming the
+variable, its value and the expected form, before any row of the report is
+rendered, the identical fail-fast rule the three lifetime variables above
+follow.
+
+`make cert-status`'s exit code is deliberately three-valued: `0` when every
+certificate is outside the warning window, `0` with a `RENEW` row naming the
+`/devcontainer:certs INSTANCE=<name>` invocation that reissues it when a
+certificate is inside the window but not yet expired, and `1` when any
+certificate has already expired. A `RENEW` that failed the build would train
+the operator to ignore it, and a certificate with days left on it still
+works; only an already-expired certificate is a build-breaking failure. An
+unreadable or unparsable certificate file is reported by naming the path
+and the parse failure, never silently classified as `expired` -- that would
+send the operator to reissue material that may be perfectly valid. `make
+cert-status` reports the `ca` and `client` roles it finds locally under
+`~/.docker/certs/<instance>/`; the server certificate is never reported
+because it is never persisted to that path in the first place --
+`certs.issue_server` generates it into a temporary directory it removes
+before returning, handing the material back as PEM text instead (see the
+certificate-storage paragraph below for the full rule).
 
 `certs.py` shells out to the `openssl` binary on `PATH` for every operation
 above and requires OpenSSL 3.0 or later: signing a certificate passes

@@ -1,0 +1,14 @@
+{
+  "name": "devcontainer",
+  "owner": {
+    "name": "Caylent",
+    "url": "https://www.caylent.com"
+  },
+  "plugins": [
+    {
+      "name": "devcontainer",
+      "source": "./",
+      "description": "Devcontainer platform skills, invoked as /devcontainer:<name>. Skills are discovered from the plugin's skills/ directory."
+    }
+  ]
+}

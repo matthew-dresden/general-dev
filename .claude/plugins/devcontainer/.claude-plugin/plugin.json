@@ -1,0 +1,9 @@
+{
+  "name": "devcontainer",
+  "description": "Devcontainer platform automation for the local and remote development container workflow, invoked as /devcontainer:<name>. See docs/devcontainer.md for the skill roster.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Caylent",
+    "url": "https://www.caylent.com"
+  }
+}

@@ -520,3 +520,39 @@ aws-profile-map.json                           /devcontainer/<project>/…      
   `push-secrets.sh` so the remote copies match.
 - The tool appends the four secret-file entries to `.gitignore` if missing
   (already present here).
+
+## Plugin and skills
+
+Section 11 of `repos/spec/devcontainer-platform.md` records the Claude Code plugin as
+an inbound integration: "Marketplace at `.claude/plugins/devcontainer`", failing
+as "A malformed manifest fails skill lint". The plugin lives at
+`.claude/plugins/devcontainer/`, a directory holding `.claude-plugin/plugin.json`
+(the plugin manifest, `name: devcontainer`) and `.claude-plugin/marketplace.json`
+(a marketplace whose single `plugins` entry sources that same directory). Neither
+manifest enumerates skills: the skill set is discovered from the plugin's
+`skills/` directory, so the manifests never drift from what is actually present
+there.
+
+`.claude/settings.json` registers the plugin directory as a `directory`-sourced
+marketplace under `extraKnownMarketplaces.devcontainer` and enables the plugin
+from it via `enabledPlugins["devcontainer@devcontainer"]`. This is additive to
+the `PreToolUse` bypass-denial hook registration the previous section describes;
+both keys coexist in the same file.
+
+With the marketplace registered and the plugin enabled, Claude Code resolves
+each skill directory under `.claude/plugins/devcontainer/skills/<name>/` as the
+slash command `/devcontainer:<name>`. Section 4.2 of
+`repos/spec/devcontainer-platform.md` names nine skills that will populate that
+directory: `setup-local`, `setup-remote`, `engine`, `launch`, `doctor`,
+`secrets`, `certs`, `teardown`, `quality`. Each lands in its own work unit as a
+Markdown-only change, because this plugin container already exists; the skill
+lint that reads it will be added by E4-F1-S1-T2.
+
+The table below is the skill roster: one row per skill directory under
+`.claude/plugins/devcontainer/skills/`, added by that skill's own work unit.
+The skill lint suite added by E4-F1-S1-T2 will assert the row set and the
+directory set are equal, so the table will not be allowed to drift from what
+is actually installed.
+
+| Skill | Invocation |
+|---|---|

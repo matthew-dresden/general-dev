@@ -11,5 +11,16 @@
         ]
       }
     ]
+  },
+  "extraKnownMarketplaces": {
+    "devcontainer": {
+      "source": {
+        "source": "directory",
+        "path": ".claude/plugins/devcontainer"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "devcontainer@devcontainer": true
   }
 }

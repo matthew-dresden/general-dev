@@ -254,17 +254,20 @@ EC2 reference, troubleshooting) live in
    the container user; the resmon-disks postAttach link, because
    `postAttachCommand` runs it unconditionally and a container that cannot
    provide it fails on every attach; the vscode-settings-sync postAttach
-   link, for the same postAttach reason; and the git hooks step, because a
+   link, for the same postAttach reason; the git hooks step, because a
    container whose hooks did not install would run `git commit` with no
-   secret scan. Each of those aborts the build through `exit_with_error`
-   instead of shipping a container missing the guarantee:
+   secret scan; and the devsecret export-list block render, because a
+   container whose shells silently lack their exported secrets is worse
+   than a container that failed to create. Each of those aborts the build
+   through `exit_with_error` instead of shipping a container missing the
+   guarantee:
 
    | Step | Depends on |
    |---|---|
    | apt proxy config (root-only, for later manual `apt` use) | `HTTP_PROXY` set |
    | every npm prefix holding a global CLI handed to the container user | the node feature |
    | `~/.vscode-server` handed to the container user | the `mounts` volume, required |
-   | `shell.env` sourcing into `.bashrc` / `.zshenv` |, |
+   | `shell.env` sourcing into `.bashrc` / `.zshenv`, plus the devsecret export-list startup block appended to both | `python3` + `devcontainer_config` on `PYTHONPATH`, required |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
    | `claude-settings.json` merged into `~/.claude/settings.json` | `claude-code` feature + `jq` |
    | `tm-*` commands sourced into both shells | `tmux` |

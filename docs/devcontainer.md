@@ -600,6 +600,58 @@ daemon's API version -- which must be at least 1.44 for mTLS on a TCP
 listener with a rootless daemon (spec Section 6) -- and whether it reports
 running rootless.
 
+**Two build paths, one opt-in selector.** `make connect` reads
+`DEVCONTAINER_TRANSPORT` from the environment (`docs/environment-files.md`)
+and dispatches on it: unset or `ssh` -- the default -- runs
+`.devcontainer/remote-docker/docker-tunnel.sh` exactly as before phase 3,
+installing the managed SSH config block, running `ssh`, and creating the
+docker context with `host=ssh://...`, so an existing caller who sets
+nothing new observes no behavior change (AC-FUNC-002). The explicit value
+`ssm` instead runs
+
+```sh
+PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.transport \
+  connect --instance-id <id> --context <context> --profile <profile> --region <region> \
+  [--certs-root <path>]
+```
+
+which is the same command, with real values substituted from `config.env`
+and `shell.env`, that the `Makefile`'s own `connect` target issues for that
+value; `transport.resolve_transport` reads the identical
+`DEVCONTAINER_TRANSPORT` inside `connect`'s own handler too, refusing
+before touching AWS or docker at all unless it is `ssm`. This path
+establishes the SSM forward exactly as `start` does, then ties in the two
+calls `start` alone never makes -- `transport.ensure_context` and
+`transport.handshake` -- and activates the resulting context with
+`docker context use` before confirming the handshake, so `connect` alone
+leaves a working, mTLS-secured `tcp://127.0.0.1:<port>` docker context,
+already active, ready to build against. Unlike the SSH default, though,
+this command does not return: `_run_connect` ends in
+`_run_until_interrupted`, which blocks on `process.wait()`, echoing the
+session process's own output, until the operator interrupts it or it
+exits on its own, and whose `finally` clause always calls `stop_forward`
+on the way out. `DEVCONTAINER_TRANSPORT=ssm make connect` (and `make
+remote`, which drives the same recipe) therefore occupies the terminal it
+was run from for as long as the context needs to stay usable; the forward
+-- and with it the docker context's endpoint -- must be left running,
+either in that same foreground or in a second terminal, for a subsequent
+`make build` to reach the `tcp://` context, and interrupting the `connect`
+process tears the forward down and stops the context from working. This
+is the opposite of the default SSH path, where `docker-tunnel.sh` returns
+control to the shell once the tunnel is established. `--certs-root`
+defaults to the same `~/.docker/certs/` root `make cert-status` and the
+certificate material above use, and only needs overriding for a test
+fixture or an alternate checkout layout. Selecting `ssm` never installs an
+SSH config block, spawns no `ssh` process, and names no
+`AWS-StartSSHSession` document; selecting it also requires no SSH key on
+the instance, unlike the default SSH path, which requires
+`REMOTE_SSH_KEY_PATH` to name one that exists. The `--context` value (and
+the `REMOTE_DOCKER_CONTEXT` the Makefile derives it from, `config.env`,
+operator-overridable) must carry the `general-dev-` prefix:
+`instance_from_context_name` raises `InvalidContextNameError` on any
+context name that does not start with it, since that prefix is the single
+place the bare instance name is recovered for certificate lookup.
+
 **The SAN requirement, and its symptom.** TLS validates the name the
 *client* used to dial the daemon, and the client dials `127.0.0.1` through
 the loopback forward, so the server certificate must carry `IP:127.0.0.1`

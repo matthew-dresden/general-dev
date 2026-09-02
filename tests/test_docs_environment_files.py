@@ -22,16 +22,19 @@ with either one.
 
 The `### Transport` section tests below (E6-F2-S1-T5) follow the same
 "parse the rendered fact, don't restate it" discipline for
-`transport.py`'s environment variables. One of those four variables,
-`DEVCONTAINER_TRANSPORT`, is documented ahead of the code that will read
-it: `resolve_transport` and the `connect` entry point are E6-F2-S1-T3's
-and E6-F2-S1-T4's changes, neither landed in this tree yet, so
-`_transport_module_env_var_names` (which derives its set from
-`devcontainer_config.transport`'s own namespace, the same technique
-`_catalog_declared_env_var_names` uses for `catalog.py`) cannot see it.
-`test_transport_table_documents_devcontainer_transport` pins that row's
-literal content directly instead, the same way `_CATALOG_FACTS` pins
-Secrets-section facts the code does not make derivable.
+`transport.py`'s environment variables. All four variables, including
+`DEVCONTAINER_TRANSPORT`, are declared as `*_ENV_VAR` module-level
+constants on `devcontainer_config.transport`'s own namespace now that
+`resolve_transport` and the `connect` entry point (E6-F2-S1-T3 and
+E6-F2-S1-T4) have landed, so `_transport_module_env_var_names` (which
+derives its set from that namespace, the same technique
+`_catalog_declared_env_var_names` uses for `catalog.py`) sees all four.
+That derivation only proves a name belongs in the table; it cannot
+produce the richer facts `DEVCONTAINER_TRANSPORT`'s own row states --
+its default, its two readers, its accepted values --
+so `test_transport_table_documents_devcontainer_transport` still pins
+those directly, the same way `_CATALOG_FACTS` pins Secrets-section facts
+the code does not make derivable.
 
 `_markdown_table_first_column_names` is the row-walking and
 backtick-stripping logic `_configuration_variable_names` and
@@ -489,15 +492,17 @@ def test_transport_section_documents_every_transport_environment_variable() -> N
     """AC-TEST-001: every environment variable `transport.py`'s own namespace names
     must appear in the `### Transport` table.
 
-    `devcontainer_config.transport` does not yet declare
-    `DEVCONTAINER_TRANSPORT_ENV_VAR` in this tree: E6-F2-S1-T3, which adds
-    it, has not landed. This check therefore cannot derive that fourth
-    variable from the module the way it derives the other three; the
-    table's `DEVCONTAINER_TRANSPORT` row is pinned directly instead by
-    `test_transport_table_documents_devcontainer_transport` below. What
-    this test guards is that no variable the module reads today, or starts
-    reading once E6-F2-S1-T3 lands, can silently drop out of the table
-    without failing here by name.
+    `devcontainer_config.transport` now declares all four `*_ENV_VAR`
+    constants, including `DEVCONTAINER_TRANSPORT_ENV_VAR` (E6-F2-S1-T3),
+    on its own module namespace, so `declared` below already covers
+    `DEVCONTAINER_TRANSPORT` the same way it covers the other three; no
+    literal exception is needed for it any more. The table's row still
+    carries facts (the default, both readers, the accepted values) this
+    name-only derivation cannot produce, which
+    `test_transport_table_documents_devcontainer_transport` below pins
+    directly. What this test guards is that no variable the module reads
+    today can silently drop out of the table without failing here by
+    name.
     """
     declared = _transport_module_env_var_names()
     assert declared, (
@@ -544,12 +549,15 @@ def test_transport_table_documents_devcontainer_transport() -> None:
     """AC-DOC-001: the `DEVCONTAINER_TRANSPORT` row states its default, accepted
     values and at least one of its two readers.
 
-    `resolve_transport` (E6-F2-S1-T3) has not landed in this tree, so this
-    fact cannot be derived from the module's own namespace the way
+    `resolve_transport` (E6-F2-S1-T3) has landed, and
     `test_transport_section_documents_every_transport_environment_variable`
-    derives the other three rows; it is pinned directly here instead, the
-    same technique the '## Secrets' section's `_CATALOG_FACTS` parametrized
-    cases use for facts the code does not (yet) make derivable.
+    above now derives `DEVCONTAINER_TRANSPORT`'s presence in the table
+    from the module's own namespace like the other three rows. What that
+    namespace derivation cannot produce is the row's own content -- its
+    default, which of the two readers it names, the accepted values --
+    so those facts are still pinned directly here, the same technique the
+    '## Secrets' section's `_CATALOG_FACTS` parametrized cases use for
+    facts the code does not make derivable.
     """
     names = _transport_table_variable_names()
     assert "DEVCONTAINER_TRANSPORT" in names, (

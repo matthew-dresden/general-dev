@@ -108,11 +108,39 @@ both required values, and the reissue invocation, rather than surfacing
 the bare, opaque `x509` error, which names neither the forward nor the
 SANs; every other failure is translated into a distinct connection
 diagnosis instead, so the two causes are never conflated (AC-FUNC-005).
+
+E6-F2-S1-T3 closes the last gap: before it, this module's own CLI --
+"the functional replacement for docker-tunnel.sh" this docstring already
+claims -- exposed only `start` (E6-F2-S1-T1's raw forward), whose handler
+never called `ensure_context` or `handshake` (E6-F2-S1-T2), and the actual
+build path (the `Makefile`'s `connect` target) never called into this
+module at all, so nothing this module built was ever reachable from
+anything a developer or CI ran. `connect` is the entry point that closes
+the first half of that gap: it establishes the forward exactly as `start`
+does (both now share `_establish_forward`, extracted rather than
+duplicated, DRY), then creates or updates the docker context at the port
+just allocated, activates it (`_use_context`), and confirms it with a
+version handshake, so a caller of `connect` alone ends with a working,
+mTLS-secured `tcp://` context, already active, ready to build against
+(AC-FUNC-003). The `Makefile`'s `connect` target closes the second half: it
+reads `DEVCONTAINER_TRANSPORT` itself and dispatches to
+`python3 -m devcontainer_config.transport connect` only when it is `ssm`,
+leaving `docker-tunnel.sh` untouched and still the default (AC-FUNC-001).
+`connect`'s own handler stays opt-in regardless of its caller, gated by
+`resolve_transport` reading the identical `DEVCONTAINER_TRANSPORT` variable
+(never a file edit): unset or `ssh` -- the default -- refuses before ever
+touching AWS or docker (`_require_ssm_transport_selected`), leaving
+`docker-tunnel.sh` the only build path that ran, exactly as before this
+task (AC-FUNC-002); only the explicit value `ssm` lets `connect` proceed.
+Nothing here ever writes the caller's own SSH client configuration file, or
+requires a key on the instance, in either case (AC-FUNC-004): this module
+still imports nothing from `docker-tunnel.sh` and never touches SSH at all.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import json
 import os
@@ -122,7 +150,7 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, NoReturn
@@ -142,6 +170,19 @@ _DOCKER_TLS_PORT_DEFAULT = 2376
 
 SSM_FORWARD_TIMEOUT_ENV_VAR = "SSM_FORWARD_TIMEOUT"
 _SSM_FORWARD_TIMEOUT_DEFAULT_SECONDS = 30.0
+
+# E6-F2-S1-T3, Approach step 2: the build path's opt-in transport selector.
+# `resolve_transport` is the one function in this module that reads this
+# variable (the same one-reader convention `DOCKER_TLS_PORT_ENV_VAR` and
+# `SSM_FORWARD_TIMEOUT_ENV_VAR` already establish above). Unset resolves to
+# `TRANSPORT_SSH` -- the existing `docker-tunnel.sh` build path, untouched
+# by this module -- so an existing caller that sets nothing new observes no
+# behavior change (AC-FUNC-002); `TRANSPORT_SSM` is the only other accepted
+# value, and it is what gates `connect` below.
+DEVCONTAINER_TRANSPORT_ENV_VAR = "DEVCONTAINER_TRANSPORT"
+TRANSPORT_SSH = "ssh"
+TRANSPORT_SSM = "ssm"
+_VALID_TRANSPORTS: tuple[str, ...] = (TRANSPORT_SSH, TRANSPORT_SSM)
 
 # spec Section 13, decision D2: the port-forwarding document, never the SSH
 # document (`AWS-StartSSHSession`) the replaced transport used.
@@ -231,6 +272,15 @@ class TransportError(RuntimeError):
     """
 
 
+class TransportNotSelectedError(TransportError):
+    """Raised when `connect` runs without `DEVCONTAINER_TRANSPORT=ssm` ever having been selected.
+
+    `connect` refuses to touch AWS or docker at all when this is raised: an
+    unset or `TRANSPORT_SSH` selector must leave `docker-tunnel.sh` as the
+    only build path that ever ran (AC-FUNC-001, AC-FUNC-002).
+    """
+
+
 class AgentNotOnlineError(TransportError):
     """Raised when the target instance's SSM agent is not reporting `Online`."""
 
@@ -266,6 +316,20 @@ class DockerVersionFloorError(TransportError):
 
 class DockerHandshakeTimeoutError(TransportError):
     """Raised when `handshake`'s version call does not answer within `DOCKER_HANDSHAKE_TIMEOUT`."""
+
+
+class InvalidContextNameError(TransportError):
+    """Raised when a context name does not carry `CONTEXT_NAME_PREFIX`.
+
+    `connect`'s `--context` argument arrives as the full context name (spec
+    Section 9's addressing table), matching `start`'s own `--context`
+    argument; `instance_from_context_name` is the single place that strips
+    `CONTEXT_NAME_PREFIX` back off to recover the bare instance name
+    `ensure_context` needs for certificate lookup, rather than the caller
+    (the `Makefile`) re-typing the prefix itself. A context name that does
+    not start with the prefix is a caller error and fails fast instead of
+    silently building a doubly-prefixed or wrong instance directory.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +444,53 @@ def _forward_timeout_seconds() -> float:
     return _positive_seconds_from_env(
         SSM_FORWARD_TIMEOUT_ENV_VAR, _SSM_FORWARD_TIMEOUT_DEFAULT_SECONDS
     )
+
+
+def resolve_transport() -> str:
+    """The build path's opt-in transport selector (Approach step 2; AC-FUNC-001, AC-FUNC-002).
+
+    Reads `DEVCONTAINER_TRANSPORT_ENV_VAR` from the environment: unset
+    resolves to `TRANSPORT_SSH`, the existing `docker-tunnel.sh` build path
+    this module never touches, so a caller that sets nothing new observes
+    no behavior change. `TRANSPORT_SSM` is the only other accepted value,
+    this module's own opt-in build path (`connect`, below). Any other value
+    is a caller error and fails fast rather than silently choosing either
+    transport for them.
+
+    Raises:
+        TransportError: the environment variable is set to a value that is
+            neither `TRANSPORT_SSH` nor `TRANSPORT_SSM`.
+    """
+    raw = os.environ.get(DEVCONTAINER_TRANSPORT_ENV_VAR, TRANSPORT_SSH)
+    if raw not in _VALID_TRANSPORTS:
+        raise TransportError(
+            f"ERROR: {DEVCONTAINER_TRANSPORT_ENV_VAR}={raw!r} is not a recognized transport\n"
+            f"Set it to one of {', '.join(_VALID_TRANSPORTS)}, or unset it to use the default of "
+            f"{TRANSPORT_SSH!r} (the existing docker-tunnel.sh build path)."
+        )
+    return raw
+
+
+def _require_ssm_transport_selected() -> None:
+    """Refuse to act unless `resolve_transport` selected `TRANSPORT_SSM` (AC-FUNC-001, AC-FUNC-002).
+
+    `connect` calls this before touching AWS or docker at all: an unset or
+    `TRANSPORT_SSH` selector must leave `docker-tunnel.sh` as the only build
+    path that ever ran, with no forward opened and no docker context
+    touched, exactly as if `connect` did not exist.
+
+    Raises:
+        TransportNotSelectedError: `resolve_transport` did not return
+            `TRANSPORT_SSM`.
+    """
+    transport = resolve_transport()
+    if transport != TRANSPORT_SSM:
+        raise TransportNotSelectedError(
+            f"ERROR: {DEVCONTAINER_TRANSPORT_ENV_VAR}={transport!r}; the SSM build path is opt-in\n"
+            f"Set {DEVCONTAINER_TRANSPORT_ENV_VAR}={TRANSPORT_SSM!r} to select it.\n"
+            f"The default, {TRANSPORT_SSH!r}, is unchanged: run make connect (docker-tunnel.sh) "
+            "instead."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -629,6 +740,32 @@ def context_name_for(instance: str) -> str:
     return f"{CONTEXT_NAME_PREFIX}{instance}"
 
 
+def instance_from_context_name(context_name: str) -> str:
+    """The bare instance name `context_name_for` built `context_name` from.
+
+    The exact inverse of `context_name_for`, and the single place
+    `CONTEXT_NAME_PREFIX` is stripped back off: `connect` receives a full
+    context name through `--context` (matching `start`'s own argument) and
+    needs the bare instance name back to look up certificate material
+    (`certs.CertPaths`). Keeping the strip here, rather than in the
+    `Makefile` recipe that calls `connect`, means the prefix is declared in
+    exactly one place; a caller-side strip of a literal `"general-dev-"`
+    would silently no-op for any context name that does not start with it.
+
+    Raises:
+        InvalidContextNameError: `context_name` does not start with
+            `CONTEXT_NAME_PREFIX`.
+    """
+    if not context_name.startswith(CONTEXT_NAME_PREFIX):
+        raise InvalidContextNameError(
+            f"ERROR: docker context name {context_name!r} does not start with "
+            f"{CONTEXT_NAME_PREFIX!r}\n"
+            f"Every context this module manages is named {CONTEXT_NAME_PREFIX}<instance> "
+            "(spec Section 9); pass the full context name as recorded in REMOTE_DOCKER_CONTEXT."
+        )
+    return context_name[len(CONTEXT_NAME_PREFIX) :]
+
+
 def _docker_endpoint_value(*, port: int, ca_path: Path, cert_path: Path, key_path: Path) -> str:
     """The single `--docker` value string carrying all four endpoint components (spec Section 5.5).
 
@@ -791,6 +928,36 @@ def ensure_context(
     )
     _run_docker_context_argv(runner, argv, name)
     return name
+
+
+def _use_context(runner: CommandRunner, context_name: str) -> None:
+    """Activate `context_name` as the docker CLI's active context (AC-FUNC-003).
+
+    `ensure_context` only creates or updates the context; the daemon a
+    subsequent `make build` targets is whichever context is *active*.
+    `docker-tunnel.sh` sets that with its own `docker context use` call once
+    it finishes creating or updating the legacy `ssh://` context, so
+    `connect` issues the identical call for the `tcp://` context it just
+    ensured, rather than leaving activation to a caller who might not know
+    it is required.
+
+    Raises:
+        TransportError: docker is not on PATH, or the `context use` command
+            itself failed. The context was already created or updated
+            successfully at this point; only activating it failed.
+    """
+    result = runner(("docker", "context", "use", context_name), None)
+    if result.binary_missing:
+        raise TransportError(
+            "ERROR: docker is not on PATH\nInstall Docker Desktop or the Docker CLI, then retry."
+        )
+    if result.exit_code != 0:
+        raise TransportError(
+            f"ERROR: docker context use {context_name!r} failed\n"
+            f"{result.stderr.strip()}\n"
+            f"The context was created or updated successfully; only activating it failed. Run "
+            f"'docker context use {context_name}' by hand, then retry."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1255,20 +1422,54 @@ def _drain_session_output(session_output: IO[bytes]) -> None:
         sys.stdout.buffer.flush()
 
 
-def _run_start(args: argparse.Namespace) -> int:
+@dataclass(frozen=True)
+class _EstablishedForward:
+    """A ready SSM forward: the launched process, its readable `stdout`, and the local port.
+
+    `session_output` is carried alongside `process` (rather than a caller
+    re-reading `process.stdout`, which mypy would still see as
+    `IO[bytes] | None`) because `_establish_forward` already proved it is
+    not `None` before ever returning one of these.
+    """
+
+    process: subprocess.Popen[bytes]
+    session_output: IO[bytes]
+    local_port: int
+
+
+def _establish_forward(
+    *, instance_id: str, context_name: str, profile: str, region: str
+) -> _EstablishedForward | None:
+    """Establish and confirm-ready one SSM port forward; the shared core of `start` and `connect`.
+
+    Extracted from what was `_run_start`'s own body (TDD REFACTOR, DRY):
+    `connect` needs the identical agent-online check, port allocation,
+    session launch and readiness wait `start` already had, and duplicating
+    that here rather than sharing it would let the two drift. This is a
+    pure extraction, not a behavior change: `start`'s own tests keep
+    passing unmodified.
+
+    Returns `None` only when a `KeyboardInterrupt` arrived before the
+    forward was confirmed ready, having already been cleanly torn down:
+    both callers treat that as the operator having exited cleanly, before
+    either would ever print anything or touch a docker context.
+
+    Raises:
+        ForwardTimeoutError: the forward never became ready within
+            `SSM_FORWARD_TIMEOUT`, having already been torn down.
+        TransportError: the launched session process was not given a
+            readable `stdout` pipe (a `default_process_launcher` bug).
+    """
     ensure_agent_online(
-        subprocess_command_runner,
-        instance_id=args.instance_id,
-        profile=args.profile,
-        region=args.region,
+        subprocess_command_runner, instance_id=instance_id, profile=profile, region=region
     )
-    local_port = allocate_local_port(subprocess_command_runner, args.context)
+    local_port = allocate_local_port(subprocess_command_runner, context_name)
     process = start_forward(
         default_process_launcher,
-        instance_id=args.instance_id,
+        instance_id=instance_id,
         local_port=local_port,
-        profile=args.profile,
-        region=args.region,
+        profile=profile,
+        region=region,
     )
     if process.stdout is None:
         raise TransportError(
@@ -1279,10 +1480,7 @@ def _run_start(args: argparse.Namespace) -> int:
     session_output: IO[bytes] = process.stdout
     try:
         wait_ready(
-            tcp_ready_probe(local_port),
-            session_output,
-            instance_id=args.instance_id,
-            port=local_port,
+            tcp_ready_probe(local_port), session_output, instance_id=instance_id, port=local_port
         )
     except ForwardTimeoutError:
         stop_forward(process)
@@ -1294,11 +1492,20 @@ def _run_start(args: argparse.Namespace) -> int:
         # child left running because the interrupt propagated past this point
         # without ever reaching `stop_forward`.
         stop_forward(process)
-        return 0
-    print(
-        f"Port forward ready: 127.0.0.1:{local_port} -> {args.instance_id} over "
-        f"{PORT_FORWARDING_DOCUMENT}."
+        return None
+    return _EstablishedForward(
+        process=process, session_output=session_output, local_port=local_port
     )
+
+
+def _run_until_interrupted(process: subprocess.Popen[bytes], session_output: IO[bytes]) -> None:
+    """Drain `session_output` and wait for `process` to exit, tearing it down either way.
+
+    Shared by `start` and `connect` (TDD REFACTOR, DRY): both keep the
+    forward open, echoing the session process's own output, until it exits
+    or the operator interrupts, and both must stop the forward on the way
+    out regardless of which of those two happened.
+    """
     try:
         _drain_session_output(session_output)
         process.wait()
@@ -1306,6 +1513,125 @@ def _run_start(args: argparse.Namespace) -> int:
         pass
     finally:
         stop_forward(process)
+
+
+@contextlib.contextmanager
+def _teardown_forward_on_error(process: subprocess.Popen[bytes]) -> Iterator[None]:
+    """Stop `process` via `stop_forward` if the wrapped block raises anything, then re-raise.
+
+    `connect`'s post-forward setup (`ensure_context`, `_use_context`,
+    `handshake`) can fail for reasons `_establish_forward` never
+    anticipates: a client certificate that went missing or expired between
+    processes, a pre-existing `ssh://` context, a SAN-mismatch handshake
+    failure, `docker` missing from `PATH`, even a `KeyboardInterrupt`. Every
+    one of those must leave the already-launched `aws ssm start-session`
+    child stopped rather than orphaned holding a live AWS session and the
+    allocated loopback port, exactly as `_establish_forward` itself already
+    guarantees for `ForwardTimeoutError` and a `KeyboardInterrupt` during
+    the readiness wait. Catches `BaseException`, not `Exception`, so a
+    `KeyboardInterrupt` raised anywhere in the wrapped block is covered
+    too; the caught exception is always re-raised unchanged, never
+    swallowed.
+    """
+    try:
+        yield
+    except BaseException:
+        stop_forward(process)
+        raise
+
+
+def _run_start(args: argparse.Namespace) -> int:
+    established = _establish_forward(
+        instance_id=args.instance_id,
+        context_name=args.context,
+        profile=args.profile,
+        region=args.region,
+    )
+    if established is None:
+        return 0
+    print(
+        f"Port forward ready: 127.0.0.1:{established.local_port} -> {args.instance_id} over "
+        f"{PORT_FORWARDING_DOCUMENT}."
+    )
+    _run_until_interrupted(established.process, established.session_output)
+    return 0
+
+
+def _run_connect(args: argparse.Namespace) -> int:
+    """Handler for `connect`: the SSM build path's context-creation entry point (Changes Manifest).
+
+    Establishes the forward exactly as `start` does, then creates or
+    updates the docker context carrying the TLS material at the port just
+    allocated (`ensure_context`), activates it (`_use_context`) so a
+    subsequent `make build` targets it rather than whichever context was
+    active before, and confirms it answers with a version handshake
+    (`handshake`) -- the calls `start` alone never makes, which is the gap
+    this task closes (AC-FUNC-003). Refuses before doing anything at all --
+    before even checking whether the SSM agent is online -- unless the
+    caller opted into `DEVCONTAINER_TRANSPORT=ssm`
+    (`_require_ssm_transport_selected`, AC-FUNC-001, AC-FUNC-002): an unset
+    or `ssh` selector leaves `docker-tunnel.sh` as the only build path that
+    ran, with no forward opened and no docker context touched.
+
+    Takes `--context` (the full docker context name), matching `start`'s
+    own argument, rather than a bare `--instance`: the `Makefile`'s
+    `connect` recipe already has the full context name in
+    `REMOTE_DOCKER_CONTEXT` and passing it straight through means
+    `CONTEXT_NAME_PREFIX` is declared in exactly one place, this module,
+    instead of being re-typed (and silently mis-stripped for a
+    non-default context name) in the recipe. `instance_from_context_name`
+    recovers the bare instance name `ensure_context` needs for certificate
+    lookup.
+
+    The client certificate precondition `ensure_context` would otherwise
+    check only after the forward is already open is checked again here,
+    first, before `_establish_forward` ever opens an AWS session: a missing
+    or expired certificate is the most common reason this handler fails,
+    it needs no AWS or docker call to detect, and paying for a live SSM
+    session only to immediately tear it down again would violate the
+    fail-fast standard's "check prerequisites before starting work". Once
+    the forward is open, everything through `handshake` runs inside
+    `_teardown_forward_on_error` so a certificate that expired in the
+    interim, a pre-existing `ssh://` context, a SAN-mismatch handshake
+    failure, `docker` going missing from `PATH`, or an operator
+    `KeyboardInterrupt` all stop the forward before propagating, rather
+    than orphaning the `aws ssm start-session` child and the loopback port
+    it holds.
+    """
+    _require_ssm_transport_selected()
+    context_name = args.context
+    instance = instance_from_context_name(context_name)
+    reference_time = datetime.datetime.now(datetime.UTC)
+    _ensure_client_certificate_ready(
+        certs.CertPaths(instance=instance, root=args.certs_root), reference_time
+    )
+    established = _establish_forward(
+        instance_id=args.instance_id,
+        context_name=context_name,
+        profile=args.profile,
+        region=args.region,
+    )
+    if established is None:
+        return 0
+    with _teardown_forward_on_error(established.process):
+        ensure_context(
+            subprocess_command_runner,
+            instance=instance,
+            port=established.local_port,
+            reference_time=reference_time,
+            certs_root=args.certs_root,
+        )
+        _use_context(subprocess_command_runner, context_name)
+        result = handshake(
+            subprocess_command_runner, instance=instance, port=established.local_port
+        )
+    rootless_note = ", rootless" if result.rootless else ""
+    print(
+        f"Connected: docker context {context_name!r} -> {args.instance_id} over "
+        f"{PORT_FORWARDING_DOCUMENT} (server {result.server_version}, api {result.api_version}"
+        f"{rootless_note})."
+    )
+    _run_until_interrupted(established.process, established.session_output)
     return 0
 
 
@@ -1329,6 +1655,29 @@ def _build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--profile", required=True, help="The AWS SSO profile.")
     start_parser.add_argument("--region", required=True, help="The AWS region.")
     start_parser.set_defaults(handler=_run_start)
+
+    connect_parser = subparsers.add_parser(
+        "connect",
+        help=(
+            "Establish the SSM forward and create/update the docker context carrying the TLS "
+            f"material (opt-in: {DEVCONTAINER_TRANSPORT_ENV_VAR}={TRANSPORT_SSM})."
+        ),
+    )
+    connect_parser.add_argument(
+        "--instance-id", required=True, help="The EC2 instance id (i-...)."
+    )
+    connect_parser.add_argument(
+        "--context", required=True, help="The docker context name (general-dev-<name>)."
+    )
+    connect_parser.add_argument("--profile", required=True, help="The AWS SSO profile.")
+    connect_parser.add_argument("--region", required=True, help="The AWS region.")
+    connect_parser.add_argument(
+        "--certs-root",
+        type=Path,
+        default=certs.DEFAULT_CERTS_ROOT,
+        help=f"Certificate material root (default: {certs.DEFAULT_CERTS_ROOT}).",
+    )
+    connect_parser.set_defaults(handler=_run_connect)
 
     return parser
 

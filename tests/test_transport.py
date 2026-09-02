@@ -51,17 +51,18 @@ import datetime
 import importlib
 import inspect
 import os
+import re
 import socket
 import subprocess
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import BinaryIO
 
 import pytest
-from conftest import FakeRunner, _synthetic_instance_id
+from conftest import FakeRunner, _repo_root, _synthetic_instance_id
 from devcontainer_config import certs
 
 # A single, runtime-generated, production-shaped (`i-` plus 17 lowercase hex)
@@ -1343,6 +1344,20 @@ def test_context_name_for_returns_the_general_dev_prefixed_name() -> None:
     assert transport.context_name_for("sandbox") == "general-dev-sandbox"
 
 
+def test_instance_from_context_name_is_the_inverse_of_context_name_for() -> None:
+    transport = _import_transport()
+
+    assert transport.instance_from_context_name("general-dev-sandbox") == "sandbox"
+    assert transport.instance_from_context_name(transport.context_name_for("remote")) == "remote"
+
+
+def test_instance_from_context_name_rejects_a_name_without_the_prefix() -> None:
+    transport = _import_transport()
+
+    with pytest.raises(transport.InvalidContextNameError, match="general-dev-"):
+        transport.instance_from_context_name("custom-context")
+
+
 def test_build_context_create_argv_contains_all_four_endpoint_components(tmp_path: Path) -> None:
     transport = _import_transport()
     ca_path, cert_path, key_path = tmp_path / "ca.pem", tmp_path / "cert.pem", tmp_path / "key.pem"
@@ -1647,6 +1662,55 @@ def test_ensure_context_expiry_precondition_calls_certs_classify(
     assert cert_not_after == certs.not_after(paths.client_cert)
     assert passed_reference_time == reference_time
     assert warn_days == 0
+
+
+# ---------------------------------------------------------------------------
+# `_use_context` (E6-F2-S1-T3, AC-FUNC-003): activating the context
+# `ensure_context` just created or updated, the step `_run_connect` needs so
+# a subsequent `make build` targets it rather than whatever was active
+# before.
+# ---------------------------------------------------------------------------
+
+
+def test_use_context_issues_the_docker_context_use_command() -> None:
+    transport = _import_transport()
+    runner = FakeRunner(
+        {("docker", "context", "use", "general-dev-sandbox"): transport.CommandResult(exit_code=0)}
+    )
+
+    transport._use_context(runner, "general-dev-sandbox")
+
+    assert runner.calls == [(("docker", "context", "use", "general-dev-sandbox"), None)]
+
+
+def test_use_context_raises_naming_the_context_when_the_command_fails() -> None:
+    transport = _import_transport()
+    runner = FakeRunner(
+        {
+            ("docker", "context", "use", "general-dev-sandbox"): transport.CommandResult(
+                exit_code=1, stderr="context not found"
+            )
+        }
+    )
+
+    with pytest.raises(transport.TransportError, match="general-dev-sandbox") as excinfo:
+        transport._use_context(runner, "general-dev-sandbox")
+
+    assert "context not found" in str(excinfo.value)
+
+
+def test_use_context_raises_when_docker_is_not_on_path() -> None:
+    transport = _import_transport()
+    runner = FakeRunner(
+        {
+            ("docker", "context", "use", "general-dev-sandbox"): transport.CommandResult(
+                exit_code=127, binary_missing=True
+            )
+        }
+    )
+
+    with pytest.raises(transport.TransportError, match="docker is not on PATH"):
+        transport._use_context(runner, "general-dev-sandbox")
 
 
 # ---------------------------------------------------------------------------
@@ -2095,3 +2159,528 @@ def test_handshake_san_diagnosis_names_the_reissue_invocation_for_the_created_in
     assert "IP:127.0.0.1" in message
     assert "DNS:localhost" in message
     assert "/devcontainer:certs INSTANCE=sandbox" in message
+
+
+# ---------------------------------------------------------------------------
+# E6-F2-S1-T3: wiring the SSM transport into the build path. "The build
+# path" is the `Makefile`'s `connect` target and anything under
+# `.devcontainer/`, not this module's own CLI (Description, Approach step
+# 1): before this task, that grep returns only the two comment references
+# the Description names and no call site, because `_build_parser` defined
+# only `start` (E6-F2-S1-T1's raw forward, whose handler never calls
+# `ensure_context` or `handshake`, E6-F2-S1-T2) and the `Makefile`'s
+# `connect` target never referenced this module at all. `connect` is the
+# entry point that closes the module-level half of that gap; the
+# `Makefile`'s `connect` target closes the other half by dispatching to it
+# only when `DEVCONTAINER_TRANSPORT=ssm`, gated by the identical opt-in,
+# environment-resolved selector that defaults to the untouched
+# docker-tunnel.sh SSH path (AC-FUNC-001, AC-FUNC-002).
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_transport_defaults_to_ssh_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = _import_transport()
+    monkeypatch.delenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, raising=False)
+
+    assert transport.resolve_transport() == transport.TRANSPORT_SSH
+
+
+def test_resolve_transport_reads_the_opt_in_ssm_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = _import_transport()
+    monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, transport.TRANSPORT_SSM)
+
+    assert transport.resolve_transport() == transport.TRANSPORT_SSM
+
+
+def test_resolve_transport_rejects_an_unrecognized_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = _import_transport()
+    monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, "vpn")
+
+    with pytest.raises(transport.TransportError, match=transport.DEVCONTAINER_TRANSPORT_ENV_VAR):
+        transport.resolve_transport()
+
+
+def _non_comment_transport_call_sites(root: Path) -> list[str]:
+    """Every non-comment `Makefile`/`.devcontainer/` line naming `devcontainer_config.transport`.
+
+    The exact grep Approach step 1 and the Description specify (`grep -rn
+    devcontainer_config.transport Makefile .devcontainer`), narrowed to
+    lines that are not themselves a `#`-prefixed comment: `certs.py` and
+    `hostprobe.py` each carry a comment referencing this module's name, and
+    a bare substring grep would count those as a "call site" when they are
+    not one. Returns `"<relative path>: <line>"` for every match found, so
+    a failing assertion names exactly where the gap is (or is not).
+    """
+    call_site_pattern = re.compile(r"devcontainer_config\.transport\b")
+    devcontainer_dir = root / ".devcontainer"
+    candidate_paths = [root / "Makefile"] + sorted(
+        path for path in devcontainer_dir.rglob("*") if path.is_file()
+    )
+
+    call_sites: list[str] = []
+    for path in candidate_paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or not call_site_pattern.search(stripped):
+                continue
+            call_sites.append(f"{path.relative_to(root)}: {stripped}")
+    return call_sites
+
+
+def test_build_path_contains_a_devcontainer_config_transport_call_site() -> None:
+    """AC-TEST-001, AC-FUNC-001: the build-path gap the Description names, asserted mechanically.
+
+    Before this task, `grep -rn devcontainer_config.transport Makefile
+    .devcontainer` returns only the two comment references the Description
+    names (`certs.py`, `hostprobe.py`) and no call site, so `make connect`
+    could never be pointed at the SSM transport no matter what
+    `DEVCONTAINER_TRANSPORT` was set to. This inspects the actual build
+    path files on disk (`Makefile`'s `connect` target and anything under
+    `.devcontainer/`) for a genuine, non-comment call site, rather than
+    inspecting `transport.py`'s own CLI, which existed on both sides of the
+    gap and cannot distinguish "reachable from the build path" from
+    "reachable if a caller already knew the incantation".
+    """
+    call_sites = _non_comment_transport_call_sites(_repo_root())
+
+    assert call_sites, (
+        "grep -rn devcontainer_config.transport Makefile .devcontainer found no "
+        "non-comment call site: the build path cannot be pointed at the SSM transport."
+    )
+    assert any("devcontainer_config.transport connect" in site for site in call_sites), (
+        f"a devcontainer_config.transport reference exists ({call_sites}) but none of them "
+        "invoke the 'connect' entry point that wires ensure_context and handshake into the "
+        "forward."
+    )
+
+
+def test_connect_refuses_before_touching_anything_when_ssh_is_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-FUNC-002: an existing caller that sets nothing new observes no behavior change.
+
+    `ensure_agent_online` is monkeypatched to raise if called at all: a
+    caller of `connect` who never opted in must never reach AWS or docker,
+    not merely fail after doing so.
+    """
+    transport = _import_transport()
+    monkeypatch.delenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, raising=False)
+
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError(
+            "connect must not touch AWS/docker when the SSH default is in effect"
+        )
+
+    monkeypatch.setattr(transport, "ensure_agent_online", _fail_if_called)
+
+    exit_code = transport.main(
+        [
+            "connect",
+            "--context",
+            "general-dev-sandbox",
+            "--instance-id",
+            _INSTANCE_ID,
+            "--profile",
+            "sandbox",
+            "--region",
+            "us-east-1",
+        ]
+    )
+
+    assert exit_code == 1
+
+
+def test_connect_refuses_when_ssh_is_explicitly_selected(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    transport = _import_transport()
+    monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, transport.TRANSPORT_SSH)
+
+    exit_code = transport.main(
+        [
+            "connect",
+            "--context",
+            "general-dev-sandbox",
+            "--instance-id",
+            _INSTANCE_ID,
+            "--profile",
+            "sandbox",
+            "--region",
+            "us-east-1",
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert transport.DEVCONTAINER_TRANSPORT_ENV_VAR in captured.err
+    assert transport.TRANSPORT_SSM in captured.err
+
+
+def _no_ssh_forward_launcher(
+    calls: list[tuple[str, ...]],
+) -> Callable[[Sequence[str]], _FakeForwardProcess]:
+    def launcher(command: Sequence[str]) -> _FakeForwardProcess:
+        calls.append(tuple(command))
+        return _FakeForwardProcess()
+
+    return launcher
+
+
+def test_connect_selecting_ssm_creates_the_tcp_context_and_spawns_no_ssh_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC-FUNC-003, AC-FUNC-004, AC-TEST-002: the full `connect` flow, opted in.
+
+    Drives `main(["connect", ...])` end to end against fakes (AC-TEST-005:
+    no real subprocess, no network beyond a loopback listener this test
+    owns) and asserts, on every argument vector issued to `aws`, `docker`
+    and the session launcher alike, that no element anywhere is (or
+    contains) `ssh` and that `AWS-StartSSHSession` is never named -- the
+    same mechanical style `build_start_session_argv`'s own test already
+    applies to that one function, now applied to the composed `connect`
+    flow this task adds. Also confirms the positive half of AC-FUNC-003: the
+    docker context actually gets created, at the allocated `tcp://` port.
+    """
+    transport = _import_transport()
+    monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, transport.TRANSPORT_SSM)
+    instance_id = _INSTANCE_ID
+    context_name = "general-dev-sandbox"
+    paths = _issue_client_material(tmp_path, "sandbox")
+    launcher_calls: list[tuple[str, ...]] = []
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        fixed_port = int(listener.getsockname()[1])
+        listener.listen(1)
+        monkeypatch.setattr(transport, "_bind_free_port", lambda: fixed_port)
+
+        create_argv = tuple(
+            transport.build_context_create_argv(
+                context_name=context_name,
+                port=fixed_port,
+                ca_path=paths.ca_cert,
+                cert_path=paths.client_cert,
+                key_path=paths.client_key,
+            )
+        )
+        runner = FakeRunner(
+            {
+                _identity_command(instance_id, "sandbox", "us-east-1"): transport.CommandResult(
+                    exit_code=0,
+                    stdout='{"InstanceInformationList": [{"PingStatus": "Online"}]}',
+                ),
+                _context_inspect_command(context_name): _no_such_context_result(
+                    transport, context_name
+                ),
+                create_argv: transport.CommandResult(exit_code=0, stdout=f"{context_name}\n"),
+                ("docker", "context", "use", context_name): transport.CommandResult(
+                    exit_code=0, stdout=f"{context_name}\n"
+                ),
+                _version_command(context_name): transport.CommandResult(
+                    exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"1.51"}'
+                ),
+                _info_command(context_name): transport.CommandResult(exit_code=0, stdout="[]"),
+            }
+        )
+        monkeypatch.setattr(transport, "subprocess_command_runner", runner)
+        monkeypatch.setattr(
+            transport, "default_process_launcher", _no_ssh_forward_launcher(launcher_calls)
+        )
+
+        exit_code = transport.main(
+            [
+                "connect",
+                "--context",
+                context_name,
+                "--instance-id",
+                instance_id,
+                "--profile",
+                "sandbox",
+                "--region",
+                "us-east-1",
+                "--certs-root",
+                str(tmp_path),
+            ]
+        )
+
+    assert exit_code == 0
+    assert create_argv in [command for command, _ in runner.calls]
+    use_argv = ("docker", "context", "use", context_name)
+    assert use_argv in [command for command, _ in runner.calls], (
+        "connect created the context but never activated it; a subsequent 'make build' "
+        "would still target whatever context was active before"
+    )
+    assert [command for command, _ in runner.calls].index(use_argv) > [
+        command for command, _ in runner.calls
+    ].index(create_argv), "the context must be created before it is activated"
+    for command, _ in runner.calls:
+        assert not any("ssh" in element.lower() for element in command)
+        assert "AWS-StartSSHSession" not in command
+    assert launcher_calls, "the session launcher was never invoked"
+    for command in launcher_calls:
+        assert not any("ssh" in element.lower() for element in command)
+        assert "AWS-StartSSHSession" not in command
+    captured = capsys.readouterr()
+    assert f"docker context {context_name!r}" in captured.out
+
+
+def test_connect_refuses_before_touching_aws_when_the_client_certificate_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The certificate precondition is checked before an AWS session is ever opened.
+
+    A missing (or expired) client certificate is the most common reason
+    `connect` fails, needs no AWS or docker call to detect, and is
+    otherwise only caught inside `ensure_context`, well after
+    `_establish_forward` has already spent a real SSM session and an
+    allocated loopback port on a `connect` invocation that could not
+    possibly complete. `ensure_agent_online` is monkeypatched to raise if
+    reached at all, exactly as the SSH-default refusal test above proves
+    for the opt-in gate itself.
+    """
+    transport = _import_transport()
+    monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, transport.TRANSPORT_SSM)
+
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError(
+            "connect must not touch AWS before the client certificate precondition is checked"
+        )
+
+    monkeypatch.setattr(transport, "ensure_agent_online", _fail_if_called)
+
+    exit_code = transport.main(
+        [
+            "connect",
+            "--context",
+            "general-dev-sandbox",
+            "--instance-id",
+            _INSTANCE_ID,
+            "--profile",
+            "sandbox",
+            "--region",
+            "us-east-1",
+            "--certs-root",
+            str(tmp_path),
+        ]
+    )
+
+    assert exit_code == 1
+
+
+def test_connect_stops_the_forward_when_ensure_context_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failure between an established forward and `_run_until_interrupted` must not leak it.
+
+    `ensure_context` can fail for reasons the earlier, pre-forward
+    certificate precondition cannot catch -- a pre-existing `ssh://`
+    context, for one (`LegacyContextError`). Before
+    `_teardown_forward_on_error` wrapped this window, `_run_connect` had no
+    teardown guard between `_establish_forward` and
+    `_run_until_interrupted`'s own `finally`, so a raise here orphaned the
+    already-launched `aws ssm start-session` child holding the allocated
+    loopback port. `stop_forward` is not monkeypatched: `fake_process.
+    terminated` is the real state flip `stop_forward` produces by calling
+    `.terminate()` on it.
+    """
+    transport = _import_transport()
+    monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, transport.TRANSPORT_SSM)
+    instance_id = _INSTANCE_ID
+    context_name = "general-dev-sandbox"
+    _issue_client_material(tmp_path, "sandbox")
+    identity_command = _identity_command(instance_id, "sandbox", "us-east-1")
+    context_command = _context_inspect_command(context_name)
+    runner = FakeRunner(
+        {
+            identity_command: transport.CommandResult(
+                exit_code=0, stdout='{"InstanceInformationList": [{"PingStatus": "Online"}]}'
+            ),
+            context_command: _no_such_context_result(transport, context_name),
+        }
+    )
+    monkeypatch.setattr(transport, "subprocess_command_runner", runner)
+
+    def _raise_legacy_context_error(*args: object, **kwargs: object) -> None:
+        raise transport.LegacyContextError("ERROR: pretend a legacy ssh:// context exists")
+
+    monkeypatch.setattr(transport, "ensure_context", _raise_legacy_context_error)
+
+    def _fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("_use_context/handshake must not run once ensure_context raised")
+
+    monkeypatch.setattr(transport, "_use_context", _fail_if_called)
+    monkeypatch.setattr(transport, "handshake", _fail_if_called)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        fixed_port = int(listener.getsockname()[1])
+        listener.listen(1)
+        monkeypatch.setattr(transport, "_bind_free_port", lambda: fixed_port)
+        fake_process = _FakeForwardProcess()
+        monkeypatch.setattr(transport, "default_process_launcher", lambda command: fake_process)
+
+        exit_code = transport.main(
+            [
+                "connect",
+                "--context",
+                context_name,
+                "--instance-id",
+                instance_id,
+                "--profile",
+                "sandbox",
+                "--region",
+                "us-east-1",
+                "--certs-root",
+                str(tmp_path),
+            ]
+        )
+
+    assert exit_code == 1
+    assert fake_process.terminated is True, (
+        "ensure_context raising must not leave the SSM forward process running"
+    )
+
+
+def test_connect_stops_the_forward_when_handshake_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same no-leak guarantee as above, for a failure after the context is created and active.
+
+    A SAN-mismatch handshake failure is one of this task's own named error
+    paths (Error Handling Contract): TLS validates the name the client
+    used through the loopback forward, and a real failure there must not
+    leave the forward open with nothing left using it.
+    """
+    transport = _import_transport()
+    monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, transport.TRANSPORT_SSM)
+    instance_id = _INSTANCE_ID
+    context_name = "general-dev-sandbox"
+    _issue_client_material(tmp_path, "sandbox")
+    identity_command = _identity_command(instance_id, "sandbox", "us-east-1")
+    context_command = _context_inspect_command(context_name)
+    runner = FakeRunner(
+        {
+            identity_command: transport.CommandResult(
+                exit_code=0, stdout='{"InstanceInformationList": [{"PingStatus": "Online"}]}'
+            ),
+            context_command: _no_such_context_result(transport, context_name),
+        }
+    )
+    monkeypatch.setattr(transport, "subprocess_command_runner", runner)
+    monkeypatch.setattr(transport, "ensure_context", lambda *args, **kwargs: context_name)
+    monkeypatch.setattr(transport, "_use_context", lambda *args, **kwargs: None)
+
+    def _raise_handshake_failure(*args: object, **kwargs: object) -> None:
+        raise transport.DockerHandshakeTimeoutError("ERROR: pretend the handshake never completed")
+
+    monkeypatch.setattr(transport, "handshake", _raise_handshake_failure)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        fixed_port = int(listener.getsockname()[1])
+        listener.listen(1)
+        monkeypatch.setattr(transport, "_bind_free_port", lambda: fixed_port)
+        fake_process = _FakeForwardProcess()
+        monkeypatch.setattr(transport, "default_process_launcher", lambda command: fake_process)
+
+        exit_code = transport.main(
+            [
+                "connect",
+                "--context",
+                context_name,
+                "--instance-id",
+                instance_id,
+                "--profile",
+                "sandbox",
+                "--region",
+                "us-east-1",
+                "--certs-root",
+                str(tmp_path),
+            ]
+        )
+
+    assert exit_code == 1
+    assert fake_process.terminated is True, (
+        "handshake raising must not leave the SSM forward process running"
+    )
+
+
+def test_transport_module_never_references_an_ssh_config_path() -> None:
+    """AC-FUNC-004 (static half): nothing here can ever write `~/.ssh/config`.
+
+    A structural guard rather than a behavioral one (AC-TEST-002 already
+    proves no `ssh` process is spawned dynamically): if a future change to
+    this module ever grew code that wrote or referenced an SSH config path,
+    this fails immediately naming the module, rather than relying on an
+    operator to notice a stray file on disk.
+    """
+    transport = _import_transport()
+
+    source = inspect.getsource(transport)
+
+    assert "ssh/config" not in source
+    assert "known_hosts" not in source
+
+
+def test_connect_returns_immediately_when_wait_ready_is_interrupted_before_the_context_is_touched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`_establish_forward` returning `None`: a `KeyboardInterrupt` during `wait_ready` must stop
+    `connect` before it ever calls `ensure_context` or `handshake` -- the same guarantee
+    `test_main_start_stops_the_forward_when_a_keyboard_interrupt_arrives_during_wait_ready`
+    already proves for `start`'s own use of the now-shared `_establish_forward`.
+    """
+    transport = _import_transport()
+    monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, transport.TRANSPORT_SSM)
+    instance_id = _INSTANCE_ID
+    context_name = "general-dev-sandbox"
+    _issue_client_material(tmp_path, "sandbox")
+    identity_command = _identity_command(instance_id, "sandbox", "us-east-1")
+    context_command = _context_inspect_command(context_name)
+    runner = FakeRunner(
+        {
+            identity_command: transport.CommandResult(
+                exit_code=0, stdout='{"InstanceInformationList": [{"PingStatus": "Online"}]}'
+            ),
+            context_command: _no_such_context_result(transport, context_name),
+        }
+    )
+    monkeypatch.setattr(transport, "subprocess_command_runner", runner)
+    fake_process = _FakeForwardProcess(announce_ready=False)
+    monkeypatch.setattr(transport, "default_process_launcher", lambda command: fake_process)
+
+    def raise_keyboard_interrupt(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(transport, "wait_ready", raise_keyboard_interrupt)
+
+    def fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError(
+            "ensure_context/handshake must not run when wait_ready is interrupted"
+        )
+
+    monkeypatch.setattr(transport, "ensure_context", fail_if_called)
+    monkeypatch.setattr(transport, "handshake", fail_if_called)
+
+    exit_code = transport.main(
+        [
+            "connect",
+            "--context",
+            context_name,
+            "--instance-id",
+            instance_id,
+            "--profile",
+            "sandbox",
+            "--region",
+            "us-east-1",
+            "--certs-root",
+            str(tmp_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert fake_process.terminated is True

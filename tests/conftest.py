@@ -50,10 +50,23 @@ runner seam `hostprobe.py` defines and `devcontainer_config.transport`
 imports and reuses rather than declaring a second, independent runner
 type. Both `tests/test_transport.py` and `tests/test_hostprobe.py` import
 this single definition (E6-F2-S1-T1); neither file declares its own copy.
+
+`ROOT_HCL_RELATIVE`, `_repo_root`, `_read_repo_file`,
+`_first_skip_guard_finding` and `_assert_no_skip_guard` are shared by
+`tests/test_tool_version_floors.py` and `tests/test_state_bucket_name.py`
+(E5-F2-S1-T2). Both modules read `remote-instances/root.hcl` off the same
+repository root and both carry an AC-TEST-007 self-check proving neither
+module hides a failure behind a skip, xfail or guarded import; before this
+extraction each file declared byte-identical copies of `_repo_root`, the
+`ROOT_HCL_RELATIVE` constant, an `ast`-based skip/xfail/guarded-import
+detector and its own "does this file exist" reader, which would have let a
+future strengthening of the detector land in one module while the other
+kept running the older, weaker check.
 """
 
 from __future__ import annotations
 
+import ast
 import re
 import uuid
 from collections.abc import Sequence
@@ -61,6 +74,78 @@ from pathlib import Path
 from typing import Any
 
 from devcontainer_config import repo
+
+ROOT_HCL_RELATIVE = "remote-instances/root.hcl"
+
+
+def _repo_root() -> Path:
+    """The git repository root containing this file, resolved via `devcontainer_config.repo`."""
+    return repo.find_root(Path(__file__).resolve().parent)
+
+
+def _read_repo_file(relative_path: str, *, error_cls: type[Exception]) -> str:
+    """`relative_path` under the repository root, or `error_cls` naming the missing file.
+
+    Shared by `tests/test_state_bucket_name.py` (reading
+    `remote-instances/root.hcl` as `BucketNameError`) and
+    `tests/test_tool_version_floors.py` (reading `remote-instances/root.hcl`
+    and `.devcontainer/devcontainer.json` as `FloorAssertionError`): both
+    need the identical "does not exist under this checkout" failure shape
+    but a module-specific exception type, so `error_cls` is a required
+    keyword argument rather than each caller re-declaring its own reader.
+    """
+    full_path = _repo_root() / relative_path
+    if not full_path.is_file():
+        raise error_cls(f"{relative_path} does not exist under {full_path.parent}")
+    return full_path.read_text(encoding="utf-8")
+
+
+def _first_skip_guard_finding(source: str) -> str | None:
+    """A description of the first skip/xfail decorator, `importorskip` call or
+    `except ImportError` guard found in `source`, or `None` if there is none.
+
+    Parsed via `ast` rather than grepped, so this cannot be tripped by the
+    forbidden names appearing as plain text inside this very function (a
+    substring search over the raw module text would match the string
+    literals this docstring and this function's own logic necessarily
+    contain) -- only a real decorator, a real call, or a real `except`
+    handler counts.
+    """
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            for decorator in node.decorator_list:
+                dotted = ast.unparse(decorator)
+                if "pytest.mark.skip" in dotted or "pytest.mark.xfail" in dotted:
+                    return f"@{dotted} decorating {node.name}"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "importorskip":
+                return "pytest.importorskip(...) call"
+        if isinstance(node, ast.Try):
+            for handler in node.handlers:
+                if handler.type is not None and "ImportError" in ast.unparse(handler.type):
+                    return "except ImportError guard"
+    return None
+
+
+def _assert_no_skip_guard(module_path: Path) -> None:
+    """Fails naming the first skip/xfail/guarded-import construct found in `module_path`.
+
+    `module_path` is always the caller's own `Path(__file__)`, never this
+    file's: the property under test (AC-TEST-007) is "this module hides no
+    failure behind a skip", which only means something read against the
+    module actually declaring the test, not against `tests/conftest.py`
+    itself. Both `tests/test_tool_version_floors.py` and
+    `tests/test_state_bucket_name.py` route their own
+    `test_no_skip_xfail_or_conditional_import_guards_this_module` through
+    this single assertion.
+    """
+    source = module_path.read_text(encoding="utf-8")
+    finding = _first_skip_guard_finding(source)
+    assert finding is None, (
+        f"{finding} found in {module_path.name}; a failure here must never be hidden "
+        "behind a skip, xfail or guarded import"
+    )
 
 
 def _synthetic_account_id() -> str:

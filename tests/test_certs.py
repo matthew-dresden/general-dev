@@ -1320,6 +1320,45 @@ def test_render_report_renew_row_names_the_reissue_invocation() -> None:
     )
 
 
+def test_renew_invocation_template_is_public_and_matches_every_reissue_site(
+    tmp_path: Path,
+) -> None:
+    """`RENEW_INVOCATION_TEMPLATE` (E6-F2-S1-T2's code_review round 1 fix) is
+    public -- not `_RENEW_INVOCATION_TEMPLATE` -- because `devcontainer_config
+    .transport` formats the identical `/devcontainer:certs INSTANCE={instance}`
+    template in its own certificate-not-ready and SAN-mismatch remedies and
+    must not carry a second, independently drifting copy of this module's own
+    reissue invocation. Both real call sites -- the missing-CA remedy
+    `_require_ca` raises through `issue_server`, and a `RENEW` status row
+    `render_report` prints -- are exercised here and proven to emit the exact
+    string `RENEW_INVOCATION_TEMPLATE.format(instance=...)` produces, not a
+    hand-typed string that could independently agree with itself.
+    """
+    certs = _import_certs()
+
+    assert certs.RENEW_INVOCATION_TEMPLATE == "/devcontainer:certs INSTANCE={instance}"
+    assert not hasattr(certs, "_RENEW_INVOCATION_TEMPLATE")
+
+    instance = f"no-ca-{uuid.uuid4().hex[:8]}"
+    expected_invocation = certs.RENEW_INVOCATION_TEMPLATE.format(instance=instance)
+    assert expected_invocation == f"/devcontainer:certs INSTANCE={instance}"
+
+    paths = certs.CertPaths(instance=instance, root=tmp_path)
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.issue_server(paths)
+    assert expected_invocation in str(excinfo.value)
+
+    row = certs.CertStatusRow(
+        instance=instance,
+        role="client",
+        not_after=datetime.datetime(2026, 8, 29, tzinfo=datetime.UTC),
+        days=11,
+        status=certs.STATUS_RENEW,
+    )
+    report_line = certs.render_report([row]).splitlines()[1]
+    assert report_line.endswith(expected_invocation)
+
+
 def test_render_report_with_no_rows_prints_header_and_setup_remote_line() -> None:
     certs = _import_certs()
     report = certs.render_report([])

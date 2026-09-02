@@ -312,16 +312,22 @@ argument vector that carries the docker API (no SSH element anywhere in
 it), allocates the local end of that forward, and detects when it is ready
 by waiting for the session process to report its port opened and then
 confirming it with a connection to the local port, rather than waiting a
-fixed amount of time.
+fixed amount of time. E6-F2-S1-T2 adds this module's other half: creating
+or updating the per-instance docker context that carries the TLS material
+(`transport.ensure_context`) and completing the `docker version` handshake
+that proves the whole path works (`transport.handshake`), translating a
+handshake failure into the SAN requirement or a connection diagnosis
+(`transport.diagnose_handshake_failure`) rather than a bare, opaque TLS
+error -- see `docs/devcontainer.md`'s "Transport" section.
 `.claude/plugins/devcontainer/scripts/devcontainer_config/hostprobe.py`
 (E1-F3-S1-T1) is the docker-handshake probe `engine`, `setup-local` and
-`setup-remote` share.
+`setup-remote` share for their own, simpler "does the engine answer" check.
 
 | Variable | Default | Defined in |
 |---|---|---|
 | `DOCKER_TLS_PORT` | `2376` | `transport.py`, read by `build_start_session_argv` |
 | `SSM_FORWARD_TIMEOUT` | `30` | `transport.py`, read by `wait_ready` and `stop_forward` |
-| `DOCKER_HANDSHAKE_TIMEOUT` | `30` | `hostprobe.py`, read by `probe_docker`'s handshake check |
+| `DOCKER_HANDSHAKE_TIMEOUT` | `30` | `hostprobe.py`'s `read_positive_seconds`, the one place its name, default and validation are declared; `transport.py`'s `handshake` (E6-F2-S1-T2) calls the same function rather than declaring its own copy |
 
 `DOCKER_TLS_PORT` is the port the rootless docker daemon on the instance
 listens on, `127.0.0.1`-only, behind a security group with zero ingress
@@ -336,10 +342,33 @@ opened and then confirm that with a connection attempt, naming the
 instance, the port and this variable before raising; `transport.stop_forward`
 separately bounds by the same variable the grace period it gives the
 session process to exit cleanly after asking it to terminate, before
-escalating to a kill. All three variables are optional: each default above
-applies whenever the variable is unset, and each module rejects a
-non-numeric or non-positive value naming the variable and its value rather
-than silently falling back to the default.
+escalating to a kill. `DOCKER_HANDSHAKE_TIMEOUT` is read by two callers that
+each bound a different `docker version` call, but through one shared
+reader: `hostprobe.read_positive_seconds` is the single place this
+variable's name, the `30` default and the finite/positive validation are
+declared (AC-FUNC-007), and both `hostprobe.py`'s `probe_docker` handshake
+check (one single `docker version` call) and `transport.py`'s `handshake`
+(E6-F2-S1-T2, which retries its own `docker version` call against a
+context it may have just created, until it answers or this deadline
+passes) call that same function rather than either declaring its own copy
+of the variable or its default. `transport.py`'s own
+`_positive_seconds_from_env` wraps `read_positive_seconds`'s
+`HostProbeError` in its own `TransportError` naming the variable, its
+offending value and the default, so a caller of `transport.py` never needs
+to catch an exception type owned by `hostprobe.py`; both
+`_forward_timeout_seconds` (`SSM_FORWARD_TIMEOUT`) and
+`_handshake_timeout_seconds` (`DOCKER_HANDSHAKE_TIMEOUT`) call that one
+wrap rather than each declaring its own. Naming the context, the local
+port and this variable together is a different error,
+`DockerHandshakeTimeoutError`, which `transport.handshake` raises instead,
+only once the retried `docker version` call itself either never answers
+before the deadline or answers with no budget left for the rootless probe
+that follows it -- `handshake` already knows the context and the port at
+that point, which the timeout reader itself never does. All three
+variables are optional: each default above applies whenever the variable
+is unset, and each reader rejects a non-numeric or non-positive value
+naming the variable and its value rather than silently falling back to
+the default.
 
 ### What did not change
 

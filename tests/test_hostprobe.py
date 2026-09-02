@@ -621,6 +621,56 @@ def test_docker_handshake_rejects_a_non_positive_or_non_finite_timeout(
         hostprobe.probe_docker(runner)
 
 
+def test_read_positive_seconds_returns_the_default_when_the_variable_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`read_positive_seconds` is the single shared reader `_docker_handshake_timeout_seconds`
+    and `devcontainer_config.transport._handshake_timeout_seconds` (E6-F2-S1-T2) both call,
+    rather than each declaring an independent copy of an env-var's name, default and
+    validation (code_review round 1, BLOCKING DRY)."""
+    hostprobe = _import_hostprobe()
+    monkeypatch.delenv("SOME_OTHER_POSITIVE_SECONDS_VAR", raising=False)
+
+    assert hostprobe.read_positive_seconds("SOME_OTHER_POSITIVE_SECONDS_VAR", 12.5) == 12.5
+
+
+def test_read_positive_seconds_reads_a_valid_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    hostprobe = _import_hostprobe()
+    monkeypatch.setenv("SOME_OTHER_POSITIVE_SECONDS_VAR", "3.5")
+
+    assert hostprobe.read_positive_seconds("SOME_OTHER_POSITIVE_SECONDS_VAR", 12.5) == 3.5
+
+
+def test_read_positive_seconds_rejects_an_unparsable_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostprobe = _import_hostprobe()
+    monkeypatch.setenv("SOME_OTHER_POSITIVE_SECONDS_VAR", "not-a-number")
+
+    with pytest.raises(hostprobe.HostProbeError, match="SOME_OTHER_POSITIVE_SECONDS_VAR"):
+        hostprobe.read_positive_seconds("SOME_OTHER_POSITIVE_SECONDS_VAR", 12.5)
+
+
+@pytest.mark.parametrize("raw_value", ["0", "-5", "nan", "inf", "-inf"])
+def test_read_positive_seconds_rejects_a_non_positive_or_non_finite_value(
+    monkeypatch: pytest.MonkeyPatch, raw_value: str
+) -> None:
+    hostprobe = _import_hostprobe()
+    monkeypatch.setenv("SOME_OTHER_POSITIVE_SECONDS_VAR", raw_value)
+
+    with pytest.raises(hostprobe.HostProbeError, match="SOME_OTHER_POSITIVE_SECONDS_VAR"):
+        hostprobe.read_positive_seconds("SOME_OTHER_POSITIVE_SECONDS_VAR", 12.5)
+
+
+def test_docker_handshake_timeout_env_var_and_default_are_public() -> None:
+    """Public (not underscore-prefixed) so `transport.py` imports the identical name and
+    default rather than redeclaring either (AC-FUNC-007)."""
+    hostprobe = _import_hostprobe()
+
+    assert hostprobe.DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR == "DOCKER_HANDSHAKE_TIMEOUT"
+    assert hostprobe.DOCKER_HANDSHAKE_TIMEOUT_DEFAULT_SECONDS == 30.0
+
+
 def test_no_probe_calls_time_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     """Spec Section 7.2: no sleep, anywhere. Patched to raise if ever called."""
     import time

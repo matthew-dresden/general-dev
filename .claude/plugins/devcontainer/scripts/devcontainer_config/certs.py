@@ -233,11 +233,16 @@ CERT_WARN_DAYS_DEFAULT = 14
 # invocation template a `RENEW` row carries (AC-FUNC-005). Roles are the two
 # certificate kinds this module ever persists locally (module docstring),
 # ordered the way spec Section 4.1.2's own worked example orders them:
-# client before ca.
+# client before ca. `RENEW_INVOCATION_TEMPLATE` is public (not
+# underscore-prefixed) because `devcontainer_config.transport` (E6-F2-S1-T2)
+# names the identical reissue invocation in its own certificate-not-ready
+# and SAN-mismatch remedies and must format the same template this module
+# defines, rather than declaring a second, independently drifting copy of
+# the same skill invocation string.
 STATUS_OK = "ok"
 STATUS_RENEW = "RENEW"
 STATUS_EXPIRED = "expired"
-_RENEW_INVOCATION_TEMPLATE = "/devcontainer:certs INSTANCE={instance}"
+RENEW_INVOCATION_TEMPLATE = "/devcontainer:certs INSTANCE={instance}"
 ROLE_CLIENT = "client"
 ROLE_CA = "ca"
 _INSPECTABLE_ROLES: tuple[str, ...] = (ROLE_CLIENT, ROLE_CA)
@@ -594,7 +599,7 @@ def _require_ca(paths: CertPaths) -> None:
     previous one already signed, including the server certificate the
     running daemon is serving (this task's Error Handling Contract,
     AC-FUNC-005). The remedy names the exact skill invocation that creates
-    an authority (`_RENEW_INVOCATION_TEMPLATE`, the identical
+    an authority (`RENEW_INVOCATION_TEMPLATE`, the identical
     `/devcontainer:certs INSTANCE=<name>` spelling `## Expiry`'s own `RENEW`
     row already gives an operator, reused here rather than a second literal)
     rather than the Python function name, since the operator driving this
@@ -607,7 +612,7 @@ def _require_ca(paths: CertPaths) -> None:
         raise CertsError(
             f"ERROR: no certificate authority exists for instance {paths.instance!r}\n"
             f"Expected {paths.ca_key} and {paths.ca_cert} to already exist.\n"
-            f"Run {_RENEW_INVOCATION_TEMPLATE.format(instance=paths.instance)} to create one first."
+            f"Run {RENEW_INVOCATION_TEMPLATE.format(instance=paths.instance)} to create one first."
         )
     for component in (paths.ca_key, paths.ca_cert):
         _require_parseable_ca_component(component, paths.instance)
@@ -1265,7 +1270,7 @@ def _format_row(row: CertStatusRow) -> str:
         f"{row.days:>8}  {row.status}"
     )
     if row.status == STATUS_RENEW:
-        line += f"   {_RENEW_INVOCATION_TEMPLATE.format(instance=row.instance)}"
+        line += f"   {RENEW_INVOCATION_TEMPLATE.format(instance=row.instance)}"
     return line
 
 

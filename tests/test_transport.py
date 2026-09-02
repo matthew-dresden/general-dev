@@ -1,4 +1,5 @@
-"""Tests for devcontainer_config.transport: the SSM port forward manager (E6-F2-S1-T1).
+"""Tests for devcontainer_config.transport: the SSM port forward manager (E6-F2-S1-T1)
+and the docker context / handshake it hands off to (E6-F2-S1-T2).
 
 The `devcontainer_config.transport` import is deferred into function bodies
 (via `_import_transport`), the same convention `tests/test_hostprobe.py` and
@@ -7,7 +8,10 @@ production-source files and re-runs a single named test node, and a
 module-level `from devcontainer_config import transport` would fail
 COLLECTION for the whole file (pytest exit 2, no test outcome recorded)
 instead of failing the one test that actually exercises the missing module
-(pytest exit 1, a real FAILED result).
+(pytest exit 1, a real FAILED result). `devcontainer_config.certs` (E6-F1-S1-T1,
+E6-F1-S1-T2) is not stashed by this task's own gate -- it already exists on
+disk, unchanged by this task's own Changes Manifest -- so it is imported at
+module scope below, the same way `tests/test_certs.py` itself imports it.
 
 `FakeRunner` (imported from `tests/conftest.py`) fakes the same
 `devcontainer_config.hostprobe.CommandRunner` seam `transport.py` itself
@@ -15,20 +19,35 @@ imports that runner type from `hostprobe`. This file imports the one
 shared definition `tests/test_hostprobe.py` also imports, rather than
 declaring a second copy of the same fake. It never shells out, it answers
 from a fixed fixture map keyed by the exact command tuple, and it records
-every call it received so a test can assert the exact sequence issued. No
-test in this file invokes a real `aws` or `docker` binary (AC-TEST-005):
-every AWS/docker call in this file goes through `FakeRunner`, and the one
-test that exercises the module's real subprocess-backed seams
-(`subprocess_command_runner`, `default_process_launcher`) drives them with
-harmless, network-free host binaries (`echo`, `tail -f /dev/null`), never a
-real `aws` or `docker`. The two tests that need a real TCP peer create and
-control that peer themselves, as a loopback listener this file opens and
-closes -- never a connection to anything outside this process.
+every call it received so a test can assert the exact sequence issued.
+`_SequencedRunner`, declared below, is a second, deliberately different
+fake: `handshake`'s own retry-until-it-answers loop issues the identical
+command tuple more than once with a *different* outcome each time, which
+`FakeRunner`'s one-fixed-result-per-command-tuple map cannot express
+without changing that map's contract for every other consumer of it,
+so it stays local to this file rather than being folded into
+`tests/conftest.py`. No test in this file invokes a real `aws` or `docker`
+binary (AC-TEST-005): every AWS/docker call in this file goes through
+`FakeRunner` or `_SequencedRunner`, and the one test that exercises the
+module's real subprocess-backed seams (`subprocess_command_runner`,
+`default_process_launcher`) drives them with harmless, network-free host
+binaries (`echo`, `tail -f /dev/null`), never a real `aws` or `docker`. The
+two tests that need a real TCP peer create and control that peer
+themselves, as a loopback listener this file opens and closes -- never a
+connection to anything outside this process. Every `x509`/TLS stderr
+string this file feeds `diagnose_handshake_failure` and `handshake` is
+copied verbatim from a real `docker version`/`docker --context ... version`
+invocation this task's author ran against a real docker CLI and a real,
+deliberately mis-issued certificate (never invented prose), so a drift
+between this file's fixtures and what the real docker CLI actually prints
+would show up as a real production diagnosis failing to match, not merely
+as a synthetic string this file made up agreeing with itself.
 """
 
 from __future__ import annotations
 
 import ast
+import datetime
 import importlib
 import inspect
 import os
@@ -37,11 +56,13 @@ import subprocess
 import threading
 import time
 from collections.abc import Sequence
+from pathlib import Path
 from types import ModuleType
 from typing import BinaryIO
 
 import pytest
 from conftest import FakeRunner, _synthetic_instance_id
+from devcontainer_config import certs
 
 # A single, runtime-generated, production-shaped (`i-` plus 17 lowercase hex)
 # instance id shared by every test in this file, rather than a hand-typed
@@ -1292,3 +1313,785 @@ def test_main_start_fails_fast_when_the_launched_process_has_no_stdout_pipe(
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "stdout" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Docker context: creation, update-in-place, the legacy ssh:// refusal, and
+# the expiry precondition (E6-F2-S1-T2; AC-FUNC-001, AC-FUNC-002, AC-FUNC-006,
+# AC-TEST-001, AC-TEST-004).
+# ---------------------------------------------------------------------------
+
+
+def _issue_client_material(root: Path, instance: str) -> object:
+    """A real CA and client certificate under `root`, for one instance, via real openssl calls.
+
+    Uses `devcontainer_config.certs` (E6-F1-S1-T1) directly, the same public
+    API `tests/test_certs.py` itself drives, rather than hand-writing PEM
+    fixture bytes: `ensure_context`'s expiry precondition parses a real
+    certificate's `notAfter` through `certs.not_after`, so a hand-written
+    stub file would not exercise that parse at all.
+    """
+    paths = certs.CertPaths(instance=instance, root=root)
+    certs.create_ca(paths)
+    certs.issue_client(paths)
+    return paths
+
+
+def test_context_name_for_returns_the_general_dev_prefixed_name() -> None:
+    transport = _import_transport()
+
+    assert transport.context_name_for("sandbox") == "general-dev-sandbox"
+
+
+def test_build_context_create_argv_contains_all_four_endpoint_components(tmp_path: Path) -> None:
+    transport = _import_transport()
+    ca_path, cert_path, key_path = tmp_path / "ca.pem", tmp_path / "cert.pem", tmp_path / "key.pem"
+
+    argv = transport.build_context_create_argv(
+        context_name="general-dev-sandbox",
+        port=54321,
+        ca_path=ca_path,
+        cert_path=cert_path,
+        key_path=key_path,
+    )
+
+    assert argv[:4] == ["docker", "context", "create", "general-dev-sandbox"]
+    docker_value = argv[argv.index("--docker") + 1]
+    assert "host=tcp://127.0.0.1:54321" in docker_value
+    assert f"ca={ca_path}" in docker_value
+    assert f"cert={cert_path}" in docker_value
+    assert f"key={key_path}" in docker_value
+    assert "ssh://" not in docker_value
+
+
+def test_build_context_update_argv_uses_update_not_create(tmp_path: Path) -> None:
+    transport = _import_transport()
+    ca_path, cert_path, key_path = tmp_path / "ca.pem", tmp_path / "cert.pem", tmp_path / "key.pem"
+
+    argv = transport.build_context_update_argv(
+        context_name="general-dev-sandbox",
+        port=54321,
+        ca_path=ca_path,
+        cert_path=cert_path,
+        key_path=key_path,
+    )
+
+    assert argv[:4] == ["docker", "context", "update", "general-dev-sandbox"]
+
+
+def test_ensure_context_creates_a_context_when_absent(tmp_path: Path) -> None:
+    transport = _import_transport()
+    paths = _issue_client_material(tmp_path, "sandbox")
+    inspect_command = _context_inspect_command("general-dev-sandbox")
+    create_argv = tuple(
+        transport.build_context_create_argv(
+            context_name="general-dev-sandbox",
+            port=54321,
+            ca_path=paths.ca_cert,
+            cert_path=paths.client_cert,
+            key_path=paths.client_key,
+        )
+    )
+    runner = FakeRunner(
+        {
+            inspect_command: _no_such_context_result(transport, "general-dev-sandbox"),
+            create_argv: transport.CommandResult(exit_code=0, stdout="general-dev-sandbox\n"),
+        }
+    )
+
+    name = transport.ensure_context(
+        runner,
+        instance="sandbox",
+        port=54321,
+        certs_root=tmp_path,
+        reference_time=datetime.datetime.now(datetime.UTC),
+    )
+
+    assert name == "general-dev-sandbox"
+    assert runner.calls == [(inspect_command, None), (create_argv, None)]
+
+
+def test_ensure_context_updates_an_existing_tcp_context_in_place(tmp_path: Path) -> None:
+    transport = _import_transport()
+    paths = _issue_client_material(tmp_path, "sandbox")
+    inspect_command = _context_inspect_command("general-dev-sandbox")
+    update_argv = tuple(
+        transport.build_context_update_argv(
+            context_name="general-dev-sandbox",
+            port=54321,
+            ca_path=paths.ca_cert,
+            cert_path=paths.client_cert,
+            key_path=paths.client_key,
+        )
+    )
+    runner = FakeRunner(
+        {
+            inspect_command: transport.CommandResult(
+                exit_code=0, stdout='{"docker":{"Host":"tcp://127.0.0.1:9999"}}'
+            ),
+            update_argv: transport.CommandResult(exit_code=0, stdout="general-dev-sandbox\n"),
+        }
+    )
+
+    name = transport.ensure_context(
+        runner,
+        instance="sandbox",
+        port=54321,
+        certs_root=tmp_path,
+        reference_time=datetime.datetime.now(datetime.UTC),
+    )
+
+    assert name == "general-dev-sandbox"
+    # Only 'inspect' then 'update' were ever issued: FakeRunner raises on any
+    # unrecorded command, so a stray 'context create' or 'context rm' here
+    # would fail this test rather than silently pass (AC-FUNC-002).
+    assert runner.calls == [(inspect_command, None), (update_argv, None)]
+
+
+def test_ensure_context_refuses_an_existing_ssh_context_by_name(tmp_path: Path) -> None:
+    transport = _import_transport()
+    _issue_client_material(tmp_path, "sandbox")
+    inspect_command = _context_inspect_command("general-dev-sandbox")
+    runner = FakeRunner(
+        {
+            inspect_command: transport.CommandResult(
+                exit_code=0, stdout='{"docker":{"Host":"ssh://user@10.0.0.5"}}'
+            )
+        }
+    )
+
+    with pytest.raises(transport.LegacyContextError, match="general-dev-sandbox") as excinfo:
+        transport.ensure_context(
+            runner,
+            instance="sandbox",
+            port=54321,
+            certs_root=tmp_path,
+            reference_time=datetime.datetime.now(datetime.UTC),
+        )
+
+    assert "ssh://user@10.0.0.5" in str(excinfo.value)
+    assert runner.calls == [(inspect_command, None)]
+
+
+def test_ensure_context_raises_when_docker_is_not_on_path(tmp_path: Path) -> None:
+    transport = _import_transport()
+    _issue_client_material(tmp_path, "sandbox")
+    inspect_command = _context_inspect_command("general-dev-sandbox")
+    runner = FakeRunner(
+        {inspect_command: transport.CommandResult(exit_code=127, binary_missing=True)}
+    )
+
+    with pytest.raises(transport.TransportError, match="docker is not on PATH"):
+        transport.ensure_context(
+            runner,
+            instance="sandbox",
+            port=54321,
+            certs_root=tmp_path,
+            reference_time=datetime.datetime.now(datetime.UTC),
+        )
+
+
+def test_ensure_context_raises_naming_the_context_when_the_create_command_fails(
+    tmp_path: Path,
+) -> None:
+    transport = _import_transport()
+    paths = _issue_client_material(tmp_path, "sandbox")
+    inspect_command = _context_inspect_command("general-dev-sandbox")
+    create_argv = tuple(
+        transport.build_context_create_argv(
+            context_name="general-dev-sandbox",
+            port=54321,
+            ca_path=paths.ca_cert,
+            cert_path=paths.client_cert,
+            key_path=paths.client_key,
+        )
+    )
+    runner = FakeRunner(
+        {
+            inspect_command: _no_such_context_result(transport, "general-dev-sandbox"),
+            create_argv: transport.CommandResult(exit_code=1, stderr="ca.pem seems invalid"),
+        }
+    )
+
+    with pytest.raises(transport.TransportError, match="general-dev-sandbox") as excinfo:
+        transport.ensure_context(
+            runner,
+            instance="sandbox",
+            port=54321,
+            certs_root=tmp_path,
+            reference_time=datetime.datetime.now(datetime.UTC),
+        )
+
+    assert "ca.pem seems invalid" in str(excinfo.value)
+
+
+def test_ensure_context_raises_when_docker_is_not_on_path_for_the_create_command(
+    tmp_path: Path,
+) -> None:
+    """Distinct from the 'inspect' binary_missing case: the create command's own branch."""
+    transport = _import_transport()
+    paths = _issue_client_material(tmp_path, "sandbox")
+    inspect_command = _context_inspect_command("general-dev-sandbox")
+    create_argv = tuple(
+        transport.build_context_create_argv(
+            context_name="general-dev-sandbox",
+            port=54321,
+            ca_path=paths.ca_cert,
+            cert_path=paths.client_cert,
+            key_path=paths.client_key,
+        )
+    )
+    runner = FakeRunner(
+        {
+            inspect_command: _no_such_context_result(transport, "general-dev-sandbox"),
+            create_argv: transport.CommandResult(exit_code=127, binary_missing=True),
+        }
+    )
+
+    with pytest.raises(transport.TransportError, match="docker is not on PATH"):
+        transport.ensure_context(
+            runner,
+            instance="sandbox",
+            port=54321,
+            certs_root=tmp_path,
+            reference_time=datetime.datetime.now(datetime.UTC),
+        )
+
+
+def test_ensure_context_refuses_before_touching_docker_when_certificate_is_missing(
+    tmp_path: Path,
+) -> None:
+    transport = _import_transport()
+    certs.CertPaths(instance="sandbox", root=tmp_path)  # no CA, no client cert issued
+    runner = FakeRunner({})
+
+    with pytest.raises(transport.CertificateNotReadyError, match="sandbox"):
+        transport.ensure_context(
+            runner,
+            instance="sandbox",
+            port=54321,
+            certs_root=tmp_path,
+            reference_time=datetime.datetime.now(datetime.UTC),
+        )
+
+    assert runner.calls == []
+
+
+def test_ensure_context_refuses_before_touching_docker_when_certificate_is_expired(
+    tmp_path: Path,
+) -> None:
+    transport = _import_transport()
+    paths = _issue_client_material(tmp_path, "sandbox")
+    expiry = certs.not_after(paths.client_cert)
+    far_future = expiry + datetime.timedelta(days=1)
+    runner = FakeRunner({})
+
+    with pytest.raises(transport.CertificateNotReadyError, match="expired"):
+        transport.ensure_context(
+            runner,
+            instance="sandbox",
+            port=54321,
+            certs_root=tmp_path,
+            reference_time=far_future,
+        )
+
+    assert runner.calls == []
+
+
+def test_ensure_context_expiry_precondition_calls_certs_classify(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """AC-TEST-004: the precondition reuses `certs.classify` rather than reimplementing it."""
+    transport = _import_transport()
+    paths = _issue_client_material(tmp_path, "sandbox")
+    real_classify = certs.classify
+    calls: list[tuple[object, object, object]] = []
+
+    def spy_classify(cert_not_after: object, reference_time: object, warn_days: object) -> object:
+        calls.append((cert_not_after, reference_time, warn_days))
+        return real_classify(cert_not_after, reference_time, warn_days)
+
+    monkeypatch.setattr(certs, "classify", spy_classify)
+    inspect_command = _context_inspect_command("general-dev-sandbox")
+    create_argv = tuple(
+        transport.build_context_create_argv(
+            context_name="general-dev-sandbox",
+            port=54321,
+            ca_path=paths.ca_cert,
+            cert_path=paths.client_cert,
+            key_path=paths.client_key,
+        )
+    )
+    runner = FakeRunner(
+        {
+            inspect_command: _no_such_context_result(transport, "general-dev-sandbox"),
+            create_argv: transport.CommandResult(exit_code=0, stdout="general-dev-sandbox\n"),
+        }
+    )
+    reference_time = datetime.datetime.now(datetime.UTC)
+
+    transport.ensure_context(
+        runner,
+        instance="sandbox",
+        port=54321,
+        certs_root=tmp_path,
+        reference_time=reference_time,
+    )
+
+    assert len(calls) == 1
+    # test_review (round 1, non-blocking): assert the delegated arguments too, not
+    # merely that classify was called once -- a precondition that reimplemented the
+    # window with the wrong certificate or the wrong reference time would still pass
+    # a bare `len(calls) == 1` check but fails these.
+    cert_not_after, passed_reference_time, warn_days = calls[0]
+    assert cert_not_after == certs.not_after(paths.client_cert)
+    assert passed_reference_time == reference_time
+    assert warn_days == 0
+
+
+# ---------------------------------------------------------------------------
+# Handshake failure translation (E6-F2-S1-T2; AC-FUNC-004, AC-FUNC-005,
+# AC-TEST-002). Every stderr string below is copied verbatim from a real
+# `docker`/`docker --context ... version` invocation this task's author ran
+# against a real docker CLI (29.4.0) and a real, deliberately mis-issued
+# certificate -- never invented prose (see the module docstring).
+# ---------------------------------------------------------------------------
+
+_REAL_SAN_MISMATCH_WRONG_IP_STDERR = (
+    'error during connect: Get "https://127.0.0.1:18444/v1.54/version": '
+    "tls: failed to verify certificate: x509: certificate is valid for 10.0.0.5, not 127.0.0.1"
+)
+_REAL_SAN_MISMATCH_NO_IP_SAN_STDERR = (
+    'error during connect: Get "https://127.0.0.1:18443/v1.54/version": '
+    "tls: failed to verify certificate: x509: cannot validate certificate for 127.0.0.1 "
+    "because it doesn't contain any IP SANs"
+)
+_REAL_CONNECTION_REFUSED_STDERR = (
+    "Cannot connect to the Docker daemon at tcp://127.0.0.1:63441. Is the docker daemon running?"
+)
+
+
+@pytest.mark.parametrize(
+    "stderr", [_REAL_SAN_MISMATCH_WRONG_IP_STDERR, _REAL_SAN_MISMATCH_NO_IP_SAN_STDERR]
+)
+def test_diagnose_handshake_failure_states_the_san_requirement(stderr: str) -> None:
+    transport = _import_transport()
+
+    message = transport.diagnose_handshake_failure(
+        stderr, context_name="general-dev-sandbox", instance="sandbox"
+    )
+
+    assert "IP:127.0.0.1" in message
+    assert "DNS:localhost" in message
+    assert "/devcontainer:certs INSTANCE=sandbox" in message
+
+
+def test_diagnose_handshake_failure_produces_the_forward_diagnosis_for_a_connection_failure() -> (
+    None
+):
+    """AC-FUNC-005: a connection failure is never conflated with the SAN diagnosis."""
+    transport = _import_transport()
+
+    message = transport.diagnose_handshake_failure(
+        _REAL_CONNECTION_REFUSED_STDERR, context_name="general-dev-sandbox", instance="sandbox"
+    )
+
+    assert "IP:127.0.0.1" not in message
+    assert "SAN" not in message
+    assert "forward" in message.lower()
+
+
+# ---------------------------------------------------------------------------
+# The handshake itself: readiness, the version floor, and rootless reporting
+# (E6-F2-S1-T2; AC-FUNC-003, AC-FUNC-007, AC-TEST-002, AC-TEST-003).
+# ---------------------------------------------------------------------------
+
+
+class _SequencedRunner:
+    """Answers the identical command with a different `CommandResult` on each successive call.
+
+    `FakeRunner` (`tests/conftest.py`) maps one fixed result per exact
+    command tuple, which cannot express `handshake`'s retry-until-it-answers
+    loop: the version command tuple this loop issues is identical on every
+    attempt, only its outcome changes as the daemon comes up. This is a
+    genuinely different shape from `FakeRunner`'s fixed-response map, not a
+    second copy of it, so it stays local to this file's own handshake tests
+    (this file's own module docstring).
+    """
+
+    def __init__(self, results: Sequence[object]) -> None:
+        self._results = list(results)
+        self.calls: list[tuple[tuple[str, ...], float | None]] = []
+
+    def __call__(self, command: Sequence[str], timeout_seconds: float | None) -> object:
+        self.calls.append((tuple(command), timeout_seconds))
+        if not self._results:
+            raise AssertionError(
+                f"_SequencedRunner exhausted its recorded results at command {tuple(command)!r}"
+            )
+        return self._results.pop(0)
+
+
+def _version_command(context_name: str) -> tuple[str, ...]:
+    return ("docker", "--context", context_name, "version", "--format", "{{json .Server}}")
+
+
+def _info_command(context_name: str) -> tuple[str, ...]:
+    return ("docker", "--context", context_name, "info", "--format", "{{json .SecurityOptions}}")
+
+
+def test_handshake_retries_the_version_call_until_it_answers() -> None:
+    transport = _import_transport()
+    runner = _SequencedRunner(
+        [
+            transport.CommandResult(exit_code=1, stderr=_REAL_CONNECTION_REFUSED_STDERR),
+            transport.CommandResult(exit_code=1, stderr=_REAL_CONNECTION_REFUSED_STDERR),
+            transport.CommandResult(exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"1.51"}'),
+            transport.CommandResult(exit_code=0, stdout='["name=seccomp,profile=builtin"]'),
+        ]
+    )
+
+    result = transport.handshake(runner, instance="sandbox", port=54321)
+
+    assert result.server_version == "28.6.0"
+    assert result.api_version == "1.51"
+    assert result.rootless is False
+    expected_version_command = _version_command("general-dev-sandbox")
+    version_calls = [call for call in runner.calls if call[0] == expected_version_command]
+    assert len(version_calls) == 3
+
+
+def test_handshake_reports_rootless_true_when_security_options_name_it() -> None:
+    transport = _import_transport()
+    runner = _SequencedRunner(
+        [
+            transport.CommandResult(exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"1.51"}'),
+            transport.CommandResult(
+                exit_code=0, stdout='["name=rootless","name=seccomp,profile=builtin"]'
+            ),
+        ]
+    )
+
+    result = transport.handshake(runner, instance="sandbox", port=54321)
+
+    assert result.rootless is True
+
+
+def test_handshake_raises_immediately_on_a_certificate_name_mismatch_without_retrying() -> None:
+    """The retry loop must never spend the timeout budget on a permanent, non-transient cause."""
+    transport = _import_transport()
+    runner = _SequencedRunner(
+        [transport.CommandResult(exit_code=1, stderr=_REAL_SAN_MISMATCH_WRONG_IP_STDERR)]
+    )
+
+    with pytest.raises(transport.TransportError, match="IP:127.0.0.1"):
+        transport.handshake(runner, instance="sandbox", port=54321)
+
+    assert len(runner.calls) == 1
+
+
+def test_handshake_raises_version_floor_error_naming_both_versions() -> None:
+    transport = _import_transport()
+    runner = _SequencedRunner(
+        [transport.CommandResult(exit_code=0, stdout='{"Version":"20.10.0","ApiVersion":"1.41"}')]
+    )
+
+    with pytest.raises(transport.DockerVersionFloorError) as excinfo:
+        transport.handshake(runner, instance="sandbox", port=54321)
+
+    message = str(excinfo.value)
+    assert "1.41" in message
+    assert transport.DOCKER_API_VERSION_FLOOR in message
+
+
+def test_handshake_raises_on_an_unparsable_api_version() -> None:
+    transport = _import_transport()
+    runner = _SequencedRunner(
+        [transport.CommandResult(exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"bogus"}')]
+    )
+
+    with pytest.raises(transport.TransportError, match="bogus"):
+        transport.handshake(runner, instance="sandbox", port=54321)
+
+
+def test_handshake_raises_on_unparsable_server_payload() -> None:
+    transport = _import_transport()
+    runner = _SequencedRunner([transport.CommandResult(exit_code=0, stdout="not json")])
+
+    with pytest.raises(transport.TransportError, match="general-dev-sandbox"):
+        transport.handshake(runner, instance="sandbox", port=54321)
+
+
+def test_handshake_raises_when_docker_info_fails_after_a_successful_version_call() -> None:
+    transport = _import_transport()
+    runner = _SequencedRunner(
+        [
+            transport.CommandResult(exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"1.51"}'),
+            transport.CommandResult(exit_code=1, stderr=_REAL_CONNECTION_REFUSED_STDERR),
+        ]
+    )
+
+    with pytest.raises(transport.TransportError, match="general-dev-sandbox"):
+        transport.handshake(runner, instance="sandbox", port=54321)
+
+
+def test_handshake_raises_when_docker_is_not_on_path() -> None:
+    transport = _import_transport()
+    runner = _SequencedRunner([transport.CommandResult(exit_code=127, binary_missing=True)])
+
+    with pytest.raises(transport.TransportError, match="docker is not on PATH"):
+        transport.handshake(runner, instance="sandbox", port=54321)
+
+
+def test_handshake_raises_when_docker_is_not_on_path_for_the_info_command() -> None:
+    """Distinct from the version call's own binary_missing branch: the info call's own branch."""
+    transport = _import_transport()
+    runner = _SequencedRunner(
+        [
+            transport.CommandResult(exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"1.51"}'),
+            transport.CommandResult(exit_code=127, binary_missing=True),
+        ]
+    )
+
+    with pytest.raises(transport.TransportError, match="docker is not on PATH"):
+        transport.handshake(runner, instance="sandbox", port=54321)
+
+
+def test_handshake_raises_on_unparsable_security_options() -> None:
+    transport = _import_transport()
+    runner = _SequencedRunner(
+        [
+            transport.CommandResult(exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"1.51"}'),
+            transport.CommandResult(exit_code=0, stdout="not json"),
+        ]
+    )
+
+    with pytest.raises(transport.TransportError, match="general-dev-sandbox"):
+        transport.handshake(runner, instance="sandbox", port=54321)
+
+
+def test_handshake_raises_timeout_naming_context_port_and_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = _import_transport()
+    monkeypatch.setenv("DOCKER_HANDSHAKE_TIMEOUT", "0.2")
+
+    def never_answers(command: Sequence[str], timeout_seconds: float | None) -> object:
+        return transport.CommandResult(exit_code=1, stderr=_REAL_CONNECTION_REFUSED_STDERR)
+
+    start = time.monotonic()
+    with pytest.raises(transport.DockerHandshakeTimeoutError) as excinfo:
+        transport.handshake(never_answers, instance="sandbox", port=54321)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < _HANG_GUARD_SECONDS
+    message = str(excinfo.value)
+    assert "general-dev-sandbox" in message
+    assert "54321" in message
+    assert "DOCKER_HANDSHAKE_TIMEOUT" in message
+
+
+def test_handshake_reads_the_timeout_through_the_shared_hostprobe_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-FUNC-007: DOCKER_HANDSHAKE_TIMEOUT has exactly one reader, hostprobe's shared one.
+
+    code_review round 1 (BLOCKING, DRY): this module must not declare a
+    second, independent copy of the env-var name, the default, or the
+    parse/validate logic `hostprobe.read_positive_seconds` already owns.
+    Spying on the name this module imports proves delegation rather than a
+    hand-rolled reimplementation that merely happens to accept the same
+    values.
+    """
+    transport = _import_transport()
+    calls: list[tuple[str, float]] = []
+
+    def spy_read_positive_seconds(env_var: str, default_seconds: float) -> float:
+        calls.append((env_var, default_seconds))
+        return 0.05
+
+    monkeypatch.setattr(transport, "read_positive_seconds", spy_read_positive_seconds)
+
+    def never_answers(command: Sequence[str], timeout_seconds: float | None) -> object:
+        return transport.CommandResult(exit_code=1, stderr=_REAL_CONNECTION_REFUSED_STDERR)
+
+    with pytest.raises(transport.DockerHandshakeTimeoutError):
+        transport.handshake(never_answers, instance="sandbox", port=54321)
+
+    assert calls == [
+        (
+            transport.DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR,
+            transport.DOCKER_HANDSHAKE_TIMEOUT_DEFAULT_SECONDS,
+        )
+    ]
+
+
+def test_handshake_passes_the_remaining_deadline_not_the_full_timeout_to_the_rootless_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """code_review round 1 (WARN): worst-case wall time must not approach 2x the timeout.
+
+    Passing the full timeout a second time to `_probe_rootless`'s `docker
+    info` call would let total handshake wall time approach 2x
+    `DOCKER_HANDSHAKE_TIMEOUT`, contradicting `docs/devcontainer.md`'s
+    'bounded by DOCKER_HANDSHAKE_TIMEOUT' statement. A deterministic clock
+    proves the exact remaining-deadline value reaches the runner, not
+    merely that some value less than the timeout might by coincidence.
+    """
+    transport = _import_transport()
+    monkeypatch.setenv("DOCKER_HANDSHAKE_TIMEOUT", "10")
+    runner = _SequencedRunner(
+        [
+            transport.CommandResult(exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"1.51"}'),
+            transport.CommandResult(exit_code=0, stdout="[]"),
+        ]
+    )
+    # deadline = 0.0 + 10 = 10.0; version call sees remaining = 10.0 - 1.0 = 9.0;
+    # the rootless probe must see remaining = 10.0 - 4.0 = 6.0, never the full 10.0.
+    clock = iter([0.0, 1.0, 4.0])
+    monkeypatch.setattr(transport.time, "monotonic", lambda: next(clock))
+
+    transport.handshake(runner, instance="sandbox", port=54321)
+
+    info_calls = [call for call in runner.calls if call[0] == _info_command("general-dev-sandbox")]
+    assert len(info_calls) == 1
+    assert info_calls[0][1] == pytest.approx(6.0)
+
+
+def test_handshake_raises_timeout_instead_of_probing_rootless_with_a_zero_remaining_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """code_review round 2 (WARN): an exhausted deadline must not reach `_probe_rootless` as 0.0.
+
+    `subprocess.run(timeout=0.0)` expires immediately, so a `docker info`
+    call issued with the leftover budget from an already-exhausted deadline
+    can never succeed; it would report the exhaustion as an opaque 'docker
+    info ... failed after a successful version handshake' with a blank
+    stderr line rather than naming the actual cause, deadline exhaustion.
+    When the version call answers but no budget remains before the
+    rootless probe would run, this must raise the same
+    `DockerHandshakeTimeoutError` the retry loop itself raises, naming the
+    context, the port and `DOCKER_HANDSHAKE_TIMEOUT`, and must never call
+    `docker info` at all.
+    """
+    transport = _import_transport()
+    monkeypatch.setenv("DOCKER_HANDSHAKE_TIMEOUT", "10")
+    runner = _SequencedRunner(
+        [transport.CommandResult(exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"1.51"}')]
+    )
+    # deadline = 0.0 + 10 = 10.0; version call sees remaining = 10.0 - 1.0 = 9.0 and answers;
+    # the rootless-probe budget check then sees remaining = 10.0 - 10.0 = 0.0, exhausted.
+    clock = iter([0.0, 1.0, 10.0])
+    monkeypatch.setattr(transport.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(transport.DockerHandshakeTimeoutError) as excinfo:
+        transport.handshake(runner, instance="sandbox", port=54321)
+
+    message = str(excinfo.value)
+    assert "general-dev-sandbox" in message
+    assert "54321" in message
+    assert "DOCKER_HANDSHAKE_TIMEOUT" in message
+    info_calls = [call for call in runner.calls if call[0] == _info_command("general-dev-sandbox")]
+    assert info_calls == []
+
+
+def test_handshake_timeout_error_message_is_produced_by_diagnose_handshake_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """code_review round 1 (WARN, DRY): the timeout message must be the same code
+    diagnose_handshake_failure's own tests exercise, not a second copy of its
+    generic connection-remediation sentence.
+    """
+    transport = _import_transport()
+    monkeypatch.setenv("DOCKER_HANDSHAKE_TIMEOUT", "0.2")
+    calls: list[tuple[str, str, str, str]] = []
+
+    def spy_diagnose(
+        stderr: str, *, context_name: str, instance: str, failure_summary: str = "failed"
+    ) -> str:
+        calls.append((stderr, context_name, instance, failure_summary))
+        return "SENTINEL_DIAGNOSIS"
+
+    monkeypatch.setattr(transport, "diagnose_handshake_failure", spy_diagnose)
+
+    def never_answers(command: Sequence[str], timeout_seconds: float | None) -> object:
+        return transport.CommandResult(exit_code=1, stderr=_REAL_CONNECTION_REFUSED_STDERR)
+
+    with pytest.raises(transport.DockerHandshakeTimeoutError) as excinfo:
+        transport.handshake(never_answers, instance="sandbox", port=54321)
+
+    assert str(excinfo.value) == "SENTINEL_DIAGNOSIS"
+    assert len(calls) == 1
+    stderr, context_name, instance, failure_summary = calls[0]
+    assert stderr == _REAL_CONNECTION_REFUSED_STDERR
+    assert context_name == "general-dev-sandbox"
+    assert instance == "sandbox"
+    assert "DOCKER_HANDSHAKE_TIMEOUT" in failure_summary
+    assert "54321" in failure_summary
+
+
+def test_handshake_reads_the_default_timeout_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = _import_transport()
+    monkeypatch.delenv("DOCKER_HANDSHAKE_TIMEOUT", raising=False)
+    recorded: list[float | None] = []
+
+    def runner(command: Sequence[str], timeout_seconds: float | None) -> object:
+        recorded.append(timeout_seconds)
+        if tuple(command) == _version_command("general-dev-sandbox"):
+            return transport.CommandResult(
+                exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"1.51"}'
+            )
+        return transport.CommandResult(exit_code=0, stdout="[]")
+
+    transport.handshake(runner, instance="sandbox", port=54321)
+
+    assert recorded[0] == pytest.approx(30.0, abs=0.5)
+
+
+def test_handshake_rejects_an_unparsable_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = _import_transport()
+    monkeypatch.setenv("DOCKER_HANDSHAKE_TIMEOUT", "not-a-number")
+
+    def never_called(command: Sequence[str], timeout_seconds: float | None) -> object:
+        raise AssertionError("runner should never be called: the timeout is invalid")
+
+    with pytest.raises(transport.TransportError, match="DOCKER_HANDSHAKE_TIMEOUT"):
+        transport.handshake(never_called, instance="sandbox", port=1)
+
+
+@pytest.mark.parametrize("raw_value", ["0", "-5", "nan", "inf"])
+def test_handshake_rejects_a_non_positive_or_non_finite_timeout(
+    monkeypatch: pytest.MonkeyPatch, raw_value: str
+) -> None:
+    transport = _import_transport()
+    monkeypatch.setenv("DOCKER_HANDSHAKE_TIMEOUT", raw_value)
+
+    def never_called(command: Sequence[str], timeout_seconds: float | None) -> object:
+        raise AssertionError("runner should never be called: the timeout is invalid")
+
+    with pytest.raises(transport.TransportError, match="DOCKER_HANDSHAKE_TIMEOUT"):
+        transport.handshake(never_called, instance="sandbox", port=1)
+
+
+# ---------------------------------------------------------------------------
+# The strongest core-behavior assertion in this RED cycle, named last in its
+# log entry: the full seam this task exists for -- a docker context created
+# with the port, ca, cert and key E6-F2-S1-T1/E6-F1-S1-T1 produced, and a
+# handshake failure against that exact material translated into the SAN
+# requirement rather than a bare, opaque TLS error (spec Section 11).
+# ---------------------------------------------------------------------------
+
+
+def test_handshake_san_diagnosis_names_the_reissue_invocation_for_the_created_instance() -> None:
+    transport = _import_transport()
+    runner = _SequencedRunner(
+        [transport.CommandResult(exit_code=1, stderr=_REAL_SAN_MISMATCH_NO_IP_SAN_STDERR)]
+    )
+
+    with pytest.raises(transport.TransportError) as excinfo:
+        transport.handshake(runner, instance="sandbox", port=54321)
+
+    message = str(excinfo.value)
+    assert "IP:127.0.0.1" in message
+    assert "DNS:localhost" in message
+    assert "/devcontainer:certs INSTANCE=sandbox" in message

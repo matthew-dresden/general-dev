@@ -526,6 +526,67 @@ what actually renders a certificate inert, because a certificate
 authenticates but IAM authorizes, and a certificate is useless without the
 tunnel it authenticates inside.
 
+## Transport
+
+The security group behind a remote instance carries zero ingress rules
+(spec Section 5.6): no packet from the network reaches the docker daemon,
+only the loopback listener `127.0.0.1:DOCKER_TLS_PORT` on the instance
+itself. Reaching that listener from the laptop is two independent factors
+stacked on top of each other, each answering a different question (spec
+Section 3.6.2), and neither substitutes for the other:
+
+- **The SSM port forward**
+  (`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`,
+  E6-F2-S1-T1) maps the loopback listener to a local port on the laptop with
+  `aws ssm start-session --document-name AWS-StartPortForwardingSession` --
+  no SSH element anywhere in the argument vector. `ssm:StartSession` scoped
+  to that document decides *who may open the tunnel at all*, and, since
+  Docker supports neither CRL nor OCSP, revoking it is the only revocation
+  mechanism this platform has.
+- **mTLS over that tunnel** (`transport.ensure_context`/`transport.handshake`,
+  E6-F2-S1-T2) decides *who may command the daemon once the tunnel is
+  open*. An SSM grant alone is coarse: without the client certificate,
+  anyone whose policy permits `ssm:StartSession` would drive the engine.
+
+Once the forward answers, `transport.ensure_context` creates or updates the
+docker context `general-dev-<instance>` (spec Section 9) to address
+`tcp://127.0.0.1:<the allocated port>` and carry the `ca`, `cert` and `key`
+files spec Section 5.5 fixes under `~/.docker/certs/<instance>/`. An
+existing context is updated in place rather than deleted and recreated; an
+existing context whose endpoint is `ssh://` -- the legacy transport
+`.devcontainer/remote-docker/docker-tunnel.sh` still uses through phase 3 --
+is refused by name and left completely untouched, so that path keeps
+working unchanged. VS Code Dev Containers needs no transport of its own: it
+follows the active docker context, so pointing the context at the tunnel
+points the editor at it too.
+
+`transport.handshake` then completes a `docker version` handshake against
+that context, retried until it answers and bounded by
+`DOCKER_HANDSHAKE_TIMEOUT` (`docs/environment-files.md`), reporting the
+daemon's API version -- which must be at least 1.44 for mTLS on a TCP
+listener with a rootless daemon (spec Section 6) -- and whether it reports
+running rootless.
+
+**The SAN requirement, and its symptom.** TLS validates the name the
+*client* used to dial the daemon, and the client dials `127.0.0.1` through
+the loopback forward, so the server certificate must carry `IP:127.0.0.1`
+and `DNS:localhost` -- never the instance's own hostname or private
+address. A server certificate issued for either of those produces a
+handshake failure that names neither the forward nor the SANs: a real
+example, captured against a deliberately mis-issued certificate, reads
+`tls: failed to verify certificate: x509: certificate is valid for
+10.0.0.5, not 127.0.0.1` -- prose that reads like a tunnel, security-group
+or daemon problem before it reads like a certificate one.
+`transport.diagnose_handshake_failure` exists to close that gap: it
+recognizes that shape (and the related `x509: cannot validate certificate
+for 127.0.0.1 because it doesn't contain any IP SANs`) and states the SAN
+requirement, both required values, and the `/devcontainer:certs
+INSTANCE=<name>` invocation that reissues the server certificate, instead
+of surfacing the bare TLS error. A connection failure -- the forward not
+established, the daemon not listening -- is translated into a distinct
+diagnosis naming the forward instead, so the two causes are never
+conflated.
+
 ## Secrets model
 
 ```text

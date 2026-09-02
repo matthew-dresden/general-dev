@@ -49,9 +49,14 @@ from typing import Any
 # context answers a version call (spec Section 7.2's own example of a
 # readiness condition) -- is bounded by this variable, read fresh on every
 # probe rather than cached at import time, so a caller (or a test) that sets
-# it before probing observes its own value.
-_DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR = "DOCKER_HANDSHAKE_TIMEOUT"
-_DOCKER_HANDSHAKE_TIMEOUT_DEFAULT_SECONDS = 30.0
+# it before probing observes its own value. Public (not underscore-prefixed)
+# because `devcontainer_config.transport.handshake` (E6-F2-S1-T2) reads the
+# identical variable for its own, retried "does a context's daemon answer"
+# check and must read the same name and default this module does, rather
+# than declaring a second, independently drifting copy of either
+# (AC-FUNC-007: read in exactly one place).
+DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR = "DOCKER_HANDSHAKE_TIMEOUT"
+DOCKER_HANDSHAKE_TIMEOUT_DEFAULT_SECONDS = 30.0
 
 # The `is_wsl` detection this probe mirrors
 # (`.devcontainer/devcontainer-functions.sh`): `uname -r | grep -i
@@ -390,33 +395,52 @@ def _docker_absent_result(check: str, prevents: str) -> ProbeResult:
     )
 
 
+def read_positive_seconds(env_var: str, default_seconds: float) -> float:
+    """Read `env_var` as a finite, positive number of seconds, or `default_seconds` if unset.
+
+    The one place this repository parses and validates a "positive number
+    of seconds" environment variable (AC-FUNC-007's "read in exactly one
+    place" requirement, generalized to every caller that needs the same
+    shape of deadline): `_docker_handshake_timeout_seconds` below and
+    `devcontainer_config.transport._handshake_timeout_seconds`
+    (E6-F2-S1-T2) both read the identical `DOCKER_HANDSHAKE_TIMEOUT`
+    variable through this function rather than each declaring its own copy
+    of the env-var name, the default and this validation. Rejects
+    non-positive and non-finite values (`0`, a negative number, `nan`,
+    `inf`) with the same clear error as an unparsable one: each would
+    otherwise be handed to a caller as a deadline that can never be honored
+    (an instantaneous or infinite wait is not a deadline at all), and
+    `float()` alone accepts every one of them without complaint. Raises
+    `HostProbeError` naming `env_var` and the offending value; a caller in
+    another module that needs its own exception type catches this and
+    re-raises it as one of its own, so this module's exception type is
+    never leaked across a module boundary it does not own.
+    """
+    raw = os.environ.get(env_var)
+    if raw is None:
+        return default_seconds
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise HostProbeError(f"{env_var}={raw!r} is not a number") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise HostProbeError(f"{env_var}={raw!r} must be a finite positive number")
+    return value
+
+
 def _docker_handshake_timeout_seconds() -> float:
     """The deadline for `docker version` to answer (spec Section 7.3).
 
     Read fresh on every call, not cached at import time, so a caller that
     sets `DOCKER_HANDSHAKE_TIMEOUT` before probing observes its own value
     and no timeout literal is ever written at a probe call site
-    (AC-FUNC-009). Rejects non-positive and non-finite values (`0`, a
-    negative number, `nan`, `inf`) with the same clear error as an
-    unparsable one: each would otherwise be handed to the runner as a
-    deadline that can never be honored (an instantaneous or infinite wait
-    is not a deadline at all), and `float()` alone accepts every one of
-    them without complaint.
+    (AC-FUNC-009). Delegates the actual parse and validation to
+    `read_positive_seconds`, the single shared reader this variable's name
+    and default are declared against (AC-FUNC-007).
     """
-    raw = os.environ.get(_DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR)
-    if raw is None:
-        return _DOCKER_HANDSHAKE_TIMEOUT_DEFAULT_SECONDS
-    try:
-        value = float(raw)
-    except ValueError as exc:
-        raise HostProbeError(
-            f"{_DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR}={raw!r} is not a number"
-        ) from exc
-    if not math.isfinite(value) or value <= 0:
-        raise HostProbeError(
-            f"{_DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR}={raw!r} must be a finite positive number"
-        )
-    return value
+    return read_positive_seconds(
+        DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR, DOCKER_HANDSHAKE_TIMEOUT_DEFAULT_SECONDS
+    )
 
 
 def _probe_context_list(runner: CommandRunner) -> tuple[ProbeResult | None, list[str]]:
@@ -528,12 +552,12 @@ def _probe_docker_handshake(runner: CommandRunner) -> ProbeResult:
     if result.timed_out:
         return ProbeResult(
             check=check,
-            found=f"no response within {timeout:g}s ({_DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR})",
+            found=f"no response within {timeout:g}s ({DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR})",
             ok=False,
             prevents=prevents,
             remedy=(
                 "Confirm the engine behind the active docker context is running, then "
-                f"retry. {_DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR} controls how long this waits."
+                f"retry. {DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR} controls how long this waits."
             ),
         )
     if result.exit_code != 0:

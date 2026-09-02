@@ -10,24 +10,51 @@ EC2 reference, troubleshooting) live in
 `.devcontainer/devcontainer.json`:
 
 - Built from `.devcontainer/Dockerfile`, user `vscode`, workspace at
-  `/workspaces/${localWorkspaceFolderBasename}`. The Dockerfile is
-  `FROM mcr.microsoft.com/devcontainers/base:noble` plus one layer: it creates
-  `~/.vscode-server` and the directories the server volumes mount over, owned by
-  `vscode`. Docker creates a missing mount point, and a named volume that is
-  empty, root-owned; VS Code installs its server as `vscode` before any
-  lifecycle hook has run, so nothing inside the container can hand those
-  directories over in time. In local mode that failure was fatal: the extension
-  runs `devcontainer up --skip-post-create`, then installs the server itself and
-  stops at `ln: failed to create symbolic link
-  '/home/vscode/.vscode-server/bin/<build>': Permission denied`. Ownership set in
-  the image is what a fresh volume is initialized with, so the mount points are
-  writable from the moment the container starts. Remote mode never hit it,
-  because `make build` runs the whole of `devcontainer up`, postCreate included,
-  before it seeds the server.
+  `/workspaces/${localWorkspaceFolderBasename}`. The Dockerfile declares a
+  `# syntax=docker/dockerfile:1` directive (required for the heredoc `RUN`
+  form used below) and is `FROM mcr.microsoft.com/devcontainers/base:noble`
+  plus two layers. The first creates `~/.vscode-server` and the directories
+  the server volumes mount over, owned by `vscode`. Docker creates a missing
+  mount point, and a named volume that is empty, root-owned; VS Code installs
+  its server as `vscode` before any lifecycle hook has run, so nothing inside
+  the container can hand those directories over in time. In local mode that
+  failure was fatal: the extension runs `devcontainer up --skip-post-create`,
+  then installs the server itself and stops at `ln: failed to create symbolic
+  link '/home/vscode/.vscode-server/bin/<build>': Permission denied`.
+  Ownership set in the image is what a fresh volume is initialized with, so
+  the mount points are writable from the moment the container starts. Remote
+  mode never hit it, because `make build` runs the whole of `devcontainer up`,
+  postCreate included, before it seeds the server. The second layer installs
+  the AWS session-manager-plugin (see the dedicated bullet below).
 - Features: aws-cli, Python 3.14, Node 25, kubectl + helm (minikube disabled
   via `"minikube": "none"`), common-utils, docker-in-docker, uv,
   `ghcr.io/devcontainers/features/terraform:1` (Terraform, Terragrunt and
   tflint, each pinned `latest`); `jq` joins the existing apt-packages list.
+- The AWS `session-manager-plugin` is installed by the Dockerfile's second
+  `RUN` layer rather than by a devcontainer Feature: no registry Feature for
+  it exists. The spec originally named
+  `ghcr.io/devcontainers-extra/features/aws-ssm-session-manager-plugin:1` as
+  the mechanism, but that Feature has never existed in any registry, and the
+  only two personal repositories that come close are either unresolvable on
+  `ghcr` or unmaintained since 2024-06-27, so `CLAUDE.md`'s dependency-trust
+  rule rules them out. The step fetches the package over TLS from AWS's own
+  S3-hosted download path and
+  verifies its detached signature with `gpg --batch --verify` before
+  `dpkg --install` ever runs, failing the build on any verification error.
+  The trust anchor is AWS's publisher signing key, embedded in the Dockerfile
+  and pinned by fingerprint `7959637124CE093AD501D47A2C4D4AFF6F6757EE`
+  (`devcontainer_config.plugin_install` carries the same pinned values so a
+  test can assert the Dockerfile has not drifted from them). No package
+  checksum is pinned: the download always targets AWS's moving `latest` path,
+  so a checksum pinned against today's build would break every future rebuild
+  the moment AWS publishes a new plugin version at that same URL; the
+  signing key's fingerprint is stable across releases, so verifying the
+  signature against it is what gives the install provenance without freezing
+  the plugin version. The plugin runs at build time, not `postCreateCommand`,
+  so it ships inside the immutable image; `devcontainer_config/transport.py`
+  shells out to it by relying on it being on `PATH` for the non-root
+  `vscode` user (work unit `E5-F3-S1-T2`, operator ruling signed at commit
+  `9a38c703adda210e27c2c34607cb1a09a4d63378`).
 - The IaC engine is Terraform, per D14, spec `devcontainer-platform.md`
   Section 13, licensed BUSL-1.1; the installed Terraform and Terragrunt
   versions satisfy the spec Section 6 floors, `>= 1.10` and `>= 1.1.3`

@@ -5,7 +5,14 @@ Detects, in scanned line content: AWS access key identifiers (`AKIA` and
 GitHub tokens (`ghp_`, `gho_`, `github_pat_`), Slack tokens (`xoxb-`,
 `xoxp-`), bearer tokens, SSO portal URLs, twelve-digit account identifiers,
 EC2 instance identifiers, every catalog secret name, and any line also
-present in the developer's own `shell.env`.
+present in the developer's own `shell.env` -- excluding a line that also
+appears, verbatim, in both the git index and `HEAD` version of the tracked
+`shell.env.example` (E2-F1-S1-T4): a line this commit does not introduce or
+change. A line a developer stages into `shell.env.example` itself, whatever
+its shape -- an assignment, a comment, anything -- has no counterpart in
+`HEAD` yet, so it can never enter that exclusion set and can never blind the
+detector for that same value leaking anywhere else in the same commit
+(E2-F1-S1-T4 security review round 4).
 
 There is no ignore list and no suppression mechanism (spec Section 4.6). A
 finding is either real, and fixed, or a false positive, which needs human
@@ -28,13 +35,25 @@ full; every other detector is credential-bearing and is redacted:
 plus the length of what it withheld, so a report stays actionable without
 ever returning a full credential value.
 
-`staged_paths`, `staged_blob` and `shell_env_lines` (E2-F1-S1-T2) are the
-impure shell around `scan_lines`: they read the git index and the
-developer's `shell.env` from disk, and `run_staged_scan` composes them into
-one `LintReport` that `render_lint_report` turns into the text
-`devcontainer_config.cli` prints. None of the three raise on a caller's
-behalf silently: an unreadable or undecodable source is a `SecretScanError`,
-never an empty result standing in for one.
+`staged_paths`, `staged_blob`, `shell_env_lines` and `shell_env_example_lines`
+(E2-F1-S1-T2, E2-F1-S1-T4) are the impure shell around `scan_lines`:
+`staged_paths` and `staged_blob` read the git index, `shell_env_example_lines`
+reads both the git index and `HEAD` (never the working tree -- only tracked
+`shell.env.example` content can suppress a `shell-env-line` finding) and
+keeps only the lines present in both, and `shell_env_lines` reads the
+developer's gitignored `shell.env` from disk. Intersecting the index and
+`HEAD` versions, rather than trusting either one alone or matching on line
+shape, means a developer who stages a real, filled-in value into
+`shell.env.example` itself cannot suppress that same value leaking anywhere
+else in the same commit: that value has no counterpart in `HEAD` yet (it was
+never committed before this staged edit), so it is never excluded no matter
+what it looks like -- an assignment, a comment, or anything else
+(E2-F1-S1-T4 security review round 4). `run_staged_scan` composes all four
+into one `LintReport` that `render_lint_report` turns into the text
+`devcontainer_config.cli` prints.
+None of these raise on a caller's behalf silently: an unreadable or
+undecodable source is a `SecretScanError`, never an empty result standing in
+for one.
 
 `commits_in_range`, `added_lines`, `_first_parent` and
 `empty_tree_object_id` (E2-F1-S2-T1) are the equally impure shell for
@@ -53,6 +72,11 @@ so a caller outside this module -- the git-hooks installer, for one -- gets
 its own exception type back on a not-installed or nonzero-exit failure
 instead of always receiving a `SecretScanError`. `empty_tree_object_id`
 forwards its own `error_type` into `run_git` unchanged, for the same reason.
+`run_git` also takes a keyword-only `tolerated_exit_code: int | None = None`;
+`_committed_text` (E2-F1-S1-T4) is the one caller that sets it, so it can
+tell `git rev-parse --verify --quiet`'s own "this object does not resolve"
+exit code apart from every other git failure without a second, undocumented
+`subprocess` call site.
 """
 
 from __future__ import annotations
@@ -64,7 +88,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from re import Pattern
 from types import MappingProxyType
-from typing import Protocol
+from typing import Protocol, overload
 
 from devcontainer_config import repo
 
@@ -152,7 +176,14 @@ class ShellEnvLineDetector:
 
     Comparison is a single membership test against
     `sources.shell_env_lines`, not a per-character search, because the thing
-    being detected is line identity, not a substring shape.
+    being detected is line identity, not a substring shape. `shell_env_lines`
+    (E2-F1-S1-T4) has already filtered that set before it ever reaches this
+    detector, so a line that also appears, verbatim, in both the index and
+    `HEAD` version of the tracked `shell.env.example` is never a member here;
+    this detector matches only a value a developer actually typed in,
+    including one a developer stages into `shell.env.example` itself
+    (E2-F1-S1-T4 security review round 4): that value has no counterpart in
+    `HEAD` yet, so it is never excluded, whatever shape it takes.
     """
 
     identifier: str
@@ -483,6 +514,7 @@ def render_finding(finding: Finding, detector: Detector) -> str:
 _CATALOG_SECRET_NAMES_NOT_WIRED_NOTE = "catalog client not yet wired into this scan"
 
 
+@overload
 def run_git(
     args: Sequence[str],
     *,
@@ -492,18 +524,46 @@ def run_git(
     input_bytes: bytes | None = None,
     config: Mapping[str, str] = MappingProxyType({}),
     error_type: type[Exception] = SecretScanError,
-) -> bytes:
+    tolerated_exit_code: None = None,
+) -> bytes: ...
+
+
+@overload
+def run_git(
+    args: Sequence[str],
+    *,
+    root: Path,
+    not_installed_message: Callable[[], str],
+    failure_message: Callable[[str], str],
+    input_bytes: bytes | None = None,
+    config: Mapping[str, str] = MappingProxyType({}),
+    error_type: type[Exception] = SecretScanError,
+    tolerated_exit_code: int,
+) -> bytes | None: ...
+
+
+def run_git(
+    args: Sequence[str],
+    *,
+    root: Path,
+    not_installed_message: Callable[[], str],
+    failure_message: Callable[[str], str],
+    input_bytes: bytes | None = None,
+    config: Mapping[str, str] = MappingProxyType({}),
+    error_type: type[Exception] = SecretScanError,
+    tolerated_exit_code: int | None = None,
+) -> bytes | None:
     """Run `git <args>` under `root`; the raw stdout bytes on success.
 
     Public (E2-F2-S1-T3) so a caller outside this module -- the git-hooks
     installer, for one -- can reuse "run a git subprocess and turn a
     failure into an exception" instead of copy-pasting this subprocess
-    shape. `staged_paths` and `staged_blob` both need exactly that,
-    differing only in the message each raises, so that shape lives here
-    once instead of being duplicated at each call site (or, worse, omitted
-    at one of them). The caller supplies the two message builders because
-    only the caller knows which git invocation failed and what the
-    operator should do about it. `input_bytes` is optional and only
+    shape. `staged_paths`, `staged_blob` and `_committed_text` all need
+    exactly that, differing only in the message each raises, so that shape
+    lives here once instead of being duplicated at each call site (or,
+    worse, omitted at one of them). The caller supplies the two message
+    builders because only the caller knows which git invocation failed and
+    what the operator should do about it. `input_bytes` is optional and only
     `empty_tree_object_id` (range mode) supplies it, to feed
     `git hash-object --stdin` an empty tree. `config` is optional and only
     `added_lines` supplies it, to run `diff-tree` with
@@ -511,13 +571,21 @@ def run_git(
     quoted and octal-escaped in the first place. `error_type` is
     keyword-only and defaults to `SecretScanError`; a caller outside this
     module supplies its own exception type so a git failure surfaces as
-    that caller's own error rather than as this module's.
+    that caller's own error rather than as this module's. `tolerated_exit_code`
+    is keyword-only and, when given, names the single exit code that is an
+    expected outcome rather than a failure: `_committed_text` passes
+    `git rev-parse --verify --quiet`'s own documented exit code 1 (which
+    that subcommand reserves for "this object does not resolve", printing no
+    stderr) so it can tell "not tracked here" apart from every other git
+    failure, which still raises `error_type` even with `tolerated_exit_code`
+    set.
 
     Raises:
         error_type: built from `not_installed_message` if the `git` binary
             is not on PATH, or from `failure_message` (given git's decoded
-            stderr) if git exits non-zero. `SecretScanError` unless the
-            caller supplies a different `error_type`.
+            stderr) if git exits non-zero and its exit code is not
+            `tolerated_exit_code`. `SecretScanError` unless the caller
+            supplies a different `error_type`.
     """
     config_args = [flag for key, value in config.items() for flag in ("-c", f"{key}={value}")]
     try:
@@ -530,6 +598,8 @@ def run_git(
     except FileNotFoundError as exc:
         raise error_type(not_installed_message()) from exc
     except subprocess.CalledProcessError as exc:
+        if tolerated_exit_code is not None and exc.returncode == tolerated_exit_code:
+            return None
         stderr = exc.stderr.decode("utf-8", errors="replace").strip() if exc.stderr else ""
         raise error_type(failure_message(stderr)) from exc
     return completed.stdout
@@ -619,31 +689,215 @@ def staged_blob(root: Path, path: str) -> tuple[tuple[int, str], ...]:
     return tuple(enumerate(text.splitlines(), start=1))
 
 
-def shell_env_lines(root: Path) -> tuple[str, ...]:
-    """Non-blank lines of `root`'s `shell.env`, or an empty tuple when absent.
+def _non_blank_lines(text: str) -> tuple[str, ...]:
+    """Every line of `text` with content once whitespace is stripped, in order.
 
-    Resolved through `repo.private_paths` rather than a new root walk
-    (AC-3.1). Absence is the normal state of a fresh clone (spec Section
-    1.7) and contributes zero lines; an unreadable file that does exist is a
-    different condition, so it is not folded into the same empty result.
+    The one filtering rule `shell_env_lines` and `shell_env_example_lines` both
+    apply to whatever they load, kept here once instead of copy-pasted at each
+    call site (E2-F1-S1-T4 REFACTOR).
+    """
+    return tuple(line for line in text.splitlines() if line.strip())
+
+
+def _committed_text(root: Path, path: str, object_name: str) -> str | None:
+    """UTF-8 text of `path` as recorded in the single git object `object_name`
+    under `root` (`:<path>` for the index, `HEAD:<path>` for the last commit), or
+    `None` if `object_name` does not resolve.
+
+    Reads exactly the one object it is given rather than falling back from one to
+    the other: `shell_env_example_lines`, the single caller, calls this once for
+    the index object and once for the `HEAD` object so it can tell "committed but
+    not currently staged this way" apart from "staged this way" and intersect the
+    two (E2-F1-S1-T4 review round 4) -- a function that silently substituted one
+    object's content for the other's absence could never make that distinction.
+    Never reads `root / path` directly either way: the working tree is not a
+    trust boundary this function accepts. A developer who edits a tracked file's
+    on-disk copy without staging or committing that edit has produced content
+    with no footprint in the commit this scan is about to allow; resolving
+    `path`'s trusted content through the working tree instead of the index or
+    `HEAD` would let that same uncommitted edit count as "trusted" (E2-F1-S1-T4
+    review round 1).
+
+    `object_name` is probed with `run_git` twice: `git rev-parse --verify
+    --quiet <object_name>` first, tolerating only that subcommand's own exit code
+    1 ("this object does not resolve", no stderr printed), and `git show
+    <object_name>` second, only once the probe confirms the object exists. This
+    tells "`path` does not resolve at `object_name`" -- a legitimate, empty-result
+    outcome for an unborn branch or a template that was never added there --
+    apart from every other git failure (an unreadable repository, a corrupt
+    object, `root` not being a work tree at all), which still raises
+    `SecretScanError` rather than being folded into the same empty result
+    (E2-F1-S1-T4 review round 2). Both probes go through the module's shared
+    `run_git` wrapper rather than a second raw `subprocess.run` call site,
+    keeping the not-installed/nonzero-exit handling in the one place `run_git`'s
+    own docstring describes.
 
     Raises:
-        SecretScanError: if `shell.env` exists but cannot be opened. Treating
-            an unreadable source as an empty one would silently narrow the
-            scan without telling the operator why.
+        SecretScanError: if the `git` binary is not on PATH; if `root` is not a
+            git work tree or another git failure occurs that is not "this
+            object does not resolve"; or if a blob this function does find
+            does not decode as UTF-8.
+    """
+
+    def _not_installed_message() -> str:
+        return (
+            "ERROR: git is not installed\n"
+            f"_committed_text needs the git binary to read the tracked "
+            f"content of {path} under {root} and none was found on PATH.\n"
+            "Install git and ensure it is on PATH, then retry."
+        )
+
+    def _probe_failure_message(stderr: str) -> str:
+        return (
+            f"ERROR: cannot determine whether {path} is tracked\n"
+            f"_committed_text ran 'git rev-parse --verify --quiet "
+            f"{object_name}' in {root} and git reported: {stderr}\n"
+            "Run this from inside a git checkout, or pass the checkout "
+            "root explicitly instead of relying on discovery."
+        )
+
+    def _read_failure_message(stderr: str) -> str:
+        return (
+            f"ERROR: cannot read tracked content of {path}\n"
+            f"_committed_text ran 'git show {object_name}' in {root} and "
+            f"git reported: {stderr}\n"
+            "Investigate why git could not read an object it just "
+            "confirmed exists, then retry."
+        )
+
+    exists = run_git(
+        ["rev-parse", "--verify", "--quiet", object_name],
+        root=root,
+        not_installed_message=_not_installed_message,
+        failure_message=_probe_failure_message,
+        tolerated_exit_code=1,
+    )
+    if exists is None:
+        return None
+    stdout = run_git(
+        ["show", object_name],
+        root=root,
+        not_installed_message=_not_installed_message,
+        failure_message=_read_failure_message,
+    )
+    try:
+        return stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SecretScanError(
+            f"ERROR: tracked content of {path} is not valid UTF-8\n"
+            f"_committed_text could not decode git object {object_name}: {exc}\n"
+            "Fix the tracked file's encoding, then retry."
+        ) from exc
+
+
+def shell_env_example_lines(root: Path) -> tuple[str, ...]:
+    """Lines of `root`'s tracked `shell.env.example` present, verbatim, in *both*
+    the git index and `HEAD` -- the lines this commit does not introduce or
+    change -- or empty when the index does not resolve the path at all (it is
+    tracked nowhere, or a staged deletion removed it from the index).
+
+    Intersecting the index and `HEAD` versions, rather than matching on line
+    shape (E2-F1-S1-T4 security review round 4), is what makes this exclusion
+    set safe: `shell.env` (spec Section 1.7) is documented as seeded by
+    `cp shell.env.example shell.env`, so every line the template ships with
+    also lands, verbatim, in a fresh `shell.env`, and an untouched template
+    line is scaffolding, not a secret a developer typed in -- `shell_env_lines`
+    uses this loader's result to tell the two apart. A line a developer stages
+    into `shell.env.example` itself, in this same commit, has no counterpart in
+    `HEAD` yet, so the intersection never contains it, whatever it looks like:
+    an assignment, a comment, or anything else. Comparing shape instead of
+    provenance let a real, filled-in value staged into the template -- as a
+    plain assignment or hidden behind a `#` -- blind the detector for that
+    same value staged anywhere else in the same commit; comparing provenance
+    closes that regardless of shape, because no line this commit introduces
+    can ever have already been in `HEAD`.
+
+    Reads both objects through `_committed_text`: `:shell.env.example` for the
+    index and `HEAD:shell.env.example` for the last commit, neither ever
+    falling back to the other or to the working tree. Resolved with
+    `repo.example_for(repo.SHELL_ENV)` rather than a hard-coded name, so the
+    private-file/example naming convention stays declared in exactly one
+    place.
+
+    Raises:
+        SecretScanError: if `git` is not on PATH; if `root` is not a git work
+            tree or another git failure occurs (`_committed_text` never folds
+            that into the same empty result "does not resolve" returns); or if
+            a tracked blob this finds does not decode as UTF-8. Treating an
+            unreadable source as an empty one would silently narrow the
+            exclusion set without telling the operator why.
+    """
+    path = repo.example_for(repo.SHELL_ENV)
+    index_text = _committed_text(root, path, f":{path}")
+    if index_text is None:
+        return ()
+    head_text = _committed_text(root, path, f"HEAD:{path}")
+    head_lines = frozenset(_non_blank_lines(head_text)) if head_text is not None else frozenset()
+    return tuple(line for line in _non_blank_lines(index_text) if line in head_lines)
+
+
+def _shell_env_comparison_lines(root: Path) -> tuple[tuple[str, ...], int]:
+    """`root`'s `shell.env` non-blank lines with every line the tracked
+    `shell.env.example` shares between the index and `HEAD` removed, paired with
+    how many lines that removal excluded.
+
+    Shared by `shell_env_lines` (the tuple `run_staged_scan` / `scan_range` inject
+    into `ScanSources`) and `run_staged_scan` (the excluded-line count
+    `LintReport` / `render_lint_report` surfaces to the operator, E2-F1-S1-T4
+    security review round 4 LOW), so both read `shell.env` once and agree on what
+    "excluded" means instead of computing the split twice.
+
+    Absence of `shell.env` is the normal state of a fresh clone (spec Section 1.7)
+    and contributes zero lines and zero exclusions; an unreadable file that does
+    exist is a different condition, so it is not folded into the same empty
+    result.
+
+    Raises:
+        SecretScanError: if `shell.env` exists but cannot be opened. Treating an
+            unreadable source as an empty one would silently narrow the scan
+            without telling the operator why.
     """
     path = repo.private_paths(root)[repo.SHELL_ENV]
     if not path.is_file():
-        return ()
+        return (), 0
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise SecretScanError(
             f"ERROR: cannot read {path}\n"
-            f"shell_env_lines found {path} but could not open it: {exc}\n"
+            f"{path} exists but could not be opened: {exc}\n"
             "Fix the file's permissions, then retry."
         ) from exc
-    return tuple(line for line in text.splitlines() if line.strip())
+    template_lines = frozenset(shell_env_example_lines(root))
+    raw_lines = _non_blank_lines(text)
+    compared = tuple(line for line in raw_lines if line not in template_lines)
+    return compared, len(raw_lines) - len(compared)
+
+
+def shell_env_lines(root: Path) -> tuple[str, ...]:
+    """Non-blank lines of `root`'s `shell.env` that are not also a line
+    `shell_env_example_lines` returns for the tracked `shell.env.example`, or
+    empty when `shell.env` is absent.
+
+    Resolved through `repo.private_paths` rather than a new root walk (AC-3.1).
+    `shell.env` is gitignored (spec Section 1.7) and never tracked, so this reads
+    it straight from the working tree -- the working tree is the only copy that
+    exists, unlike `shell_env_example_lines`, which never trusts it.
+
+    A line also returned by `shell_env_example_lines` is excluded from the
+    comparison set built here (AC-CODE-001, E2-F1-S1-T4): `shell_env_example_lines`
+    only ever returns a line present, verbatim, in both the index and `HEAD`
+    version of the tracked template, so a line is excluded because it demonstrably
+    predates this commit, never merely because the template happens to repeat that
+    exact value some other way. Every one of `run_staged_scan` / `scan_range`
+    shares this one loader (via `_shell_env_comparison_lines`), so the exclusion
+    cannot be forgotten at one call site while present at another.
+
+    Raises:
+        SecretScanError: see `_shell_env_comparison_lines`.
+    """
+    compared, _excluded_count = _shell_env_comparison_lines(root)
+    return compared
 
 
 @dataclass(frozen=True)
@@ -656,10 +910,23 @@ class StagedFinding:
 
 @dataclass(frozen=True)
 class LintReport:
-    """Every source's entry count and every finding from one `run_staged_scan` call."""
+    """Every source's entry count and every finding from one `run_staged_scan` call.
+
+    `shell_env_line_count` is `shell_env_lines`' result, which already excludes
+    any line also present, verbatim, in both the index and `HEAD` version of the
+    tracked `shell.env.example` (E2-F1-S1-T4): it is the count of lines actually
+    compared, not the raw line count of `shell.env` on disk.
+    `shell_env_excluded_line_count` is how many lines that exclusion removed
+    (E2-F1-S1-T4 security review round 4 LOW):
+    `render_lint_report` prints both counts so an operator reading
+    `shell.env lines: 0` can tell a genuinely empty `shell.env` apart from one
+    whose entire comparison set the template exclusion suppressed, rather than
+    the label alone standing in for a number the report never showed.
+    """
 
     staged_path_count: int
     shell_env_line_count: int
+    shell_env_excluded_line_count: int
     catalog_secret_name_count: int
     findings: tuple[StagedFinding, ...]
 
@@ -694,7 +961,7 @@ def run_staged_scan(root: Path) -> LintReport:
     infers or guesses a value for it until a follow-up unit adds that call.
     """
     paths = staged_paths(root)
-    shell_env = shell_env_lines(root)
+    shell_env, shell_env_excluded_count = _shell_env_comparison_lines(root)
     catalog_secret_names: tuple[str, ...] = ()
     sources = ScanSources(shell_env_lines=shell_env, catalog_secret_names=catalog_secret_names)
 
@@ -707,6 +974,7 @@ def run_staged_scan(root: Path) -> LintReport:
     return LintReport(
         staged_path_count=len(paths),
         shell_env_line_count=len(shell_env),
+        shell_env_excluded_line_count=shell_env_excluded_count,
         catalog_secret_name_count=len(catalog_secret_names),
         findings=findings,
     )
@@ -718,14 +986,21 @@ def render_lint_report(report: LintReport) -> str:
     The header names every source and its entry count (AC-FUNC-003), even
     when nothing was staged, so "zero paths were scanned" is a fact the
     header states rather than an empty screen the operator has to interpret.
-    Each finding line names the staged path, the line number and the
-    detector description (AC-FUNC-004); the value itself comes from
-    `render_finding`, which redacts every non-printable detector's match.
+    The `shell.env` line prints both the compared count and how many lines
+    the template exclusion removed (E2-F1-S1-T4 security review round 4 LOW)
+    so an operator reading `shell.env lines: 0` can tell a genuinely empty
+    `shell.env` apart from one whose entire comparison set the tracked
+    `shell.env.example` intersection excluded -- the label alone, with no
+    count, could not make that distinction. Each finding line names
+    the staged path, the line number and the detector description
+    (AC-FUNC-004); the value itself comes from `render_finding`, which
+    redacts every non-printable detector's match.
     """
     lines = [
         "[LINT] secrets in staged content",
         f"  staged paths scanned: {report.staged_path_count}",
-        f"  shell.env lines: {report.shell_env_line_count}",
+        f"  shell.env lines: {report.shell_env_line_count} "
+        f"({report.shell_env_excluded_line_count} template lines excluded)",
         f"  catalog secret names: {report.catalog_secret_name_count} "
         f"({_CATALOG_SECRET_NAMES_NOT_WIRED_NOTE})",
     ]

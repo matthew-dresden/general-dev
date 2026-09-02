@@ -34,7 +34,8 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-from gitfixtures import generated_root, init_repo
+from devcontainer_config.repo import find_root
+from gitfixtures import commit_text, generated_root, init_repo, stage_bytes, stage_text
 
 
 def _import_secrets() -> ModuleType:
@@ -43,6 +44,27 @@ def _import_secrets() -> ModuleType:
     See the module docstring for why this is not a module-level import.
     """
     return importlib.import_module("devcontainer_config.secrets")
+
+
+def _real_shell_env_example_text() -> str:
+    """This repository's own `shell.env.example`, read fresh for every call.
+
+    AC-TEST-001's fixture uses this instead of a synthetic all-comment/
+    all-empty-assignment template (E2-F1-S1-T4 review round 4, test_review
+    FAIL): a synthetic template built from only placeholder-shaped lines
+    cannot observe a false positive on a concrete-default line such as
+    `export DEFAULT_GIT_BRANCH='main'` or `unset GIT_EDITOR`, which the real
+    template ships and which the reported defect (AC-CODE-001, "87
+    false-positive findings") was measured against. `find_root` is imported
+    at module scope, and this function reads the file fresh rather than
+    caching it, for the same reason `tests/test_shellrc.py` documents for its
+    own `_shell_env_example_text` helper: `repo.py` is not in this task's
+    Changes Manifest, so the TDD RED gate's stash of `secrets.py` never
+    touches this import path.
+    """
+    return (find_root(Path(__file__).resolve().parent) / "shell.env.example").read_text(
+        encoding="utf-8"
+    )
 
 
 class _CallerDefinedRunGitError(Exception):
@@ -534,3 +556,227 @@ def test_empty_tree_object_id_matches_independent_git_hash_object(tmp_path: Path
         .strip()
     )
     assert derived == independent
+
+
+def test_run_staged_scan_reports_clean_when_shell_env_example_edit_is_staged(
+    tmp_path: Path,
+) -> None:
+    """AC-TEST-001: staging a shell.env.example edit, with shell.env seeded from the
+    template's own content (the documented `cp shell.env.example shell.env`
+    workflow), reports no findings for every line the edit does not touch.
+
+    Uses this repository's own `shell.env.example` (`_real_shell_env_example_text`)
+    instead of a synthetic all-comment/all-empty-assignment fixture (E2-F1-S1-T4
+    review round 4, test_review FAIL): a synthetic fixture built only from
+    placeholder-shaped lines cannot observe a false positive on a concrete-default
+    line such as `export DEFAULT_GIT_BRANCH='main'` or `unset GIT_EDITOR`, which the
+    real template ships and which the reported defect (AC-CODE-001, "87
+    false-positive findings") was measured against.
+
+    Also pins `shell_env_excluded_line_count` and the rendered
+    "(N template lines excluded)" text (E2-F1-S1-T4 security review round 4 LOW,
+    test_review FAIL): every one of the template's non-blank lines is untouched by
+    the trivial staged edit below, so all of them, and none besides, must be
+    excluded."""
+    secrets = _import_secrets()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    template = _real_shell_env_example_text()
+    template_line_count = len([line for line in template.splitlines() if line.strip()])
+    commit_text(root, "shell.env.example", template, "add shell.env.example")
+    (root / "shell.env").write_text(template, encoding="utf-8")
+    stage_text(root, "shell.env.example", template + "# a trivial, unrelated template edit\n")
+
+    report = secrets.run_staged_scan(root)
+
+    assert report.findings == ()
+    assert report.shell_env_excluded_line_count == template_line_count
+    assert f"({template_line_count} template lines excluded)" in secrets.render_lint_report(report)
+
+
+def test_run_staged_scan_still_denies_a_shell_env_value_absent_from_the_template(
+    tmp_path: Path,
+) -> None:
+    """AC-TEST-001 negative case: a value a developer actually typed into shell.env,
+    that does not trace back to a line shared between shell.env.example's index and
+    HEAD versions, is still caught when that same value leaks into staged content
+    elsewhere."""
+    secrets = _import_secrets()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    commit_text(root, "shell.env.example", "AWS_PROFILE=\n", "add shell.env.example")
+    filled_in = f"AWS_PROFILE=prod-{uuid.uuid4().hex}"
+    (root / "shell.env").write_text(filled_in + "\n", encoding="utf-8")
+    stage_text(root, "src/leaked.py", filled_in + "\n")
+
+    report = secrets.run_staged_scan(root)
+
+    assert len(report.findings) == 1
+    assert report.findings[0].path == "src/leaked.py"
+    assert report.findings[0].finding.detector_id == "shell-env-line"
+
+
+def test_shell_env_example_lines_raises_when_git_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`shell_env_example_lines` reads tracked content through git; a missing git
+    binary must surface as SecretScanError, never as an empty (zero-exclusion)
+    result standing in for it."""
+    secrets = _import_secrets()
+    _monkeypatch_subprocess_run_raises(monkeypatch, FileNotFoundError())
+
+    with pytest.raises(secrets.SecretScanError, match="git is not installed"):
+        secrets.shell_env_example_lines(tmp_path)
+
+
+def test_shell_env_example_lines_raises_on_non_utf8_staged_content(tmp_path: Path) -> None:
+    """A staged `shell.env.example` blob that is not valid UTF-8 fails the scan instead
+    of silently narrowing the exclusion set to zero lines."""
+    secrets = _import_secrets()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    stage_bytes(root, "shell.env.example", b"\xff\xfe\x00not-utf8")
+
+    with pytest.raises(secrets.SecretScanError, match="not valid UTF-8"):
+        secrets.shell_env_example_lines(root)
+
+
+def test_shell_env_example_lines_raises_on_a_genuine_git_failure_not_a_missing_path(
+    tmp_path: Path,
+) -> None:
+    """Review round 2 regression (E2-F1-S1-T4): a genuine git failure -- `root` is not a
+    git work tree at all -- must not be conflated with "shell.env.example is tracked
+    nowhere". The latter is a legitimate empty exclusion set (a fresh repo, or one that
+    never added shell.env.example); the former is a condition this scanner's own
+    docstring says must never be silently swallowed as an empty result standing in for
+    an error."""
+    secrets = _import_secrets()
+    root = generated_root(tmp_path)
+    # Deliberately never init_repo(root): there is no `.git` here at all, so every git
+    # invocation against `root` fails the same way `staged_paths` fails against a
+    # non-work-tree root, not the way a legitimately untracked path fails.
+
+    with pytest.raises(secrets.SecretScanError, match="cannot determine whether"):
+        secrets.shell_env_example_lines(root)
+
+
+def test_committed_text_raises_when_git_show_fails_after_rev_parse_confirms_existence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A TOCTOU race between the `rev-parse --verify` existence probe and the `git
+    show` read -- the object existed when probed, but `git show` still fails -- must
+    raise `SecretScanError`, never fall through as though the path were untracked."""
+    secrets = _import_secrets()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    commit_text(root, "shell.env.example", "AWS_PROFILE=\n", "add shell.env.example")
+    real_run = subprocess.run
+
+    def _fake_run(
+        cmd: list[str],
+        *,
+        input: bytes | None = None,
+        capture_output: bool = True,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[bytes]:
+        if "show" in cmd:
+            raise subprocess.CalledProcessError(
+                128, cmd, output=b"", stderr=b"synthetic show failure"
+            )
+        return real_run(cmd, input=input, capture_output=capture_output, check=check)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    with pytest.raises(secrets.SecretScanError, match="cannot read tracked content"):
+        secrets.shell_env_example_lines(root)
+
+
+def test_run_staged_scan_ignores_a_worktree_only_shell_env_example_edit(
+    tmp_path: Path,
+) -> None:
+    """Review-round-1 regression (E2-F1-S1-T4): the exclusion set built by
+    shell_env_example_lines must trace back to tracked (index or HEAD) content
+    only. A line pasted into the developer's uncommitted, unstaged working copy of
+    shell.env.example has no footprint in the commit this scan is about to allow,
+    so it must not widen the exclusion set and silently blind the shell-env-line
+    detector for the same value leaking into staged content elsewhere."""
+    secrets = _import_secrets()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    commit_text(root, "shell.env.example", "AWS_PROFILE=\n", "add shell.env.example")
+    leaked = f"MY_API_KEY=super-real-value-{uuid.uuid4().hex}"
+    (root / "shell.env").write_text(f"AWS_PROFILE=\n{leaked}\n", encoding="utf-8")
+    # Worktree-only edit: written directly, never `git add`-ed or committed.
+    (root / "shell.env.example").write_text(f"AWS_PROFILE=\n{leaked}\n", encoding="utf-8")
+    stage_text(root, "src/leaked.py", leaked + "\n")
+
+    report = secrets.run_staged_scan(root)
+
+    assert len(report.findings) == 1
+    assert report.findings[0].path == "src/leaked.py"
+    assert report.findings[0].finding.detector_id == "shell-env-line"
+
+
+def test_run_staged_scan_still_flags_a_leak_staged_into_shell_env_example_itself(
+    tmp_path: Path,
+) -> None:
+    """HIGH security regression (E2-F1-S1-T4 security review round 4): the previous
+    test proves a *worktree-only* template edit cannot widen the exclusion set, but
+    that test passes even when the exclusion set is built from every tracked
+    shell.env.example line, because the edit is never staged there. This test
+    poisons the template the same way but `git add`-s it, so the poisoned line IS
+    tracked (index-resolved) content -- the scenario the worktree-only test cannot
+    reach. A developer copies their filled-in shell.env over shell.env.example and
+    stages it, and the same real value also leaks into src/leaked.py; both staged
+    occurrences of that value must still be reported, because the poisoned line has
+    no counterpart in HEAD (it was never committed before this staged edit), so the
+    HEAD-and-index intersection this unit's fix builds the exclusion set from can
+    never contain it, regardless of what it looks like."""
+    secrets = _import_secrets()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    commit_text(root, "shell.env.example", "AWS_PROFILE=\n", "add shell.env.example")
+    leaked = f"DB_PASSWORD=really-secret-{uuid.uuid4().hex}"
+    (root / "shell.env").write_text(f"AWS_PROFILE=\n{leaked}\n", encoding="utf-8")
+    # Poisoned template, staged (not worktree-only): the developer's shell.env
+    # content copied verbatim over shell.env.example and `git add`-ed.
+    stage_text(root, "shell.env.example", f"AWS_PROFILE=\n{leaked}\n")
+    stage_text(root, "src/leaked.py", leaked + "\n")
+
+    report = secrets.run_staged_scan(root)
+
+    assert {(finding.path, finding.finding.detector_id) for finding in report.findings} == {
+        ("shell.env.example", "shell-env-line"),
+        ("src/leaked.py", "shell-env-line"),
+    }
+
+
+def test_run_staged_scan_still_flags_a_leak_staged_as_a_comment_into_shell_env_example(
+    tmp_path: Path,
+) -> None:
+    """Finding B (E2-F1-S1-T4 review round 4, code_review HIGH): the placeholder-shape
+    design's comment branch treated ANY line starting with `#` as excludable, so a
+    real, filled-in value staged into shell.env.example as a commented-out
+    assignment -- a shape this repository's own template already ships (`#
+    export REMOTE_INSTANCE_ID=...`) -- silently blinded the shell-env-line detector
+    for that same value leaking anywhere else in the same commit. The
+    HEAD-and-index intersection rule closes this regardless of shape: the poisoned
+    line was never committed before this staged edit, so it can never appear in
+    both HEAD and the index, comment or not."""
+    secrets = _import_secrets()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    commit_text(root, "shell.env.example", "AWS_PROFILE=\n", "add shell.env.example")
+    leaked_comment = f"# export DB_PASSWORD='really-secret-{uuid.uuid4().hex}'"
+    (root / "shell.env").write_text(f"AWS_PROFILE=\n{leaked_comment}\n", encoding="utf-8")
+    # Poisoned template, staged as a comment (not an assignment): the developer's
+    # shell.env content copied verbatim, `#`-prefix included, and `git add`-ed.
+    stage_text(root, "shell.env.example", f"AWS_PROFILE=\n{leaked_comment}\n")
+    stage_text(root, "src/leaked.py", leaked_comment + "\n")
+
+    report = secrets.run_staged_scan(root)
+
+    assert {(finding.path, finding.finding.detector_id) for finding in report.findings} == {
+        ("shell.env.example", "shell-env-line"),
+        ("src/leaked.py", "shell-env-line"),
+    }

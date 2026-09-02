@@ -25,7 +25,13 @@ EC2 reference, troubleshooting) live in
   because `make build` runs the whole of `devcontainer up`, postCreate included,
   before it seeds the server.
 - Features: aws-cli, Python 3.14, Node 25, kubectl + helm (minikube disabled
-  via `"minikube": "none"`), common-utils, docker-in-docker, uv.
+  via `"minikube": "none"`), common-utils, docker-in-docker, uv,
+  `ghcr.io/devcontainers/features/terraform:1` (Terraform, Terragrunt and
+  tflint, each pinned `latest`); `jq` joins the existing apt-packages list.
+- The IaC engine is Terraform, per D14, spec `devcontainer-platform.md`
+  Section 13, licensed BUSL-1.1; the installed Terraform and Terragrunt
+  versions satisfy the spec Section 6 floors, `>= 1.10` and `>= 1.1.3`
+  respectively.
 - Features contribute VS Code extensions of their own, merged with the
   `customizations.vscode.extensions` list: the container image's
   `devcontainer.metadata` label records which feature added which. The aws-cli

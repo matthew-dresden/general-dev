@@ -324,34 +324,34 @@ error -- see `docs/devcontainer.md`'s "Transport" section.
 `setup-remote` share for their own, simpler "does the engine answer" check.
 
 `DEVCONTAINER_TRANSPORT` is a transport selector for the `make connect`
-entry point. Two independent readers are planned to implement it:
-`transport.py`'s `resolve_transport` (not yet landed, E6-F2-S1-T3) and
-the Makefile's `connect` recipe (not yet landed, E6-F2-S1-T4). Once both
-land, each reader will dispatch the variable the same way, in exactly
-three branches: unset or the literal `ssh` will select the existing SSH
-transport (`.devcontainer/remote-docker/docker-tunnel.sh`), `ssm` will
-select this module's SSM transport through a planned `python3 -m
+entry point. It has two independent readers: the Makefile's `connect`
+recipe, which reads DEVCONTAINER_TRANSPORT from the environment and
+dispatches on it today, and `transport.py`'s `resolve_transport` (not yet
+landed, E6-F2-S1-T3). Both readers dispatch, or will dispatch, the
+variable the same way, in exactly three branches: unset or the literal
+`ssh` selects the existing SSH transport
+(`.devcontainer/remote-docker/docker-tunnel.sh`), `ssm` selects this
+module's SSM transport through a planned `python3 -m
 devcontainer_config.transport connect` subcommand (also not yet landed:
 `transport.py`'s `_build_parser` registers only a `start` subcommand
-today), and any other value will result in a non-zero exit before
-either transport starts, printing an `ERROR:` line to stderr that names
-the variable, the offending value and the accepted values -- no branch
-will silently default. As of this revision `transport.py` declares no
-`resolve_transport` function, and the Makefile's `connect` recipe (not
-yet landed, E6-F2-S1-T4) is still `@$(TUNNEL_SH)`, with no reference to
-DEVCONTAINER_TRANSPORT or any dispatch logic. Once landed, the two
-readers will be independent of each other; the variable will not change
-what `docker-tunnel.sh` itself does either way, since neither planned
-reader will call or modify that script. The row below documents the
-interface both readers will implement, not a behavior this repository
-exhibits yet.
+today), and any other value results in a non-zero exit before either
+transport starts, printing an `ERROR:` line to stderr that names the
+variable, the offending value and the accepted values -- no branch
+silently defaults. As of this revision `transport.py` declares no
+`resolve_transport` function, so only the Makefile's `connect` recipe
+implements this dispatch contract today. Once `resolve_transport` also
+lands, the two readers will be independent of each other; the variable
+will not change what `docker-tunnel.sh` itself does either way, since
+neither reader will call or modify that script. The row below documents
+the interface the Makefile's `connect` recipe already implements and
+`resolve_transport` will implement once it lands.
 
 | Variable | Default | Defined in |
 |---|---|---|
 | `DOCKER_TLS_PORT` | `2376` | `transport.py`, read by `build_start_session_argv` |
 | `SSM_FORWARD_TIMEOUT` | `30` | `transport.py`, read by `wait_ready` and `stop_forward` |
 | `DOCKER_HANDSHAKE_TIMEOUT` | `30` | `hostprobe.py`'s `read_positive_seconds`, the one place its name, default and validation are declared; `transport.py`'s `handshake` (E6-F2-S1-T2) calls the same function rather than declaring its own copy |
-| `DEVCONTAINER_TRANSPORT` | `ssh` | selector for `make connect`'s planned transport dispatch; two independent readers will implement it once each lands, the Makefile's `connect` recipe (not yet landed, E6-F2-S1-T4) and `transport.py`'s `resolve_transport` and its planned `transport connect` subcommand (not yet landed, E6-F2-S1-T3); accepts `ssh` (default) or `ssm` |
+| `DEVCONTAINER_TRANSPORT` | `ssh` | selector for `make connect`'s transport dispatch; the Makefile's `connect` recipe already reads and dispatches on it, while `transport.py`'s `resolve_transport` and its planned `transport connect` subcommand (not yet landed, E6-F2-S1-T3) do not yet; accepts `ssh` (default) or `ssm` |
 
 `DOCKER_TLS_PORT` is the port the rootless docker daemon on the instance
 listens on, `127.0.0.1`-only, behind a security group with zero ingress
@@ -396,11 +396,11 @@ are read by code in this repository today: each default above applies
 whenever the variable is unset, and each reader rejects a non-numeric or
 non-positive value naming the variable and its value rather than
 silently falling back to the default. `DEVCONTAINER_TRANSPORT`'s two
-planned readers, the Makefile's `connect` recipe (not yet landed,
-E6-F2-S1-T4) and `transport.py`'s `resolve_transport` (not yet landed,
-E6-F2-S1-T3), will apply the same fail-fast rule once each lands: each
-will reject a value other than `ssh` or `ssm` by name rather than
-defaulting past it. Neither reader exists in this repository today.
+readers apply, or will apply, the same fail-fast rule: the Makefile's
+`connect` recipe already rejects, by name, a value other than `ssh` or
+`ssm` today, and `transport.py`'s `resolve_transport` (not yet landed,
+E6-F2-S1-T3) will do the same once it lands. Only the Makefile's
+`connect` recipe exists in this repository today.
 
 ### What did not change
 

@@ -113,7 +113,17 @@ help:
 	@printf '\n'
 
 connect:
-	@$(TUNNEL_SH)
+	@set -euo pipefail; \
+	transport="$${DEVCONTAINER_TRANSPORT:-ssh}"; \
+	case "$$transport" in \
+		ssh) $(TUNNEL_SH) ;; \
+		ssm) $(PROXY_ENV) PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.transport connect \
+			--instance-id "$$REMOTE_INSTANCE_ID" --context "$(REMOTE_CONTEXT)" \
+			--profile "$$REMOTE_AWS_PROFILE" --region "$$REMOTE_AWS_REGION" ;; \
+		*) printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT="%s" is not recognized.\n' "$$transport" >&2; \
+		   printf '        Accepted values: ssh (default), ssm.\n' >&2; \
+		   exit 1 ;; \
+	esac
 
 disconnect:
 	@docker context inspect $(LOCAL_CONTEXT) > /dev/null 2>&1 || { \

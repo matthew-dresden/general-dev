@@ -130,6 +130,46 @@ def _cert_status_recipe_body(makefile_text: str) -> str:
     return match.group(1)
 
 
+def _connect_recipe_body(makefile_text: str) -> str:
+    """The recipe lines (tab-indented) that follow the `connect:` target header.
+
+    E6-F2-S1-T4's own addition: the `connect` recipe now dispatches on
+    `DEVCONTAINER_TRANSPORT` instead of running `$(TUNNEL_SH)` unconditionally.
+    """
+    match = re.search(r"^connect:.*\n((?:\t.*\n?)*)", makefile_text, re.MULTILINE)
+    assert match is not None, "no connect target found in Makefile"
+    return match.group(1)
+
+
+def _shell_env_example_text() -> str:
+    """The repository root `shell.env.example`, read fresh for every call.
+
+    Not cached at module scope, for the same reason `_makefile_text`
+    (tests/conftest.py) is not: a cached value would let one test's assertion
+    about the file's content leak into another's failure message instead of
+    each test reading the file it is actually asserting about.
+    """
+    root = find_root(Path(__file__).resolve().parent)
+    return (root / "shell.env.example").read_text(encoding="utf-8")
+
+
+def _remote_docker_engine_block(shell_env_example_text: str) -> str:
+    """The `Remote docker engine` commented block of `shell.env.example`.
+
+    Bounded by its own banner heading and the next `#####...` banner (or end
+    of file, since this is currently the file's last section), so a line
+    added inside the block is picked up without the match widening into an
+    unrelated section.
+    """
+    match = re.search(
+        r"^#{10,}\n# Remote docker engine.*?\n#{10,}\n(.*?)(?=^#{10,}\n|\Z)",
+        shell_env_example_text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None, "no 'Remote docker engine' block found in shell.env.example"
+    return match.group(1)
+
+
 def _prerequisites_row(makefile_text: str, label: str) -> str:
     """The second column of the PREREQUISITES row whose first column is `label`.
 
@@ -220,6 +260,38 @@ def _minimal_path_missing_tool(tool: str, tmp_path: Path) -> str:
         f"{tool!r} is unexpectedly resolvable inside a minimal PATH built without it"
     )
     return doctored_path
+
+
+def _run_make(
+    target: str, *, env: dict[str, str], timeout_env_var: str
+) -> subprocess.CompletedProcess[str]:
+    """Shells out to `make <target>` from the repository root with `env`,
+    bounded by a configurable timeout read from `timeout_env_var`
+    (CLAUDE.md: no hardcoded timeouts).
+
+    Shared by every test in this file that proves a recipe's fail-fast
+    behavior by actually running it end to end, rather than only
+    inspecting its source text: `test_test_recipe_guard_fails_fast_when_a_tool_is_absent`
+    and `test_connect_recipe_rejects_an_unrecognized_transport` each
+    carried their own copy of this `find_root` + `shutil.which("make")` +
+    timeout-resolution + `subprocess.run` scaffold before this extraction
+    (test_review DRY finding, E6-F2-S1-T4 round 2), following the same
+    "single source of truth" discipline `_makefile_text` and
+    `_resolve_make_refs` already apply to Makefile-variable resolution.
+    """
+    root = find_root(Path(__file__).resolve().parent)
+    make_path = shutil.which("make")
+    assert make_path is not None, "make must be installed on the machine running this test suite"
+    timeout_seconds = float(os.environ.get(timeout_env_var, "30"))
+    return subprocess.run(
+        [make_path, target],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout_seconds,
+    )
 
 
 def test_test_target_is_phony() -> None:
@@ -313,11 +385,8 @@ def test_test_recipe_guards_every_prerequisite_tool_before_pytest() -> None:
 @pytest.mark.parametrize("tool", TEST_PREREQUISITE_TOOLS)
 def test_test_recipe_guard_fails_fast_when_a_tool_is_absent(tool: str, tmp_path: Path) -> None:
     """E3-F2-S2-T5 AC-FUNC-001/002 / AC-TEST-004: the guard names the missing tool and its fix."""
-    root = find_root(Path(__file__).resolve().parent)
     makefile_text = _makefile_text()
     hint = _install_hint(makefile_text, tool)
-    make_path = shutil.which("make")
-    assert make_path is not None, "make must be installed on the machine running this test suite"
     env = dict(os.environ)
     env["PATH"] = _minimal_path_missing_tool(tool, tmp_path)
     # A bounded safety net, not a readiness wait: this recipe is asserted to fail
@@ -328,15 +397,8 @@ def test_test_recipe_guard_fails_fast_when_a_tool_is_absent(tool: str, tmp_path:
     # a runaway process tree. Configurable so a slower CI runner is not penalized
     # by a bound tuned for a developer's machine (CLAUDE.md: no hardcoded
     # timeouts), following the pattern in tests/test_hostprobe.py.
-    timeout_seconds = float(os.environ.get("MAKEFILE_GUARD_TEST_TIMEOUT_SECONDS", "30"))
-    result = subprocess.run(
-        [make_path, "test"],
-        cwd=root,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout_seconds,
+    result = _run_make(
+        "test", env=env, timeout_env_var="MAKEFILE_GUARD_TEST_TIMEOUT_SECONDS"
     )
     combined = result.stdout + result.stderr
     assert result.returncode != 0, f"make test must fail fast when {tool!r} is absent from PATH"
@@ -380,3 +442,142 @@ def test_cert_status_help_row_matches_the_two_roles_the_command_reports() -> Non
     assert len(cert_status_rows) == 1
     assert '"host"' in cert_status_rows[0]
     assert "Client and CA expiry per instance." in cert_status_rows[0]
+
+
+# ---------------------------------------------------------------------------
+# E6-F2-S1-T4: the `connect` recipe dispatches on `DEVCONTAINER_TRANSPORT`
+# instead of running `$(TUNNEL_SH)` unconditionally, so the SSM port-forward
+# manager E6-F2-S1-T1 delivered (and the docker context E6-F2-S1-T2 delivered)
+# become reachable from the build path at all. `transport.py`'s own `connect`
+# subparser is E6-F2-S1-T3's, adapted after this recipe's interface lands
+# (Approach note), so these assertions are against the Makefile's dispatch
+# wiring only -- the source-side arguments and fail-fast behavior it is
+# already responsible for -- never against invoking the ssm branch for real.
+# ---------------------------------------------------------------------------
+
+# `make connect` shells out with a bogus DEVCONTAINER_TRANSPORT value in a
+# real subprocess; bounded so a regression that makes the recipe hang (rather
+# than exit fast in its `*` branch) fails this test instead of the run.
+# Configurable per CLAUDE.md's no-hardcoded-timeouts rule; see
+# MAKEFILE_GUARD_TEST_TIMEOUT_SECONDS above for the identical rationale.
+_CONNECT_REJECT_TEST_TIMEOUT_SECONDS_ENV_VAR = "MAKEFILE_CONNECT_TEST_TIMEOUT_SECONDS"
+
+
+def test_connect_recipe_dispatches_on_the_transport_selector() -> None:
+    """AC-FUNC-001 / AC-TEST-001: the recipe reads DEVCONTAINER_TRANSPORT and
+    names both branches through their existing Make variables, never a
+    duplicated literal path or module name.
+    """
+    text = _makefile_text()
+    recipe = _connect_recipe_body(text)
+    assert "DEVCONTAINER_TRANSPORT" in recipe
+    assert "$(TUNNEL_SH)" in recipe
+    assert "docker-tunnel.sh" in _resolve_make_refs(text, "$(TUNNEL_SH)"), (
+        "$(TUNNEL_SH) must still resolve to docker-tunnel.sh on the default branch"
+    )
+    assert "devcontainer_config.transport connect" in recipe
+    assert "general-dev" not in recipe, (
+        "the recipe must never carry a literal 'general-dev' substring "
+        "(AC-FUNC-003: no prefix arithmetic on REMOTE_DOCKER_CONTEXT)"
+    )
+
+
+def test_connect_recipe_passes_the_resolved_context_variable() -> None:
+    """AC-FUNC-003: the ssm branch passes `--context "$(REMOTE_CONTEXT)"`,
+    reusing the existing Makefile variable, rather than reconstructing the
+    instance name by stripping a literal prefix off REMOTE_DOCKER_CONTEXT
+    (the standards violation the rejected E6-F2-S1-T3 amendment carried).
+    """
+    recipe = _connect_recipe_body(_makefile_text())
+    assert '--context "$(REMOTE_CONTEXT)"' in recipe
+    assert "REMOTE_DOCKER_CONTEXT#" not in recipe, (
+        "the recipe must not strip a prefix off REMOTE_DOCKER_CONTEXT to "
+        "derive the context name; transport.py's CONTEXT_NAME_PREFIX already "
+        "owns that logic"
+    )
+
+
+def test_connect_recipe_unset_transport_still_runs_tunnel_sh_with_no_arguments() -> None:
+    """AC-FUNC-004: with DEVCONTAINER_TRANSPORT unset, the recipe still invokes
+    `$(TUNNEL_SH)` with no arguments, exactly as the pre-change recipe did, so
+    `make remote` and `make up` (which depend on `connect`) see no behavior
+    change. Asserted against the recipe source (not by actually invoking
+    docker-tunnel.sh, which needs real AWS/SSH state) by requiring that the
+    `$(TUNNEL_SH)` reference on the ssh branch carries no trailing arguments.
+    """
+    recipe = _connect_recipe_body(_makefile_text())
+    match = re.search(r"\$\(TUNNEL_SH\)([^\n;]*)", recipe)
+    assert match is not None, "no $(TUNNEL_SH) reference found in the connect recipe"
+    # The capture group already excludes ';', so a trailing ';;' (the case
+    # arm's own terminator) can never appear here; the only value a
+    # well-formed recipe can leave behind is an empty string, once
+    # surrounding whitespace is stripped (code_review round-2: the prior
+    # `trailing in ("", ";;")` form carried an unreachable ";;" alternative).
+    trailing = match.group(1).strip()
+    assert trailing == "", (
+        f"$(TUNNEL_SH) must be invoked with no extra arguments, found trailing text: {trailing!r}"
+    )
+
+
+def test_connect_recipe_rejects_an_unrecognized_transport() -> None:
+    """AC-FUNC-002 / AC-TEST-003: an unrecognized DEVCONTAINER_TRANSPORT value
+    makes `make connect` exit non-zero before any transport starts, printing
+    an ERROR line naming the variable, the offending value and the accepted
+    values -- proved by actually running the dispatch, not only by inspecting
+    the recipe's source text.
+    """
+    env = dict(os.environ)
+    env["DEVCONTAINER_TRANSPORT"] = "bogus-transport"
+    result = _run_make(
+        "connect",
+        env=env,
+        timeout_env_var=_CONNECT_REJECT_TEST_TIMEOUT_SECONDS_ENV_VAR,
+    )
+    assert result.returncode != 0, "make connect must fail fast on an unrecognized transport"
+    assert "ERROR" in result.stderr
+    assert "DEVCONTAINER_TRANSPORT" in result.stderr
+    assert "bogus-transport" in result.stderr
+    assert "ssh" in result.stderr
+    assert "ssm" in result.stderr
+
+
+def test_shell_env_example_documents_the_transport_selector() -> None:
+    """AC-DOC-001 / AC-TEST-002: `shell.env.example`'s `Remote docker engine`
+    block names DEVCONTAINER_TRANSPORT, states the ssh default and names both
+    accepted values. Any `docs/*.md` path the new commented lines cite must
+    itself exist, already contain the string DEVCONTAINER_TRANSPORT -- the
+    guard the rejected E6-F2-S1-T3 amendment's dangling
+    `docs/environment-files.md` reference did not have -- and must not
+    claim the variable "has no effect" or "is not read", the round-2
+    doc_review REVIEW_FAIL this file's original version of this guard let
+    through: it only checked the variable's name appeared, so it passed
+    against a cited section whose prose was stale the moment this task's
+    own Makefile change landed a real reader for the variable.
+    """
+    root = find_root(Path(__file__).resolve().parent)
+    shell_env_example_text = _shell_env_example_text()
+    block = _remote_docker_engine_block(shell_env_example_text)
+    assert "DEVCONTAINER_TRANSPORT" in block
+    assert "ssh" in block.lower() and "default" in block.lower()
+    assert "ssm" in block.lower()
+
+    cited_doc_paths = set(re.findall(r"\bdocs/[\w./-]+\.md\b", block))
+    for doc_path in cited_doc_paths:
+        doc_file = root / doc_path
+        assert doc_file.is_file(), f"{doc_path!r} is cited but does not exist on disk"
+        cited_text = doc_file.read_text(encoding="utf-8")
+        assert "DEVCONTAINER_TRANSPORT" in cited_text, (
+            f"{doc_path!r} is cited as documenting DEVCONTAINER_TRANSPORT but "
+            "does not itself mention the variable"
+        )
+        lowered_cited_text = cited_text.lower()
+        assert "no effect at all" not in lowered_cited_text, (
+            f"{doc_path!r} is cited as the DEVCONTAINER_TRANSPORT reference but claims "
+            "the variable has 'no effect at all', which this Makefile's connect recipe "
+            "contradicts by reading and dispatching on the variable today"
+        )
+        assert "not read by any code" not in lowered_cited_text, (
+            f"{doc_path!r} is cited as the DEVCONTAINER_TRANSPORT reference but claims "
+            "the variable is 'not read by any code', which this Makefile's connect "
+            "recipe contradicts by reading it today"
+        )

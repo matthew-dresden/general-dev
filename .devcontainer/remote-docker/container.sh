@@ -880,20 +880,36 @@ rdc_rebuild() {
 
 RDC_COMMAND="${1:-}"
 
-# Anything aimed at the remote engine needs the EC2 identity before docker is
-# even reachable; local commands must not, so this cannot live in rd_load_config.
-if command -v docker > /dev/null 2>&1 && [ "$(rdc_backend)" = "remote" ]; then
-  rd_require_remote_config
+# Resolve before classifying, not after. rdc_backend answers "is the active
+# docker context this instance's context", and only the resolver knows what
+# that context is. Asking first compared the active context against whatever
+# config.env defaulted REMOTE_DOCKER_CONTEXT to, so every instance whose name
+# did not happen to match that default was classified `local`: `make build`
+# then took the bind-mount path and asked the remote engine to mount a path
+# that exists only on this laptop.
+#
+# The quiet form is deliberate. A repository that configures no instances at
+# all is a legitimately local one, not an error, and it must still be able to
+# build against its local engine.
+if command -v docker > /dev/null 2>&1; then
   # Resolve once, here, and let every downstream reader use the result. The
   # two names below were previously derived from PROJECT_NAME independently
   # by this script and by push-secrets.sh, which meant two callers could
   # address different instances while each believed it was addressing "the"
   # one. Assigning them from the single resolved block removes that split
   # without rewriting every use site.
-  rd_resolve_instance
-  REMOTE_DOCKER_CONTEXT="$DOCKER_CONTEXT"
-  DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
-  export REMOTE_DOCKER_CONTEXT DEVCONTAINER_SSM_PREFIX
+  if rd_resolve_instance_quiet; then
+    REMOTE_DOCKER_CONTEXT="$DOCKER_CONTEXT"
+    DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
+    export REMOTE_DOCKER_CONTEXT DEVCONTAINER_SSM_PREFIX
+  fi
+
+  # Anything aimed at the remote engine needs the EC2 identity before docker
+  # is even reachable; local commands must not, so this cannot live in
+  # rd_load_config.
+  if [ "$(rdc_backend)" = "remote" ]; then
+    rd_require_remote_config
+  fi
 fi
 
 case "$RDC_COMMAND" in

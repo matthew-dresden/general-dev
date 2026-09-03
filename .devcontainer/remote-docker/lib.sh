@@ -102,25 +102,22 @@ rd_check_prereqs() {
 # runs that once, exports what it printed, and translates a failure into the
 # repository's own rd_fail shape so the caller sees a remedy rather than a
 # traceback.
-rd_resolve_instance() {
+# The resolving half, without the diagnosis: returns non-zero when nothing can
+# be resolved instead of ending the process. A caller that has not yet decided
+# whether it is even talking to a remote engine needs to ask the question
+# without a repository that configures no instances at all becoming an error.
+rd_resolve_instance_quiet() {
   [ -n "${RD_INSTANCE_RESOLVED:-}" ] && return 0
 
-  local repo_root scripts_dir block
+  local repo_root scripts_dir block line
   repo_root="$(cd "${RD_DIR}/../.." && pwd)"
   scripts_dir="${repo_root}/.claude/plugins/devcontainer/scripts"
 
   block="$(PYTHONPATH="$scripts_dir" python3 -m devcontainer_config.cli resolve-instance 2>&1)" \
-    || rd_fail "Could not resolve which instance to act on" \
-      "$(printf '%s' "$block" | sed -n '1,6p')" \
-      "" \
-      "Name one explicitly:      ${RD_BOLD}INSTANCE=<name> make <target>${RD_RESET}" \
-      "Or set a default:         ${RD_BOLD}export DEFAULT_REMOTE_INSTANCE=<name>${RD_RESET}" \
-      "" \
-      "What is configured:       ${RD_BOLD}make instances${RD_RESET}"
+    || { RD_RESOLVE_DIAGNOSIS="$block"; return 1; }
 
   # Only KEY=VALUE lines are consumed; a warning the resolver printed to
   # stderr has already reached the caller and must not be eval'd.
-  local line
   while IFS= read -r line; do
     case "$line" in
       [A-Z_]*=*) export "${line?}" ;;
@@ -129,13 +126,27 @@ rd_resolve_instance() {
 $block
 EOF_BLOCK
 
-  [ -n "${INSTANCE:-}" ] || rd_fail "The resolver returned no instance" \
+  [ -n "${INSTANCE:-}" ] || { RD_RESOLVE_DIAGNOSIS=""; return 1; }
+
+  RD_INSTANCE_RESOLVED=1
+  export RD_INSTANCE_RESOLVED
+}
+
+rd_resolve_instance() {
+  rd_resolve_instance_quiet && return 0
+
+  [ -n "${RD_RESOLVE_DIAGNOSIS:-}" ] || rd_fail "The resolver returned no instance" \
     "It exited successfully but printed no INSTANCE line, so there is nothing to act on." \
     "" \
     "What is configured:       ${RD_BOLD}make instances${RD_RESET}"
 
-  RD_INSTANCE_RESOLVED=1
-  export RD_INSTANCE_RESOLVED
+  rd_fail "Could not resolve which instance to act on" \
+    "$(printf '%s' "$RD_RESOLVE_DIAGNOSIS" | sed -n '1,6p')" \
+    "" \
+    "Name one explicitly:      ${RD_BOLD}INSTANCE=<name> make <target>${RD_RESET}" \
+    "Or set a default:         ${RD_BOLD}export DEFAULT_REMOTE_INSTANCE=<name>${RD_RESET}" \
+    "" \
+    "What is configured:       ${RD_BOLD}make instances${RD_RESET}"
 }
 
 rd_check_aws_auth() {

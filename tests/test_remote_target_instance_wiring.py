@@ -199,3 +199,51 @@ def test_resolver_failure_is_reported_through_rd_fail_with_remedies() -> None:
     assert "INSTANCE=<name>" in body, "the remedy must show naming an instance explicitly"
     assert "DEFAULT_REMOTE_INSTANCE" in body, "the remedy must show setting a default"
     assert "make instances" in body, "the remedy should point at the listing"
+
+
+def test_the_backend_is_classified_only_after_the_instance_is_resolved() -> None:
+    """`rdc_backend` compares against a value only the resolver knows.
+
+    Classifying first compared the active docker context against whatever
+    `config.env` defaulted `REMOTE_DOCKER_CONTEXT` to, so every instance whose
+    context did not match that one default was classified `local`. `make build`
+    then took the bind-mount path and asked the remote engine to mount a path
+    that exists only on the laptop -- observed against a real instance, where
+    the image built and container creation failed with "bind source path does
+    not exist".
+
+    The ordering is the fix, so the ordering is what is pinned.
+    """
+    # Scoped to the top-level dispatch block. Earlier `rdc_backend` calls sit
+    # inside function bodies, which run when those functions are called, long
+    # after this block has already assigned the value they read.
+    text = _CONTAINER_SH.read_text(encoding="utf-8")
+    dispatch = text[text.index('RDC_COMMAND="${1:-}"') :]
+    resolve_at = dispatch.index("rd_resolve_instance_quiet")
+    assign_at = dispatch.index('REMOTE_DOCKER_CONTEXT="$DOCKER_CONTEXT"')
+    classify_at = dispatch.index('[ "$(rdc_backend)" = "remote" ]')
+    assert resolve_at < assign_at < classify_at, (
+        "the backend must be classified only after REMOTE_DOCKER_CONTEXT has been assigned "
+        "from the resolved block, or the comparison reads a config default"
+    )
+
+
+def test_a_repository_with_no_configured_instance_stays_local() -> None:
+    """Resolution must not be fatal at the point the backend is merely being classified."""
+    lib = _LIB_SH.read_text(encoding="utf-8")
+    assert "rd_resolve_instance_quiet()" in lib, (
+        "a non-fatal resolver is required: a repository configuring no instances is a "
+        "legitimately local one and must still build against its local engine"
+    )
+    container = _CONTAINER_SH.read_text(encoding="utf-8")
+    assert "if rd_resolve_instance_quiet; then" in container, (
+        "container.sh must tolerate an unresolvable instance while classifying"
+    )
+
+
+def test_the_fatal_resolver_still_names_both_remedies() -> None:
+    """Splitting out the quiet form must not have dropped the diagnosis."""
+    lib = _LIB_SH.read_text(encoding="utf-8")
+    fatal = lib[lib.index("rd_resolve_instance() {") :]
+    assert "INSTANCE=<name> make <target>" in fatal
+    assert "DEFAULT_REMOTE_INSTANCE=<name>" in fatal

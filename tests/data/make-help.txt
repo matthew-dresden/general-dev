@@ -16,7 +16,6 @@ ENGINE  pick where builds and containers live
   make remote             host    Point them at the EC2 engine (<REMOTE_DOCKER_CONTEXT>), refreshing the SSH-over-SSM tunnel first.
   make connect            remote  What 'make remote' calls. Re-run after a reboot, after sleep, or when SSO expires.
   make disconnect         host    What 'make local' calls. Only changes where new commands and windows point.
-  make shell              remote  Interactive zsh on the EC2 host itself, not in a container.
 
 BUILD  every target blocks until the container is up and exits non-zero if anything fails
   make build              both    Create the container for the active backend. Refuses if one already exists.

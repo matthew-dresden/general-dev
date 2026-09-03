@@ -68,8 +68,6 @@ rd_require_remote_config() {
   : "${REMOTE_INSTANCE_ID:?REMOTE_INSTANCE_ID must be set}"
   : "${REMOTE_AWS_REGION:?REMOTE_AWS_REGION must be set}"
   : "${REMOTE_AWS_PROFILE:?REMOTE_AWS_PROFILE must be set}"
-  : "${REMOTE_SSH_ALIAS:?REMOTE_SSH_ALIAS must be set}"
-  : "${REMOTE_USER:?REMOTE_USER must be set}"
   : "${REMOTE_DOCKER_CONTEXT:?REMOTE_DOCKER_CONTEXT must be set}"
 }
 
@@ -81,7 +79,6 @@ rd_require_cmd() {
 rd_check_prereqs() {
   rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
   rd_require_cmd session-manager-plugin "Install: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
-  rd_require_cmd ssh "Install OpenSSH client."
 }
 
 rd_check_aws_auth() {
@@ -89,48 +86,6 @@ rd_check_aws_auth() {
     || rd_die "AWS credentials for profile '$REMOTE_AWS_PROFILE' are not valid. Run: aws sso login --profile $REMOTE_AWS_PROFILE"
 }
 
-rd_install_ssh_config() {
-  [ -n "${REMOTE_SSH_KEY_PATH:-}" ] || rd_die "REMOTE_SSH_KEY_PATH must be set (private key for the EC2 key pair)"
-  [ -f "$REMOTE_SSH_KEY_PATH" ] || rd_die "SSH private key not found at $REMOTE_SSH_KEY_PATH (set REMOTE_SSH_KEY_PATH to your key for the '<your-key-pair-name>' key pair)"
-
-  local ssh_dir="${HOME}/.ssh"
-  local ssh_config="${ssh_dir}/config"
-  local marker="general-dev remote-docker ${REMOTE_SSH_ALIAS}"
-  mkdir -p "$ssh_dir"
-  chmod 700 "$ssh_dir"
-  touch "$ssh_config"
-  chmod 600 "$ssh_config"
-
-  local tmp_config
-  tmp_config="$(mktemp)"
-  awk -v marker="$marker" '
-    index($0, ">>> " marker " >>>") { skip = 1; next }
-    index($0, "<<< " marker " <<<") { skip = 0; next }
-    !skip { print }
-  ' "$ssh_config" > "$tmp_config"
-
-  {
-    echo "# >>> ${marker} >>>"
-    echo "Host ${REMOTE_SSH_ALIAS}"
-    echo "  HostName ${REMOTE_INSTANCE_ID}"
-    echo "  User ${REMOTE_USER}"
-    echo "  IdentityFile ${REMOTE_SSH_KEY_PATH}"
-    echo "  IdentitiesOnly yes"
-    echo "  ProxyCommand sh -c \"aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p' --region ${REMOTE_AWS_REGION} --profile ${REMOTE_AWS_PROFILE}\""
-    echo "  ConnectTimeout ${REMOTE_SSH_CONNECT_TIMEOUT:-30}"
-    echo "  ServerAliveInterval 15"
-    echo "  ServerAliveCountMax 3"
-    echo "  StrictHostKeyChecking accept-new"
-    echo "  ControlMaster auto"
-    echo "  ControlPath ~/.ssh/cm-%C"
-    echo "  ControlPersist ${REMOTE_SSH_CONTROL_PERSIST:-10m}"
-    echo "# <<< ${marker} <<<"
-  } >> "$tmp_config"
-
-  mv "$tmp_config" "$ssh_config"
-  chmod 600 "$ssh_config"
-  rd_ok "SSH config block installed for Host '${REMOTE_SSH_ALIAS}' -> ${REMOTE_INSTANCE_ID}"
-}
 
 rd_run() {
   local translator="$1" err status=0 detail
@@ -160,11 +115,11 @@ rd_engine_diagnosis() {
   fi
   if command -v aws > /dev/null 2>&1 \
     && ! aws sts get-caller-identity --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null 2>&1; then
-    printf 'the AWS session for profile '\''%s'\'' has expired, which breaks the tunnel.\n' "$REMOTE_AWS_PROFILE"
+    printf 'the AWS session for profile '\''%s'\'' has expired, which breaks the port forward.\n' "$REMOTE_AWS_PROFILE"
     printf 'aws sso login --profile %s, then make connect\n' "$REMOTE_AWS_PROFILE"
     return 0
   fi
-  printf 'the SSH-over-SSM tunnel to %s has dropped.\n' "$REMOTE_INSTANCE_ID"
+  printf 'the SSM port forward to %s has dropped.\n' "$REMOTE_INSTANCE_ID"
   printf 'make connect\n'
 }
 

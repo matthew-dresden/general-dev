@@ -470,9 +470,11 @@ def test_connect_recipe_dispatches_on_the_transport_selector() -> None:
     text = _makefile_text()
     recipe = _connect_recipe_body(text)
     assert "DEVCONTAINER_TRANSPORT" in recipe
-    assert "$(TUNNEL_SH)" in recipe
-    assert "docker-tunnel.sh" in _resolve_make_refs(text, "$(TUNNEL_SH)"), (
-        "$(TUNNEL_SH) must still resolve to docker-tunnel.sh on the default branch"
+    assert "$(TUNNEL_SH)" not in recipe, (
+        "the ssh branch was removed at cutover (E7-F1-S1-T1); $(TUNNEL_SH) no longer exists"
+    )
+    assert "docker-tunnel.sh" not in text, (
+        "the Makefile must not reference the deleted docker-tunnel.sh"
     )
     assert "devcontainer_config.transport connect" in recipe
     assert "general-dev" not in recipe, (
@@ -544,26 +546,22 @@ def test_context_prefix_assertion_message_names_the_current_prefix_owner() -> No
     )
 
 
-def test_connect_recipe_unset_transport_still_runs_tunnel_sh_with_no_arguments() -> None:
-    """AC-FUNC-004: with DEVCONTAINER_TRANSPORT unset, the recipe still invokes
-    `$(TUNNEL_SH)` with no arguments, exactly as the pre-change recipe did, so
-    `make remote` and `make up` (which depend on `connect`) see no behavior
-    change. Asserted against the recipe source (not by actually invoking
-    docker-tunnel.sh, which needs real AWS/SSH state) by requiring that the
-    `$(TUNNEL_SH)` reference on the ssh branch carries no trailing arguments.
+def test_connect_recipe_defaults_to_the_ssm_transport_when_unset() -> None:
+    """An unset DEVCONTAINER_TRANSPORT selects ssm, the only transport left.
+
+    Before the cutover this asserted the opposite: an unset selector ran
+    `$(TUNNEL_SH)` bare so `make remote` and `make up` saw no behavior change
+    while both transports existed. E7-F1-S1-T1 deleted docker-tunnel.sh, so the
+    default has to move rather than merely lose a branch -- otherwise an
+    operator who sets nothing gets a recipe that dispatches to a value its own
+    case statement rejects. Asserted against the recipe source, never by
+    invoking the ssm branch, which needs real AWS state.
     """
     recipe = _connect_recipe_body(_makefile_text())
-    match = re.search(r"\$\(TUNNEL_SH\)([^\n;]*)", recipe)
-    assert match is not None, "no $(TUNNEL_SH) reference found in the connect recipe"
-    # The capture group already excludes ';', so a trailing ';;' (the case
-    # arm's own terminator) can never appear here; the only value a
-    # well-formed recipe can leave behind is an empty string, once
-    # surrounding whitespace is stripped (code_review round-2: the prior
-    # `trailing in ("", ";;")` form carried an unreachable ";;" alternative).
-    trailing = match.group(1).strip()
-    assert trailing == "", (
-        f"$(TUNNEL_SH) must be invoked with no extra arguments, found trailing text: {trailing!r}"
+    assert 'DEVCONTAINER_TRANSPORT:-ssm' in recipe, (
+        "an unset DEVCONTAINER_TRANSPORT must default to ssm now that ssh is gone"
     )
+    assert "ssh)" not in recipe, "the ssh branch must be gone from the case statement"
 
 
 def test_connect_recipe_rejects_an_unrecognized_transport() -> None:

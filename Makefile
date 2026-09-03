@@ -4,8 +4,6 @@ SHELL := /bin/bash
 RD_DIR := .devcontainer/remote-docker
 CONFIG := $(RD_DIR)/config.env
 CONTAINER_SH := $(RD_DIR)/container.sh
-TUNNEL_SH := $(RD_DIR)/docker-tunnel.sh
-SHELL_SH := $(RD_DIR)/shell.sh
 SECRETS_SH := $(RD_DIR)/push-secrets.sh
 PROXY_SH := .devcontainer/tinyproxy-daemon.sh
 KEYBINDINGS_PY := .devcontainer/vscode-keybindings-install.py
@@ -43,7 +41,7 @@ SPELL_FILES ?= $(MD_FILES)
 PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer/aws-profile-map.json
 
 .DEFAULT_GOAL := help
-.PHONY: help connect disconnect status shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
+.PHONY: help connect disconnect status start stop restart rename check build push-git-creds clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test cert-status
@@ -63,7 +61,6 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)), refreshing the SSH-over-SSM tunnel first."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make connect"          "remote" "What 'make remote' calls. Re-run after a reboot, after sleep, or when SSO expires."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make disconnect"       "host"   "What 'make local' calls. Only changes where new commands and windows point."
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make shell"            "remote" "Interactive zsh on the EC2 host itself, not in a container."
 	@printf '\n\033[1mBUILD\033[0m  every target blocks until the container is up and exits non-zero if anything fails\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make build"            "both"   "Create the container for the active backend. Refuses if one already exists."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make rebuild"          "both"   "clean, then build. Prerequisites are checked before anything is destroyed."
@@ -114,14 +111,13 @@ help:
 
 connect:
 	@set -euo pipefail; \
-	transport="$${DEVCONTAINER_TRANSPORT:-ssh}"; \
+	transport="$${DEVCONTAINER_TRANSPORT:-ssm}"; \
 	case "$$transport" in \
-		ssh) $(TUNNEL_SH) ;; \
 		ssm) $(PROXY_ENV) PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.transport connect \
 			--instance-id "$$REMOTE_INSTANCE_ID" --context "$(REMOTE_CONTEXT)" \
 			--profile "$$REMOTE_AWS_PROFILE" --region "$$REMOTE_AWS_REGION" ;; \
 		*) printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT="%s" is not recognized.\n' "$$transport" >&2; \
-		   printf '        Accepted values: ssh (default), ssm.\n' >&2; \
+		   printf '        Accepted value: ssm. The ssh transport was removed at cutover.\n' >&2; \
 		   exit 1 ;; \
 	esac
 
@@ -133,9 +129,6 @@ disconnect:
 		exit 1; \
 	}
 	@docker context use $(LOCAL_CONTEXT)
-
-shell:
-	@$(SHELL_SH)
 
 status:
 	@$(CONTAINER_SH) status

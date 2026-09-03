@@ -667,16 +667,18 @@ rdc_up() {
 
   if ! docker info > /dev/null 2>&1; then
     if [ "$backend" = "remote" ]; then
-      rd_log "remote engine is not answering, refreshing the tunnel"
-      "${RD_DIR}/docker-tunnel.sh" > /dev/null \
-        || rd_fail "The tunnel could not be refreshed, so the remote engine stays unreachable" \
+      rd_log "remote engine is not answering, refreshing the port forward"
+      PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" python3 -m devcontainer_config.transport connect \
+        --instance-id "$REMOTE_INSTANCE_ID" --context "$REMOTE_DOCKER_CONTEXT" \
+        --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null \
+        || rd_fail "The port forward could not be refreshed, so the remote engine stays unreachable" \
           "The reason is in the output above." \
           "" \
           "If it is an authentication failure:" \
           "  ${RD_BOLD}aws sso login --profile ${REMOTE_AWS_PROFILE}${RD_RESET}, then ${RD_BOLD}make up${RD_RESET}" \
           "" \
           "If the instance is stopped, start it, then ${RD_BOLD}make connect${RD_RESET}."
-      rd_ok "tunnel refreshed"
+      rd_ok "port forward refreshed"
     else
       local diagnosis
       diagnosis="$(rd_engine_diagnosis "$(docker context show)")"

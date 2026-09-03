@@ -4,14 +4,18 @@ Every other module in this package takes a root as an argument rather than
 discovering one itself, so a test can point the whole package at a temporary
 directory instead of the real checkout. Something has to know how to find
 that root and how to derive paths beneath it in the first place; that is
-this module, which is why it depends on nothing else in the package and is
-the first to land.
+this module, which is why it was the first to land. `repo_slug` (below)
+reads `devcontainer_config.hostprobe.read_positive_seconds` for its
+env-configurable timeout, the same shared reader `transport.py` uses, which
+is this module's only intra-package dependency.
 """
 
 from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+
+from devcontainer_config.hostprobe import HostProbeError, read_positive_seconds
 
 SHELL_ENV = "shell.env"
 DEVCONTAINER_ENV_JSON = "devcontainer-environment-variables.json"
@@ -27,6 +31,18 @@ AWS_PROFILE_MAP = ".devcontainer/aws-profile-map.json"
 PRIVATE_FILES: tuple[str, ...] = (SHELL_ENV, DEVCONTAINER_ENV_JSON, AWS_PROFILE_MAP)
 
 EXAMPLE_SUFFIX = ".example"
+
+# Bounds how long `repo_slug` waits on `git config --get remote.origin.url`,
+# a local, network-free read of the checkout's own `.git/config` file. Read
+# fresh on every call through `hostprobe.read_positive_seconds`, the single
+# shared reader this variable's name and default are resolved against.
+# `tests/test_state_bucket_name.py` presently declares its own
+# `_GIT_REMOTE_TIMEOUT_ENV_VAR` / `_GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS` pair
+# naming the same variable and the same default rather than importing these
+# two names; E8-F1-S1-T6 is the tracked follow-up that collapses that pair
+# onto this declaration.
+GIT_REMOTE_TIMEOUT_ENV_VAR = "REPO_SLUG_GIT_TIMEOUT_SECONDS"
+GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS = 10.0
 
 
 class RepoError(RuntimeError):
@@ -82,6 +98,116 @@ def find_root(start: Path) -> Path:
             "explicitly instead of relying on discovery."
         ) from exc
     return Path(completed.stdout.strip())
+
+
+def _git_remote_timeout_seconds() -> float:
+    """The deadline `repo_slug` gives its git-config read (`GIT_REMOTE_TIMEOUT_ENV_VAR`).
+
+    Read fresh on every call, not cached at import time, so a caller that
+    sets `REPO_SLUG_GIT_TIMEOUT_SECONDS` before calling `repo_slug` observes
+    its own value. Delegates the parse and validation to
+    `hostprobe.read_positive_seconds`, the single shared reader this
+    variable's name and default are declared against, re-raising its
+    `HostProbeError` as `RepoError` so no exception type foreign to this
+    module crosses the `repo_slug` boundary.
+    """
+    try:
+        return read_positive_seconds(GIT_REMOTE_TIMEOUT_ENV_VAR, GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS)
+    except HostProbeError as exc:
+        raise RepoError(
+            f"ERROR: {exc}\n"
+            f"Set {GIT_REMOTE_TIMEOUT_ENV_VAR} to a positive number of seconds, "
+            f"or unset it to use the default of "
+            f"{GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS:g}."
+        ) from exc
+
+
+def repo_slug(root: Path) -> str:
+    """The repository slug `remote-instances/root.hcl`'s `repo_slug` local also derives.
+
+    Mirrors that local's own transform on every well-formed remote URL:
+    `git config --get remote.origin.url`, then the final `/`-delimited path
+    segment (which is what Terragrunt's `basename()` also gives for both the
+    HTTPS form `https://host/org/repo.git` and the SSH form
+    `git@host:org/repo.git`, per root.hcl's own comment), then a trailing
+    `.git` removed (Terragrunt's `trimsuffix(..., ".git")`). This
+    correspondence is a documented convention, not an enforced invariant:
+    an HCL `locals` block and a Python function cannot share one
+    declaration across languages, so keeping the two transforms in step
+    depends on updating both here and in root.hcl whenever either changes,
+    the same way `tests/test_repo.py::test_repo_slug_derives_from_git_remote`
+    pins this function's own behavior against root.hcl's documented forms.
+
+    Derives the slug from the git remote only; there is no fallback to the
+    checkout directory name and no default value on any path.
+
+    Raises:
+        RepoError: if the `git` binary is not on PATH, if `GIT_REMOTE_TIMEOUT_ENV_VAR`
+            is set to a value `hostprobe.read_positive_seconds` rejects, if
+            the read does not answer within the resolved deadline, if no
+            `remote.origin.url` is configured for `root`, if the configured
+            URL has no final path segment, or if that final path segment is
+            only `.git` and therefore trims down to an empty slug.
+    """
+    timeout = _git_remote_timeout_seconds()
+    try:
+        completed = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RepoError(
+            "ERROR: git is not installed\n"
+            "repo_slug needs the git binary to read remote.origin.url and "
+            "none was found on PATH.\n"
+            "Install git and ensure it is on PATH, then retry."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RepoError(
+            f"ERROR: git config --get remote.origin.url on {root} did not "
+            f"answer within {timeout:g}s\n"
+            f"repo_slug bounds this local, network-free config read via "
+            f"{GIT_REMOTE_TIMEOUT_ENV_VAR}.\n"
+            "Investigate why a local git config read is unexpectedly slow "
+            "(for example a stale index.lock or disk contention), or raise "
+            f"{GIT_REMOTE_TIMEOUT_ENV_VAR}."
+        ) from exc
+
+    remote_url = completed.stdout.strip()
+    if completed.returncode != 0 or not remote_url:
+        raise RepoError(
+            f"ERROR: no remote.origin.url is configured for {root}\n"
+            "repo_slug derives the repository slug from 'git config --get "
+            "remote.origin.url' and git reported no value.\n"
+            "Configure a remote named 'origin' on this checkout, or pass "
+            "the repository root that has one."
+        )
+
+    last_segment = remote_url.rsplit("/", 1)[-1]
+    if not last_segment:
+        raise RepoError(
+            f"ERROR: no final path segment in remote.origin.url configured "
+            f"for {root}\n"
+            "repo_slug could not derive a repository slug from the "
+            "configured remote.origin.url.\n"
+            "Fix the configured remote URL so it ends in a repository name."
+        )
+
+    slug = last_segment.removesuffix(".git")
+    if not slug:
+        raise RepoError(
+            f"ERROR: remote.origin.url configured for {root} has no "
+            "repository name once a trailing '.git' is removed\n"
+            "repo_slug could not derive a non-empty repository slug from "
+            "the configured remote.origin.url.\n"
+            "Fix the configured remote URL so it ends in a repository name, "
+            "not a bare '.git'."
+        )
+    return slug
 
 
 def workspace_name(root: Path) -> str:

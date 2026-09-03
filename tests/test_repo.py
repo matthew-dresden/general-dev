@@ -195,6 +195,146 @@ def test_find_root_raises_when_start_is_outside_any_repository(tmp_path: Path) -
         repo.find_root(outside)
 
 
+def _set_origin(root: Path, url: str) -> None:
+    """Configure `root`'s `remote.origin.url` to `url`, the way `repo_slug` reads it."""
+    subprocess.run(
+        ["git", "-C", str(root), "remote", "add", "origin", url],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_slug"),
+    [
+        pytest.param("https://host/org/general-dev.git", "general-dev", id="https-with-dot-git"),
+        pytest.param("https://host/org/general-dev", "general-dev", id="https-without-dot-git"),
+        pytest.param("git@host:org/general-dev.git", "general-dev", id="ssh-form"),
+    ],
+)
+def test_repo_slug_derives_from_git_remote(tmp_path: Path, url: str, expected_slug: str) -> None:
+    """AC-FUNC-001 / AC-TEST-001: the same basename-plus-trimsuffix transform root.hcl applies."""
+    repo = _import_repo()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    _set_origin(root, url)
+
+    assert repo.repo_slug(root) == expected_slug
+
+
+def test_repo_slug_raises_when_git_is_not_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-003 / AC-TEST-002: the git binary is not on PATH."""
+    repo = _import_repo()
+    monkeypatch.setenv("PATH", "")
+
+    with pytest.raises(repo.RepoError, match="git is not installed"):
+        repo.repo_slug(tmp_path)
+
+
+def test_repo_slug_raises_when_no_origin_is_configured(tmp_path: Path) -> None:
+    """AC-FUNC-003 / AC-TEST-002: a repository with no remote.origin.url configured."""
+    repo = _import_repo()
+    root = generated_root(tmp_path)
+    init_repo(root)
+
+    with pytest.raises(repo.RepoError, match="no remote.origin.url is configured"):
+        repo.repo_slug(root)
+
+
+def test_repo_slug_raises_when_remote_url_has_no_final_path_segment(tmp_path: Path) -> None:
+    """AC-FUNC-003 / AC-TEST-002: a configured URL that ends in a bare '/'."""
+    repo = _import_repo()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    _set_origin(root, "https://host/org/")
+
+    with pytest.raises(repo.RepoError, match="no final path segment"):
+        repo.repo_slug(root)
+
+
+def test_repo_slug_raises_when_remote_url_final_segment_is_only_dot_git(tmp_path: Path) -> None:
+    """AC-FUNC-003 / AC-TEST-002: a configured URL whose final path segment is exactly
+    '.git' must not silently collapse to an empty slug once the suffix is removed."""
+    repo = _import_repo()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    _set_origin(root, "https://host/org/.git")
+
+    with pytest.raises(repo.RepoError, match="no repository name"):
+        repo.repo_slug(root)
+
+
+def test_repo_slug_honors_git_remote_timeout_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-004: `REPO_SLUG_GIT_TIMEOUT_SECONDS` reaches `subprocess.run`'s `timeout` kwarg."""
+    repo = _import_repo()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    monkeypatch.setenv(repo.GIT_REMOTE_TIMEOUT_ENV_VAR, "2.5")
+    recorded_timeouts: list[float] = []
+
+    def _recording_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        recorded_timeouts.append(timeout)
+        return subprocess.CompletedProcess(
+            cmd, returncode=0, stdout="https://host/org/general-dev.git\n", stderr=""
+        )
+
+    monkeypatch.setattr(repo.subprocess, "run", _recording_run)
+
+    assert repo.repo_slug(root) == "general-dev"
+    assert recorded_timeouts == [2.5]
+
+
+def test_repo_slug_raises_when_git_remote_timeout_env_var_is_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-003 / AC-FUNC-004: an unparsable timeout env var raises `RepoError`, not
+    `hostprobe.HostProbeError`, so no foreign exception type crosses the module boundary."""
+    repo = _import_repo()
+    root = generated_root(tmp_path)
+    init_repo(root)
+    monkeypatch.setenv(repo.GIT_REMOTE_TIMEOUT_ENV_VAR, "not-a-number")
+
+    with pytest.raises(repo.RepoError, match=repo.GIT_REMOTE_TIMEOUT_ENV_VAR):
+        repo.repo_slug(root)
+
+
+def test_repo_slug_raises_when_git_config_read_times_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-FUNC-003 / AC-TEST-002: `subprocess.TimeoutExpired` is converted to a `RepoError`."""
+    repo = _import_repo()
+    root = generated_root(tmp_path)
+    init_repo(root)
+
+    def _timed_out_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    monkeypatch.setattr(repo.subprocess, "run", _timed_out_run)
+
+    with pytest.raises(repo.RepoError, match="did not answer within"):
+        repo.repo_slug(root)
+
+
 @pytest.mark.parametrize("selector", list(_PRESENT_SELECTORS))
 def test_missing_examples_reports_absent_examples(tmp_path: Path, selector: str) -> None:
     repo = _import_repo()

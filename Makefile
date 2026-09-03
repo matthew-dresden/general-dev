@@ -41,7 +41,7 @@ SPELL_FILES ?= $(MD_FILES)
 PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer/aws-profile-map.json
 
 .DEFAULT_GOAL := help
-.PHONY: help connect disconnect status start stop restart rename check build push-git-creds clean rebuild push-secrets \
+.PHONY: help connect disconnect status exec shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test cert-status
@@ -70,6 +70,7 @@ help:
 	@printf '\n\033[1mLIFECYCLE\033[0m\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make status"           "both"   "Backend, container, image and volumes. Read-only, so start here when something looks wrong."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make reopen"           "both"   "Open the container in VS Code. Local opens the folder; remote names the container to attach to."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make exec"             "both" "Interactive shell inside the container. CONTAINER_SHELL picks which one."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make vscode-server"    "both"   "Fetch the VS Code server this machine needs inside the container. reopen does it for you."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make start / stop"     "both"   "Start or stop the container. The checkout survives either way."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make restart"          "both"   "Restart in place. Fixes a wedged container without rebuilding anything."
@@ -204,6 +205,16 @@ remote: connect
 
 reopen:
 	@$(CONTAINER_SH) reopen
+
+exec:
+	@$(CONTAINER_SH) exec
+
+shell:
+	@printf '\033[0;31m[ERROR]\033[0m make shell is gone: the EC2 host has no interactive access path.\n' >&2
+	@printf '        The SSH transport was removed at cutover, and the remote engine is now\n' >&2
+	@printf '        reached over an SSM port forward that carries the docker API only.\n' >&2
+	@printf '        For a shell inside the container:  \033[1mmake exec\033[0m\n' >&2
+	@exit 1
 
 vscode-server:
 	@$(CONTAINER_SH) vscode-server

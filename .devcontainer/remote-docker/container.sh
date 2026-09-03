@@ -659,6 +659,25 @@ rdc_reopen() {
   rd_ok "VS Code opening the workspace directly, no Attach step needed"
 }
 
+rdc_exec_shell() {
+  # An interactive shell inside the container, on whichever engine the active
+  # context points at. This is the replacement for the host shell the cutover
+  # removed: the container is where work happens, and the host deliberately has
+  # no human access path left.
+  #
+  # Named rdc_exec_shell, not rdc_exec: that name is already taken above by the
+  # non-interactive helper rdc_check and others use to run a single command in
+  # a container and capture its output.
+  local id
+  id="$(rdc_require_container)" || exit $?
+  docker exec -it "$id" "$CONTAINER_SHELL" \
+    || rd_fail "The shell '${CONTAINER_SHELL}' could not be started in the container" \
+      "The container is running; the shell itself failed to start." \
+      "" \
+      "If the image does not ship that shell, name one it does have:" \
+      "  ${RD_BOLD}CONTAINER_SHELL=/bin/bash make exec${RD_RESET}"
+}
+
 rdc_up() {
   rd_require_cmd docker "Install the docker CLI: https://docs.docker.com/engine/install/"
 
@@ -878,8 +897,9 @@ case "$RDC_COMMAND" in
   reopen) rdc_require_docker && rdc_reopen ;;
   vscode-server) rdc_require_docker && rdc_seed_vscode_server ;;
   up) rdc_up ;;
+  exec) rdc_require_docker && rdc_exec_shell ;;
   push-git-creds) rdc_require_docker && rdc_push_git_creds ;;
   clean) rdc_require_docker && rdc_clean ;;
   rebuild) rdc_require_docker && rdc_rebuild ;;
-  *) rd_die "usage: $(basename "$0") <up|status|start|stop|restart|rename|reopen|vscode-server|check|build|push-git-creds|clean|rebuild>" ;;
+  *) rd_die "usage: $(basename "$0") <up|exec|status|start|stop|restart|rename|reopen|vscode-server|check|build|push-git-creds|clean|rebuild>" ;;
 esac

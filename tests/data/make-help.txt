@@ -27,6 +27,7 @@ BUILD  every target blocks until the container is up and exits non-zero if anyth
 LIFECYCLE
   make status             both    Backend, container, image and volumes. Read-only, so start here when something looks wrong.
   make reopen             both    Open the container in VS Code. Local opens the folder; remote names the container to attach to.
+  make exec               both    Interactive shell inside the container. CONTAINER_SHELL picks which one.
   make vscode-server      both    Fetch the VS Code server this machine needs inside the container. reopen does it for you.
   make start / stop       both    Start or stop the container. The checkout survives either way.
   make restart            both    Restart in place. Fixes a wedged container without rebuilding anything.

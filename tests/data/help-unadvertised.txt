@@ -9,3 +9,5 @@
 help: this is the target `make help` itself renders; advertising itself in its own output would be circular and would add a row that does nothing a developer does not already know from having typed it.
 
 hooks-uninstall: part of the bypass surface the PreToolUse hook denies (spec Section 4.6.1); advertising it in `make help` would advertise the bypass it exists to deny.
+
+shell: removed at cutover and kept only as a notice that exits non-zero, so an operator with the old command in muscle memory or a script gets a specific explanation and a pointer to `make exec` rather than make's bare "No rule to make target". Advertising it would offer a capability that no longer exists.

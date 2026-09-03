@@ -163,6 +163,35 @@ A script or skill that needs one of these values calls into that module
 recomputing the pattern above independently; recomputing it a second time
 is exactly the drift this table exists to prevent.
 
+## Choosing which instance a command acts on
+
+Every make target that reaches the remote engine accepts `INSTANCE`:
+
+```sh
+INSTANCE=personal make build
+INSTANCE=personal make status
+INSTANCE=personal make push-secrets
+```
+
+The name is resolved once per invocation, by
+`devcontainer_config.cli resolve-instance`, which owns the resolution order:
+an explicit `INSTANCE` wins; otherwise `DEFAULT_REMOTE_INSTANCE`; otherwise a
+sole configured instance; and with several configured and no selector, the
+command stops and names them rather than picking one.
+
+Resolution deliberately does not happen when `make` parses this file. It shells
+out, and doing it at parse time would run on every invocation, including
+`make help` in a checkout with no instances configured at all.
+
+If resolution fails, the error names both remedies:
+
+```sh
+INSTANCE=<name> make <target>          # name one for this command
+export DEFAULT_REMOTE_INSTANCE=<name>  # or set a default for the shell
+```
+
+`make instances` shows what is available.
+
 ## Seeing what is configured
 
 `make instances` lists every instance under `remote-instances/`, with the AWS

@@ -3,6 +3,13 @@ SHELL := /bin/bash
 
 RD_DIR := .devcontainer/remote-docker
 CONFIG := $(RD_DIR)/config.env
+# The instance every remote target acts on. Declared once, passed through to
+# each remote recipe rather than resolved at parse time: resolution shells out,
+# and doing it at parse time would run on every `make` invocation including
+# `make help`, in a repository that may have no instances configured at all.
+# Empty by default, so the resolver applies its own four-step order.
+INSTANCE ?=
+
 CONTAINER_SH := $(RD_DIR)/container.sh
 SECRETS_SH := $(RD_DIR)/push-secrets.sh
 PROXY_SH := .devcontainer/tinyproxy-daemon.sh
@@ -133,22 +140,22 @@ disconnect:
 	@docker context use $(LOCAL_CONTEXT)
 
 status:
-	@$(CONTAINER_SH) status
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) status
 
 start:
-	@$(CONTAINER_SH) start
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) start
 
 stop:
-	@$(CONTAINER_SH) stop
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) stop
 
 restart:
-	@$(CONTAINER_SH) restart
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) restart
 
 rename:
-	@$(CONTAINER_SH) rename
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) rename
 
 check:
-	@$(CONTAINER_SH) check
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) check
 
 init:
 	@printf '\033[0;36m[INIT]\033[0m creating config files from their examples\n'
@@ -187,16 +194,16 @@ keybindings:
 	@python3 $(KEYBINDINGS_PY)
 
 up:
-	@$(CONTAINER_SH) up
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) up
 
 build:
-	@$(CONTAINER_SH) build
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) build
 
 build-no-cache:
-	@NO_CACHE=1 $(CONTAINER_SH) build
+	@INSTANCE="$(INSTANCE)" NO_CACHE=1 $(CONTAINER_SH) build
 
 rebuild-no-cache:
-	@NO_CACHE=1 $(CONTAINER_SH) rebuild
+	@INSTANCE="$(INSTANCE)" NO_CACHE=1 $(CONTAINER_SH) rebuild
 
 local: disconnect
 	@printf '\033[0;32m[DONE]\033[0m targeting the local engine, "make build" bind-mounts this folder\n'
@@ -205,10 +212,10 @@ remote: connect
 	@printf '\033[0;32m[DONE]\033[0m targeting the remote engine, "make build" clones into a volume\n'
 
 reopen:
-	@$(CONTAINER_SH) reopen
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) reopen
 
 exec:
-	@$(CONTAINER_SH) exec
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) exec
 
 instances:
 	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instances
@@ -221,19 +228,19 @@ shell:
 	@exit 1
 
 vscode-server:
-	@$(CONTAINER_SH) vscode-server
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) vscode-server
 
 push-git-creds:
-	@$(CONTAINER_SH) push-git-creds
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) push-git-creds
 
 clean:
-	@$(CONTAINER_SH) clean
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) clean
 
 rebuild:
-	@$(CONTAINER_SH) rebuild
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) rebuild
 
 push-secrets:
-	@$(SECRETS_SH)
+	@INSTANCE="$(INSTANCE)" $(SECRETS_SH)
 
 # spec Section 4.1.2 (E6-F1-S1-T2): client and CA expiry per instance, the
 # inspection half of the `certs` module. Exit 0 when every certificate is

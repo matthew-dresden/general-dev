@@ -884,6 +884,16 @@ RDC_COMMAND="${1:-}"
 # even reachable; local commands must not, so this cannot live in rd_load_config.
 if command -v docker > /dev/null 2>&1 && [ "$(rdc_backend)" = "remote" ]; then
   rd_require_remote_config
+  # Resolve once, here, and let every downstream reader use the result. The
+  # two names below were previously derived from PROJECT_NAME independently
+  # by this script and by push-secrets.sh, which meant two callers could
+  # address different instances while each believed it was addressing "the"
+  # one. Assigning them from the single resolved block removes that split
+  # without rewriting every use site.
+  rd_resolve_instance
+  REMOTE_DOCKER_CONTEXT="$DOCKER_CONTEXT"
+  DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
+  export REMOTE_DOCKER_CONTEXT DEVCONTAINER_SSM_PREFIX
 fi
 
 case "$RDC_COMMAND" in

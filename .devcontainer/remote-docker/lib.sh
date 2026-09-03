@@ -81,6 +81,54 @@ rd_check_prereqs() {
   rd_require_cmd session-manager-plugin "Install: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
 }
 
+# The single place any shell caller turns INSTANCE / DEFAULT_REMOTE_INSTANCE
+# into a concrete instance and its addressing block. Every remote entry point
+# calls this exactly once, at its own start, and then reads the exported
+# values -- rather than each script deriving a context name or parameter
+# prefix from PROJECT_NAME on its own, which is how two callers end up
+# addressing different instances while believing they agree.
+#
+# The resolver is `devcontainer_config.cli resolve-instance`, which owns the
+# four-step resolution order. This function adds no policy of its own; it
+# runs that once, exports what it printed, and translates a failure into the
+# repository's own rd_fail shape so the caller sees a remedy rather than a
+# traceback.
+rd_resolve_instance() {
+  [ -n "${RD_INSTANCE_RESOLVED:-}" ] && return 0
+
+  local repo_root scripts_dir block
+  repo_root="$(cd "${RD_DIR}/../.." && pwd)"
+  scripts_dir="${repo_root}/.claude/plugins/devcontainer/scripts"
+
+  block="$(PYTHONPATH="$scripts_dir" python3 -m devcontainer_config.cli resolve-instance 2>&1)" \
+    || rd_fail "Could not resolve which instance to act on" \
+      "$(printf '%s' "$block" | sed -n '1,6p')" \
+      "" \
+      "Name one explicitly:      ${RD_BOLD}INSTANCE=<name> make <target>${RD_RESET}" \
+      "Or set a default:         ${RD_BOLD}export DEFAULT_REMOTE_INSTANCE=<name>${RD_RESET}" \
+      "" \
+      "What is configured:       ${RD_BOLD}make instances${RD_RESET}"
+
+  # Only KEY=VALUE lines are consumed; a warning the resolver printed to
+  # stderr has already reached the caller and must not be eval'd.
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      [A-Z_]*=*) export "${line?}" ;;
+    esac
+  done <<EOF_BLOCK
+$block
+EOF_BLOCK
+
+  [ -n "${INSTANCE:-}" ] || rd_fail "The resolver returned no instance" \
+    "It exited successfully but printed no INSTANCE line, so there is nothing to act on." \
+    "" \
+    "What is configured:       ${RD_BOLD}make instances${RD_RESET}"
+
+  RD_INSTANCE_RESOLVED=1
+  export RD_INSTANCE_RESOLVED
+}
+
 rd_check_aws_auth() {
   aws sts get-caller-identity --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null 2>&1 \
     || rd_die "AWS credentials for profile '$REMOTE_AWS_PROFILE' are not valid. Run: aws sso login --profile $REMOTE_AWS_PROFILE"

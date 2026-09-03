@@ -53,7 +53,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import _makefile_text, _resolve_make_refs
+from conftest import _makefile_text, _removed_identifiers, _resolve_make_refs
 from devcontainer_config import instances
 from devcontainer_config.repo import find_root
 
@@ -473,9 +473,10 @@ def test_connect_recipe_dispatches_on_the_transport_selector() -> None:
     assert "$(TUNNEL_SH)" not in recipe, (
         "the ssh branch was removed at cutover (E7-F1-S1-T1); $(TUNNEL_SH) no longer exists"
     )
-    assert "docker-tunnel.sh" not in text, (
-        "the Makefile must not reference the deleted docker-tunnel.sh"
-    )
+    for identifier in _removed_identifiers():
+        assert identifier not in text, (
+            f"the Makefile must not reference {identifier!r}, deleted at cutover"
+        )
     assert "devcontainer_config.transport connect" in recipe
     assert "general-dev" not in recipe, (
         "the recipe must never carry a literal 'general-dev' substring "

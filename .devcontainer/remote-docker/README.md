@@ -112,22 +112,21 @@ make clean CONTAINER=general-dev-review
 
 ## Daily workflow, connect & disconnect
 
-One-time Mac setup (tools, SSO profile, key verification, `~/.zshrc` aliases)
-is automated by the agent prompt at `docs/mac-setup-prompt.md`.
-It installs these aliases:
+One-time setup of this machine -- host tools, the SSO profile, and the
+certificate authority and client certificate this transport presents -- is what
+the `/devcontainer:setup-local` and `/devcontainer:setup-remote` skills do.
+They ask what they need, state any command they cannot run themselves, and
+verify the result rather than assuming it.
 
-| Alias | Makefile equivalent | What it does |
-|---|---|---|
-| `gdev-connect` | `make connect` | Opens the SSM port forward and switches the docker context to the instance's own. |
-| `gdev-disconnect` | `make disconnect` | Switches the docker context back to the local engine (OrbStack). |
-| `gdev-shell` | `make shell` | zsh on the EC2 host. |
-
-The aliases work from any directory; the `make` targets work from the repo root
-and cover the container lifecycle as well. `make help` documents all of them.
+The `make` targets run from the repository root and cover the whole lifecycle;
+`make help` documents them. There are no shell aliases: the pair that once
+existed wrapped `make connect` and `make disconnect`, and a third wrapped a
+`make shell` that no longer exists, so they are one more thing to keep in step
+with the Makefile for no capability the Makefile does not already give.
 
 **Connect (or reconnect after sleep/reboot/SSO expiry):**
 
-1. `gdev-connect`, if it fails with an auth error, run
+1. `make connect`, if it fails with an auth error, run
    `aws sso login --profile default` first.
 2. VS Code → new window → **Dev Containers: Attach to Running Container…**
    → pick the `vsc-<project>…` container. Your container was running the
@@ -146,7 +145,7 @@ and cover the container lifecycle as well. `make help` documents all of them.
 - Just close the VS Code window (or sleep/shut the Mac). Containers on EC2
   keep running (`shutdownAction: "none"`), including any long-lived agent
   sessions inside them.
-- `gdev-disconnect` is only needed when you want NEW VS Code / docker
+- `make disconnect` is only needed when you want NEW VS Code / docker
   operations to target the local OrbStack engine again. It stops nothing
   remotely, and already-open remote windows are unaffected.
 
@@ -472,7 +471,7 @@ screen. Do not redirect either stream here.
   fix in `.devcontainer/`, pick the workflow that matches the context:
   - Remote engine → **Attach to Running Container…** (or clone-in-volume for
     the first create of a project). Never Reopen in Container.
-  - Local engine → `gdev-disconnect` first, then Reopen in Container.
+  - Local engine → `make disconnect` first, then Reopen in Container.
 
   The two working trees are independent: the local folder and the
   `<project>-<branch>-<hash>` volume are separate checkouts that can hold

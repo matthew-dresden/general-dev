@@ -299,7 +299,7 @@ Homebrew does not guarantee `openssl@3` is symlinked into that shared
 prefix on every install -- then confirm `openssl version` reports `OpenSSL
 3.x`, not `LibreSSL`; on Linux/WSL, most current distributions'
 `apt-get install openssl` already satisfies the floor.
-`docs/mac-setup-prompt.md` step 2 lists this alongside the other host
+The `/devcontainer:setup-local` skill checks this alongside the other host
 tools, and `certs/SKILL.md`'s `## Failure semantics` documents the failure
 this produces when the requirement is unmet.
 

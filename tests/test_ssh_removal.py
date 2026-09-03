@@ -8,8 +8,11 @@ reintroduce a reference to a script that no longer exists, and the failure then
 surfaces at runtime on someone's machine rather than here.
 
 This module scans every tracked file for the identifiers in
-`tests/data/removed-ssh-tokens.txt` and fails on any occurrence outside the
-carve-outs in `tests/data/ssh-reference-deferred-paths.md`. Both are data, read
+`tests/data/removed-ssh-tokens.txt` and fails on any occurrence anywhere in the
+repository. There are no carve-outs: the two test modules that once needed one,
+because asserting an identifier's absence meant naming it, now read the same
+token list through `conftest._removed_identifiers` and contain none of them.
+The token list is data, read
 at run time, so adding an identifier or clearing a carve-out is an edit to a
 data file rather than to this module.
 
@@ -37,7 +40,6 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _TOKENS_FILE = _REPO_ROOT / "tests" / "data" / "removed-ssh-tokens.txt"
-_DEFERRED_FILE = _REPO_ROOT / "tests" / "data" / "ssh-reference-deferred-paths.md"
 _SELF = "tests/test_ssh_removal.py"
 
 
@@ -55,18 +57,10 @@ def _removed_tokens() -> list[str]:
     return tokens
 
 
-def _deferred_paths() -> set[str]:
-    """Repo-relative paths carved out of the scan, parsed from the markdown list."""
-    assert _DEFERRED_FILE.is_file(), f"{_DEFERRED_FILE} is missing"
-    text = _DEFERRED_FILE.read_text(encoding="utf-8")
-    return {m.group(1).strip() for m in re.finditer(r"^- (\S+)\s*$", text, re.MULTILINE)}
-
-
 def _files_containing(token: str) -> set[str]:
     hits: set[str] = set()
     for relative in _tracked_files():
-        if relative in {_SELF, "tests/data/removed-ssh-tokens.txt",
-                        "tests/data/ssh-reference-deferred-paths.md"}:
+        if relative in {_SELF, "tests/data/removed-ssh-tokens.txt"}:
             continue
         absolute = _REPO_ROOT / relative
         try:
@@ -80,12 +74,13 @@ def _files_containing(token: str) -> set[str]:
 
 @pytest.mark.parametrize("token", _removed_tokens())
 def test_no_tracked_file_references_a_removed_identifier(token: str) -> None:
-    """AC-4.9: the identifier appears nowhere outside its declared carve-outs."""
-    offenders = sorted(_files_containing(token) - _deferred_paths())
+    """AC-4.9: the identifier appears nowhere in the repository at all."""
+    offenders = sorted(_files_containing(token))
     assert not offenders, (
         f"{token!r} was removed by the cutover but is still referenced by: {offenders}. "
-        f"Either remove the reference, or add the path to "
-        f"tests/data/ssh-reference-deferred-paths.md naming the task that owns it."
+        "Remove the reference. There is no carve-out list any more: a test that must "
+        "assert this identifier's absence reads it from tests/data/removed-ssh-tokens.txt "
+        "through conftest._removed_identifiers rather than spelling it."
     )
 
 
@@ -97,29 +92,6 @@ def test_the_three_deleted_scripts_are_absent_from_disk() -> None:
         ".devcontainer/remote-docker/ec2-user-data.yaml",
     ):
         assert not (_REPO_ROOT / relative).exists(), f"{relative} was deleted at cutover but exists"
-
-
-def test_no_carve_out_is_stale() -> None:
-    """A path listed as deferred must still contain a reference, or it is stale.
-
-    Without this the list would silently accumulate paths that were already
-    cleaned, and the scan's coverage would shrink without anyone noticing.
-    """
-    tokens = _removed_tokens()
-    stale: list[str] = []
-    for relative in sorted(_deferred_paths()):
-        absolute = _REPO_ROOT / relative
-        if not absolute.is_file():
-            stale.append(f"{relative} (no such file)")
-            continue
-        content = absolute.read_text(encoding="utf-8")
-        if not any(token in content for token in tokens):
-            stale.append(f"{relative} (no remaining reference)")
-    assert not stale, (
-        "tests/data/ssh-reference-deferred-paths.md carries stale entries: "
-        f"{stale}. Delete each row whose reference is already gone; when the "
-        "file is empty the scan covers the whole repository."
-    )
 
 
 def test_container_sh_invokes_no_script_that_is_missing() -> None:
@@ -150,8 +122,3 @@ def test_scanner_detects_a_planted_reference(tmp_path: Path) -> None:
     assert "docker-tunnel.sh" in planted.read_text(encoding="utf-8")
 
 
-def test_deferred_list_parses_the_paths_it_declares() -> None:
-    """The markdown parser finds real entries, so the carve-out is not silently empty."""
-    paths = _deferred_paths()
-    assert paths, "no deferred paths parsed; the carve-out file's format may have drifted"
-    assert all(not p.startswith("/") for p in paths), "paths must be repo-relative"

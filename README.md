@@ -6,8 +6,11 @@ Personal general-purpose development workspace built on the
 
 - **Local**. VS Code Dev Containers on the laptop's Docker engine (OrbStack).
 - **Remote**. VS Code Dev Containers against a Docker engine on EC2, reached
-  through SSH-over-SSM. Containers and source live on the instance, so work
-  survives the laptop sleeping, restarting, or losing connectivity.
+  through an SSM port forward carrying the docker API under mutual TLS.
+  Containers and source live on the instance, so work survives the laptop
+  sleeping, restarting, or losing connectivity. There is no key pair, and no
+  interactive access to the host: `make exec` opens a shell in a container,
+  which is the only shell this workspace offers.
 
 Project repos being worked on are **plain nested clones** inside the
 workspace, not submodules, and `repos/` is where they go. They are gitignored
@@ -15,12 +18,30 @@ by this repo and each appears as its own repository in Source Control with
 nothing to configure: VS Code's scan walks directories and never consults
 `.gitignore`, so an ignored clone is found like any other.
 
+## What changed
+
+Each row is a behavior an earlier version of this workspace had, and what it
+does now. The identifiers match Section 0 of the platform specification.
+
+| | Was | Is now |
+|---|---|---|
+| B1 | Remote engine reached over SSH inside SSM, requiring `REMOTE_SSH_KEY_PATH` and a key pair. | Remote engine reached over an SSM port forward with mutual TLS. No key pair exists. |
+| B2 | `make shell` opened an interactive shell on the EC2 host. | That target is removed. Host access is not available to the developer at all; `make exec` opens a shell inside a container. |
+| B3 | A developer with engine access could obtain root on the EC2 host, through the docker group on a rootful daemon. | Host root is unreachable. The daemon is rootless; containers still run as uid 0 inside a user namespace. |
+| B4 | `make remote`, `make build` and `make status` operated on one implicit instance. | The same targets accept `INSTANCE=<name>`, defaulting to `DEFAULT_REMOTE_INSTANCE`. |
+| B5 | API tokens were placed in `shell.env`, which was published wholesale to Parameter Store. | Tokens live in a per-secret catalog reached through `devsecret`. `shell.env` carries no credentials. |
+| B6 | `git commit --no-verify` succeeded. | Denied by a `PreToolUse` hook and by the pre-commit hook. |
+| B7 | `.claude/` was untracked in its entirety. | `.claude/` is tracked except `settings.local.json`, so the plugin and hooks arrive with a clone. |
+| B8 | The devcontainer image had no Terraform, Terragrunt or session-manager-plugin. | All three are installed by devcontainer features. An image rebuild is required. |
+| B9 | The instance's cloud-init user data was applied by hand, to an instance created in the console. | The instance is declared in Terraform and created by Terragrunt, and its user data is rendered from the module. |
+| B10 | `shell.env` was the only place project configuration lived. | Unchanged for configuration. Only credentials moved. |
+
 ## Layout
 
 | Path | Purpose |
 |---|---|
 | `.devcontainer/` | Devcontainer definition (image + features), postcreate setup, shared shell functions |
-| `.devcontainer/remote-docker/` | Remote EC2 engine: tunnel/shell/secrets scripts, instance config, see its [README](.devcontainer/remote-docker/README.md) |
+| `.devcontainer/remote-docker/` | Remote EC2 engine: transport, certificate and secret entry points, instance config, see its [README](.devcontainer/remote-docker/README.md) |
 | `.devcontainer/nix-family-os/`, `wsl-family-os/` | Host-side proxy (tinyproxy) helpers for local mode |
 | `repos/` | Where project repositories are cloned. Only its `.gitkeep` is tracked |
 | `.vscode/settings.json` | Workspace git-repo detection (nested clones) |
@@ -29,10 +50,26 @@ nothing to configure: VS Code's scan walks directories and never consults
 
 ## Quick start, local
 
-1. `cdevcontainer setup-devcontainer` (generates the gitignored `shell.env`,
-   `devcontainer-environment-variables.json`, `.devcontainer/aws-profile-map.json`).
-2. Start the host proxy if `HOST_PROXY=true` (see `nix-family-os/README.md`).
-3. VS Code → **Reopen in Container**.
+The local engine is the laptop's own Docker (OrbStack). The workspace folder is
+bind-mounted, so an edit is visible on both sides at once.
+
+**The make route, in the order they are run:**
+
+```sh
+make init             # create the three gitignored config files from examples
+make local            # point docker and VS Code at the local engine
+make build            # build the container and run postCreate
+make exec             # a shell inside the container
+```
+
+**The skill route:** `/devcontainer:setup-local` prepares this machine, checking
+each host tool and stating any command it cannot run itself, and
+`/devcontainer:launch` builds and opens the container. Both reach the same
+container the make targets produce.
+
+`cdevcontainer setup-devcontainer` generates the three gitignored files if you
+would rather not use `make init`. Start the host proxy if `HOST_PROXY=true`
+(see `nix-family-os/README.md`), then VS Code → **Reopen in Container**.
 
 ## First-time setup
 
@@ -64,9 +101,15 @@ nothing.
 
 ## Quick start, remote
 
-Everything runs through `make` from this directory. `make help` documents each
-target in detail; details and instance reference live in
-[.devcontainer/remote-docker/README.md](.devcontainer/remote-docker/README.md).
+The remote engine is a rootless Docker daemon on an EC2 instance. Nothing
+listens for inbound connections: the daemon binds its TLS port to loopback on
+the instance, and the only route to it is an SSM port forward, authenticated by
+IAM, carrying the docker API under mutual TLS. The certificate authenticates
+the client; IAM authorizes the session. Host access does not exist, by design.
+
+Two routes reach the same result. The `make` targets are the mechanism, and the
+`/devcontainer:` skills drive those same targets while asking for what they
+need and verifying each step; use whichever suits the moment.
 
 **Prerequisites (laptop):** aws CLI v2, session-manager-plugin, docker CLI, git.
 For `build`/`rebuild` additionally:
@@ -78,11 +121,28 @@ brew install jq
 
 Missing tools fail fast with the install command.
 
+**The make route, in the order they are run:**
+
 ```sh
-make push-secrets     # once per project (publishes shell.env to Parameter Store)
-make connect          # SSH-over-SSM tunnel + docker context switch
+make cert-ca          # once per instance: create its certificate authority
+make cert-client      # the client certificate make connect presents
+make cert-publish     # issue server material and publish it to Parameter Store
+make cert-install     # the instance fetches it and starts its daemon
+make push-secrets     # publish this project's shell.env and profile map
+make connect          # open the SSM port forward, point docker at the instance
 make build            # clone into a volume on the engine, build, run postCreate
+make exec             # a shell inside the container
 ```
+
+**The skill route:** `/devcontainer:setup-remote` performs the same
+provisioning and certificate steps and verifies each one before continuing;
+`/devcontainer:certs` owns the certificate lifecycle afterward, including
+renewal; `/devcontainer:engine` switches which engine is active; and
+`/devcontainer:launch` builds and opens the container.
+
+Add `INSTANCE=<name>` to any of the targets above to act on a specific
+instance, or set `DEFAULT_REMOTE_INSTANCE`. `make instances` lists what is
+configured and marks the active one.
 
 `make build` blocks until the container is actually up and exits non-zero if
 the build or postCreate fails. It clones from **origin**, not from this
@@ -102,7 +162,8 @@ Store via the instance role, so there is no manual seeding.
 | `make rename NAME=…` | readable container name |
 | `make check` | report uncommitted/unpushed work inside the volume |
 | `make clean` / `make rebuild` | destroy / destroy and build again |
-| `make shell` | zsh on the EC2 host itself |
+| `make exec` | a shell inside the container, the only shell available |
+| `make cert-status` | client and CA expiry per instance |
 | `make disconnect` | point docker back at the local engine |
 
 Terminals inside the container open in a shared tmux session, so a Claude

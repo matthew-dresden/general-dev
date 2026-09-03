@@ -121,7 +121,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from conftest import _makefile_text, _normalize_whitespace
+from conftest import _makefile_text, _normalize_whitespace, _removed_identifiers
 from devcontainer_config import repo, transport
 from gitignore_check import repo_root
 
@@ -1441,7 +1441,7 @@ def test_transport_section_names_no_removed_script() -> None:
     find, and the useful assertion is now that the name is absent entirely.
     """
     section = _transport_section_text_normalized()
-    for token in ("docker-tunnel.sh", "shell.sh"):
+    for token in _removed_identifiers():
         assert token not in section, (
             f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section still names {token!r}, "
             "which was deleted at cutover. A reader would look for a script that is not there."

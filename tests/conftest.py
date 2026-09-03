@@ -297,6 +297,23 @@ def _example_root(tmp_path: Path) -> Path:
     return root
 
 
+
+def _removed_identifiers() -> tuple[str, ...]:
+    """The identifiers deleted at cutover, read from the one file that lists them.
+
+    Read rather than spelled so a test can assert their absence without itself
+    containing them. A test that names a removed identifier is an occurrence of
+    it, which is exactly what forced `tests/test_ssh_removal.py`'s
+    repository-wide scan to carry per-file carve-outs; reading the list removes
+    the need for them, and keeps every such assertion in step with the scan
+    rather than drifting from it.
+    """
+    path = Path(__file__).resolve().parent / "data" / "removed-ssh-tokens.txt"
+    tokens = tuple(t.strip() for t in path.read_text(encoding="utf-8").splitlines() if t.strip())
+    assert tokens, f"{path} lists no identifiers; assertions reading it would check nothing"
+    return tokens
+
+
 def _makefile_text() -> str:
     """The repository root `Makefile`, read fresh for every call.
 

@@ -329,32 +329,29 @@ error -- see `docs/devcontainer.md`'s "Transport" section.
 (E1-F3-S1-T1) is the docker-handshake probe `engine`, `setup-local` and
 `setup-remote` share for their own, simpler "does the engine answer" check.
 
-`DEVCONTAINER_TRANSPORT` is a transport selector for the `make connect`
-entry point. It has two independent readers: the Makefile's `connect`
-recipe, which reads DEVCONTAINER_TRANSPORT from the environment and
-dispatches on it, and `transport.py`'s `resolve_transport`, which the
-module's own `connect` subcommand calls. Both readers dispatch the
-variable the same way for unset, `ssh` and `ssm`, and for any other
-non-empty value: unset or the literal `ssh` selects the existing SSH
-transport (`.devcontainer/remote-docker/docker-tunnel.sh`), `ssm` selects
-this module's SSM transport through the `python3 -m
-devcontainer_config.transport connect` subcommand, and any other
-non-empty value results in a non-zero exit before either transport
-starts, printing an `ERROR:` line to stderr that names the variable, the
-offending value and the accepted values -- no branch silently defaults.
+`DEVCONTAINER_TRANSPORT` selects the transport for the `make connect` entry
+point. Since the cutover there is one transport, so the selector has one
+accepted value, `ssm`, which is also the default. It is kept rather than
+removed because it is the seam a future transport is added at, and because a
+caller that still exports the old value gets told so rather than being
+silently redirected.
+
+It has two independent readers: the Makefile's `connect` recipe, which reads
+the variable from the environment and dispatches on it, and `transport.py`'s
+`resolve_transport`, which the module's own `connect` subcommand calls. Both
+dispatch the same way. Unset selects `ssm`. The literal `ssm` selects it
+explicitly. Any other non-empty value, including the `ssh` that used to be the
+default, exits non-zero before any transport starts, printing an `ERROR:` line
+to stderr naming the variable, the offending value and the accepted value. No
+branch silently defaults.
+
 The one value the two readers do not agree on is the empty string: the
-Makefile's `${DEVCONTAINER_TRANSPORT:-ssh}` substitution treats a set-but-
-empty value the same as unset and silently selects `ssh`, while
-`resolve_transport`'s `os.environ.get(VAR, TRANSPORT_SSH)` returns the
-empty string itself rather than the default, which is not in the accepted
-set, so it raises `TransportError` naming the empty value. Setting the
-variable to an explicit empty string is not a supported way to request
-the default; leave it unset instead. The two readers are otherwise
-independent of each other; the variable will not change what
-`docker-tunnel.sh` itself does either way, since neither reader modifies
-that script -- the `ssh` branch of the Makefile's `connect` recipe invokes
-it unchanged. The row below documents the interface both readers
-implement.
+Makefile's `${DEVCONTAINER_TRANSPORT:-ssm}` substitution treats a set-but-empty
+value the same as unset and selects `ssm`, while `resolve_transport`'s
+`os.environ.get` returns the empty string itself rather than the default, which
+is not in the accepted set, so it raises `TransportError` naming the empty
+value. Setting the variable to an explicit empty string is not a supported way
+to request the default; leave it unset instead.
 
 | Variable | Default | Defined in |
 |---|---|---|

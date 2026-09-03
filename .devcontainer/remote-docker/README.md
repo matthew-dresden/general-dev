@@ -1,7 +1,7 @@
 # remote-docker. EC2 remote Docker engine for devcontainers
 
 Laptop-side tooling that connects VS Code Dev Containers to a Docker engine
-running on an EC2 instance, over SSH carried inside an AWS SSM session.
+running on an EC2 instance, over an AWS SSM port forward secured with mTLS.
 Devcontainers run **on the instance**, with source code cloned into named
 Docker volumes there, so containers keep running and lose nothing when the
 laptop disconnects, sleeps, or shuts down.
@@ -11,17 +11,20 @@ laptop disconnects, sleeps, or shuts down.
 ```text
 laptop                                        EC2 (us-east-1, no inbound ports)
 ──────                                        ─────────────────────────────────
-docker CLI / VS Code ── ssh ── SSM session ── sshd ── dockerd (data on 1TB volume)
-                              (IAM auth)              └─ devcontainer per project
-                                                         └─ source in named volume
+docker CLI / VS Code ── SSM port forward ── dockerd TLS listener (loopback)
+                          (IAM auth, mTLS)     └─ dockerd (data on the data volume)
+                                                  └─ devcontainer per project
+                                                     └─ source in named volume
 aws ssm put-parameter ───────────────────────► SSM Parameter Store
       (push-secrets.sh)                          └─ read at container create via
                                                     instance role (IMDSv2)
 ```
 
 - **No inbound access:** the security group has zero inbound rules. All
-  connectivity is outbound SSM. SSH host key + key pair still authenticate the
-  SSH layer inside the tunnel.
+  connectivity is outbound SSM. The docker API is authenticated by mutual TLS,
+  and the daemon's TLS listener is bound to loopback on the instance, so the
+  port forward is the only way to reach it. There is no SSH layer, no key pair
+  and no interactive path to the host at all.
 - **Survives disconnects:** `shutdownAction: "none"` in devcontainer.json keeps
   containers running when VS Code detaches; `live-restore` keeps them running
   across dockerd restarts; source lives in Docker volumes on the instance.
@@ -35,7 +38,8 @@ aws ssm put-parameter ───────────────────�
 - [session-manager-plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 - docker CLI (a local engine is not required)
 - git
-- The private key for the EC2 key pair (`REMOTE_SSH_KEY_PATH` in `config.env`)
+- Client certificate material for the instance, issued by `make cert-status`'s
+  module (`~/.docker/certs/<instance>/`)
 
 `make build` / `make rebuild` additionally need:
 
@@ -60,14 +64,12 @@ operation and both entry points stay in step.
 
 | Script | Purpose |
 |---|---|
-| `docker-tunnel.sh` | Install the managed SSH config block, create/refresh the `general-dev-remote` docker context, switch to it, verify end-to-end. |
-| `shell.sh` | Interactive zsh on the instance (same tunnel). |
+| `devcontainer_config.transport` | Establish the SSM port forward, create or refresh the instance's docker context against the forwarded port, and switch to it. Reached through `make connect`. |
 | `push-secrets.sh` | Transform local `shell.env` for remote use and publish both secret files to SSM Parameter Store (`/devcontainer/<project>/…`). |
 | `container.sh` | Container lifecycle for the current project: status, start/stop/restart, unpushed-work check, teardown, rebuild report, and seeding the VS Code server (`vscode-server`, which `reopen` runs for you). |
 | `lib.sh` | Shared functions (sourced by the others), including the failure translation described below. |
 | `../resmon-disks.py` | Runs from `postAttachCommand`, by the absolute path postCreate links it to (`~/.local/bin/`), because an attached container gives the hook no workspace to run in. Points the Resource Monitor extension at the devices behind `/workspaces` and `/tmp`, resolved per host. |
 | `config.env` | Defaults (instance ID, region, profile, context names, VS Code server download endpoint and channel). Every value is overridable via environment variables, including `SKIP_VSCODE_SERVER_SEED=1` to open a window without seeding the server. |
-| `ec2-user-data.yaml` | cloud-init config the instance was provisioned with (kept for reproducibility). |
 
 ## Launching a project on the remote engine
 
@@ -75,11 +77,12 @@ operation and both entry points stay in step.
 2. `./push-secrets.sh`, once per project (re-run after token rotation or
    template changes). Use `PROJECT_NAME=<repo-basename> ./push-secrets.sh` for
    other projects.
-3. `./docker-tunnel.sh`, activates the remote docker context.
+3. `make connect`, which opens the SSM port forward and activates the
+   instance's docker context.
 4. VS Code → **Dev Containers: Clone Repository in Container Volume…** →
    pick the GitHub repo. The postcreate wrapper bootstraps `shell.env` and
    `aws-profile-map.json` from Parameter Store automatically.
-5. Reconnect later (any laptop state): run `./docker-tunnel.sh`, then VS Code →
+5. Reconnect later (any laptop state): run `make connect`, then VS Code →
    **Dev Containers: Attach to Running Container…** (or reopen the recent
    workspace entry). The container was running the whole time.
 
@@ -115,7 +118,7 @@ It installs these aliases:
 
 | Alias | Makefile equivalent | What it does |
 |---|---|---|
-| `gdev-connect` | `make connect` | Runs `docker-tunnel.sh`: refreshes the SSM tunnel config and switches the docker context to `general-dev-remote`. |
+| `gdev-connect` | `make connect` | Opens the SSM port forward and switches the docker context to the instance's own. |
 | `gdev-disconnect` | `make disconnect` | Switches the docker context back to the local engine (OrbStack). |
 | `gdev-shell` | `make shell` | zsh on the EC2 host. |
 
@@ -475,7 +478,7 @@ screen. Do not redirect either stream here.
   `<project>-<branch>-<hash>` volume are separate checkouts that can hold
   different uncommitted changes. Check both before assuming work is lost, `docker exec -u vscode <container> git -C /workspaces/<project> status`.
 - **`docker version` hangs / SSH fails:** AWS SSO session expired, run
-  `aws sso login --profile default`. Then re-run `docker-tunnel.sh`.
+  `aws sso login --profile default`. Then re-run `make connect`.
 - **Instance not Online in SSM:** check instance state and
   `aws ssm describe-instance-information` in us-east-1.
 - **postCreate fails with "shell.env not found … SSM bootstrap failed":**

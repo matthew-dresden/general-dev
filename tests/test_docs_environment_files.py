@@ -409,11 +409,6 @@ _ENUMERATION_WORD_TO_COUNT = {
 }
 
 # AC-DOC-003's negative clause: no claim that DEVCONTAINER_TRANSPORT changes
-# what docker-tunnel.sh itself does, since resolve_transport never calls or
-# modifies that script. Matches "changes" (not "change"), so it does not
-# also match this section's own correct "will not change what
-# `docker-tunnel.sh` itself does" sentence.
-_TRANSPORT_FALSE_TUNNEL_CLAIM_NEEDLE = "changes what `docker-tunnel.sh`"
 
 # code_review/doc_review REVIEW_FAIL round 1: a prior draft of the section
 # described the SSH transport as running "for every other value, including
@@ -1427,52 +1422,50 @@ def test_blanket_neither_caveat_pattern_does_not_match_real_section() -> None:
     )
 
 
-def test_transport_section_does_not_claim_it_changes_docker_tunnel_sh() -> None:
-    """AC-DOC-003's negative clause: no claim that DEVCONTAINER_TRANSPORT changes
-    what `docker-tunnel.sh` itself does, since `resolve_transport` never calls
-    or modifies that script.
+def test_transport_section_names_no_removed_script() -> None:
+    """The section must not reference the SSH tunnel script, which no longer exists.
+
+    This replaces a guard that required the opposite: while both transports
+    existed, the section had to carry an explicit caveat that
+    DEVCONTAINER_TRANSPORT did not change what the tunnel script itself did,
+    because `resolve_transport` never called or modified it. The script is gone,
+    so a caveat about its behaviour would describe something a reader cannot
+    find, and the useful assertion is now that the name is absent entirely.
     """
     section = _transport_section_text_normalized()
-    assert _TRANSPORT_FALSE_TUNNEL_CLAIM_NEEDLE not in section, (
-        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section claims DEVCONTAINER_TRANSPORT "
-        f"changes what docker-tunnel.sh does, which `resolve_transport` never does: "
-        f"{_TRANSPORT_FALSE_TUNNEL_CLAIM_NEEDLE!r}."
-    )
-    assert "will not change what `docker-tunnel.sh` itself does" in section, (
-        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section no longer states that "
-        "DEVCONTAINER_TRANSPORT does not change docker-tunnel.sh's own behavior."
-    )
+    for token in ("docker-tunnel.sh", "shell.sh"):
+        assert token not in section, (
+            f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section still names {token!r}, "
+            "which was deleted at cutover. A reader would look for a script that is not there."
+        )
 
 
-def test_transport_section_does_not_describe_ssh_as_the_fallback_for_unrecognized_values() -> None:
-    """code_review/doc_review REVIEW_FAIL (round 1): the section must not describe
-    the SSH transport as running for "every other value" (or "any other value")
-    of `DEVCONTAINER_TRANSPORT`, since that documents a silent fallback on an
-    unrecognized value. E6-F2-S1-T4 AC-FUNC-002 requires `make connect` to exit
-    non-zero, before either transport starts, for any value other than unset,
-    `ssh` or `ssm`, printing an `ERROR:` line naming the variable, the offending
-    value and the accepted values; this section's own closing sentence already
-    states the same fail-fast rule. A paragraph that instead routes "every other
-    value" to the SSH transport contradicts both, and this test pins the
-    contradiction so it cannot be reintroduced silently.
+def test_transport_section_documents_ssm_as_the_only_value_and_fails_fast() -> None:
+    """One accepted value, it is the default, and anything else exits non-zero.
+
+    This replaces a guard written while two transports existed, which pinned
+    that the SSH branch was scoped to "unset or the literal `ssh`" so the
+    section could not describe a silent fallback. After the cutover the risk
+    inverts: the danger is documentation that still presents `ssh` as
+    selectable, or that goes quiet about what happens to a caller who exports
+    it out of habit. Both are pinned here.
     """
     section = _transport_section_text_normalized()
-    match = _TRANSPORT_SSH_UNQUALIFIED_FALLBACK_PATTERN.search(section)
-    assert match is None, (
-        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section describes the SSH "
-        f"transport as the fallback for an unrecognized DEVCONTAINER_TRANSPORT value "
-        f"({match.group(0)!r}), contradicting the section's own fail-fast closing "
-        "sentence and E6-F2-S1-T4 AC-FUNC-002, which requires a non-zero exit naming "
-        "the variable, the offending value and the accepted values for any value "
-        "other than unset, `ssh` or `ssm`."
+    assert "non-zero" in section, (
+        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section must state that an "
+        "unrecognized value exits non-zero rather than falling back."
     )
-    assert "non-zero exit" in section, (
-        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not state that an "
-        "unrecognized DEVCONTAINER_TRANSPORT value makes `make connect` exit non-zero."
+    assert re.search(r"`ssm`[^.]*default|default[^.]*`ssm`", section), (
+        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section must say `ssm` is the default."
     )
-    assert "unset or the literal `ssh`" in section, (
-        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not scope the SSH "
-        "transport branch to only unset or the literal `ssh`."
+    assert not re.search(r"unset or the literal `ssh`", section), (
+        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section still scopes a branch to the "
+        "`ssh` value, which is no longer accepted."
+    )
+    assert "ssh" in section.lower(), (
+        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section should still mention the old "
+        "value, so a caller who exports it out of habit learns what happens rather than "
+        "meeting an unexplained error."
     )
 
 

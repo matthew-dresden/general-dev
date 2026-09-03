@@ -81,9 +81,9 @@ _OS_FAMILIES: dict[str, str] = {"Darwin": "macos", "Linux": "linux"}
 # gives no command), so this points at docker's own official install page
 # instead of a repo citation. Matches the one this repository's own
 # require-command messages already print for the identical condition
-# (`.devcontainer/remote-docker/lib.sh`, `container.sh`, `docker-tunnel.sh`),
+# (`.devcontainer/remote-docker/lib.sh`, `container.sh`),
 # and is the single source every docker-absent remedy in this module reads
-# from, so the four sites that report a missing docker CLI never drift apart.
+# from, so every site that reports a missing docker CLI never drifts apart.
 _DOCKER_INSTALL_URL = "https://docs.docker.com/engine/install/"
 
 # What every docker-context check in `probe_docker` prevents when it fails,

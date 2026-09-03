@@ -592,12 +592,13 @@ repository; spec Section 9) to address `tcp://127.0.0.1:<the allocated
 port>` and carry the `ca`, `cert` and `key` files spec Section 5.5 fixes
 under `<certs-root>/<instance>/`. An
 existing context is updated in place rather than deleted and recreated; an
-existing context whose endpoint is `ssh://` -- the legacy transport
-`.devcontainer/remote-docker/docker-tunnel.sh` still uses through phase 3 --
-is refused by name and left completely untouched, so that path keeps
-working unchanged. VS Code Dev Containers needs no transport of its own: it
-follows the active docker context, so pointing the context at the tunnel
-points the editor at it too.
+existing context whose endpoint is `ssh://` is refused by name and left
+completely untouched. Nothing creates such a context any more, but one may
+survive on a machine that used the transport removed at cutover, and silently
+rewriting it would destroy the only record of what that machine was pointed at.
+VS Code Dev Containers needs no transport of its own: it follows the active
+docker context, so pointing the context at the forward points the editor at it
+too.
 
 `transport.handshake` then completes a `docker version` handshake against
 that context, retried until it answers and bounded by
@@ -606,14 +607,15 @@ daemon's API version -- which must be at least 1.44 for mTLS on a TCP
 listener with a rootless daemon (spec Section 6) -- and whether it reports
 running rootless.
 
-**Two build paths, one opt-in selector.** `make connect` reads
-`DEVCONTAINER_TRANSPORT` from the environment (`docs/environment-files.md`)
-and dispatches on it: unset or `ssh` -- the default -- runs
-`.devcontainer/remote-docker/docker-tunnel.sh` exactly as before phase 3,
-installing the managed SSH config block, running `ssh`, and creating the
-docker context with `host=ssh://...`, so an existing caller who sets
-nothing new observes no behavior change (AC-FUNC-002). The explicit value
-`ssm` instead runs
+**One build path, and a selector kept for the next one.** `make connect`
+reads `DEVCONTAINER_TRANSPORT` from the environment
+(`docs/environment-files.md`) and dispatches on it. Since the cutover there is
+one accepted value, `ssm`, which is also the default; any other value, including
+the `ssh` that used to be the default, exits non-zero naming the variable, the
+offending value and the accepted value. The selector is kept rather than
+removed because it is the seam a future transport is added at, and because a
+caller who exports the old value out of habit is told so instead of being
+silently redirected. Unset, or the explicit value `ssm`, runs
 
 ```sh
 PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.transport \
@@ -642,16 +644,15 @@ was run from for as long as the context needs to stay usable; the forward
 -- and with it the docker context's endpoint -- must be left running,
 either in that same foreground or in a second terminal, for a subsequent
 `make build` to reach the `tcp://` context, and interrupting the `connect`
-process tears the forward down and stops the context from working. This
-is the opposite of the default SSH path, where `docker-tunnel.sh` returns
-control to the shell once the tunnel is established. `--certs-root`
+process tears the forward down and stops the context from working. This is unlike a
+transport that daemonizes and returns, where the command returns
+control to the shell once its work is done. `--certs-root`
 defaults to `certs.DEFAULT_CERTS_ROOT` -- the same `<certs-root>` root
 `make cert-status` and the certificate material above use -- and only
 needs overriding for a test fixture or an alternate checkout layout.
-Selecting `ssm` never installs an SSH config block, spawns no `ssh`
-process, and names no `AWS-StartSSHSession` document; selecting it also
-requires no SSH key on the instance, unlike the default SSH path, which
-requires `REMOTE_SSH_KEY_PATH` to name one that exists. The `--context`
+The transport installs no SSH configuration block, spawns no `ssh` process,
+and names no `AWS-StartSSHSession` document; it requires no key on the
+instance, and the instance is provisioned without one. The `--context`
 value (and the `REMOTE_DOCKER_CONTEXT` the Makefile derives it from,
 `config.env`, operator-overridable) must carry the `<repo-slug>-` prefix
 `instances.docker_context_prefix` derives from `repo.repo_slug`

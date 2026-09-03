@@ -551,7 +551,7 @@ def test_connect_recipe_defaults_to_the_ssm_transport_when_unset() -> None:
 
     Before the cutover this asserted the opposite: an unset selector ran
     `$(TUNNEL_SH)` bare so `make remote` and `make up` saw no behavior change
-    while both transports existed. E7-F1-S1-T1 deleted docker-tunnel.sh, so the
+    while both transports existed. The cutover deleted the SSH tunnel script, so the
     default has to move rather than merely lose a branch -- otherwise an
     operator who sets nothing gets a recipe that dispatches to a value its own
     case statement rejects. Asserted against the recipe source, never by

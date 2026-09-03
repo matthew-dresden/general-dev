@@ -1,7 +1,7 @@
 """SSM port forward manager: the transport that carries the docker API (spec Section 4.5).
 
 This is the functional replacement for
-`.devcontainer/remote-docker/docker-tunnel.sh`, which opens SSH inside an SSM
+the transport removed at cutover, which opened SSH inside an SSM
 session and writes a `ProxyCommand` invoking `AWS-StartSSHSession` (spec
 Section 1.4). That script is not deleted here -- phase 4 deletes it in
 E7-F1-S1-T1 (spec Section 11.5) -- so it keeps working unchanged for the
@@ -77,7 +77,7 @@ Section 5.5 fixes under
 `~/.docker/certs/<instance>/` (`devcontainer_config.certs.CertPaths`,
 E6-F1-S1-T1); it refuses an existing `ssh://` context by name rather than
 mutating it, since that is the legacy transport
-`.devcontainer/remote-docker/docker-tunnel.sh` still uses through phase 3,
+the pre-cutover transport used,
 and it refuses a missing or expired client certificate before ever
 touching the context, reusing `certs.classify` (E6-F1-S1-T2) for that
 expiry decision rather than reimplementing its warning-window arithmetic a
@@ -112,7 +112,7 @@ SANs; every other failure is translated into a distinct connection
 diagnosis instead, so the two causes are never conflated (AC-FUNC-005).
 
 E6-F2-S1-T3 closes the last gap: before it, this module's own CLI --
-"the functional replacement for docker-tunnel.sh" this docstring already
+"the functional replacement for the SSH tunnel" this docstring already
 claims -- exposed only `start` (E6-F2-S1-T1's raw forward), whose handler
 never called `ensure_context` or `handshake` (E6-F2-S1-T2), and the actual
 build path (the `Makefile`'s `connect` target) never called into this
@@ -127,16 +127,16 @@ mTLS-secured `tcp://` context, already active, ready to build against
 (AC-FUNC-003). The `Makefile`'s `connect` target closes the second half: it
 reads `DEVCONTAINER_TRANSPORT` itself and dispatches to
 `python3 -m devcontainer_config.transport connect` only when it is `ssm`,
-leaving `docker-tunnel.sh` untouched and still the default (AC-FUNC-001).
+leaving the SSH path untouched and still the default at the time.
 `connect`'s own handler stays opt-in regardless of its caller, gated by
 `resolve_transport` reading the identical `DEVCONTAINER_TRANSPORT` variable
 (never a file edit): unset or `ssh` -- the default -- refuses before ever
 touching AWS or docker (`_require_ssm_transport_selected`), leaving
-`docker-tunnel.sh` the only build path that ran, exactly as before this
+the SSH path the only build path that ran, exactly as before this
 task (AC-FUNC-002); only the explicit value `ssm` lets `connect` proceed.
 Nothing here ever writes the caller's own SSH client configuration file, or
 requires a key on the instance, in either case (AC-FUNC-004): this module
-still imports nothing from `docker-tunnel.sh` and never touches SSH at all.
+never imported anything from the SSH path and never touches SSH at all.
 """
 
 from __future__ import annotations
@@ -177,15 +177,19 @@ _SSM_FORWARD_TIMEOUT_DEFAULT_SECONDS = 30.0
 # E6-F2-S1-T3, Approach step 2: the build path's opt-in transport selector.
 # `resolve_transport` is the one function in this module that reads this
 # variable (the same one-reader convention `DOCKER_TLS_PORT_ENV_VAR` and
-# `SSM_FORWARD_TIMEOUT_ENV_VAR` already establish above). Unset resolves to
-# `TRANSPORT_SSH` -- the existing `docker-tunnel.sh` build path, untouched
-# by this module -- so an existing caller that sets nothing new observes no
-# behavior change (AC-FUNC-002); `TRANSPORT_SSM` is the only other accepted
-# value, and it is what gates `connect` below.
+# `SSM_FORWARD_TIMEOUT_ENV_VAR` already establish above). Since the cutover
+# there is one transport, so unset resolves to `TRANSPORT_SSM` and that is
+# the only accepted value. The selector is kept rather than deleted because
+# it is the seam a future transport is added at, and because a caller who
+# still exports the removed `ssh` value is told so rather than silently
+# redirected.
 DEVCONTAINER_TRANSPORT_ENV_VAR = "DEVCONTAINER_TRANSPORT"
-TRANSPORT_SSH = "ssh"
 TRANSPORT_SSM = "ssm"
-_VALID_TRANSPORTS: tuple[str, ...] = (TRANSPORT_SSH, TRANSPORT_SSM)
+_VALID_TRANSPORTS: tuple[str, ...] = (TRANSPORT_SSM,)
+# The value this selector accepted before the cutover. Named so the error
+# below can tell a caller who still exports it what happened, instead of
+# treating it like any other typo.
+_REMOVED_TRANSPORT = "ssh"
 
 # spec Section 13, decision D2: the port-forwarding document, never the SSH
 # document (`AWS-StartSSHSession`) the replaced transport used.
@@ -235,7 +239,7 @@ _EXPIRED_CREDENTIAL_MARKERS: tuple[str, ...] = (
 # the single place that row is derived from `repo.repo_slug`, never a
 # literal (AC-FUNC-002).
 
-# The scheme `.devcontainer/remote-docker/docker-tunnel.sh`'s legacy SSH
+# The scheme the removed SSH transport's legacy
 # context still carries; `ensure_context` refuses to mutate a context found
 # with this scheme rather than overwriting the phase-3 SSH path in place.
 _SSH_ENDPOINT_PREFIX = "ssh://"
@@ -281,7 +285,7 @@ class TransportNotSelectedError(TransportError):
     """Raised when `connect` runs without `DEVCONTAINER_TRANSPORT=ssm` ever having been selected.
 
     `connect` refuses to touch AWS or docker at all when this is raised: an
-    unset or `TRANSPORT_SSH` selector must leave `docker-tunnel.sh` as the
+    a non-ssm selector must leave the SSH path as the
     only build path that ever ran (AC-FUNC-001, AC-FUNC-002).
     """
 
@@ -305,7 +309,7 @@ class ForwardTimeoutError(TransportError):
 class LegacyContextError(TransportError):
     """Raised when a docker context of the target name already exists with an `ssh://` endpoint.
 
-    That is the legacy transport `.devcontainer/remote-docker/docker-tunnel.sh`
+    That is the legacy SSH transport
     still uses through phase 3; `ensure_context` refuses to mutate it rather
     than overwriting a still-working path in place.
     """
@@ -452,37 +456,47 @@ def _forward_timeout_seconds() -> float:
 
 
 def resolve_transport() -> str:
-    """The build path's opt-in transport selector (Approach step 2; AC-FUNC-001, AC-FUNC-002).
+    """The build path's transport selector.
 
-    Reads `DEVCONTAINER_TRANSPORT_ENV_VAR` from the environment: unset
-    resolves to `TRANSPORT_SSH`, the existing `docker-tunnel.sh` build path
-    this module never touches, so a caller that sets nothing new observes
-    no behavior change. `TRANSPORT_SSM` is the only other accepted value,
-    this module's own opt-in build path (`connect`, below). Any other value
-    is a caller error and fails fast rather than silently choosing either
-    transport for them.
+    Reads `DEVCONTAINER_TRANSPORT_ENV_VAR` from the environment. Unset
+    resolves to `TRANSPORT_SSM`, which since the cutover is the only
+    transport there is. Any other value is a caller error and fails fast
+    rather than silently choosing for them.
+
+    The removed `ssh` value gets its own message. A caller who exports it
+    out of habit, or from an old shell profile, has a different problem
+    from someone who made a typo, and telling them the transport was
+    removed is more useful than listing the accepted values at them.
 
     Raises:
-        TransportError: the environment variable is set to a value that is
-            neither `TRANSPORT_SSH` nor `TRANSPORT_SSM`.
+        TransportError: the variable is set to anything other than
+            `TRANSPORT_SSM`.
     """
-    raw = os.environ.get(DEVCONTAINER_TRANSPORT_ENV_VAR, TRANSPORT_SSH)
+    raw = os.environ.get(DEVCONTAINER_TRANSPORT_ENV_VAR, TRANSPORT_SSM)
+    if raw == _REMOVED_TRANSPORT:
+        raise TransportError(
+            f"ERROR: {DEVCONTAINER_TRANSPORT_ENV_VAR}={raw!r} was removed at cutover\n"
+            f"The SSH transport and its tunnel script no longer exist. The docker API is "
+            f"reached over an SSM port forward secured with mTLS.\n"
+            f"Unset {DEVCONTAINER_TRANSPORT_ENV_VAR}, or set it to {TRANSPORT_SSM!r}."
+        )
     if raw not in _VALID_TRANSPORTS:
         raise TransportError(
             f"ERROR: {DEVCONTAINER_TRANSPORT_ENV_VAR}={raw!r} is not a recognized transport\n"
-            f"Set it to one of {', '.join(_VALID_TRANSPORTS)}, or unset it to use the default of "
-            f"{TRANSPORT_SSH!r} (the existing docker-tunnel.sh build path)."
+            f"Set it to {TRANSPORT_SSM!r}, or unset it to use that default."
         )
     return raw
 
 
 def _require_ssm_transport_selected() -> None:
-    """Refuse to act unless `resolve_transport` selected `TRANSPORT_SSM` (AC-FUNC-001, AC-FUNC-002).
+    """Refuse to act unless `resolve_transport` selected `TRANSPORT_SSM`.
 
-    `connect` calls this before touching AWS or docker at all: an unset or
-    `TRANSPORT_SSH` selector must leave `docker-tunnel.sh` as the only build
-    path that ever ran, with no forward opened and no docker context
-    touched, exactly as if `connect` did not exist.
+    `connect` calls this before touching AWS or docker at all. Since the
+    cutover `resolve_transport` either returns `TRANSPORT_SSM` or raises, so
+    this can only fire if a caller reaches `connect` through some path that
+    bypassed it. Kept as a guard rather than deleted: a silent assumption
+    that the selector was validated upstream is exactly what would let a
+    future caller open a forward it never asked for.
 
     Raises:
         TransportNotSelectedError: `resolve_transport` did not return
@@ -491,10 +505,9 @@ def _require_ssm_transport_selected() -> None:
     transport = resolve_transport()
     if transport != TRANSPORT_SSM:
         raise TransportNotSelectedError(
-            f"ERROR: {DEVCONTAINER_TRANSPORT_ENV_VAR}={transport!r}; the SSM build path is opt-in\n"
-            f"Set {DEVCONTAINER_TRANSPORT_ENV_VAR}={TRANSPORT_SSM!r} to select it.\n"
-            f"The default, {TRANSPORT_SSH!r}, is unchanged: run make connect (docker-tunnel.sh) "
-            "instead."
+            f"ERROR: {DEVCONTAINER_TRANSPORT_ENV_VAR}={transport!r}; this build path requires "
+            f"{TRANSPORT_SSM!r}.\n"
+            f"Unset {DEVCONTAINER_TRANSPORT_ENV_VAR} to use the default."
         )
 
 
@@ -913,7 +926,7 @@ def _use_context(runner: CommandRunner, context_name: str) -> None:
 
     `ensure_context` only creates or updates the context; the daemon a
     subsequent `make build` targets is whichever context is *active*.
-    `docker-tunnel.sh` sets that with its own `docker context use` call once
+    The removed SSH transport set that with its own `docker context use` call once
     it finishes creating or updating the legacy `ssh://` context, so
     `connect` issues the identical call for the `tcp://` context it just
     ensured, rather than leaving activation to a caller who might not know
@@ -1548,7 +1561,7 @@ def _run_connect(args: argparse.Namespace) -> int:
     before even checking whether the SSM agent is online -- unless the
     caller opted into `DEVCONTAINER_TRANSPORT=ssm`
     (`_require_ssm_transport_selected`, AC-FUNC-001, AC-FUNC-002): an unset
-    or `ssh` selector leaves `docker-tunnel.sh` as the only build path that
+    or `ssh` selector left the SSH path as the only build path that
     ran, with no forward opened and no docker context touched.
 
     Takes `--context` (the full docker context name), matching `start`'s

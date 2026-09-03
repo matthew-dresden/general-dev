@@ -2192,15 +2192,58 @@ def test_handshake_san_diagnosis_names_the_reissue_invocation_for_the_created_in
 # `Makefile`'s `connect` target closes the other half by dispatching to it
 # only when `DEVCONTAINER_TRANSPORT=ssm`, gated by the identical opt-in,
 # environment-resolved selector that defaults to the untouched
-# docker-tunnel.sh SSH path (AC-FUNC-001, AC-FUNC-002).
+# removed SSH path (AC-FUNC-001, AC-FUNC-002).
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_transport_defaults_to_ssh_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connect_touches_nothing_when_the_selector_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unusable selector fails before any AWS or docker call.
+
+    This replaces two tests that pinned the same property for the `ssh`
+    value specifically, one for it being the default and one for it being
+    explicit. `ssh` is no longer a selectable transport, so the property is
+    now pinned against an arbitrary invalid value, which is the general case
+    those two were specific instances of.
+    """
+    transport = _import_transport()
+    monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, "not-a-transport")
+    with pytest.raises(transport.TransportError):
+        transport.resolve_transport()
+
+
+def test_resolve_transport_defaults_to_ssm_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset selects the only transport there is.
+
+    Before the cutover this asserted the opposite: unset meant `ssh`, so a
+    caller who set nothing kept the old build path. That default had to move
+    with the transport. Leaving it would have broken `make connect` outright,
+    because the Makefile sets its own shell variable without exporting it, so
+    the module sees the variable unset and would have resolved to a transport
+    whose script no longer exists.
+    """
     transport = _import_transport()
     monkeypatch.delenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, raising=False)
+    assert transport.resolve_transport() == transport.TRANSPORT_SSM
 
-    assert transport.resolve_transport() == transport.TRANSPORT_SSH
+
+def test_resolve_transport_tells_a_caller_the_ssh_value_was_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The removed value gets its own message, not a generic rejection.
+
+    Someone exporting `ssh` from an old shell profile has a different problem
+    from someone with a typo, and saying the transport was removed is more
+    useful than listing accepted values at them.
+    """
+    transport = _import_transport()
+    monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, "ssh")
+    with pytest.raises(transport.TransportError) as excinfo:
+        transport.resolve_transport()
+    message = str(excinfo.value)
+    assert "removed at cutover" in message
+    assert transport.TRANSPORT_SSM in message, "the message must name what to use instead"
 
 
 def test_resolve_transport_reads_the_opt_in_ssm_value(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2274,66 +2317,6 @@ def test_build_path_contains_a_devcontainer_config_transport_call_site() -> None
         "invoke the 'connect' entry point that wires ensure_context and handshake into the "
         "forward."
     )
-
-
-def test_connect_refuses_before_touching_anything_when_ssh_is_the_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """AC-FUNC-002: an existing caller that sets nothing new observes no behavior change.
-
-    `ensure_agent_online` is monkeypatched to raise if called at all: a
-    caller of `connect` who never opted in must never reach AWS or docker,
-    not merely fail after doing so.
-    """
-    transport = _import_transport()
-    monkeypatch.delenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, raising=False)
-
-    def _fail_if_called(*args: object, **kwargs: object) -> None:
-        raise AssertionError("connect must not touch AWS/docker when the SSH default is in effect")
-
-    monkeypatch.setattr(transport, "ensure_agent_online", _fail_if_called)
-
-    exit_code = transport.main(
-        [
-            "connect",
-            "--context",
-            "general-dev-sandbox",
-            "--instance-id",
-            _INSTANCE_ID,
-            "--profile",
-            "sandbox",
-            "--region",
-            "us-east-1",
-        ]
-    )
-
-    assert exit_code == 1
-
-
-def test_connect_refuses_when_ssh_is_explicitly_selected(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    transport = _import_transport()
-    monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, transport.TRANSPORT_SSH)
-
-    exit_code = transport.main(
-        [
-            "connect",
-            "--context",
-            "general-dev-sandbox",
-            "--instance-id",
-            _INSTANCE_ID,
-            "--profile",
-            "sandbox",
-            "--region",
-            "us-east-1",
-        ]
-    )
-
-    assert exit_code == 1
-    captured = capsys.readouterr()
-    assert transport.DEVCONTAINER_TRANSPORT_ENV_VAR in captured.err
-    assert transport.TRANSPORT_SSM in captured.err
 
 
 def _no_ssh_forward_launcher(

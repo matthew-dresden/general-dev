@@ -20,10 +20,12 @@ Run this when provisioning a new Mac against an already-running instance.
 
 - Remote engine: EC2 `<ec2-instance-id>` (c8g.4xlarge, Ubuntu 24.04 arm64),
   us-east-1, AWS sandbox account `<aws-account-id>`, reachable ONLY via SSM (no
-  inbound ports). Tunnel scripts live in `.devcontainer/remote-docker/`
-  (`docker-tunnel.sh`, `shell.sh`, `push-secrets.sh`, `config.env`, `lib.sh`).
-- The EC2 key pair is `<your-key-pair-name>` (ed25519). Its public-key
-  fingerprint as registered in AWS: `SHA256:QmT+d5VyqB/ufJprRgMY2GVBHtc/7wOa/NnyrRXM7p0=`.
+  inbound ports). Supporting scripts live in `.devcontainer/remote-docker/`
+  (`push-secrets.sh`, `config.env`, `lib.sh`); the transport itself is
+  `devcontainer_config.transport`, reached through `make connect`.
+- There is no SSH key and no key pair to find. The docker API is authenticated
+  by mutual TLS over an SSM port forward, and the instance has no SSH server or
+  interactive login path at all.
 - OrbStack provides the local docker engine and CLI.
 
 ## Rules
@@ -40,7 +42,7 @@ Run this when provisioning a new Mac against an already-running instance.
 
 1. **Preflight.** Confirm `uname` is `Darwin`, that the repo lives at
    `/Users/mdresden/Workspace/caylent-solutions/general-dev`, and that
-   `.devcontainer/remote-docker/docker-tunnel.sh` exists there (fail with a
+   `.devcontainer/remote-docker/config.env` exists there (fail with a
    clear message otherwise). Confirm Homebrew is installed.
 
 2. **Install tools** (skip anything already present; verify each with a
@@ -85,25 +87,22 @@ Run this when provisioning a new Mac against an already-running instance.
    then verify `aws sts get-caller-identity --profile default` returns
    account `<aws-account-id>`.
 
-4. **Locate and verify the SSH private key.** Search `~/.ssh/` for the key
-   pair's private key (common names: `<your-key-pair-name>.pem`,
-   `id_ed25519`, downloads from the EC2 console). Verify the match with
-   `ssh-keygen -lf <candidate>`, the fingerprint must equal
-   `SHA256:QmT+d5VyqB/ufJprRgMY2GVBHtc/7wOa/NnyrRXM7p0=`.
-   If no candidate matches, list what you checked and ask me where the key
-   is. Ensure the file is `chmod 600`.
+4. **Issue client certificate material.** The docker API is authenticated by
+   mutual TLS, so the laptop needs a client certificate for the instance rather
+   than an SSH key. Run `make cert-status` to see what exists; if the instance
+   has no material yet, the `/devcontainer:setup-remote` skill issues it. The
+   material lives under `~/.docker/certs/<instance>/` and never leaves the
+   laptop except as the certificate the daemon verifies.
 
 5. **Persist configuration in `~/.zshrc`** (single managed block, see Rules).
    The block must contain:
-   - `export REMOTE_SSH_KEY_PATH="<verified key path>"`, only if it differs
-     from the default `~/.ssh/<your-key-pair-name>.pem`.
    - Convenience aliases (substitute `<LOCAL_CONTEXT>` with the actual local
      docker context name discovered in step 2):
 
      ```sh
-     alias gdev-connect='(cd /Users/mdresden/Workspace/caylent-solutions/general-dev/.devcontainer/remote-docker && ./docker-tunnel.sh)'
+     alias gdev-connect='make -C /Users/mdresden/Workspace/caylent-solutions/general-dev connect'
      alias gdev-disconnect='docker context use <LOCAL_CONTEXT>'
-     alias gdev-shell='/Users/mdresden/Workspace/caylent-solutions/general-dev/.devcontainer/remote-docker/shell.sh'
+     alias gdev-exec='make -C /Users/mdresden/Workspace/caylent-solutions/general-dev exec'
      ```
 
 6. **Trust workspaces automatically.** VS Code otherwise asks "Do you trust the

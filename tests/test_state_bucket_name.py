@@ -25,9 +25,11 @@ AC-FUNC-001 requires instead of typing any of them as a literal:
   digit run ever appears as source text (`lint-secrets` keys on exactly that
   shape).
 - `_FIXED_REPO_SLUG` is derived from this checkout's own git remote via
-  `_repo_slug_from_git_remote`, applying the identical `basename(...)` /
-  `trimsuffix(..., ".git")` transform root.hcl's `repo_slug` local applies,
-  so it is read from the repository rather than typed.
+  `_repo_slug_from_git_remote`, which delegates to
+  `devcontainer_config.repo.repo_slug`, the same production reader that
+  applies the identical `basename(...)` / `trimsuffix(..., ".git")`
+  transform root.hcl's `repo_slug` local applies, so it is read from the
+  repository rather than typed.
 - `_FIXED_REGION` is generated at runtime by `_synthetic_region`, from the
   same partition/direction vocabulary real AWS region names use, for the
   identical "generated, not typed" reason `_synthetic_account_id` exists.
@@ -53,9 +55,9 @@ rather than declared twice; see that module's docstring for why.
 
 from __future__ import annotations
 
+import ast
 import random
 import re
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -66,7 +68,7 @@ from conftest import (
     _repo_root,
     _synthetic_account_id,
 )
-from devcontainer_config.hostprobe import read_positive_seconds
+from devcontainer_config import repo
 
 _INTERPOLATION_TOKEN = re.compile(r"\$\{local\.([A-Za-z0-9_]+)\}")
 
@@ -81,17 +83,14 @@ _INTERPOLATION_TOKEN = re.compile(r"\$\{local\.([A-Za-z0-9_]+)\}")
 _REGION_PARTITIONS = ("us", "eu", "ap", "ca", "sa", "af", "me")
 _REGION_DIRECTIONS = ("east", "west", "north", "south", "central")
 
-# Bounds how long `_repo_slug_from_git_remote` waits on `git config --get
-# remote.origin.url`, a local, network-free read of this checkout's own
-# `.git/config` (spec Section 10.1's hermetic-suite contract). Read from the
-# environment with a documented default via
-# `devcontainer_config.hostprobe.read_positive_seconds`, the same fail-fast
-# reader `tests/test_tool_version_floors.py` uses for its own subprocess
-# timeout, rather than a bare literal at the `subprocess.run` call site
-# (CLAUDE.md: "timeout values must be configurable via environment
-# variables").
-_GIT_REMOTE_TIMEOUT_ENV_VAR = "REPO_SLUG_GIT_TIMEOUT_SECONDS"
-_GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS = 10.0
+# Bound to `devcontainer_config.repo`'s own declaration rather than
+# restated as a second literal: `repo.repo_slug` is the sole reader of
+# `REPO_SLUG_GIT_TIMEOUT_SECONDS` now that `_repo_slug_from_git_remote`
+# below delegates its whole derivation to that function, so this module
+# names the production constants instead of typing the env-var name and
+# default a second time (E8-F1-S1-T6).
+_GIT_REMOTE_TIMEOUT_ENV_VAR = repo.GIT_REMOTE_TIMEOUT_ENV_VAR
+_GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS = repo.GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS
 
 
 class BucketNameError(AssertionError):
@@ -119,39 +118,20 @@ def _synthetic_region() -> str:
 def _repo_slug_from_git_remote() -> str:
     """The `repo_slug` root.hcl's own `locals` block derives, read the same way root.hcl reads it.
 
-    Mirrors `remote-instances/root.hcl`'s `repo_slug` local exactly: `git
-    config --get remote.origin.url`, then split on the last `/` (which lands
-    after the org/user segment for both the HTTPS form
-    `https://host/org/repo.git` and the SSH form `git@host:org/repo.git`,
-    per that local's own comment), then strip a trailing `.git`. Reads this
-    checkout's own git remote rather than a typed literal, so `_FIXED_REPO_SLUG`
-    is read from the repository instead of restated as an AC-FUNC-001
-    literal.
+    Delegates the entire derivation to `devcontainer_config.repo.repo_slug`,
+    the production function that mirrors `remote-instances/root.hcl`'s
+    `repo_slug` local (`git config --get remote.origin.url`, then the final
+    `/`-delimited path segment, then a trailing `.git` removed). This
+    module no longer runs its own copy of that transform; it only adapts
+    `repo.RepoError` to this module's own `BucketNameError` contract, so
+    every caller of this helper keeps catching the same exception type it
+    always has, with the original operator-facing message text intact
+    (E8-F1-S1-T6).
     """
-    timeout = read_positive_seconds(
-        _GIT_REMOTE_TIMEOUT_ENV_VAR, _GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS
-    )
-    result = subprocess.run(
-        ["git", "config", "--get", "remote.origin.url"],
-        cwd=_repo_root(),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    remote_url = result.stdout.strip()
-    if result.returncode != 0 or not remote_url:
-        raise BucketNameError(
-            "git config --get remote.origin.url produced no remote URL in this checkout; "
-            "root.hcl's repo_slug local cannot be derived without one"
-        )
-    last_segment = remote_url.rsplit("/", 1)[-1]
-    if not last_segment:
-        raise BucketNameError(
-            f"git config --get remote.origin.url returned {remote_url!r}, which has no "
-            "final path segment to derive root.hcl's repo_slug local from"
-        )
-    return last_segment.removesuffix(".git")
+    try:
+        return repo.repo_slug(_repo_root())
+    except repo.RepoError as exc:
+        raise BucketNameError(str(exc)) from exc
 
 
 # Arbitrary, fixed stand-ins for the three components root.hcl resolves at
@@ -291,3 +271,67 @@ def test_template_referencing_an_unsupplied_component_raises_naming_it() -> None
 def test_no_skip_xfail_or_conditional_import_guards_this_module() -> None:
     """AC-TEST-007: this module hides no failure behind a skip, xfail or guarded import."""
     _assert_no_skip_guard(Path(__file__))
+
+
+# Maps this module's private, leading-underscore local name to the exact
+# `devcontainer_config.repo` attribute it must be an `ast.Attribute` load of,
+# so a local rebound onto the wrong attribute name (e.g. a typo or a swap
+# between the two constants) is caught, not only a re-declared literal.
+_GIT_REMOTE_TIMEOUT_LOCAL_TO_REPO_ATTR = {
+    "_GIT_REMOTE_TIMEOUT_ENV_VAR": "GIT_REMOTE_TIMEOUT_ENV_VAR",
+    "_GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS": "GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS",
+}
+
+
+def test_git_remote_timeout_name_and_default_are_bound_to_repo_module() -> None:
+    """AC-TEST-002: this module declares no independent copy of `devcontainer_config.repo`'s
+    timeout name or default; both are loaded from `repo`'s own attributes.
+
+    Runtime `is`/`==` checks against the two names' current values cannot enforce this:
+    CPython interns identifier-shaped string literals across separately-compiled modules,
+    so a re-declaration such as `_GIT_REMOTE_TIMEOUT_ENV_VAR = "REPO_SLUG_GIT_TIMEOUT_SECONDS"`
+    would still satisfy `is repo.GIT_REMOTE_TIMEOUT_ENV_VAR`, and a re-declared `10.0` would
+    still satisfy `==` against `repo`'s `10.0` -- both were observed to hold against the
+    pre-fix, independently-declared literals during this test's own RED phase. Parsing this
+    module's own source with `ast` sidesteps interning entirely: it inspects how each name
+    is bound rather than what its current runtime value happens to be, so only an
+    `ast.Attribute` load off the `repo` name satisfies the check; any `ast.Constant`
+    right-hand side, including one that happens to equal the current default, fails. Mirrors
+    `tests/test_catalog.py::test_module_emits_exactly_one_external_command_name`'s convention
+    of asserting the module's own parsed source instead of a value observed at runtime.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    bound_via_repo_attribute: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if (
+            not isinstance(target, ast.Name)
+            or target.id not in _GIT_REMOTE_TIMEOUT_LOCAL_TO_REPO_ATTR
+        ):
+            continue
+        expected_attr = _GIT_REMOTE_TIMEOUT_LOCAL_TO_REPO_ATTR[target.id]
+        assert isinstance(node.value, ast.Attribute), (
+            f"{target.id} must be bound to devcontainer_config.repo's own attribute, "
+            f"not restated as a literal; found {ast.unparse(node.value)!r} at "
+            f"{Path(__file__).name}:{node.lineno}"
+        )
+        assert isinstance(node.value.value, ast.Name) and node.value.value.id == "repo", (
+            f"{target.id} must read from the `repo` module, not {ast.unparse(node.value.value)!r}"
+        )
+        assert node.value.attr == expected_attr, (
+            f"{target.id} must be bound to repo.{expected_attr}, not repo.{node.value.attr}"
+        )
+        bound_via_repo_attribute.add(target.id)
+    assert bound_via_repo_attribute == set(_GIT_REMOTE_TIMEOUT_LOCAL_TO_REPO_ATTR), (
+        f"expected exactly one module-level assignment for each of "
+        f"{sorted(_GIT_REMOTE_TIMEOUT_LOCAL_TO_REPO_ATTR)} binding to repo's attribute; "
+        f"found {sorted(bound_via_repo_attribute)}"
+    )
+
+    # The parsed binding is the load-bearing guarantee above; these confirm the runtime
+    # values still agree with `repo`'s, catching a rebind onto the wrong attribute name.
+    assert _GIT_REMOTE_TIMEOUT_ENV_VAR is repo.GIT_REMOTE_TIMEOUT_ENV_VAR
+    assert _GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS == repo.GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS

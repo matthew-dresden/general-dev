@@ -1628,52 +1628,51 @@ def _run_repo_slug_section_assertions() -> None:
     otherwise have to keep in sync with `docs/environment-files.md` by
     hand -- the same discipline `test_transport_table_documents_devcontainer_transport`
     applies to `DEVCONTAINER_TRANSPORT`'s row. The expected default is
-    derived from `tests/test_state_bucket_name.py`'s own declared
-    `_GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS` constant (the technique
+    derived from `devcontainer_config.repo`'s own declared
+    `GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS` constant (the technique
     `_catalog_declared_env_var_names` uses for `catalog.py`) rather than
     restated as the literal `10`, so the documented default cannot drift
-    from the declaration this assertion requires it to match (test_review
-    WARN round 2).
+    from the single production declaration this assertion requires it to
+    match (test_review WARN round 2; E8-F1-S1-T6 rebound the expectation
+    from `tests/test_state_bucket_name.py`'s former independent copy onto
+    this module-level `repo` import so the gate reads the production
+    constant directly).
     """
-    from test_state_bucket_name import (
-        _GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS,
-        _GIT_REMOTE_TIMEOUT_ENV_VAR,
-    )
-
-    default_seconds = _GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS
+    default_seconds = repo.GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS
+    git_remote_timeout_env_var = repo.GIT_REMOTE_TIMEOUT_ENV_VAR
     expected_default_text = (
         f"`{int(default_seconds)}`" if default_seconds.is_integer() else f"`{default_seconds}`"
     )
 
     names = _repo_table_variable_names()
-    assert _GIT_REMOTE_TIMEOUT_ENV_VAR in names, (
+    assert git_remote_timeout_env_var in names, (
         f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' table does not document "
-        f"{_GIT_REMOTE_TIMEOUT_ENV_VAR}: {names!r}."
+        f"{git_remote_timeout_env_var}: {names!r}."
     )
     section = _repo_section_text_normalized()
     defaults = _repo_table_variable_defaults()
-    row_default = defaults.get(_GIT_REMOTE_TIMEOUT_ENV_VAR)
+    row_default = defaults.get(git_remote_timeout_env_var)
     assert row_default == expected_default_text.strip("`"), (
         f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' table row for "
-        f"{_GIT_REMOTE_TIMEOUT_ENV_VAR} states its Default cell as {row_default!r}, not "
-        f"{expected_default_text.strip('`')!r}, matching tests/test_state_bucket_name.py's "
-        f"declared _GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS ({default_seconds!r}); a table cell "
+        f"{git_remote_timeout_env_var} states its Default cell as {row_default!r}, not "
+        f"{expected_default_text.strip('`')!r}, matching devcontainer_config.repo's "
+        f"declared GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS ({default_seconds!r}); a table cell "
         "can drift from the surrounding prose without this assertion, since it now checks "
         "the ROW's own cell rather than the section as a whole (test_review WARN round 2)."
     )
     assert expected_default_text in section, (
         f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not state "
-        f"{expected_default_text} as {_GIT_REMOTE_TIMEOUT_ENV_VAR}'s default anywhere in its "
-        "prose, matching tests/test_state_bucket_name.py's declared "
-        f"_GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS ({default_seconds!r})."
+        f"{expected_default_text} as {git_remote_timeout_env_var}'s default anywhere in its "
+        "prose, matching devcontainer_config.repo's declared "
+        f"GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS ({default_seconds!r})."
     )
     assert "repo_slug" in section, (
         f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not name `repo_slug` as "
-        f"{_GIT_REMOTE_TIMEOUT_ENV_VAR}'s derivation."
+        f"{git_remote_timeout_env_var}'s derivation."
     )
     assert "read_positive_seconds" in section, (
         f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not name "
-        f"`read_positive_seconds` as the shared reader {_GIT_REMOTE_TIMEOUT_ENV_VAR} is "
+        f"`read_positive_seconds` as the shared reader {git_remote_timeout_env_var} is "
         "resolved through."
     )
     assert "test_state_bucket_name.py" in section, (
@@ -1683,7 +1682,7 @@ def _run_repo_slug_section_assertions() -> None:
     assert "_repo_slug_from_git_remote" in section, (
         f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not name "
         "tests/test_state_bucket_name.py's private _repo_slug_from_git_remote as a reader "
-        f"of {_GIT_REMOTE_TIMEOUT_ENV_VAR}."
+        f"of {git_remote_timeout_env_var}."
     )
     _assert_repo_section_state_neutral(section)
     _assert_repo_section_attributes_transform_to_root_hcl(section)
@@ -1740,6 +1739,25 @@ def test_repo_section_assertions_are_state_independent(
     """
     patch_repo_slug(monkeypatch)
     _run_repo_slug_section_assertions()
+
+
+def test_repo_section_assertions_fail_when_repo_module_default_drifts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-TEST-001: proves the drift path E8-F1-S1-T6 closes is real, not merely asserted.
+
+    Monkeypatches `devcontainer_config.repo.GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS`,
+    the single production declaration, to a value other than the documented
+    `10`. `_run_repo_slug_section_assertions` must notice: if it is still
+    blind to this constant (reading some other module's independent copy
+    instead), the documented default and the production default can drift
+    apart with every test in this file staying green, which is exactly the
+    gap `docs/environment-files.md`'s '### Repository slug derivation'
+    section exists to prevent.
+    """
+    monkeypatch.setattr(repo, "GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS", 999.0)
+    with pytest.raises(AssertionError):
+        _run_repo_slug_section_assertions()
 
 
 _REPO_WORK_UNIT_ID_PATTERN = re.compile(r"E\d+-F\d+-S\d+-T\d+")

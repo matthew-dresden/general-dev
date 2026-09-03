@@ -208,3 +208,38 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "disable_api_termination" {
+  description = <<-EOT
+    Whether the EC2 API refuses to terminate this instance. Type bool,
+    defaults to true, which is the posture a long-lived developer box wants:
+    an accidental `terraform destroy` or console click cannot take it away.
+
+    An ephemeral deployment that exists to be created, asserted against and
+    destroyed in one session sets this false. Without that, `terragrunt
+    destroy` cannot remove the instance it just created: the API rejects
+    TerminateInstances with OperationNotPermitted, the internet gateway then
+    fails to detach because the instance still holds a mapped public address,
+    and clearing it takes two out-of-band `aws ec2 modify-instance-attribute`
+    calls that no Terragrunt configuration can express. Exposing the flag is
+    what makes teardown declarative rather than tribal knowledge, per this
+    repository's input-driven-configuration standard.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "disable_api_stop" {
+  description = <<-EOT
+    Whether the EC2 API refuses to stop this instance. Type bool, defaults to
+    true, for the same reason as var.disable_api_termination.
+
+    Both flags must be cleared to destroy an instance, and this one only
+    surfaces after the first is cleared: TerminateInstances reports the
+    termination flag, and reports the stop flag only on the next attempt. A
+    deployment that sets one and not the other still cannot be destroyed, so
+    an ephemeral deployment sets both false.
+  EOT
+  type        = bool
+  default     = true
+}

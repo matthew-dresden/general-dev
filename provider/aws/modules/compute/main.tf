@@ -22,8 +22,8 @@ resource "aws_instance" "this" {
   vpc_security_group_ids = var.security_group_ids
   iam_instance_profile   = var.iam_instance_profile_name
 
-  disable_api_termination = true
-  disable_api_stop        = true
+  disable_api_termination = var.disable_api_termination
+  disable_api_stop        = var.disable_api_stop
 
   metadata_options {
     http_endpoint               = "enabled"

@@ -80,5 +80,7 @@ module "compute" {
   docker_tls_listen_port    = var.docker_tls_listen_port
   docker_repo_base_url      = var.docker_repo_base_url
   docker_repo_channel       = var.docker_repo_channel
+  disable_api_termination   = var.disable_api_termination
+  disable_api_stop          = var.disable_api_stop
   tags                      = var.tags
 }

@@ -411,3 +411,24 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "disable_api_termination" {
+  description = <<-EOT
+    Whether the EC2 API refuses to terminate the instance. Type bool,
+    defaults to true. Forwarded to the compute submodule, which documents why
+    both this and var.disable_api_stop must be false for an ephemeral
+    deployment to be destroyable by `terragrunt destroy` alone.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "disable_api_stop" {
+  description = <<-EOT
+    Whether the EC2 API refuses to stop the instance. Type bool, defaults to
+    true. Forwarded to the compute submodule. Both flags must be false for a
+    destroy to succeed; setting only one leaves the instance undestroyable.
+  EOT
+  type        = bool
+  default     = true
+}

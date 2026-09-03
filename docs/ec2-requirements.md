@@ -83,8 +83,8 @@ to false.
 | Network placement | The subnet, security group and instance profile from 2.1 and 2.2 | (from 2.1, 2.2) |
 | Root volume | One `gp3` volume, encrypted, size as given, deleted automatically on instance termination | `var.root_volume_size_gb`, for example `50` |
 | Data volume | Choose with the requester: either a second `gp3` volume, encrypted, size as given, attached at the device name given, or no second volume at all (root volume only) | `var.create_data_volume` (default: create one), `var.data_volume_size_gb` (default `100`), `var.data_volume_device_name` (default `/dev/sdf`) |
-| Termination protection | Enabled (`DisableApiTermination` = true) | fixed |
-| Stop protection | Enabled (`DisableApiStop` = true) | fixed |
+| Termination protection | Enabled by default (`DisableApiTermination` = true). A long-lived instance keeps it; an ephemeral one that is created, asserted against and destroyed in a single session sets it false, because `terragrunt destroy` cannot otherwise remove the instance it created | `var.disable_api_termination` (default `true`) |
+| Stop protection | Enabled by default (`DisableApiStop` = true). Both this and termination protection must be false for a destroy to succeed: the EC2 API reports the termination flag first and this one only on the next attempt, so clearing one leaves the instance undestroyable | `var.disable_api_stop` (default `true`) |
 | Instance metadata service | IMDSv2 required (`HttpTokens` = required), metadata endpoint enabled, hop limit exactly 2 | fixed |
 | Name tag | `var.name_prefix` is a prefix, not a literal Name value: the instance, the VPC and the internet gateway carry it unchanged, and every other resource above carries it with a fixed suffix appended -- root volume `-root`, data volume `-data`, subnet and route table `-public`, security group `-instance-sg`, IAM role `-instance-role`, instance profile `-instance-profile` | `var.name_prefix`, for example `EXAMPLE-devcontainer-remote` |
 | Additional tags | As given, if any | `var.tags`, for example `{"Environment": "EXAMPLE"}` |

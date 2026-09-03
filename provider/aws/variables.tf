@@ -369,19 +369,22 @@ variable "docker_tls_listen_port" {
   default     = 2376
 }
 
-variable "aws_cli_installer_url" {
+variable "aws_cli_installer_base_url" {
   description = <<-EOT
-    URL of the AWS CLI v2 installer archive the rendered user data downloads.
-    The instance needs the CLI to read its own TLS material and secrets from
-    Parameter Store through its instance role: the security module grants that
-    role ssm:GetParameter on /devcontainer/<instance>/*, and nothing on a bare
-    Ubuntu host can exercise it (Ubuntu 24.04 offers no awscli apt candidate).
-    Defaults to Amazon's own published archive; a caller mirroring third-party
-    downloads internally overrides this rather than the template carrying a
-    literal upstream URL.
+    Base URL the rendered user data downloads the AWS CLI v2 installer archive
+    from. The archive filename is derived on the instance from `uname -m`
+    ("awscli-exe-linux-x86_64.zip" or "awscli-exe-linux-aarch64.zip"), because
+    var.instance_type selects the architecture and a URL pinned to one of them
+    installs a binary that cannot execute on the other. The instance needs the
+    CLI to read its own TLS material and secrets from Parameter Store through
+    its instance role: the security module grants that role ssm:GetParameter on
+    /devcontainer/<instance>/*, and nothing on a bare Ubuntu host can exercise
+    it (Ubuntu 24.04 offers no awscli apt candidate). Defaults to Amazon's own
+    published location; a caller mirroring third-party downloads internally
+    overrides this rather than the template carrying a literal upstream URL.
   EOT
   type        = string
-  default     = "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+  default     = "https://awscli.amazonaws.com"
 }
 
 variable "docker_repo_base_url" {

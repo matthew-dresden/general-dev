@@ -64,24 +64,24 @@ module "security" {
 module "compute" {
   source = "./modules/compute"
 
-  ami                       = var.ami
-  instance_type             = var.instance_type
-  subnet_id                 = local.subnet_id
-  security_group_ids        = local.security_group_ids
-  iam_instance_profile_name = local.iam_instance_profile_name
-  name_prefix               = var.name_prefix
-  root_volume_size_gb       = var.root_volume_size_gb
-  create_data_volume        = var.create_data_volume
-  data_volume_size_gb       = var.data_volume_size_gb
-  data_volume_device_name   = var.data_volume_device_name
-  docker_daemon_user        = var.docker_daemon_user
-  docker_data_root          = var.docker_data_root
-  docker_tls_listen_address = var.docker_tls_listen_address
-  docker_tls_listen_port    = var.docker_tls_listen_port
-  aws_cli_installer_url     = var.aws_cli_installer_url
-  docker_repo_base_url      = var.docker_repo_base_url
-  docker_repo_channel       = var.docker_repo_channel
-  disable_api_termination   = var.disable_api_termination
-  disable_api_stop          = var.disable_api_stop
-  tags                      = var.tags
+  ami                        = var.ami
+  instance_type              = var.instance_type
+  subnet_id                  = local.subnet_id
+  security_group_ids         = local.security_group_ids
+  iam_instance_profile_name  = local.iam_instance_profile_name
+  name_prefix                = var.name_prefix
+  root_volume_size_gb        = var.root_volume_size_gb
+  create_data_volume         = var.create_data_volume
+  data_volume_size_gb        = var.data_volume_size_gb
+  data_volume_device_name    = var.data_volume_device_name
+  docker_daemon_user         = var.docker_daemon_user
+  docker_data_root           = var.docker_data_root
+  docker_tls_listen_address  = var.docker_tls_listen_address
+  docker_tls_listen_port     = var.docker_tls_listen_port
+  aws_cli_installer_base_url = var.aws_cli_installer_base_url
+  docker_repo_base_url       = var.docker_repo_base_url
+  docker_repo_channel        = var.docker_repo_channel
+  disable_api_termination    = var.disable_api_termination
+  disable_api_stop           = var.disable_api_stop
+  tags                       = var.tags
 }

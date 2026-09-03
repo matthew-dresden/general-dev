@@ -164,11 +164,15 @@ have already run costs more time than doing them first would have.
    convenience: rootless docker manages its own bridge NAT and
    published-port DNAT through it. `unzip` exists only to unpack the AWS CLI
    archive in the next step.
-2. Install the AWS CLI v2 from the archive given
-   (`var.aws_cli_installer_url`, default
-   `https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip`): download it,
-   unpack it, and run its own `install --update` so a repeated run updates
-   rather than aborting. The instance needs a client for the
+2. Install the AWS CLI v2 from the base URL given
+   (`var.aws_cli_installer_base_url`, default
+   `https://awscli.amazonaws.com`), appending the archive name for this
+   host's architecture as `uname -m` reports it
+   (`awscli-exe-linux-x86_64.zip` or `awscli-exe-linux-aarch64.zip`):
+   download it, unpack it, and run its own `install --update` so a repeated
+   run updates rather than aborting. Confirm `aws --version` runs afterward;
+   an archive for the wrong architecture installs cleanly and fails only when
+   first executed. The instance needs a client for the
    `ssm:GetParameter` grant its role already carries on
    `/devcontainer/<instance>/*` -- it reads its own TLS material (Section 4)
    and its secrets from Parameter Store over IMDSv2 with it -- and Ubuntu

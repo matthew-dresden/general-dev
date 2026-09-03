@@ -26,7 +26,7 @@ _USER_DATA = _COMPUTE / "user-data.yaml"
 _VARIABLES = _COMPUTE / "variables.tf"
 _MAIN = _COMPUTE / "main.tf"
 
-_INSTALLER_VARIABLE = "aws_cli_installer_url"
+_INSTALLER_VARIABLE = "aws_cli_installer_base_url"
 
 
 def _user_data() -> str:
@@ -70,10 +70,41 @@ def test_the_installer_url_is_a_variable_rather_than_a_literal() -> None:
     )
 
 
+def test_the_archive_name_is_derived_from_the_host_architecture() -> None:
+    """var.instance_type selects the architecture; a pinned archive breaks the other one.
+
+    An archive for the wrong architecture unpacks and installs cleanly, then
+    fails with "Exec format error" the first time anything runs `aws` -- which
+    is how this was found, on an arm64 instance type.
+    """
+    text = _user_data()
+    assert "awscli-exe-linux-$(uname -m).zip" in text, (
+        "the archive name must come from uname -m, which reports exactly the two names "
+        "Amazon publishes (x86_64, aarch64)"
+    )
+    for pinned in ("awscli-exe-linux-x86_64.zip", "awscli-exe-linux-aarch64.zip"):
+        assert f"/{pinned}" not in text, f"the template pins {pinned} instead of deriving it"
+
+
 def test_the_install_is_repeatable() -> None:
     """cloud-init may re-run the step; a second run must update, not abort."""
     text = _user_data()
     assert "--update" in text, (
         "the AWS CLI installer aborts when an installation already exists unless --update "
         "is given, which would fail the whole runcmd under set -e on any re-run"
+    )
+
+
+def test_a_user_data_change_replaces_the_instance() -> None:
+    """cloud-init runs once, at first boot, so an edit that does not replace is inert.
+
+    Without `user_data_replace_on_change`, terraform reports "1 changed" for a
+    template edit, the running host keeps whatever it was provisioned with, and
+    the two disagree silently -- the operator believes a provisioning change
+    took effect when nothing on the instance ran it. Replacement is also what
+    the immutable-deployment rule requires of a provisioning change.
+    """
+    main = _MAIN.read_text(encoding="utf-8")
+    assert "user_data_replace_on_change = true" in main, (
+        "an edit to user-data.yaml would update the attribute without re-provisioning"
     )

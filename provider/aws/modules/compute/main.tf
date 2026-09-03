@@ -42,15 +42,24 @@ resource "aws_instance" "this" {
     })
   }
 
+  # A user_data change must replace the instance, not merely update the
+  # attribute. cloud-init runs once, at first boot: without this, terraform
+  # reports "1 changed" for an edit to the template, the running host keeps
+  # whatever it was provisioned with, and the two disagree silently until
+  # something depends on the change. Replacement is also what the program's
+  # own immutable-deployment rule requires -- a provisioning change produces a
+  # new instance rather than a mutated one.
+  user_data_replace_on_change = true
+
   user_data = templatefile("${path.module}/user-data.yaml", {
-    daemon_user           = var.docker_daemon_user
-    data_root             = var.docker_data_root
-    tls_listen_address    = var.docker_tls_listen_address
-    tls_listen_port       = var.docker_tls_listen_port
-    create_data_volume    = var.create_data_volume
-    aws_cli_installer_url = var.aws_cli_installer_url
-    docker_repo_base_url  = var.docker_repo_base_url
-    docker_repo_channel   = var.docker_repo_channel
+    daemon_user                = var.docker_daemon_user
+    data_root                  = var.docker_data_root
+    tls_listen_address         = var.docker_tls_listen_address
+    tls_listen_port            = var.docker_tls_listen_port
+    create_data_volume         = var.create_data_volume
+    aws_cli_installer_base_url = var.aws_cli_installer_base_url
+    docker_repo_base_url       = var.docker_repo_base_url
+    docker_repo_channel        = var.docker_repo_channel
   })
 
   tags = merge(var.tags, {

@@ -209,7 +209,13 @@ runcmd:
     set -e
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
-    curl -fsSL "${aws_cli_installer_url}" -o "$tmp/awscliv2.zip"
+    # The archive is per-architecture and `uname -m` reports exactly the two
+    # names Amazon publishes (x86_64, aarch64). Deriving it here rather than
+    # pinning one in the URL is what keeps an arm64 instance type from
+    # installing an x86_64 binary that fails with "Exec format error" on its
+    # first use -- which the `aws --version` check below turns into a
+    # provisioning failure rather than a puzzle discovered much later.
+    curl -fsSL "${aws_cli_installer_base_url}/awscli-exe-linux-$(uname -m).zip" -o "$tmp/awscliv2.zip"
     unzip -q "$tmp/awscliv2.zip" -d "$tmp"
     "$tmp/aws/install" --update
     aws --version

@@ -54,6 +54,9 @@ packages:
   - uidmap
   - dbus-user-session
   - iptables
+  # unzip exists solely to unpack the AWS CLI archive installed in runcmd
+  # below; Ubuntu 24.04 ships neither it nor an awscli apt candidate.
+  - unzip
 
 write_files:
   # AppArmor unprivileged-user-namespace relaxation (Section 8.1, silent
@@ -193,6 +196,23 @@ runcmd:
     DAEMON_UID=$(id -u ${daemon_user})
     runuser -u ${daemon_user} -- env HOME=/home/${daemon_user} XDG_RUNTIME_DIR=/run/user/$DAEMON_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$DAEMON_UID/bus PATH=/usr/bin:/usr/sbin:/bin:/sbin dockerd-rootless-setuptool.sh install
     runuser -u ${daemon_user} -- env HOME=/home/${daemon_user} XDG_RUNTIME_DIR=/run/user/$DAEMON_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$DAEMON_UID/bus systemctl --user stop docker.service
+  # The AWS CLI, which the instance needs to read its own TLS material and
+  # secrets from Parameter Store through its instance role over IMDSv2. The
+  # security module already grants that role ssm:GetParameter on
+  # /devcontainer/<instance>/*; without a client for it that grant is
+  # unusable, and Ubuntu 24.04 offers no awscli apt candidate, so the archive
+  # Amazon publishes is the supported way to install v2.
+  #
+  # --update rather than a plain install so a re-run of this step (cloud-init
+  # may repeat it) updates an existing installation instead of aborting.
+  - |
+    set -e
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL "${aws_cli_installer_url}" -o "$tmp/awscliv2.zip"
+    unzip -q "$tmp/awscliv2.zip" -d "$tmp"
+    "$tmp/aws/install" --update
+    aws --version
   # The TLS listener is bound to loopback only (var.docker_tls_listen_address
   # is validated to be exactly 127.0.0.1), reachable through the SSM port
   # forward in E6 and nothing else; the unix socket alongside it is the

@@ -42,6 +42,7 @@ SECRETS AND CERTIFICATES
   make cert-ca            host    Create this instance's certificate authority. Once per instance; refuses if one exists.
   make cert-client        host    Issue the client certificate 'make connect' presents. Run after cert-ca, and again at renewal.
   make cert-publish       remote  Issue server material and publish it to Parameter Store. The daemon needs it to open its listener.
+  make cert-install       remote  Have the instance fetch the published material and start its daemon. Run after cert-publish.
 
 HOST PROXY  only needed behind a corporate proxy; remote builds force HOST_PROXY=false
   make proxy-start        local   Run tinyproxy on this machine. Local containers reach it via host.docker.internal.

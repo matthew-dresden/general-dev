@@ -24,6 +24,7 @@ usage() {
     "  ${RD_BOLD}make cert-ca${RD_RESET}       Create this instance's certificate authority." \
     "  ${RD_BOLD}make cert-client${RD_RESET}   Issue the client certificate 'make connect' presents." \
     "  ${RD_BOLD}make cert-publish${RD_RESET}  Issue server material and publish it to Parameter Store." \
+    "  ${RD_BOLD}make cert-install${RD_RESET}  Have the instance fetch it and start its daemon." \
     "" \
     "Expiry of what already exists: ${RD_BOLD}make cert-status${RD_RESET}"
 }
@@ -56,6 +57,18 @@ case "$command" in
   client)
     run_certs issue-client
     rd_ok "Client certificate issued for '${INSTANCE}'. 'make connect' can now present it."
+    ;;
+  install)
+    rd_require_remote_config
+    rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+    rd_check_aws_auth
+    PYTHONPATH="$SCRIPTS_DIR" python3 -m devcontainer_config.transport install-material \
+      --instance "$INSTANCE" \
+      --instance-id "$REMOTE_INSTANCE_ID" \
+      --profile "$REMOTE_AWS_PROFILE" \
+      --region "$REMOTE_AWS_REGION" \
+      --daemon-user "$REMOTE_DAEMON_USER"
+    rd_ok "'${INSTANCE}' installed its TLS material and started its daemon."
     ;;
   publish)
     # Region and profile only: this publishes to a path the resolver addressed

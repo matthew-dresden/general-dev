@@ -159,61 +159,71 @@ have already run costs more time than doing them first would have.
 ### 3.2 Remaining host configuration, in the order performed
 
 1. Update the package index and install `ca-certificates`, `curl`, `gnupg`,
-   `uidmap`, `dbus-user-session` and `iptables`. `iptables` is a hard
+   `uidmap`, `dbus-user-session`, `iptables` and `unzip`. `iptables` is a hard
    prerequisite of the rootless install step below, not an optional
    convenience: rootless docker manages its own bridge NAT and
-   published-port DNAT through it.
-2. Add the Docker apt repository's signing key and source list, from the
+   published-port DNAT through it. `unzip` exists only to unpack the AWS CLI
+   archive in the next step.
+2. Install the AWS CLI v2 from the archive given
+   (`var.aws_cli_installer_url`, default
+   `https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip`): download it,
+   unpack it, and run its own `install --update` so a repeated run updates
+   rather than aborting. The instance needs a client for the
+   `ssm:GetParameter` grant its role already carries on
+   `/devcontainer/<instance>/*` -- it reads its own TLS material (Section 4)
+   and its secrets from Parameter Store over IMDSv2 with it -- and Ubuntu
+   24.04 publishes no `awscli` apt candidate.
+3. Add the Docker apt repository's signing key and source list, from the
    base URL and release channel given (`var.docker_repo_base_url`, default
    `https://download.docker.com/linux/ubuntu`; `var.docker_repo_channel`,
    default `stable`), then install `docker-ce`, `docker-ce-cli`,
    `docker-ce-rootless-extras` and `containerd.io`.
-3. Disable and stop the rootful daemon the package install just enabled:
+4. Disable and stop the rootful daemon the package install just enabled:
    `systemctl disable --now docker.service docker.socket`. Confirm neither
    unit is active or enabled afterward (Section 5). Docker group membership
    on a rootful daemon is equivalent to host root, so this host never runs
    the rootful daemon at all, and never adds any account to the `docker`
    group.
-4. Install and enable the `amazon-ssm-agent` snap
+5. Install and enable the `amazon-ssm-agent` snap
    (`snap install amazon-ssm-agent --classic`, then
    `systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service`).
    Do this before any daemon-user-specific step below that can fail, so an
    operator can always reach the host through SSM to diagnose a later
    failure.
-5. Create the dedicated, unprivileged daemon user given
+6. Create the dedicated, unprivileged daemon user given
    (`var.docker_daemon_user`, default `dockerd`), with no interactive login
    shell, then apply silent failure 1 above (`loginctl enable-linger
    <daemon-user>`) and start that user's service manager:
    `systemctl start user@<uid>.service`, where `<uid>` is that user's numeric
    ID from `id -u <daemon-user>`. Every later step that talks to this user's
-   service manager (steps 11 and 13, and the "Daemon enabled, not started"
+   service manager (steps 12 and 14, and the "Daemon enabled, not started"
    row in Section 5) reuses this same `<uid>`.
-6. Load the AppArmor profile written in silent failure 2 above:
+7. Load the AppArmor profile written in silent failure 2 above:
     `apparmor_parser -r /etc/apparmor.d/rootlesskit`.
-7. Apply the cgroup delegation drop-in written in silent failure 3 above for
+8. Apply the cgroup delegation drop-in written in silent failure 3 above for
     the daemon user's `user@<uid>.service`, then reload systemd and restart
     that unit so the delegation takes effect: `systemctl daemon-reload` and
     `systemctl restart user@<uid>.service`.
-8. Create the daemon user's TLS directory, the destination the requester's
+9. Create the daemon user's TLS directory, the destination the requester's
     certificate delivery (Section 4) targets:
     `install -d -m 0700 -o <daemon-user> -g <daemon-user>
     /home/<daemon-user>/tls`.
-9. Create the daemon's data directory at the path given
+10. Create the daemon's data directory at the path given
     (`var.docker_data_root`, always required, for example
     `/mnt/docker-data`), owned by the daemon user.
-10. If a second data volume was provisioned (2.3): format it once
+11. If a second data volume was provisioned (2.3): format it once
     (`mkfs.ext4 -i 8192 -L DOCKERDATA <device>`), add a `LABEL=DOCKERDATA
     <data-root> ext4 defaults,noatime,nofail 0 2` line to `/etc/fstab`,
     mount it (`mount -a`), confirm the mount succeeded:
     `mountpoint -q <data-root>`, then restore the daemon user's ownership of
     the mount point, which mounting a filesystem over the directory from
-    step 9 replaces with the new filesystem's own root ownership:
+    step 10 replaces with the new filesystem's own root ownership:
     `chown <daemon-user>:<daemon-user> <data-root>`. Skipping this chown
     leaves the data-root owned by root, and the unprivileged rootless daemon
     cannot write to it.
-11. Install rootless docker for the daemon user, then stop the daemon it
+12. Install rootless docker for the daemon user, then stop the daemon it
     starts automatically; it is reconfigured and re-enabled next. The daemon
-    user has no interactive login shell (step 5), so run both commands
+    user has no interactive login shell (step 6), so run both commands
     through `runuser`, supplying the daemon user's own runtime directory and
     session bus explicitly because `runuser -u` does not propagate the
     caller's environment:
@@ -223,10 +233,10 @@ have already run costs more time than doing them first would have.
     runuser -u <daemon-user> -- env HOME=/home/<daemon-user> XDG_RUNTIME_DIR=/run/user/<uid> DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus systemctl --user stop docker.service
     ```
 
-12. Write that user's `daemon.json` at
+13. Write that user's `daemon.json` at
     `/home/<daemon-user>/.config/docker/daemon.json`, owned by the daemon
     user, with this exact content, substituting the data-root path from
-    step 9, the TLS directory from step 8, and the loopback address and
+    step 10, the TLS directory from step 9, and the loopback address and
     port given (`var.docker_tls_listen_address`, default `127.0.0.1`, must
     remain loopback; `var.docker_tls_listen_port`, default `2376`):
 
@@ -244,20 +254,20 @@ have already run costs more time than doing them first would have.
 
     This step names the paths the daemon reads for its TLS material; it
     does not supply the certificate itself, which the requester delivers
-    separately, into the directory from step 8, once the instance
+    separately, into the directory from step 9, once the instance
     identifier is handed back (Section 4).
-13. Enable, but do not start, the daemon user's `docker.service`, again
-    through `runuser` with the same environment as step 11:
+14. Enable, but do not start, the daemon user's `docker.service`, again
+    through `runuser` with the same environment as step 12:
 
     ```text
     runuser -u <daemon-user> -- env HOME=/home/<daemon-user> XDG_RUNTIME_DIR=/run/user/<uid> DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus systemctl --user enable docker.service
     ```
 
-    The daemon's first start reads the TLS material at the paths step 12's
+    The daemon's first start reads the TLS material at the paths step 13's
     `daemon.json` names; starting it before that material exists would fail
     and leave the enablement itself undone, so this step stops short of
     starting it.
-14. Once every step above has succeeded, write a UTC timestamp to
+15. Once every step above has succeeded, write a UTC timestamp to
     `/etc/general-dev-provisioned`. This file's presence, and only its
     presence, is the signal the instance is ready to hand back; nothing
     earlier in this list writes it.

@@ -43,13 +43,14 @@ resource "aws_instance" "this" {
   }
 
   user_data = templatefile("${path.module}/user-data.yaml", {
-    daemon_user          = var.docker_daemon_user
-    data_root            = var.docker_data_root
-    tls_listen_address   = var.docker_tls_listen_address
-    tls_listen_port      = var.docker_tls_listen_port
-    create_data_volume   = var.create_data_volume
-    docker_repo_base_url = var.docker_repo_base_url
-    docker_repo_channel  = var.docker_repo_channel
+    daemon_user           = var.docker_daemon_user
+    data_root             = var.docker_data_root
+    tls_listen_address    = var.docker_tls_listen_address
+    tls_listen_port       = var.docker_tls_listen_port
+    create_data_volume    = var.create_data_volume
+    aws_cli_installer_url = var.aws_cli_installer_url
+    docker_repo_base_url  = var.docker_repo_base_url
+    docker_repo_channel   = var.docker_repo_channel
   })
 
   tags = merge(var.tags, {

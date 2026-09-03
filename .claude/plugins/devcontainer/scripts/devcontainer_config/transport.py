@@ -145,6 +145,7 @@ import argparse
 import contextlib
 import datetime
 import json
+import shlex
 import os
 import selectors
 import socket
@@ -171,6 +172,8 @@ from devcontainer_config.hostprobe import (
 DOCKER_TLS_PORT_ENV_VAR = "DOCKER_TLS_PORT"
 _DOCKER_TLS_PORT_DEFAULT = 2376
 
+MATERIAL_INSTALL_TIMEOUT_ENV_VAR = "MATERIAL_INSTALL_TIMEOUT"
+_MATERIAL_INSTALL_TIMEOUT_DEFAULT_SECONDS = 300.0
 SSM_FORWARD_TIMEOUT_ENV_VAR = "SSM_FORWARD_TIMEOUT"
 _SSM_FORWARD_TIMEOUT_DEFAULT_SECONDS = 30.0
 
@@ -196,6 +199,7 @@ _REMOVED_TRANSPORT = "ssh"
 PORT_FORWARDING_DOCUMENT = "AWS-StartPortForwardingSession"
 
 ONLINE_PING_STATUS = "Online"
+_COMMAND_SUCCESS_STATUS = "Success"
 
 _LOCALHOST = "127.0.0.1"
 
@@ -317,6 +321,10 @@ class LegacyContextError(TransportError):
 
 class CertificateNotReadyError(TransportError):
     """Raised when the client certificate `ensure_context` needs is missing or expired."""
+
+
+class MaterialInstallError(TransportError):
+    """The instance did not install its published TLS material, or would not start its daemon."""
 
 
 class DockerVersionFloorError(TransportError):
@@ -962,6 +970,194 @@ def _use_context(runner: CommandRunner, context_name: str) -> None:
 # already observed the session process announce its port opened, never in
 # a tight retry loop.
 ReadinessProbe = Callable[[float], bool]
+
+
+def _material_install_timeout_seconds() -> float:
+    """The deadline for the instance to fetch its material and start its daemon.
+
+    Generous by default: the step downloads three parameters and starts a
+    docker daemon whose first start initializes its data root. Read through
+    `read_positive_seconds` rather than hard-coded so a slow instance can be
+    accommodated without editing this file.
+    """
+    return read_positive_seconds(
+        MATERIAL_INSTALL_TIMEOUT_ENV_VAR, _MATERIAL_INSTALL_TIMEOUT_DEFAULT_SECONDS
+    )
+
+
+def build_install_commands(instance: str, *, daemon_user: str, region: str) -> tuple[str, ...]:
+    """The shell the instance runs to install its published material and start its daemon.
+
+    Every path comes from `certs.publication_set(instance)`, the same function
+    `certs.publish` iterates, so what the instance fetches cannot drift from
+    what was published.
+
+    The instance pulls; nothing is pushed. These commands name parameter paths
+    and never carry a value, so the private key is absent from the command
+    document, from `aws ssm get-command-invocation` output, and from the
+    instance's own process table -- the daemon writes it straight to its file.
+    Pushing the material instead would place a TLS private key in SSM's command
+    history, readable for as long as AWS retains it, which is a materially
+    worse exposure than the one `certs.publish` already went to some trouble to
+    avoid.
+
+    `umask 077` before the fetch, then an explicit mode per file: the key is
+    never briefly world-readable between creation and `chmod`.
+    """
+    lines = [
+        "set -eu",
+        f"user={shlex.quote(daemon_user)}",
+        'dir="/home/$user/tls"',
+        'install -d -m 0700 -o "$user" -g "$user" "$dir"',
+        "umask 077",
+    ]
+    for entry in certs.publication_set(instance):
+        filename = entry.parameter_path.rsplit("/", 1)[1]
+        mode = "0600" if filename == certs.SERVER_KEY_FILENAME else "0644"
+        lines.append(
+            f"aws ssm get-parameter --name {shlex.quote(entry.parameter_path)} "
+            f"--with-decryption --region {shlex.quote(region)} "
+            f'--query Parameter.Value --output text > "$dir/{filename}"'
+        )
+        lines.append(f'chmod {mode} "$dir/{filename}"')
+    lines.extend(
+        [
+            'chown -R "$user:$user" "$dir"',
+            'uid="$(id -u "$user")"',
+            # The daemon was enabled but never started: its first start reads
+            # the material that only now exists. `start` is idempotent, so a
+            # re-delivery after a certificate reissue is a restart, not a
+            # failure.
+            'runuser -u "$user" -- env HOME="/home/$user" '
+            'XDG_RUNTIME_DIR="/run/user/$uid" '
+            'DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" '
+            "systemctl --user restart docker.service",
+            'runuser -u "$user" -- env HOME="/home/$user" '
+            'XDG_RUNTIME_DIR="/run/user/$uid" '
+            'DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" '
+            "systemctl --user is-active docker.service",
+        ]
+    )
+    return tuple(lines)
+
+
+def install_material(
+    runner: CommandRunner,
+    *,
+    instance: str,
+    instance_id: str,
+    daemon_user: str,
+    profile: str,
+    region: str,
+) -> str:
+    """Have `instance_id` fetch its published TLS material and start its daemon.
+
+    The step `provider/aws/modules/compute/user-data.yaml` defers to E6: that
+    template installs the paths the daemon reads and enables the unit, but
+    never writes the material, because its first start would fail and abort the
+    remainder of cloud-init. Nothing else closes that gap, so an instance whose
+    material has been published still has an empty TLS directory, an inactive
+    daemon and no listener on its TLS port.
+
+    Returns:
+        The stdout the instance produced, so a caller can record what ran.
+
+    Raises:
+        MaterialInstallError: the command did not reach `Success`, carrying the
+            instance's own stderr -- which distinguishes the causes that matter
+            (no parameter published yet, the role cannot read the prefix, the
+            daemon refused the certificate) and which no exit code alone would.
+        TransportError: the aws CLI is missing, or a call failed for a reason
+            `_run_aws_cli` does not classify.
+    """
+    commands = build_install_commands(instance, daemon_user=daemon_user, region=region)
+    started = _run_aws_cli(
+        runner,
+        (
+            "ssm",
+            "send-command",
+            "--instance-ids",
+            instance_id,
+            "--document-name",
+            "AWS-RunShellScript",
+            "--comment",
+            f"install TLS material for {instance}",
+            "--parameters",
+            json.dumps({"commands": list(commands)}),
+        ),
+        profile=profile,
+        region=region,
+    )
+    try:
+        command_id = str(json.loads(started.stdout)["Command"]["CommandId"])
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise MaterialInstallError(
+            "ERROR: aws ssm send-command produced unparsable output: "
+            f"{started.stdout.strip()!r}\n"
+            "Run the command manually and investigate why its output does not match the "
+            "expected shape."
+        ) from exc
+
+    # The CLI's own waiter, bounded by the runner's deadline: an external state
+    # change is waited on rather than polled on a timer.
+    waited = runner(
+        (
+            "aws",
+            "ssm",
+            "wait",
+            "command-executed",
+            "--command-id",
+            command_id,
+            "--instance-id",
+            instance_id,
+            "--profile",
+            profile,
+            "--region",
+            region,
+        ),
+        _material_install_timeout_seconds(),
+    )
+    if waited.timed_out:
+        raise MaterialInstallError(
+            f"ERROR: installing TLS material on {instance_id} did not finish in "
+            f"{_material_install_timeout_seconds()}s\n"
+            f"The command is still recorded as {command_id}; inspect it with "
+            f"'aws ssm get-command-invocation --command-id {command_id} "
+            f"--instance-id {instance_id}'.\n"
+            f"Raise {MATERIAL_INSTALL_TIMEOUT_ENV_VAR} if this instance is simply slow."
+        )
+
+    invocation = _run_aws_cli(
+        runner,
+        (
+            "ssm",
+            "get-command-invocation",
+            "--command-id",
+            command_id,
+            "--instance-id",
+            instance_id,
+        ),
+        profile=profile,
+        region=region,
+    )
+    try:
+        payload = json.loads(invocation.stdout)
+        status = str(payload["Status"])
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise MaterialInstallError(
+            "ERROR: aws ssm get-command-invocation produced unparsable output: "
+            f"{invocation.stdout.strip()!r}"
+        ) from exc
+    if status != _COMMAND_SUCCESS_STATUS:
+        raise MaterialInstallError(
+            f"ERROR: installing TLS material on {instance_id} reported {status}\n"
+            f"{str(payload.get('StandardErrorContent', '')).strip()}\n"
+            f"Publish the material first if it is missing: "
+            f"make cert-publish INSTANCE={instance}\n"
+            f"Full output: 'aws ssm get-command-invocation --command-id {command_id} "
+            f"--instance-id {instance_id}'."
+        )
+    return str(payload.get("StandardOutputContent", ""))
 
 
 def tcp_ready_probe(port: int) -> ReadinessProbe:
@@ -1674,7 +1870,39 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     connect_parser.set_defaults(handler=_run_connect)
 
+    install_parser = subparsers.add_parser(
+        "install-material",
+        help=(
+            "Have the instance fetch its published TLS material and start its docker daemon."
+        ),
+    )
+    install_parser.add_argument("--instance", required=True, help="The remote instance name.")
+    install_parser.add_argument("--instance-id", required=True, help="The EC2 instance id (i-...).")
+    install_parser.add_argument("--profile", required=True, help="The AWS SSO profile.")
+    install_parser.add_argument("--region", required=True, help="The AWS region.")
+    install_parser.add_argument(
+        "--daemon-user",
+        required=True,
+        help="The instance's docker daemon user (var.docker_daemon_user).",
+    )
+    install_parser.set_defaults(handler=_run_install_material)
+
     return parser
+
+
+def _run_install_material(args: argparse.Namespace) -> int:
+    output = install_material(
+        subprocess_command_runner,
+        instance=args.instance,
+        instance_id=args.instance_id,
+        daemon_user=args.daemon_user,
+        profile=args.profile,
+        region=args.region,
+    )
+    for line in output.splitlines():
+        print(line)
+    print(f"Installed TLS material on {args.instance_id} and started its docker daemon.")
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

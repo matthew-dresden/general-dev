@@ -92,6 +92,7 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-ca"          "host"   "Create this instance's certificate authority. Once per instance; refuses if one exists."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-client"      "host"   "Issue the client certificate 'make connect' presents. Run after cert-ca, and again at renewal."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-publish"     "remote" "Issue server material and publish it to Parameter Store. The daemon needs it to open its listener."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."
 	@printf '\n\033[1mHOST PROXY\033[0m  only needed behind a corporate proxy; remote builds force HOST_PROXY=false\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-start"      "local"  "Run tinyproxy on this machine. Local containers reach it via host.docker.internal."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-status"     "local"  "Whether it is running, and on which port."
@@ -265,6 +266,9 @@ cert-client:
 
 cert-publish:
 	@INSTANCE="$(INSTANCE)" $(CERTS_SH) publish
+
+cert-install:
+	@INSTANCE="$(INSTANCE)" $(CERTS_SH) install
 
 proxy-start:
 	@$(PROXY_ENV) $(PROXY_SH) start

@@ -54,6 +54,7 @@ from pathlib import Path
 
 import pytest
 from conftest import _makefile_text, _resolve_make_refs
+from devcontainer_config import instances
 from devcontainer_config.repo import find_root
 
 # Spec Section 4.1.2 requires the `make test` row to stay "no docker, no AWS,
@@ -397,9 +398,7 @@ def test_test_recipe_guard_fails_fast_when_a_tool_is_absent(tool: str, tmp_path:
     # a runaway process tree. Configurable so a slower CI runner is not penalized
     # by a bound tuned for a developer's machine (CLAUDE.md: no hardcoded
     # timeouts), following the pattern in tests/test_hostprobe.py.
-    result = _run_make(
-        "test", env=env, timeout_env_var="MAKEFILE_GUARD_TEST_TIMEOUT_SECONDS"
-    )
+    result = _run_make("test", env=env, timeout_env_var="MAKEFILE_GUARD_TEST_TIMEOUT_SECONDS")
     combined = result.stdout + result.stderr
     assert result.returncode != 0, f"make test must fail fast when {tool!r} is absent from PATH"
     assert tool in combined, f"the failure output must name the missing tool {tool!r}"
@@ -482,6 +481,27 @@ def test_connect_recipe_dispatches_on_the_transport_selector() -> None:
     )
 
 
+def _remote_docker_context_prefix_owner() -> str:
+    """Dotted name of the function that owns REMOTE_DOCKER_CONTEXT
+    prefix-stripping logic, derived from the live object (not restated as a
+    literal) so a future rename of `docker_context_prefix` breaks this
+    helper's callers instead of leaving them pointed at a stale name.
+    """
+    return f"{instances.__name__}.{instances.docker_context_prefix.__qualname__}"
+
+
+def _remote_docker_context_prefix_diagnostic() -> str:
+    """The exact message `test_connect_recipe_passes_the_resolved_context_variable`
+    asserts on REMOTE_DOCKER_CONTEXT# regression, naming the current owner of
+    the prefix-stripping logic. Single-sourced here so the assertion that uses
+    it and the guard that checks its wording can never drift apart.
+    """
+    return (
+        "the recipe must not strip a prefix off REMOTE_DOCKER_CONTEXT to "
+        f"derive the context name; {_remote_docker_context_prefix_owner()} already owns that logic"
+    )
+
+
 def test_connect_recipe_passes_the_resolved_context_variable() -> None:
     """AC-FUNC-003: the ssm branch passes `--context "$(REMOTE_CONTEXT)"`,
     reusing the existing Makefile variable, rather than reconstructing the
@@ -490,10 +510,37 @@ def test_connect_recipe_passes_the_resolved_context_variable() -> None:
     """
     recipe = _connect_recipe_body(_makefile_text())
     assert '--context "$(REMOTE_CONTEXT)"' in recipe
-    assert "REMOTE_DOCKER_CONTEXT#" not in recipe, (
-        "the recipe must not strip a prefix off REMOTE_DOCKER_CONTEXT to "
-        "derive the context name; transport.py's CONTEXT_NAME_PREFIX already "
-        "owns that logic"
+    assert "REMOTE_DOCKER_CONTEXT#" not in recipe, _remote_docker_context_prefix_diagnostic()
+
+
+def test_context_prefix_assertion_message_names_the_current_prefix_owner() -> None:
+    """AC-FUNC-001/002: the constant `transport.py` used to derive the docker
+    context prefix from was deleted in favor of
+    `devcontainer_config.instances.docker_context_prefix`. Two independent
+    checks: (1) this file's own source text must no longer reference the
+    deleted constant anywhere (a genuine whole-file search, since the deleted
+    symbol has no legitimate reason to appear here at all); and (2) the
+    diagnostic message `test_connect_recipe_passes_the_resolved_context_variable`
+    actually raises on a REMOTE_DOCKER_CONTEXT# regression -- obtained by
+    calling `_remote_docker_context_prefix_diagnostic()`, the single function
+    that builds both that assertion's message and this guard's expectation --
+    must name the current owner. Scoping the second check to that message
+    (rather than this whole file's source, which also contains this
+    docstring's own prose) means a diagnostic reworded to drop the owner name
+    fails this guard instead of being satisfied by unrelated text elsewhere in
+    the file. The deleted constant's name is assembled from two halves below
+    so this guard's own source does not trip its own search term.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    deleted_symbol = "CONTEXT_NAME" + "_PREFIX"
+    assert deleted_symbol not in source, (
+        f"this file must not reference the deleted transport.{deleted_symbol} symbol"
+    )
+    owner = _remote_docker_context_prefix_owner()
+    diagnostic = _remote_docker_context_prefix_diagnostic()
+    assert owner in diagnostic, (
+        f"the REMOTE_DOCKER_CONTEXT# diagnostic message must name {owner!r} "
+        "as the current owner of the prefix-stripping logic"
     )
 
 

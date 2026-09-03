@@ -8,9 +8,12 @@ description: Configures this laptop to reach a remote EC2 docker engine over an 
 `/devcontainer:setup-remote INSTANCE=<name>` is the worked example in spec
 Section 2, G2: G1 for a remote instance, with no SSH anywhere. `<name>` is
 the human-chosen instance name (spec Section 9's addressing pattern:
-`remote-instances/<name>/`, docker context `general-dev-<name>`, Parameter
-prefix `/devcontainer/<name>/`, certificates under
-`~/.docker/certs/<name>/`); `remote_instance_id` is the separate schema
+`remote-instances/<name>/`, docker context `<repo-slug>-<name>`
+(`general-dev-<name>` in this repository), Parameter prefix
+`/devcontainer/<name>/`, certificates under `<certs-root>/<name>/` --
+`$DOCKER_CONFIG/certs/<name>/`, or `~/.docker/certs/<name>/` when
+`DOCKER_CONFIG` is unset; `<certs-root>` stands for that root throughout
+this document); `remote_instance_id` is the separate schema
 field recording the actual EC2 instance id once resolved. This skill is
 `/devcontainer:setup-local` plus the remote fields and the remote work: it
 asks everything `setup-local` asks, plus instance name, id, region and
@@ -21,15 +24,26 @@ own those questions, and `hostprobe` owns every fact about this machine.
 Certificate generation and instance resolution are owned by the `certs` and
 `instances` modules of that same section (spec Section 4.5). `certs`
 (E6-F1-S1-T1, E6-F1-S1-T2) now exists for both generation -- `certs.create_ca`,
-`certs.issue_server`, `certs.issue_client` and `certs.publication_set`,
-which Procedure step 9 below calls directly -- and inspection/expiry status
+`certs.issue_server`, `certs.issue_client` and `certs.publication_set`, which
+Procedure step 9 below calls directly -- and inspection/expiry status
 (`certs.status_rows`, `certs.classify`), the same functions `make cert-status`
 calls. `transport` (E6-F2-S1-T1) owns the SSM port forward itself: SSM agent
 status, per-instance local port allocation, the `aws ssm start-session`
 argument vector and its readiness detection, which Procedure steps 7 and 11
-through 12 below call directly. `instances` does not yet exist, so every
-step below that depends on it names the module that will own it rather than
-a function this repository does not yet contain.
+through 12 below call directly. `instances` (E8-F1-S1-T1) now owns instance
+discovery, the resolution order and the Section 9 addressing derivations named
+in the paragraph above -- `instances.discover`, `instances.resolve`,
+`instances.docker_context_prefix`, `instances.docker_context`,
+`instances.parameter_prefix`, `instances.certs_root` and `instances.certs_dir`
+-- deriving every `<repo-slug>-<name>`, `<certs-root>/<name>/` and
+`/devcontainer/<name>/` path this document uses. Procedure step 7 below never
+calls `instances.resolve`: `instances.resolve`'s `INSTANCE` /
+`DEFAULT_REMOTE_INSTANCE` / sole-directory order selects among
+already-configured `remote-instances/` directories, and this skill is what
+creates `remote-instances/<name>` for the first time (Procedure step 8), so
+this skill's own `<name>` comes from the operator's `/devcontainer:setup-remote
+INSTANCE=<name>` invocation directly, never from a call to `instances.resolve`
+here.
 
 Where this skill cannot act itself -- a browser SSO login, an AWS resource
 that only an operator may create or destroy -- it states the exact
@@ -119,15 +133,26 @@ continuing.
    `hostprobe.probe_aws_identity(runner, profile=<remote_aws_profile>)`. On
    failure, follow the `## Checks` remedy above: state the exact
    `aws sso login` command, wait, then re-probe before continuing.
-7. Resolve the answered `remote_instance_id` (owned by the `instances`
-   module, spec Section 4.5, once it exists) and confirm its SSM agent
-   reports `Online` by calling `transport.ensure_agent_online`
+7. Confirm the SSM agent for the answered `remote_instance_id` reports
+   `Online` by calling `transport.ensure_agent_online(runner,
+   instance_id=<remote_instance_id>, profile=<remote_aws_profile>,
+   region=<remote_aws_region>)`
    (`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`,
    E6-F2-S1-T1), which raises for any status other than `Online` -- naming
    either the reported ping status, or that SSM has no record of the
    instance at all, meaning it is stopped, terminated, or the configured id
-   is wrong. On failure, follow the `## Checks` remedy above: stop naming
-   the instance id and the agent state, and do not attempt the forward.
+   is wrong. This step never calls `instances.resolve`: that function
+   selects an instance NAME from the `remote-instances/` directories
+   `instances.discover` already lists (the `INSTANCE` /
+   `DEFAULT_REMOTE_INSTANCE` / sole-directory order), whereas this skill's
+   `<name>` comes directly from the operator's `/devcontainer:setup-remote
+   INSTANCE=<name>` invocation and `remote_instance_id` is the separate,
+   already-answered EC2 id -- neither is something to resolve here. On a
+   first run, `remote-instances/<name>` does not exist until step 8 creates
+   it, so calling `instances.resolve` at this point would raise
+   `NoInstancesConfiguredError` telling the operator to run this very
+   skill. On failure, follow the `## Checks` remedy above: stop naming the
+   instance id and the agent state, and do not attempt the forward.
 8. If provisioning or changing this instance's `remote-instances/<name>`
    Terragrunt state is needed to proceed -- creating it for the first time,
    per spec Section 2 G5, or changing a resource that module owns -- reach
@@ -141,12 +166,12 @@ continuing.
    `certs.create_ca`, `certs.issue_server` and `certs.issue_client`
    (`.claude/plugins/devcontainer/scripts/devcontainer_config/certs.py`,
    spec Section 4.5, E6-F1-S1-T1) rather than invoking `openssl` by hand:
-   CA private key at `~/.docker/certs/<name>/ca/ca-key.pem` mode `0600`, CA
-   public certificate at `~/.docker/certs/<name>/ca/ca.pem` mode `0644`,
+   CA private key at `<certs-root>/<name>/ca/ca-key.pem` mode `0600`, CA
+   public certificate at `<certs-root>/<name>/ca/ca.pem` mode `0644`,
    lifetime `CERT_CA_DAYS`; server certificate with SANs `IP:127.0.0.1` and
    `DNS:localhost`, lifetime `CERT_SERVER_DAYS`; client certificate at
-   `~/.docker/certs/<name>/cert.pem` mode `0644` and client key at
-   `~/.docker/certs/<name>/key.pem` mode `0600`, lifetime `CERT_CLIENT_DAYS`.
+   `<certs-root>/<name>/cert.pem` mode `0644` and client key at
+   `<certs-root>/<name>/key.pem` mode `0600`, lifetime `CERT_CLIENT_DAYS`.
    All four paths are outside the repository entirely, which removes the
    class of mistake rather than relying on an ignore rule.
 10. Publish the server key, the server certificate and the CA certificate to
@@ -161,18 +186,19 @@ continuing.
     `transport.allocate_local_port`
     (`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`,
     spec Section 4.5, E6-F2-S1-T1) rather than picking a port by hand: it
-    reuses the port already recorded in `general-dev-<name>`'s docker
+    reuses the port already recorded in `<repo-slug>-<name>`'s docker
     context endpoint when that context already exists, or binds an
     OS-assigned free port when it does not (spec Section 9: "never a fixed
-    number"). If the port already recorded for `general-dev-<name>` is held
+    number"). If the port already recorded for `<repo-slug>-<name>` is held
     by a foreign process, `transport.allocate_local_port` raises
     `PortOccupiedError` naming the port and the context rather than silently
     allocating a different one, since a silent move would strand every
     docker context and configuration that recorded the old value: an
     operator action (free the port, then retry), not a self-fix. Create the
-    docker context `general-dev-<name>` (spec Section 9's addressing table)
-    addressed at `tcp://127.0.0.1:<the allocated port>`, over the forward the
-    next step establishes on that same port.
+    docker context `<repo-slug>-<name>` (`general-dev-<name>` in this
+    repository; spec Section 9's addressing table) addressed at
+    `tcp://127.0.0.1:<the allocated port>`, over the forward the next step
+    establishes on that same port.
 12. Establish the SSM port forward to the instance's `DOCKER_TLS_PORT` by
     calling `transport.start_forward` with the port allocated in the
     previous step, then confirm it answers by calling `transport.wait_ready`,
@@ -220,8 +246,9 @@ continuing.
   generation and certificate-expiry facts (`certs.status_rows`,
   `certs.classify`), and `transport` (E6-F2-S1-T1) now owns the SSM port
   forward facts: SSM agent status, per-instance local port allocation, and
-  forward readiness. `instances` will own instance facts once they exist.
-  This skill decides none of them itself.
+  forward readiness. `instances` (E8-F1-S1-T1) now owns instance facts:
+  discovery, the resolution order and the Section 9 addressing
+  derivations. This skill decides none of them itself.
 - Section 5.1: the interview schema, including which fields are asked only
   when the backend is remote, and that `remote_ssh_key_path` is removed in
   phase 4.

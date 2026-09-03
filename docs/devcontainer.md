@@ -525,13 +525,18 @@ certificate, both signed by a certificate authority created once per
 instance. Three lifetimes govern that material (`CERT_CA_DAYS`,
 `CERT_SERVER_DAYS`, `CERT_CLIENT_DAYS`; defaults and validation are
 documented in `docs/environment-files.md`'s "Certificate lifetimes"
-section, the single place they are defined):
+section, the single place they are defined). Certificate material is
+persisted under `certs.DEFAULT_CERTS_ROOT` / `instances.certs_root()`:
+`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/` when
+`DOCKER_CONFIG` is unset (`docs/environment-files.md`'s "Instances"
+section, `DOCKER_CONFIG` row, the single place that default is defined);
+`<certs-root>` stands for that root in the table below:
 
 | Material | Default lifetime | Persisted at |
 |---|---|---|
-| CA (`ca-key.pem`, `ca.pem`) | 3650 days | `~/.docker/certs/<instance>/ca/` |
-| Server (key, certificate) | 365 days | Nowhere: generated and published to Parameter Store in one step, never written under `~/.docker/certs/<instance>/` |
-| Client (`key.pem`, `cert.pem`) | 90 days | `~/.docker/certs/<instance>/` |
+| CA (`ca-key.pem`, `ca.pem`) | 3650 days | `<certs-root>/<instance>/ca/` |
+| Server (key, certificate) | 365 days | Nowhere: generated and published to Parameter Store in one step, never written under `<certs-root>/<instance>/` |
+| Client (`key.pem`, `cert.pem`) | 90 days | `<certs-root>/<instance>/` |
 
 The client certificate's ninety-day lifetime is the one an operator actually
 lives with day to day, and it is sustainable only because rotating it is
@@ -582,9 +587,10 @@ Section 3.6.2), and neither substitutes for the other:
   anyone whose policy permits `ssm:StartSession` would drive the engine.
 
 Once the forward answers, `transport.ensure_context` creates or updates the
-docker context `general-dev-<instance>` (spec Section 9) to address
-`tcp://127.0.0.1:<the allocated port>` and carry the `ca`, `cert` and `key`
-files spec Section 5.5 fixes under `~/.docker/certs/<instance>/`. An
+docker context `<repo-slug>-<instance>` (`general-dev-<instance>` in this
+repository; spec Section 9) to address `tcp://127.0.0.1:<the allocated
+port>` and carry the `ca`, `cert` and `key` files spec Section 5.5 fixes
+under `<certs-root>/<instance>/`. An
 existing context is updated in place rather than deleted and recreated; an
 existing context whose endpoint is `ssh://` -- the legacy transport
 `.devcontainer/remote-docker/docker-tunnel.sh` still uses through phase 3 --
@@ -639,18 +645,20 @@ either in that same foreground or in a second terminal, for a subsequent
 process tears the forward down and stops the context from working. This
 is the opposite of the default SSH path, where `docker-tunnel.sh` returns
 control to the shell once the tunnel is established. `--certs-root`
-defaults to the same `~/.docker/certs/` root `make cert-status` and the
-certificate material above use, and only needs overriding for a test
-fixture or an alternate checkout layout. Selecting `ssm` never installs an
-SSH config block, spawns no `ssh` process, and names no
-`AWS-StartSSHSession` document; selecting it also requires no SSH key on
-the instance, unlike the default SSH path, which requires
-`REMOTE_SSH_KEY_PATH` to name one that exists. The `--context` value (and
-the `REMOTE_DOCKER_CONTEXT` the Makefile derives it from, `config.env`,
-operator-overridable) must carry the `general-dev-` prefix:
-`instance_from_context_name` raises `InvalidContextNameError` on any
-context name that does not start with it, since that prefix is the single
-place the bare instance name is recovered for certificate lookup.
+defaults to `certs.DEFAULT_CERTS_ROOT` -- the same `<certs-root>` root
+`make cert-status` and the certificate material above use -- and only
+needs overriding for a test fixture or an alternate checkout layout.
+Selecting `ssm` never installs an SSH config block, spawns no `ssh`
+process, and names no `AWS-StartSSHSession` document; selecting it also
+requires no SSH key on the instance, unlike the default SSH path, which
+requires `REMOTE_SSH_KEY_PATH` to name one that exists. The `--context`
+value (and the `REMOTE_DOCKER_CONTEXT` the Makefile derives it from,
+`config.env`, operator-overridable) must carry the `<repo-slug>-` prefix
+`instances.docker_context_prefix` derives from `repo.repo_slug`
+(`general-dev-` in this repository, not a literal to copy into a fork):
+`transport.instance_from_context_name` raises `InvalidContextNameError` on
+any context name that does not start with it, since that prefix is the
+single place the bare instance name is recovered for certificate lookup.
 
 **The SAN requirement, and its symptom.** TLS validates the name the
 *client* used to dial the daemon, and the client dials `127.0.0.1` through

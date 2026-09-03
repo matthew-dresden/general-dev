@@ -69,9 +69,11 @@ function that nothing else in this module calls internally.
 E6-F2-S1-T2 adds this module's other half: the docker context that carries
 the TLS material, and the version handshake that proves the whole path
 works end to end (spec Section 11). `ensure_context` creates or updates the
-per-instance context `general-dev-<instance>` (spec Section 9,
-`context_name_for`) to address the port this module already allocated,
-carrying the `ca`, `cert` and `key` files spec Section 5.5 fixes under
+per-instance context (spec Section 9's addressing table; `context_name_for`
+delegates to `devcontainer_config.instances.docker_context`, the single
+place that row is derived, E8-F1-S1-T1 round 2) to address the port this
+module already allocated, carrying the `ca`, `cert` and `key` files spec
+Section 5.5 fixes under
 `~/.docker/certs/<instance>/` (`devcontainer_config.certs.CertPaths`,
 E6-F1-S1-T1); it refuses an existing `ssh://` context by name rather than
 mutating it, since that is the legacy transport
@@ -144,7 +146,6 @@ import contextlib
 import datetime
 import json
 import os
-import re
 import selectors
 import socket
 import subprocess
@@ -155,13 +156,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, NoReturn
 
-from devcontainer_config import certs
+from devcontainer_config import certs, instances, repo
 from devcontainer_config.hostprobe import (
     DOCKER_HANDSHAKE_TIMEOUT_DEFAULT_SECONDS,
     DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR,
     CommandResult,
     CommandRunner,
     HostProbeError,
+    docker_context_endpoint_host,
+    docker_context_forwarded_port,
     read_positive_seconds,
 )
 
@@ -191,8 +194,6 @@ PORT_FORWARDING_DOCUMENT = "AWS-StartPortForwardingSession"
 ONLINE_PING_STATUS = "Online"
 
 _LOCALHOST = "127.0.0.1"
-
-_TCP_ENDPOINT_PATTERN = re.compile(r"^tcp://(?P<host>[^:/]+):(?P<port>\d+)$")
 
 # The substring the real `session-manager-plugin` prints to stdout once the
 # local end of an `AWS-StartPortForwardingSession` forward is listening, for
@@ -227,8 +228,12 @@ _EXPIRED_CREDENTIAL_MARKERS: tuple[str, ...] = (
 # both modules use, rather than a second, independently drifting copy of the
 # name and default.
 
-# spec Section 9's addressing table: the docker context name for one instance.
-CONTEXT_NAME_PREFIX = "general-dev-"
+# spec Section 9's addressing table: the docker context name for one
+# instance. There is no module constant for the prefix here (E8-F1-S1-T1
+# round 2): `context_name_for`/`instance_from_context_name` below delegate
+# to `devcontainer_config.instances.docker_context`/`docker_context_prefix`,
+# the single place that row is derived from `repo.repo_slug`, never a
+# literal (AC-FUNC-002).
 
 # The scheme `.devcontainer/remote-docker/docker-tunnel.sh`'s legacy SSH
 # context still carries; `ensure_context` refuses to mutate a context found
@@ -319,16 +324,16 @@ class DockerHandshakeTimeoutError(TransportError):
 
 
 class InvalidContextNameError(TransportError):
-    """Raised when a context name does not carry `CONTEXT_NAME_PREFIX`.
+    """Raised when a context name does not carry `instances.docker_context_prefix(root)`.
 
     `connect`'s `--context` argument arrives as the full context name (spec
     Section 9's addressing table), matching `start`'s own `--context`
     argument; `instance_from_context_name` is the single place that strips
-    `CONTEXT_NAME_PREFIX` back off to recover the bare instance name
-    `ensure_context` needs for certificate lookup, rather than the caller
-    (the `Makefile`) re-typing the prefix itself. A context name that does
-    not start with the prefix is a caller error and fails fast instead of
-    silently building a doubly-prefixed or wrong instance directory.
+    the prefix back off to recover the bare instance name `ensure_context`
+    needs for certificate lookup, rather than the caller (the `Makefile`)
+    re-typing the prefix itself. A context name that does not start with
+    the prefix is a caller error and fails fast instead of silently
+    building a doubly-prefixed or wrong instance directory.
     """
 
 
@@ -600,70 +605,34 @@ def ensure_agent_online(
 def _context_endpoint_host(runner: CommandRunner, context_name: str) -> str | None:
     """The raw docker endpoint host `context_name` is recorded with, or `None` if absent.
 
-    `None` is returned ONLY for a positively identified absence: docker's
-    own `context "<name>": context not found` stderr, naming this exact
-    context. Every other non-zero exit -- the docker CLI missing from PATH
-    (`result.binary_missing`), an unreadable or misdirected `DOCKER_CONFIG`,
-    a permission error, or a corrupted context store -- raises `TransportError`
-    naming the context and docker's own stderr instead, the same fail-fast
-    `_run_aws_cli` already applies to its own `binary_missing` case: reading
-    any of those as "nothing recorded" would let a caller either silently
-    bind a brand-new port while the context on disk may still record the
-    old one, or silently overwrite an endpoint scheme it never actually
-    inspected.
-
-    Extracted out of what was `_existing_context_port` (E6-F2-S1-T2 REFACTOR)
-    so `allocate_local_port`'s port-parsing concern and `ensure_context`'s
-    endpoint-scheme concern share this one `docker context inspect` call site
-    instead of two independent copies of the identical inspection and error
-    translation.
+    Delegates to `hostprobe.docker_context_endpoint_host`, the single
+    `docker context inspect` reader `devcontainer_config.instances`
+    (`forwarded_port`) also drives, rather than a second, independent copy
+    of the same command tuple, "context not found" detection and JSON
+    parse (E8-F1-S1-T1 round 2; this function itself was already extracted
+    out of what was `_existing_context_port`, E6-F2-S1-T2 REFACTOR, for the
+    identical reason within this module alone). `hostprobe.HostProbeError`
+    is re-raised as `TransportError` here so no exception type foreign to
+    this module crosses its boundary, the same convention
+    `hostprobe.read_positive_seconds` documents for its own callers.
     """
-    command = ("docker", "context", "inspect", context_name, "--format", "{{json .Endpoints}}")
-    result = runner(command, None)
-    if result.binary_missing:
-        raise TransportError(
-            "ERROR: docker is not on PATH\nInstall Docker Desktop or the Docker CLI, then retry."
-        )
-    if result.exit_code != 0:
-        if f'context "{context_name}": context not found' in result.stderr:
-            return None
-        raise TransportError(
-            f"ERROR: docker context inspect {context_name!r} failed\n"
-            f"{result.stderr.strip()}\n"
-            "Confirm docker is installed, DOCKER_CONFIG points at a readable context store, "
-            "and the store is not corrupted, then retry."
-        )
     try:
-        endpoints = json.loads(result.stdout)
-        return str(endpoints["docker"]["Host"])
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        raise TransportError(
-            f"ERROR: docker context {context_name!r} has an unparsable endpoint: "
-            f"{result.stdout.strip()!r}\n"
-            "Recreate the context with a valid tcp:// docker endpoint, then retry."
-        ) from exc
+        return docker_context_endpoint_host(runner, context_name)
+    except HostProbeError as exc:
+        raise TransportError(f"ERROR: {exc}") from exc
 
 
 def _existing_context_port(runner: CommandRunner, context_name: str) -> int | None:
     """The local TCP port already recorded in `context_name`'s docker endpoint, or `None`.
 
-    A context that DOES exist but whose endpoint `_context_endpoint_host`
-    reports cannot be parsed as `tcp://<host>:<port>` is a distinct, louder
-    failure than "nothing to reuse": the record itself is unusable, and
-    silently treating it as absent would allocate a second, different port
-    for a context a caller believes already has one.
+    Delegates to `hostprobe.docker_context_forwarded_port`, the shared
+    reader `_context_endpoint_host` above also now wraps, rather than this
+    module's own copy of the `tcp://` parse.
     """
-    host = _context_endpoint_host(runner, context_name)
-    if host is None:
-        return None
-    match = _TCP_ENDPOINT_PATTERN.match(host)
-    if match is None:
-        raise TransportError(
-            f"ERROR: docker context {context_name!r} has a non-TCP endpoint: {host!r}\n"
-            "This module only reuses a tcp:// endpoint's port; recreate the context with "
-            "one, then retry."
-        )
-    return int(match.group("port"))
+    try:
+        return docker_context_forwarded_port(runner, context_name)
+    except HostProbeError as exc:
+        raise TransportError(f"ERROR: {exc}") from exc
 
 
 def _bind_free_port() -> int:
@@ -735,35 +704,43 @@ def allocate_local_port(runner: CommandRunner, context_name: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def context_name_for(instance: str) -> str:
-    """The docker context name spec Section 9's addressing table fixes for `instance`."""
-    return f"{CONTEXT_NAME_PREFIX}{instance}"
+def context_name_for(instance: str, root: Path) -> str:
+    """The docker context name spec Section 9's addressing table fixes for `instance`.
+
+    Delegates to `devcontainer_config.instances.docker_context`, the single
+    place Section 9's addressing table is derived (AC-FUNC-001): the
+    context name is `<repo-slug>-<instance>`, `repo.repo_slug(root)`
+    derived, never a literal (AC-FUNC-002, E8-F1-S1-T1 round 2).
+    """
+    return instances.docker_context(root, instance)
 
 
-def instance_from_context_name(context_name: str) -> str:
+def instance_from_context_name(root: Path, context_name: str) -> str:
     """The bare instance name `context_name_for` built `context_name` from.
 
-    The exact inverse of `context_name_for`, and the single place
-    `CONTEXT_NAME_PREFIX` is stripped back off: `connect` receives a full
+    The exact inverse of `context_name_for`: `connect` receives a full
     context name through `--context` (matching `start`'s own argument) and
     needs the bare instance name back to look up certificate material
-    (`certs.CertPaths`). Keeping the strip here, rather than in the
-    `Makefile` recipe that calls `connect`, means the prefix is declared in
-    exactly one place; a caller-side strip of a literal `"general-dev-"`
-    would silently no-op for any context name that does not start with it.
+    (`certs.CertPaths`). The prefix stripped here is
+    `instances.docker_context_prefix(root)`, the identical value
+    `context_name_for` composes with, so the two directions of the mapping
+    can never drift apart; keeping the strip here, rather than in the
+    `Makefile` recipe that calls `connect`, also means a caller-side strip
+    of a literal never silently no-ops for a context name that does not
+    start with the real prefix.
 
     Raises:
         InvalidContextNameError: `context_name` does not start with
-            `CONTEXT_NAME_PREFIX`.
+            `instances.docker_context_prefix(root)`.
     """
-    if not context_name.startswith(CONTEXT_NAME_PREFIX):
+    prefix = instances.docker_context_prefix(root)
+    if not context_name.startswith(prefix):
         raise InvalidContextNameError(
-            f"ERROR: docker context name {context_name!r} does not start with "
-            f"{CONTEXT_NAME_PREFIX!r}\n"
-            f"Every context this module manages is named {CONTEXT_NAME_PREFIX}<instance> "
+            f"ERROR: docker context name {context_name!r} does not start with {prefix!r}\n"
+            f"Every context this module manages is named {prefix}<instance> "
             "(spec Section 9); pass the full context name as recorded in REMOTE_DOCKER_CONTEXT."
         )
-    return context_name[len(CONTEXT_NAME_PREFIX) :]
+    return context_name[len(prefix) :]
 
 
 def _docker_endpoint_value(*, port: int, ca_path: Path, cert_path: Path, key_path: Path) -> str:
@@ -877,11 +854,12 @@ def ensure_context(
     runner: CommandRunner,
     *,
     instance: str,
+    root: Path,
     port: int,
     reference_time: datetime.datetime,
     certs_root: Path = certs.DEFAULT_CERTS_ROOT,
 ) -> str:
-    """Create or update the docker context `general-dev-<instance>`, carrying the TLS material.
+    """Create or update the docker context for `instance`, carrying the TLS material.
 
     Refuses before touching docker at all if the client certificate spec
     Section 5.5 fixes under `certs_root` is missing or expired
@@ -893,8 +871,8 @@ def ensure_context(
     issued for that case.
 
     Returns:
-        The context name (`context_name_for(instance)`), so a caller can
-        chain directly into `handshake`.
+        The context name (`context_name_for(instance, root)`), so a caller
+        can chain directly into `handshake`.
 
     Raises:
         CertificateNotReadyError: the client certificate is missing or
@@ -906,7 +884,7 @@ def ensure_context(
     """
     paths = certs.CertPaths(instance=instance, root=certs_root)
     _ensure_client_certificate_ready(paths, reference_time)
-    name = context_name_for(instance)
+    name = context_name_for(instance, root)
     existing_host = _context_endpoint_host(runner, name)
     if existing_host is not None and existing_host.startswith(_SSH_ENDPOINT_PREFIX):
         raise LegacyContextError(
@@ -1306,8 +1284,8 @@ def _raise_handshake_timeout(
     )
 
 
-def handshake(runner: CommandRunner, *, instance: str, port: int) -> HandshakeResult:
-    """Complete a docker version handshake against `general-dev-<instance>` (spec Section 4.2.1).
+def handshake(runner: CommandRunner, *, instance: str, root: Path, port: int) -> HandshakeResult:
+    """Complete a docker version handshake against `instance`'s docker context (spec Section 4.2.1).
 
     The version call is retried until it answers, bounded overall by
     `DOCKER_HANDSHAKE_TIMEOUT` (module docstring: every attempt shells out
@@ -1342,7 +1320,7 @@ def handshake(runner: CommandRunner, *, instance: str, port: int) -> HandshakeRe
             (`diagnose_handshake_failure`), or a response could not be
             parsed.
     """
-    context_name = context_name_for(instance)
+    context_name = context_name_for(instance, root)
     timeout = _handshake_timeout_seconds()
     deadline = time.monotonic() + timeout
     version_command = (
@@ -1576,12 +1554,12 @@ def _run_connect(args: argparse.Namespace) -> int:
     Takes `--context` (the full docker context name), matching `start`'s
     own argument, rather than a bare `--instance`: the `Makefile`'s
     `connect` recipe already has the full context name in
-    `REMOTE_DOCKER_CONTEXT` and passing it straight through means
-    `CONTEXT_NAME_PREFIX` is declared in exactly one place, this module,
-    instead of being re-typed (and silently mis-stripped for a
-    non-default context name) in the recipe. `instance_from_context_name`
-    recovers the bare instance name `ensure_context` needs for certificate
-    lookup.
+    `REMOTE_DOCKER_CONTEXT` and passing it straight through means the
+    `<repo-slug>-` prefix (`devcontainer_config.instances.docker_context_prefix`)
+    is declared in exactly one place, `instances.py`, instead of being
+    re-typed (and silently mis-stripped for a non-default context name) in
+    the recipe. `instance_from_context_name` recovers the bare instance
+    name `ensure_context` needs for certificate lookup.
 
     The client certificate precondition `ensure_context` would otherwise
     check only after the forward is already open is checked again here,
@@ -1599,8 +1577,9 @@ def _run_connect(args: argparse.Namespace) -> int:
     it holds.
     """
     _require_ssm_transport_selected()
+    root = repo.find_root(Path.cwd())
     context_name = args.context
-    instance = instance_from_context_name(context_name)
+    instance = instance_from_context_name(root, context_name)
     reference_time = datetime.datetime.now(datetime.UTC)
     _ensure_client_certificate_ready(
         certs.CertPaths(instance=instance, root=args.certs_root), reference_time
@@ -1617,13 +1596,14 @@ def _run_connect(args: argparse.Namespace) -> int:
         ensure_context(
             subprocess_command_runner,
             instance=instance,
+            root=root,
             port=established.local_port,
             reference_time=reference_time,
             certs_root=args.certs_root,
         )
         _use_context(subprocess_command_runner, context_name)
         result = handshake(
-            subprocess_command_runner, instance=instance, port=established.local_port
+            subprocess_command_runner, instance=instance, root=root, port=established.local_port
         )
     rootless_note = ", rootless" if result.rootless else ""
     print(
@@ -1650,7 +1630,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     start_parser.add_argument("--instance-id", required=True, help="The EC2 instance id (i-...).")
     start_parser.add_argument(
-        "--context", required=True, help="The docker context name (general-dev-<name>)."
+        "--context",
+        required=True,
+        help="The docker context name (<repo-slug>-<name>, e.g. general-dev-<name> here).",
     )
     start_parser.add_argument("--profile", required=True, help="The AWS SSO profile.")
     start_parser.add_argument("--region", required=True, help="The AWS region.")
@@ -1663,11 +1645,11 @@ def _build_parser() -> argparse.ArgumentParser:
             f"material (opt-in: {DEVCONTAINER_TRANSPORT_ENV_VAR}={TRANSPORT_SSM})."
         ),
     )
+    connect_parser.add_argument("--instance-id", required=True, help="The EC2 instance id (i-...).")
     connect_parser.add_argument(
-        "--instance-id", required=True, help="The EC2 instance id (i-...)."
-    )
-    connect_parser.add_argument(
-        "--context", required=True, help="The docker context name (general-dev-<name>)."
+        "--context",
+        required=True,
+        help="The docker context name (<repo-slug>-<name>, e.g. general-dev-<name> here).",
     )
     connect_parser.add_argument("--profile", required=True, help="The AWS SSO profile.")
     connect_parser.add_argument("--region", required=True, help="The AWS region.")
@@ -1688,13 +1670,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     Every handler raises a `TransportError` on a real failure instead of
     exiting itself; this is the one place that exception becomes a
     non-zero exit code, printed with an `ERROR:` prefix to stderr, never a
-    stack trace.
+    stack trace. `connect` also resolves the repository root
+    (`repo.find_root`) to derive the docker context name
+    (`devcontainer_config.instances.docker_context`, AC-FUNC-002), so
+    `repo.RepoError` is caught here the same way, the same convention
+    `devcontainer_config.cli.main` already establishes for that exception.
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
         return int(args.handler(args))
-    except TransportError as exc:
+    except (TransportError, repo.RepoError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 

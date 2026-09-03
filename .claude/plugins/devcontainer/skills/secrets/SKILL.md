@@ -117,10 +117,13 @@ implicit -- since a value found in the shared scope when the operator
 expected an instance-scoped one is a real difference in blast radius, not
 a detail.
 
-No instance-detection mechanism is wired into `devsecret`'s own argument
-parser yet (`cli.py`'s module docstring: "No instance-detection mechanism
-exists yet ... every command here resolves or narrows against
-`catalog.scope_set(None)`"), the identical gap `/devcontainer:doctor`'s own
+No instance is accepted by `devsecret`'s own argument parser (`cli.py`'s
+module docstring: "`devsecret`'s own commands do not resolve an instance:
+every command here resolves or narrows against `catalog.scope_set(None)`
+... independent of `devcontainer_config.instances`, this module's separate
+instance-resolution entry point below"): `cli.py` now exposes that entry
+point as the `resolve-instance` subcommand (E8-F1-S1-T1), but `devsecret`
+does not call it, the identical gap `/devcontainer:doctor`'s own
 introduction already discloses for its own secrets findings. `catalog.scope_set(None)`
 returns the shared scope alone, so today every `--scope` this skill's own
 invocations name, and the scope `get` resolves against, is the shared

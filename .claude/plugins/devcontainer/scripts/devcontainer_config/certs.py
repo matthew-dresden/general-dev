@@ -9,21 +9,26 @@ binary, driven by `.claude/plugins/devcontainer/skills/certs/SKILL.md`. Every
 `openssl` invocation below passes an argument list, never a shell string
 (spec Section 3.4's dependency rule, AC-FUNC-006), and this module imports
 nothing beyond the standard library and this project's own
-`devcontainer_config.catalog`, reused below for its existing instance/scope
-validation and Parameter Store constants rather than a second, independent
-copy of either -- no third-party package is added.
+`devcontainer_config.catalog` and `devcontainer_config.instances` -- no
+third-party package is added. `catalog` is reused below for its existing
+instance/scope validation and Parameter Store constants rather than a
+second, independent copy of either. `instances` supplies `DEFAULT_CERTS_ROOT`
+(`instances.certs_root`, spec Section 9's own addressing-table derivation
+of this identical value, E8-F1-S1-T1 round 2) rather than this module
+declaring a second, `DOCKER_CONFIG`-blind copy of the same root.
 
 `instance` reaches this module unvalidated from `--instance` on the CLI and,
 per `.claude/plugins/devcontainer/skills/certs/SKILL.md`'s own instance
 resolution, from `INSTANCE`/`DEFAULT_REMOTE_INSTANCE`; every path this module
 composes from it -- `CertPaths.instance_dir` and the Parameter Store path
 `publication_set` builds -- validates it first, through `_validate_instance`,
-which delegates to `devcontainer_config.catalog._validate_scope`: the control
-`catalog.py` already carries for the identical `/devcontainer/<scope>/` path
-interpolation, reused here rather than reimplemented, so a name containing a
-path separator or the empty string is rejected before it ever reaches a
+which delegates to `devcontainer_config.instances.validate_name`: the single
+owner spec Section 4.5 assigns the naming rule, so a name containing a path
+separator, the empty string, or a name longer than
+`instances.MAX_INSTANCE_NAME_LENGTH` is rejected before it ever reaches a
 filesystem path or a Parameter Store path (code_review, this unit, round 1:
-BLOCKING 1). `PARAMETER_ROOT` and `SECURE_STRING_TYPE` below are likewise
+BLOCKING 1; round 2: WARN, a second, length-unbounded validator of the
+identical concept). `PARAMETER_ROOT` and `SECURE_STRING_TYPE` below are likewise
 `catalog.PATH_ROOT` and `catalog.SECURE_STRING_TYPE` themselves, not a second
 literal declaration of either (round 1, WARN 4).
 
@@ -167,7 +172,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from devcontainer_config import catalog
+from devcontainer_config import catalog, instances
 
 # The one external command every function below shells out to. Every argv
 # built in this module starts with this constant; nothing else here names an
@@ -177,8 +182,12 @@ OPENSSL_EXECUTABLE = "openssl"
 
 # spec Section 5.5's material root. A parameter of `CertPaths`, not a literal
 # baked into any function body, so the test suite can point an entire run at
-# `tmp_path` instead of the developer's real `~/.docker/certs`.
-DEFAULT_CERTS_ROOT = Path.home() / ".docker" / "certs"
+# `tmp_path` instead of the developer's real `~/.docker/certs`. Sourced from
+# `devcontainer_config.instances.certs_root`, the single spec Section 9
+# addressing-table derivation of this same value (E8-F1-S1-T1 round 2): an
+# operator who sets `DOCKER_CONFIG` must never have certificates written
+# under one directory while `instances.certs_dir` addresses another.
+DEFAULT_CERTS_ROOT = instances.certs_root()
 
 CA_SUBDIR = "ca"
 CA_KEY_FILENAME = "ca-key.pem"
@@ -299,14 +308,19 @@ class CertsError(RuntimeError):
 
 
 def _validate_instance(instance: str) -> None:
-    """Reject a path-unsafe instance name before it reaches any path composition.
+    """Reject a path-unsafe or over-length instance name before it reaches any path composition.
 
-    Delegates the pattern check to `catalog._validate_scope`
-    (`devcontainer_config.catalog`), the control already added there for the
-    identical `/devcontainer/<scope>/` path interpolation (its own
-    `InvalidScopeError` docstring records why), rather than a second,
-    independent implementation of the same rule (code_review, this unit,
-    round 1: BLOCKING 1). `instance` reaches this module unvalidated from
+    Delegates to `instances.validate_name` (`devcontainer_config.instances`),
+    the single owner spec Section 4.5 assigns the naming rule, rather than a
+    second, independent implementation of the same rule (code_review, this
+    unit, round 1: BLOCKING 1). An earlier version of this function delegated
+    only to `catalog._validate_scope`, which enforces the character-class
+    rule but no length bound, so a 64+ character instance name was accepted
+    here and rejected by `instances.certs_dir` for the identical directory
+    (code_review, this unit, round 2: WARN); delegating to
+    `instances.validate_name` closes that gap, since it applies the
+    identical character-class rule and `instances.MAX_INSTANCE_NAME_LENGTH`
+    in one call. `instance` reaches this module unvalidated from
     `--instance` on the CLI and, per
     `.claude/plugins/devcontainer/skills/certs/SKILL.md`'s own instance
     resolution, from `INSTANCE`/`DEFAULT_REMOTE_INSTANCE`, so leaving it
@@ -316,17 +330,19 @@ def _validate_instance(instance: str) -> None:
     `PARAMETER_ROOT` (`publication_set`).
 
     Raises:
-        CertsError: `instance` is empty, or contains a path separator or
-            another character `catalog._validate_scope` rejects.
+        CertsError: `instance` is empty, contains a path separator or
+            another character `instances.validate_name` rejects, or exceeds
+            `instances.MAX_INSTANCE_NAME_LENGTH` characters.
     """
     try:
-        catalog._validate_scope(instance)
-    except catalog.InvalidScopeError as exc:
+        instances.validate_name(instance)
+    except instances.InvalidInstanceNameError as exc:
         raise CertsError(
             f"ERROR: invalid instance name {instance!r}\n"
-            "An instance name must be a non-empty path segment: letters, "
+            "An instance name must be a non-empty path segment of at most "
+            f"{instances.MAX_INSTANCE_NAME_LENGTH} characters: letters, "
             "digits, hyphens and underscores only -- the identical rule "
-            "devcontainer_config.catalog enforces for the same "
+            "devcontainer_config.instances enforces for the same "
             "/devcontainer/<instance>/ prefix.\n"
             "Use a valid instance name."
         ) from exc

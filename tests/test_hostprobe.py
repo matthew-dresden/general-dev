@@ -520,6 +520,123 @@ def test_docker_probe_reports_binary_missing_between_the_first_and_second_call()
 
 
 # ---------------------------------------------------------------------------
+# docker_context_endpoint_host / docker_context_forwarded_port (E8-F1-S1-T1
+# round 2): the single `docker context inspect` reader
+# `devcontainer_config.transport` and `devcontainer_config.instances` both
+# drive, replacing what were two independent copies of the identical
+# inspection and error translation.
+# ---------------------------------------------------------------------------
+
+_CONTEXT_INSPECT_COMMAND = (
+    "docker",
+    "context",
+    "inspect",
+    "general-dev-sandbox",
+    "--format",
+    "{{json .Endpoints}}",
+)
+
+
+def test_docker_context_endpoint_host_reads_the_recorded_endpoint() -> None:
+    hostprobe = _import_hostprobe()
+    runner = FakeRunner(
+        {
+            _CONTEXT_INSPECT_COMMAND: hostprobe.CommandResult(
+                exit_code=0, stdout='{"docker":{"Host":"tcp://127.0.0.1:54321"}}'
+            )
+        }
+    )
+
+    assert (
+        hostprobe.docker_context_endpoint_host(runner, "general-dev-sandbox")
+        == "tcp://127.0.0.1:54321"
+    )
+
+
+def test_docker_context_endpoint_host_returns_none_when_the_context_does_not_exist() -> None:
+    hostprobe = _import_hostprobe()
+    runner = FakeRunner(
+        {
+            _CONTEXT_INSPECT_COMMAND: hostprobe.CommandResult(
+                exit_code=1, stderr='context "general-dev-sandbox": context not found'
+            )
+        }
+    )
+
+    assert hostprobe.docker_context_endpoint_host(runner, "general-dev-sandbox") is None
+
+
+def test_docker_context_endpoint_host_raises_when_docker_is_not_on_path() -> None:
+    hostprobe = _import_hostprobe()
+    runner = FakeRunner(
+        {_CONTEXT_INSPECT_COMMAND: hostprobe.CommandResult(exit_code=127, binary_missing=True)}
+    )
+
+    with pytest.raises(hostprobe.HostProbeError, match="docker is not on PATH"):
+        hostprobe.docker_context_endpoint_host(runner, "general-dev-sandbox")
+
+
+def test_docker_context_endpoint_host_raises_when_inspect_fails_for_another_reason() -> None:
+    hostprobe = _import_hostprobe()
+    runner = FakeRunner(
+        {_CONTEXT_INSPECT_COMMAND: hostprobe.CommandResult(exit_code=1, stderr="permission denied")}
+    )
+
+    with pytest.raises(hostprobe.HostProbeError, match="permission denied"):
+        hostprobe.docker_context_endpoint_host(runner, "general-dev-sandbox")
+
+
+def test_docker_context_endpoint_host_raises_on_unparsable_json() -> None:
+    hostprobe = _import_hostprobe()
+    runner = FakeRunner(
+        {_CONTEXT_INSPECT_COMMAND: hostprobe.CommandResult(exit_code=0, stdout="not-json")}
+    )
+
+    with pytest.raises(hostprobe.HostProbeError, match="unparsable"):
+        hostprobe.docker_context_endpoint_host(runner, "general-dev-sandbox")
+
+
+def test_docker_context_forwarded_port_parses_the_tcp_endpoint() -> None:
+    hostprobe = _import_hostprobe()
+    runner = FakeRunner(
+        {
+            _CONTEXT_INSPECT_COMMAND: hostprobe.CommandResult(
+                exit_code=0, stdout='{"docker":{"Host":"tcp://127.0.0.1:54321"}}'
+            )
+        }
+    )
+
+    assert hostprobe.docker_context_forwarded_port(runner, "general-dev-sandbox") == 54321
+
+
+def test_docker_context_forwarded_port_returns_none_when_the_context_does_not_exist() -> None:
+    hostprobe = _import_hostprobe()
+    runner = FakeRunner(
+        {
+            _CONTEXT_INSPECT_COMMAND: hostprobe.CommandResult(
+                exit_code=1, stderr='context "general-dev-sandbox": context not found'
+            )
+        }
+    )
+
+    assert hostprobe.docker_context_forwarded_port(runner, "general-dev-sandbox") is None
+
+
+def test_docker_context_forwarded_port_raises_on_a_non_tcp_endpoint() -> None:
+    hostprobe = _import_hostprobe()
+    runner = FakeRunner(
+        {
+            _CONTEXT_INSPECT_COMMAND: hostprobe.CommandResult(
+                exit_code=0, stdout='{"docker":{"Host":"unix:///var/run/docker.sock"}}'
+            )
+        }
+    )
+
+    with pytest.raises(hostprobe.HostProbeError, match="non-TCP"):
+        hostprobe.docker_context_forwarded_port(runner, "general-dev-sandbox")
+
+
+# ---------------------------------------------------------------------------
 # AC-FUNC-009 / AC-FUNC-010 / AC-TEST-005: the docker engine handshake timeout.
 # ---------------------------------------------------------------------------
 

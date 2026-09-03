@@ -135,10 +135,33 @@ layer enforces that agreement:
 |---|---|---|
 | Terragrunt directory | `remote-instances/<name>/` | This layer |
 | State key | `<name>/terraform.tfstate` | This layer (`root.hcl`, derived via `path_relative_to_include()`) |
-| Docker context | `general-dev-<name>` | `E6` |
+| Docker context | `<repo-slug>-<name>` (`general-dev-<name>` in this repository) | `E6` |
 | Parameter prefix | `/devcontainer/<name>/` | The security submodule's inline IAM policy (`provider/aws`), scoped from `var.instance_name` |
-| Certificates | `~/.docker/certs/<name>/` | `E6` |
+| Certificates | `$DOCKER_CONFIG/certs/<name>/`, or `~/.docker/certs/<name>/` when `DOCKER_CONFIG` is unset | `E6` |
 | Local forwarded port | Allocated per instance, recorded, never a fixed number | `E6` |
+
+The docker context row's Pattern is `<repo-slug>-<name>`, `repo.repo_slug`
+(the same value `root.hcl`'s own `local.repo_slug` derives) prepended to the
+instance name -- never a literal, so a fork of this repository under a
+different name gets its own, non-colliding prefix without editing any of
+this table's owners. `general-dev-<name>` above is this repository's own
+worked example, not a fixed pattern to copy into a fork. The certificates
+row's on-disk material root and this table's addressing value are the same
+derivation, `devcontainer_config.instances.certs_root` --
+`devcontainer_config.certs.DEFAULT_CERTS_ROOT` is sourced from it -- so an
+operator who has set `DOCKER_CONFIG` never has certificates written under
+one directory while this table points at another.
+
+"Owned by" above names what creates or manages each artifact at runtime
+(Terragrunt, the security submodule's inline IAM policy, `E6`'s transport
+and certificate modules). Deriving the value programmatically -- turning
+an instance name into any one of these six strings or paths -- is a
+separate concern spec Section 4.5 assigns to exactly one Python module:
+`.claude/plugins/devcontainer/scripts/devcontainer_config/instances.py`.
+A script or skill that needs one of these values calls into that module
+(or shells out to its `resolve-instance` entry point) instead of
+recomputing the pattern above independently; recomputing it a second time
+is exactly the drift this table exists to prevent.
 
 ## Reusing an existing network: `create_network = false`
 

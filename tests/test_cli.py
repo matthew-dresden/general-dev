@@ -273,6 +273,62 @@ def test_hooks_pre_push_scans_a_new_branch_the_remote_has_never_seen(
 
 
 # ---------------------------------------------------------------------------
+# resolve-instance (spec Section 4.1.1, 9; E8-F1-S1-T1)
+#
+# The business-logic scenarios (all four resolution steps, all three edge
+# cases, and the address-block content) are covered in
+# tests/test_instances.py per this task's own Approach; the tests below
+# cover only the argparse-level wiring `test_instances.py` does not:
+# `--help` text, the `--local-backend-active` flag's presence, and that an
+# invalid flag is rejected the same way every other subcommand's parser
+# rejects one, matching the convention this file's other subcommand
+# sections (`hooks-install`, `hooks-check`) already establish above.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_instance_help_documents_local_backend_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = import_cli()
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["resolve-instance", "--help"])
+
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "--local-backend-active" in out
+    assert "spec Section 4.1.1" in out
+
+
+def test_resolve_instance_rejects_an_unknown_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = import_cli()
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["resolve-instance", "--no-such-flag"])
+
+    assert exc_info.value.code == 2
+    assert "resolve-instance" in capsys.readouterr().err
+
+
+def test_resolve_instance_fails_fast_outside_a_git_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`resolve-instance` reuses `repo.find_root` (AC-FUNC-006's shared RepoError path)."""
+    outside = generated_root(tmp_path)
+
+    exit_code = run_cli(monkeypatch, outside, ["resolve-instance"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert str(outside) in captured.err
+
+
+# ---------------------------------------------------------------------------
 # devsecret: get, list, set, rm (spec Section 4.3; E3-F2-S1-T1)
 # ---------------------------------------------------------------------------
 
@@ -1760,10 +1816,11 @@ def test_devsecret_export_list_name_exported_in_both_tiers_is_printed_once() -> 
     name but carrying different scopes, the shape `catalog.list_resolved`
     produces for a name present in both an instance and the shared tier
     (E3-F1-S2-T1 AC-FUNC-006). devsecret's own commands resolve against
-    `catalog.scope_set(None)` (no instance-detection mechanism exists yet,
-    per this module's docstring), so this dedup rule is asserted directly
-    against the renderer rather than through a two-tier CLI invocation that
-    the current single-scope wiring cannot produce.
+    `catalog.scope_set(None)` -- the shared scope alone, independent of
+    `devcontainer_config.instances` (this module's own docstring) -- so
+    this dedup rule is asserted directly against the renderer rather than
+    through a two-tier CLI invocation that the current single-scope wiring
+    cannot produce.
     """
     catalog = _import_catalog()
     cli = import_cli()
@@ -1851,8 +1908,8 @@ def test_devsecret_end_to_end_export_list_then_run_narrows_to_the_named_secret(
     for the `run` invocation is gone once it returns.
 
     devsecret's commands resolve against `catalog.scope_set(None)` -- the
-    shared scope alone, no instance-detection mechanism exists yet (this
-    module's docstring) -- so JENKINS_API_TOKEN is seeded into a scope
+    shared scope alone, independent of `devcontainer_config.instances`
+    (this module's own docstring) -- so JENKINS_API_TOKEN is seeded into a scope
     (`sandbox`) this injected catalog holds but neither `export-list` nor
     `run` ever queries, in place of a live instance address. That is what
     proves both commands: `export-list` never names anything outside the

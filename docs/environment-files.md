@@ -268,8 +268,11 @@ unreadable or unparsable certificate file is reported by naming the path
 and the parse failure, never silently classified as `expired` -- that would
 send the operator to reissue material that may be perfectly valid. `make
 cert-status` reports the `ca` and `client` roles it finds locally under
-`~/.docker/certs/<instance>/`; the server certificate is never reported
-because it is never persisted to that path in the first place --
+`certs.DEFAULT_CERTS_ROOT`/`instances.certs_root()`'s certificate-directory
+root (`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/`
+when `DOCKER_CONFIG` is unset -- see the "Instances" section's `DOCKER_CONFIG`
+row below); the server certificate is never reported because it is never
+persisted to that path in the first place --
 `certs.issue_server` generates it into a temporary directory it removes
 before returning, handing the material back as PEM text instead (see the
 certificate-storage paragraph below for the full rule).
@@ -292,9 +295,12 @@ this produces when the requirement is unmet.
 
 The certificate authority and client material these variables govern is
 never stored in this repository: it lives outside the checkout entirely,
-under `~/.docker/certs/<instance>/` (spec Section 5.5), the same "outside
-the repository, not merely ignored" rule this document's other private
-files (`shell.env`, `.devcontainer/aws-profile-map.json`,
+under `certs.DEFAULT_CERTS_ROOT`/`instances.certs_root()`'s `<instance>/`
+directory (`$DOCKER_CONFIG/certs/<instance>/`, or
+`~/.docker/certs/<instance>/` when `DOCKER_CONFIG` is unset; spec Section
+5.5), the same "outside the repository, not merely ignored" rule this
+document's other private files (`shell.env`,
+`.devcontainer/aws-profile-map.json`,
 `devcontainer-environment-variables.json`) follow for a different reason
 higher up in this file. The server key and certificate are never persisted
 under that path: `certs.issue_server` generates both inside a
@@ -429,6 +435,82 @@ git-remote read.
 `DOCKER_HANDSHAKE_TIMEOUT`'s reader applies to every reader of
 `REPO_SLUG_GIT_TIMEOUT_SECONDS`: it rejects a non-numeric or non-positive
 value by name rather than silently falling back to the default.
+
+### Instances
+
+`.claude/plugins/devcontainer/scripts/devcontainer_config/instances.py` is
+the single module that turns an instance name into every artifact spec
+Section 9's addressing table names -- the Terragrunt directory, the state
+key, the docker context, the Parameter Store prefix, the certificate
+directory, and the recorded forwarded port -- and the single module that
+decides which instance a command means. `resolve-instance` is its entry
+point (`PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m
+devcontainer_config.cli resolve-instance`): it prints the resolved name
+and the statically derivable half of the addressing block -- everything
+except the forwarded port, which needs a real docker context -- as one
+`KEY=value` line per artifact on stdout, so the shell layer reads values
+rather than re-deriving them, and prints nothing to stdout and exits 1
+with the operator-facing text on stderr on any resolution failure.
+
+The certificate-directory row honors `DOCKER_CONFIG`, the real docker
+CLI's own variable for relocating its configuration home, so an operator
+who has moved it also gets certificate material addressed under the same,
+moved location:
+
+| Variable | Default | Governs |
+|---|---|---|
+| `DOCKER_CONFIG` | Unset (`~/.docker`) | `instances.certs_dir`'s (and `certs.DEFAULT_CERTS_ROOT`'s) certificate-directory root: an absolute directory path. When set, certificates are addressed and written under `$DOCKER_CONFIG/certs/<name>/` instead of `~/.docker/certs/<name>/`. Read only; never set by this repository. |
+| `INSTANCE` | Unset | `instances.resolve`'s first resolution step: the instance name to select this call, read directly from the process environment. Optional. When set, must pass `instances.validate_name` -- a non-empty path segment of letters, digits, hyphens and underscores only, at most `instances.MAX_INSTANCE_NAME_LENGTH` (63) characters -- or resolution fails naming the value and the rule it broke. |
+| `DEFAULT_REMOTE_INSTANCE` | Unset | `instances.resolve`'s second resolution step, read directly from the process environment when `INSTANCE` is unset. Optional; has no entry in `shell.env.example`. Same format as `INSTANCE`: a non-empty path segment of at most `instances.MAX_INSTANCE_NAME_LENGTH` (63) characters. |
+
+`DEFAULT_REMOTE_INSTANCE` is the second step of the instance-resolution
+order spec Section 4.1.1 fixes, evaluated once per resolution by
+`instances.resolve`:
+
+1. `INSTANCE` in the process environment. No Makefile target accepts or
+   forwards `INSTANCE` yet (`E8-F2-S1-T1` wires `make <target>
+   INSTANCE=<name>` in); today, set it directly:
+   `INSTANCE=<name> PYTHONPATH=.claude/plugins/devcontainer/scripts
+   python3 -m devcontainer_config.cli resolve-instance`.
+2. `DEFAULT_REMOTE_INSTANCE` from `shell.env`.
+3. The sole directory under `remote-instances/`, when exactly one is
+   configured.
+4. Otherwise: failure.
+
+Both `INSTANCE` and `DEFAULT_REMOTE_INSTANCE` are read directly from the
+process environment by `instances.resolve`, the identical convention
+`transport.resolve_transport` already establishes for
+`DEVCONTAINER_TRANSPORT` above rather than an injected mapping. Three edge
+cases each produce their own distinct outcome instead of folding into one
+failure:
+
+- `INSTANCE` naming no directory under `remote-instances/` fails, listing
+  every instance actually configured.
+- `INSTANCE` set while the local backend is active is a warning on
+  stderr, not an error: the value names nothing on that backend and is
+  simply unused, so nothing is resolved and nothing fails. This outcome is
+  gated on `resolve-instance`'s own `--local-backend-active` flag (there is
+  no other caller of `instances.resolve` yet): passing `INSTANCE=<name>
+  ... resolve-instance` alone still resolves against `remote-instances/`
+  and fails if `<name>` names no directory there; passing `INSTANCE=<name>
+  ... resolve-instance --local-backend-active` is what produces the
+  warning. A future caller that already knows the active backend (the
+  Makefile, per spec Section 1.1) passes `local_backend_active=True` to
+  `instances.resolve` directly instead of through this flag.
+- An empty (or absent) `remote-instances/` directory on a remote backend
+  fails, directing the operator to `/devcontainer:setup-remote`.
+
+Ambiguity -- more than one instance configured and neither selector chose
+one -- fails naming every configured instance and both remedies,
+`make <target> INSTANCE=<name>` and `DEFAULT_REMOTE_INSTANCE='<name>'` in
+`shell.env`, with exit code 1 and no partial work: resolution happens
+before any docker or AWS call.
+
+`DEFAULT_REMOTE_INSTANCE` has no default and no entry in
+`shell.env.example`: unset, it is simply the second resolution step
+producing nothing, and resolution proceeds to the third. A developer who
+wants one instance to be their implicit default sets it in their own
+`shell.env`.
 
 ### What did not change
 

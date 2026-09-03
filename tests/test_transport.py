@@ -1339,23 +1339,32 @@ def _issue_client_material(root: Path, instance: str) -> object:
 
 
 def test_context_name_for_returns_the_general_dev_prefixed_name() -> None:
+    """This repository's own `repo.repo_slug` resolves to `general-dev` (AC-FUNC-002:
+    `context_name_for` delegates to `devcontainer_config.instances.docker_context`, never a
+    literal), so the worked example spec Section 9 names is what this checkout actually
+    produces.
+    """
     transport = _import_transport()
 
-    assert transport.context_name_for("sandbox") == "general-dev-sandbox"
+    assert transport.context_name_for("sandbox", _repo_root()) == "general-dev-sandbox"
 
 
 def test_instance_from_context_name_is_the_inverse_of_context_name_for() -> None:
     transport = _import_transport()
+    root = _repo_root()
 
-    assert transport.instance_from_context_name("general-dev-sandbox") == "sandbox"
-    assert transport.instance_from_context_name(transport.context_name_for("remote")) == "remote"
+    assert transport.instance_from_context_name(root, "general-dev-sandbox") == "sandbox"
+    assert (
+        transport.instance_from_context_name(root, transport.context_name_for("remote", root))
+        == "remote"
+    )
 
 
 def test_instance_from_context_name_rejects_a_name_without_the_prefix() -> None:
     transport = _import_transport()
 
     with pytest.raises(transport.InvalidContextNameError, match="general-dev-"):
-        transport.instance_from_context_name("custom-context")
+        transport.instance_from_context_name(_repo_root(), "custom-context")
 
 
 def test_build_context_create_argv_contains_all_four_endpoint_components(tmp_path: Path) -> None:
@@ -1417,6 +1426,7 @@ def test_ensure_context_creates_a_context_when_absent(tmp_path: Path) -> None:
     name = transport.ensure_context(
         runner,
         instance="sandbox",
+        root=_repo_root(),
         port=54321,
         certs_root=tmp_path,
         reference_time=datetime.datetime.now(datetime.UTC),
@@ -1451,6 +1461,7 @@ def test_ensure_context_updates_an_existing_tcp_context_in_place(tmp_path: Path)
     name = transport.ensure_context(
         runner,
         instance="sandbox",
+        root=_repo_root(),
         port=54321,
         certs_root=tmp_path,
         reference_time=datetime.datetime.now(datetime.UTC),
@@ -1479,6 +1490,7 @@ def test_ensure_context_refuses_an_existing_ssh_context_by_name(tmp_path: Path) 
         transport.ensure_context(
             runner,
             instance="sandbox",
+            root=_repo_root(),
             port=54321,
             certs_root=tmp_path,
             reference_time=datetime.datetime.now(datetime.UTC),
@@ -1500,6 +1512,7 @@ def test_ensure_context_raises_when_docker_is_not_on_path(tmp_path: Path) -> Non
         transport.ensure_context(
             runner,
             instance="sandbox",
+            root=_repo_root(),
             port=54321,
             certs_root=tmp_path,
             reference_time=datetime.datetime.now(datetime.UTC),
@@ -1532,6 +1545,7 @@ def test_ensure_context_raises_naming_the_context_when_the_create_command_fails(
         transport.ensure_context(
             runner,
             instance="sandbox",
+            root=_repo_root(),
             port=54321,
             certs_root=tmp_path,
             reference_time=datetime.datetime.now(datetime.UTC),
@@ -1567,6 +1581,7 @@ def test_ensure_context_raises_when_docker_is_not_on_path_for_the_create_command
         transport.ensure_context(
             runner,
             instance="sandbox",
+            root=_repo_root(),
             port=54321,
             certs_root=tmp_path,
             reference_time=datetime.datetime.now(datetime.UTC),
@@ -1584,6 +1599,7 @@ def test_ensure_context_refuses_before_touching_docker_when_certificate_is_missi
         transport.ensure_context(
             runner,
             instance="sandbox",
+            root=_repo_root(),
             port=54321,
             certs_root=tmp_path,
             reference_time=datetime.datetime.now(datetime.UTC),
@@ -1605,6 +1621,7 @@ def test_ensure_context_refuses_before_touching_docker_when_certificate_is_expir
         transport.ensure_context(
             runner,
             instance="sandbox",
+            root=_repo_root(),
             port=54321,
             certs_root=tmp_path,
             reference_time=far_future,
@@ -1648,6 +1665,7 @@ def test_ensure_context_expiry_precondition_calls_certs_classify(
     transport.ensure_context(
         runner,
         instance="sandbox",
+        root=_repo_root(),
         port=54321,
         certs_root=tmp_path,
         reference_time=reference_time,
@@ -1815,7 +1833,7 @@ def test_handshake_retries_the_version_call_until_it_answers() -> None:
         ]
     )
 
-    result = transport.handshake(runner, instance="sandbox", port=54321)
+    result = transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
     assert result.server_version == "28.6.0"
     assert result.api_version == "1.51"
@@ -1836,7 +1854,7 @@ def test_handshake_reports_rootless_true_when_security_options_name_it() -> None
         ]
     )
 
-    result = transport.handshake(runner, instance="sandbox", port=54321)
+    result = transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
     assert result.rootless is True
 
@@ -1849,7 +1867,7 @@ def test_handshake_raises_immediately_on_a_certificate_name_mismatch_without_ret
     )
 
     with pytest.raises(transport.TransportError, match="IP:127.0.0.1"):
-        transport.handshake(runner, instance="sandbox", port=54321)
+        transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
     assert len(runner.calls) == 1
 
@@ -1861,7 +1879,7 @@ def test_handshake_raises_version_floor_error_naming_both_versions() -> None:
     )
 
     with pytest.raises(transport.DockerVersionFloorError) as excinfo:
-        transport.handshake(runner, instance="sandbox", port=54321)
+        transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
     message = str(excinfo.value)
     assert "1.41" in message
@@ -1875,7 +1893,7 @@ def test_handshake_raises_on_an_unparsable_api_version() -> None:
     )
 
     with pytest.raises(transport.TransportError, match="bogus"):
-        transport.handshake(runner, instance="sandbox", port=54321)
+        transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
 
 def test_handshake_raises_on_unparsable_server_payload() -> None:
@@ -1883,7 +1901,7 @@ def test_handshake_raises_on_unparsable_server_payload() -> None:
     runner = _SequencedRunner([transport.CommandResult(exit_code=0, stdout="not json")])
 
     with pytest.raises(transport.TransportError, match="general-dev-sandbox"):
-        transport.handshake(runner, instance="sandbox", port=54321)
+        transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
 
 def test_handshake_raises_when_docker_info_fails_after_a_successful_version_call() -> None:
@@ -1896,7 +1914,7 @@ def test_handshake_raises_when_docker_info_fails_after_a_successful_version_call
     )
 
     with pytest.raises(transport.TransportError, match="general-dev-sandbox"):
-        transport.handshake(runner, instance="sandbox", port=54321)
+        transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
 
 def test_handshake_raises_when_docker_is_not_on_path() -> None:
@@ -1904,7 +1922,7 @@ def test_handshake_raises_when_docker_is_not_on_path() -> None:
     runner = _SequencedRunner([transport.CommandResult(exit_code=127, binary_missing=True)])
 
     with pytest.raises(transport.TransportError, match="docker is not on PATH"):
-        transport.handshake(runner, instance="sandbox", port=54321)
+        transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
 
 def test_handshake_raises_when_docker_is_not_on_path_for_the_info_command() -> None:
@@ -1918,7 +1936,7 @@ def test_handshake_raises_when_docker_is_not_on_path_for_the_info_command() -> N
     )
 
     with pytest.raises(transport.TransportError, match="docker is not on PATH"):
-        transport.handshake(runner, instance="sandbox", port=54321)
+        transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
 
 def test_handshake_raises_on_unparsable_security_options() -> None:
@@ -1931,7 +1949,7 @@ def test_handshake_raises_on_unparsable_security_options() -> None:
     )
 
     with pytest.raises(transport.TransportError, match="general-dev-sandbox"):
-        transport.handshake(runner, instance="sandbox", port=54321)
+        transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
 
 def test_handshake_raises_timeout_naming_context_port_and_variable(
@@ -1945,7 +1963,7 @@ def test_handshake_raises_timeout_naming_context_port_and_variable(
 
     start = time.monotonic()
     with pytest.raises(transport.DockerHandshakeTimeoutError) as excinfo:
-        transport.handshake(never_answers, instance="sandbox", port=54321)
+        transport.handshake(never_answers, instance="sandbox", root=_repo_root(), port=54321)
     elapsed = time.monotonic() - start
 
     assert elapsed < _HANG_GUARD_SECONDS
@@ -1980,7 +1998,7 @@ def test_handshake_reads_the_timeout_through_the_shared_hostprobe_reader(
         return transport.CommandResult(exit_code=1, stderr=_REAL_CONNECTION_REFUSED_STDERR)
 
     with pytest.raises(transport.DockerHandshakeTimeoutError):
-        transport.handshake(never_answers, instance="sandbox", port=54321)
+        transport.handshake(never_answers, instance="sandbox", root=_repo_root(), port=54321)
 
     assert calls == [
         (
@@ -2015,7 +2033,7 @@ def test_handshake_passes_the_remaining_deadline_not_the_full_timeout_to_the_roo
     clock = iter([0.0, 1.0, 4.0])
     monkeypatch.setattr(transport.time, "monotonic", lambda: next(clock))
 
-    transport.handshake(runner, instance="sandbox", port=54321)
+    transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
     info_calls = [call for call in runner.calls if call[0] == _info_command("general-dev-sandbox")]
     assert len(info_calls) == 1
@@ -2049,7 +2067,7 @@ def test_handshake_raises_timeout_instead_of_probing_rootless_with_a_zero_remain
     monkeypatch.setattr(transport.time, "monotonic", lambda: next(clock))
 
     with pytest.raises(transport.DockerHandshakeTimeoutError) as excinfo:
-        transport.handshake(runner, instance="sandbox", port=54321)
+        transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
     message = str(excinfo.value)
     assert "general-dev-sandbox" in message
@@ -2082,7 +2100,7 @@ def test_handshake_timeout_error_message_is_produced_by_diagnose_handshake_failu
         return transport.CommandResult(exit_code=1, stderr=_REAL_CONNECTION_REFUSED_STDERR)
 
     with pytest.raises(transport.DockerHandshakeTimeoutError) as excinfo:
-        transport.handshake(never_answers, instance="sandbox", port=54321)
+        transport.handshake(never_answers, instance="sandbox", root=_repo_root(), port=54321)
 
     assert str(excinfo.value) == "SENTINEL_DIAGNOSIS"
     assert len(calls) == 1
@@ -2107,7 +2125,7 @@ def test_handshake_reads_the_default_timeout_when_unset(monkeypatch: pytest.Monk
             )
         return transport.CommandResult(exit_code=0, stdout="[]")
 
-    transport.handshake(runner, instance="sandbox", port=54321)
+    transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
     assert recorded[0] == pytest.approx(30.0, abs=0.5)
 
@@ -2120,7 +2138,7 @@ def test_handshake_rejects_an_unparsable_timeout(monkeypatch: pytest.MonkeyPatch
         raise AssertionError("runner should never be called: the timeout is invalid")
 
     with pytest.raises(transport.TransportError, match="DOCKER_HANDSHAKE_TIMEOUT"):
-        transport.handshake(never_called, instance="sandbox", port=1)
+        transport.handshake(never_called, instance="sandbox", root=_repo_root(), port=1)
 
 
 @pytest.mark.parametrize("raw_value", ["0", "-5", "nan", "inf"])
@@ -2134,7 +2152,7 @@ def test_handshake_rejects_a_non_positive_or_non_finite_timeout(
         raise AssertionError("runner should never be called: the timeout is invalid")
 
     with pytest.raises(transport.TransportError, match="DOCKER_HANDSHAKE_TIMEOUT"):
-        transport.handshake(never_called, instance="sandbox", port=1)
+        transport.handshake(never_called, instance="sandbox", root=_repo_root(), port=1)
 
 
 # ---------------------------------------------------------------------------
@@ -2153,7 +2171,7 @@ def test_handshake_san_diagnosis_names_the_reissue_invocation_for_the_created_in
     )
 
     with pytest.raises(transport.TransportError) as excinfo:
-        transport.handshake(runner, instance="sandbox", port=54321)
+        transport.handshake(runner, instance="sandbox", root=_repo_root(), port=54321)
 
     message = str(excinfo.value)
     assert "IP:127.0.0.1" in message
@@ -2271,9 +2289,7 @@ def test_connect_refuses_before_touching_anything_when_ssh_is_the_default(
     monkeypatch.delenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, raising=False)
 
     def _fail_if_called(*args: object, **kwargs: object) -> None:
-        raise AssertionError(
-            "connect must not touch AWS/docker when the SSH default is in effect"
-        )
+        raise AssertionError("connect must not touch AWS/docker when the SSH default is in effect")
 
     monkeypatch.setattr(transport, "ensure_agent_online", _fail_if_called)
 
@@ -2659,9 +2675,7 @@ def test_connect_returns_immediately_when_wait_ready_is_interrupted_before_the_c
     monkeypatch.setattr(transport, "wait_ready", raise_keyboard_interrupt)
 
     def fail_if_called(*args: object, **kwargs: object) -> None:
-        raise AssertionError(
-            "ensure_context/handshake must not run when wait_ready is interrupted"
-        )
+        raise AssertionError("ensure_context/handshake must not run when wait_ready is interrupted")
 
     monkeypatch.setattr(transport, "ensure_context", fail_if_called)
     monkeypatch.setattr(transport, "handshake", fail_if_called)

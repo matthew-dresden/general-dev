@@ -32,6 +32,15 @@ never answered in time" and "the tool ran and failed on its own terms" are
 three different findings with three different remedies, and folding them
 into one non-zero exit code would make it impossible for a probe to tell
 them apart.
+
+`docker_context_endpoint_host` and `docker_context_forwarded_port` are a
+second kind of shared seam this module carries alongside its own probes:
+not a judgment rendered into a `ProbeResult`, but the single `docker
+context inspect` reader `devcontainer_config.transport` and
+`devcontainer_config.instances` both drive when they need a context's
+recorded endpoint or forwarded port, so the identical command tuple, the
+"context not found" detection and the `tcp://` parse exist in exactly one
+place rather than two independent copies (E8-F1-S1-T1 round 2).
 """
 
 from __future__ import annotations
@@ -103,9 +112,16 @@ class HostProbeError(RuntimeError):
     AWS session, an unreachable engine -- is reported as a `ProbeResult`
     instead of raised, because it is exactly the kind of thing a caller
     needs to render into a findings list and continue past. This exception
-    is reserved for the one thing that is not an operational finding: a
-    value this module was itself configured with (currently, only
-    `DOCKER_HANDSHAKE_TIMEOUT`) that cannot be interpreted at all.
+    is reserved for the things that are not operational findings a caller
+    renders into a list: a value this module was itself configured with
+    (currently, only `DOCKER_HANDSHAKE_TIMEOUT`) that cannot be interpreted
+    at all, and a shared low-level reader (`docker_context_endpoint_host`,
+    `docker_context_forwarded_port`) whose caller needs a hard failure at
+    the call site, not a soft result to render later. `read_positive_seconds`
+    already documents the pattern: a caller in another module that needs
+    its own exception type catches this and re-raises it as one of its
+    own, so this module's exception type is never leaked across a module
+    boundary it does not own.
     """
 
 
@@ -441,6 +457,82 @@ def _docker_handshake_timeout_seconds() -> float:
     return read_positive_seconds(
         DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR, DOCKER_HANDSHAKE_TIMEOUT_DEFAULT_SECONDS
     )
+
+
+# spec Section 9: the endpoint `docker context inspect` records for a
+# context, parsed as `tcp://<host>:<port>`. `docker_context_endpoint_host`
+# and `docker_context_forwarded_port` below are the single reader of that
+# endpoint (E8-F1-S1-T1 round 2): `devcontainer_config.transport`
+# (`allocate_local_port`, `ensure_context`) and `devcontainer_config.instances`
+# (`forwarded_port`) both drive the identical `docker context inspect`
+# call and translation through this pair instead of each declaring its own
+# copy of the command tuple, the "context not found" detection, the JSON
+# parse and the `tcp://` pattern.
+_TCP_ENDPOINT_PATTERN = re.compile(r"^tcp://(?P<host>[^:/]+):(?P<port>\d+)$")
+
+
+def docker_context_endpoint_host(runner: CommandRunner, context_name: str) -> str | None:
+    """The raw docker endpoint host `context_name` is recorded with, or `None` if absent.
+
+    `None` is returned ONLY for a positively identified absence: docker's
+    own `context "<name>": context not found` stderr, naming this exact
+    context. Every other non-zero exit -- the docker CLI missing from PATH
+    (`result.binary_missing`), an unreadable or misdirected `DOCKER_CONFIG`,
+    a permission error, or a corrupted context store -- raises
+    `HostProbeError` naming the context and docker's own stderr instead:
+    reading any of those as "nothing recorded" would let a caller either
+    silently bind a brand-new port while the context on disk may still
+    record the old one, or silently overwrite an endpoint scheme it never
+    actually inspected. A caller in another module catches `HostProbeError`
+    here and re-raises it as its own exception type, the same convention
+    `read_positive_seconds` documents.
+    """
+    command = ("docker", "context", "inspect", context_name, "--format", "{{json .Endpoints}}")
+    result = runner(command, None)
+    if result.binary_missing:
+        raise HostProbeError(
+            "docker is not on PATH\nInstall Docker Desktop or the Docker CLI, then retry."
+        )
+    if result.exit_code != 0:
+        if f'context "{context_name}": context not found' in result.stderr:
+            return None
+        raise HostProbeError(
+            f"docker context inspect {context_name!r} failed\n"
+            f"{result.stderr.strip()}\n"
+            "Confirm docker is installed, DOCKER_CONFIG points at a readable context "
+            "store, and the store is not corrupted, then retry."
+        )
+    try:
+        endpoints = json.loads(result.stdout)
+        return str(endpoints["docker"]["Host"])
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise HostProbeError(
+            f"docker context {context_name!r} has an unparsable endpoint: "
+            f"{result.stdout.strip()!r}\n"
+            "Recreate the context with a valid tcp:// docker endpoint, then retry."
+        ) from exc
+
+
+def docker_context_forwarded_port(runner: CommandRunner, context_name: str) -> int | None:
+    """The local TCP port already recorded in `context_name`'s docker endpoint, or `None`.
+
+    A context that DOES exist but whose endpoint `docker_context_endpoint_host`
+    reports cannot be parsed as `tcp://<host>:<port>` is a distinct, louder
+    failure than "nothing to reuse": the record itself is unusable, and
+    silently treating it as absent would let a caller allocate a second,
+    different port for a context it believes already has one.
+    """
+    host = docker_context_endpoint_host(runner, context_name)
+    if host is None:
+        return None
+    match = _TCP_ENDPOINT_PATTERN.match(host)
+    if match is None:
+        raise HostProbeError(
+            f"docker context {context_name!r} has a non-TCP endpoint: {host!r}\n"
+            "This reader only reuses a tcp:// endpoint's port; recreate the context "
+            "with one, then retry."
+        )
+    return int(match.group("port"))
 
 
 def _probe_context_list(runner: CommandRunner) -> tuple[ProbeResult | None, list[str]]:

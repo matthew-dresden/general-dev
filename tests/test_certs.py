@@ -40,6 +40,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -162,6 +163,72 @@ def issued_material(tmp_path_factory: pytest.TempPathFactory) -> _IssuedMaterial
     server = certs.issue_server(paths)
     certs.issue_client(paths)
     return _IssuedMaterial(certs=certs, paths=paths, server=server)
+
+
+# ---------------------------------------------------------------------------
+# DEFAULT_CERTS_ROOT (E8-F1-S1-T1 round 2, code_review BLOCKING 2): a single
+# derivation must own spec Section 9's certificate-directory row, so an
+# operator who sets DOCKER_CONFIG never has certificates written under one
+# directory while devcontainer_config.instances.certs_dir addresses another.
+# ---------------------------------------------------------------------------
+
+
+def test_default_certs_root_is_sourced_from_instances_certs_root() -> None:
+    certs = _import_certs()
+    instances = importlib.import_module("devcontainer_config.instances")
+
+    assert certs.DEFAULT_CERTS_ROOT == instances.certs_root()
+
+
+def test_default_certs_root_reflects_docker_config_on_a_fresh_import(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`DEFAULT_CERTS_ROOT` is a module-level constant, computed once at import (unchanged
+    behavior from before this delegation existed), so this proves it honors `DOCKER_CONFIG`
+    at that computation rather than reading the pre-`DOCKER_CONFIG` `~/.docker/certs` default.
+
+    test_review round 2, BLOCKING (test isolation): the original version of this test
+    popped both modules and re-imported `certs` inside `finally` while `DOCKER_CONFIG`
+    was still monkeypatched to this test's own `tmp_path`, leaving a poisoned module
+    object in `sys.modules` -- one whose `DEFAULT_CERTS_ROOT` pointed at a directory
+    pytest later deletes, and whose identity differs from the one
+    `devcontainer_config.transport` captured via its own `from devcontainer_config
+    import certs` at first import. Restoring `sys.modules["devcontainer_config.certs"]`
+    alone is not sufficient: Python's import machinery also sets the parent package's
+    own attribute (`sys.modules["devcontainer_config"].certs`) to whatever module object
+    was most recently imported under that name, and a later `from devcontainer_config
+    import certs` (such as `devcontainer_config.transport`'s own module-level import)
+    resolves through that package attribute first, not through `sys.modules` directly.
+    Both must be restored to the exact original objects, or a module imported after this
+    test still observes the poisoned one.
+    """
+    module_names = ("devcontainer_config.certs", "devcontainer_config.instances")
+    saved_modules = {name: sys.modules.get(name) for name in module_names}
+    package = sys.modules["devcontainer_config"]
+    saved_package_attrs = {
+        name: getattr(package, name.rsplit(".", 1)[-1], None) for name in module_names
+    }
+    moved_docker_home = tmp_path / "moved-docker-home"
+    monkeypatch.setenv("DOCKER_CONFIG", str(moved_docker_home))
+    for module_name in module_names:
+        sys.modules.pop(module_name, None)
+
+    try:
+        certs = importlib.import_module("devcontainer_config.certs")
+        assert certs.DEFAULT_CERTS_ROOT == moved_docker_home / "certs"
+    finally:
+        # Unset DOCKER_CONFIG before restoring anything, so no import triggered by the
+        # restore below (or by any later test) can observe this test's environment.
+        monkeypatch.delenv("DOCKER_CONFIG", raising=False)
+        for module_name in module_names:
+            sys.modules.pop(module_name, None)
+            attr_name = module_name.rsplit(".", 1)[-1]
+            original = saved_modules[module_name]
+            original_attr = saved_package_attrs[module_name]
+            if original is not None:
+                sys.modules[module_name] = original
+            if original_attr is not None:
+                setattr(package, attr_name, original_attr)
 
 
 # ---------------------------------------------------------------------------
@@ -576,9 +643,9 @@ def test_main_create_ca_twice_via_cli_reports_error(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # code_review round 1, BLOCKING 1/2: `instance` is validated before it ever
 # reaches a path composition, a `mkdir`, or an `os.open`, reusing
-# `catalog._validate_scope` -- the control catalog.py already carries for the
-# identical `/devcontainer/<scope>/` interpolation -- rather than a second,
-# independent implementation of the same rule.
+# `instances.validate_name` -- the single owner spec Section 4.5 assigns the
+# naming rule -- rather than a second, independent implementation of the
+# same rule.
 # ---------------------------------------------------------------------------
 
 
@@ -590,6 +657,25 @@ def test_certpaths_rejects_unsafe_instance_names(tmp_path: Path, unsafe_instance
     certs = _import_certs()
     with pytest.raises(certs.CertsError, match="instance"):
         certs.CertPaths(instance=unsafe_instance, root=tmp_path)
+
+
+def test_certpaths_rejects_an_over_length_instance_name_matching_instances_bound(
+    tmp_path: Path,
+) -> None:
+    """code_review round 2, WARN (DRY): before this fix `_validate_instance` delegated
+    only to `catalog._validate_scope`, which enforces no length bound, so a 64+ character
+    instance name was accepted by `CertPaths.instance_dir` and rejected by
+    `instances.certs_dir` for the identical directory -- two validators of the same
+    concept disagreeing on the same value. Delegating to `instances.validate_name`
+    instead gives the naming rule a single owner (spec Section 4.5) and this length
+    bound with it.
+    """
+    certs = _import_certs()
+    instances = importlib.import_module("devcontainer_config.instances")
+    over_length_instance = "a" * (instances.MAX_INSTANCE_NAME_LENGTH + 1)
+
+    with pytest.raises(certs.CertsError, match="instance"):
+        certs.CertPaths(instance=over_length_instance, root=tmp_path)
 
 
 @pytest.mark.parametrize(

@@ -53,12 +53,12 @@ on the machine can read them; `run` resolves every named secret and hands
 each one to the child through its environment only, never through argv, and
 does so inside `catalog.secret_cache_dir`, which refuses (also exit 5) to
 materialize its transient directory anywhere a value could leak into the
-workspace or a persistent layer (spec Section 5.4, 7.3). No
-instance-detection mechanism exists yet (Section 9's addressing is later,
-separate work), so every command here resolves or narrows against
-`catalog.scope_set(None)` -- the shared scope alone, the correct answer for
-an engine with no instance (decision D11), not a partial implementation of
-instance-first resolution.
+workspace or a persistent layer (spec Section 5.4, 7.3). `devsecret`'s own
+commands do not resolve an instance: every command here resolves or narrows
+against `catalog.scope_set(None)` -- the shared scope alone, the correct
+answer for an engine with no instance (decision D11) -- independent of
+`devcontainer_config.instances`, this module's separate instance-resolution
+entry point below.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from devcontainer_config import catalog, repo
+from devcontainer_config import catalog, instances, repo
 from devcontainer_config.githooks import (
     HOOK_NAMES,
     GitHooksError,
@@ -129,6 +129,23 @@ _HOOKS_PRE_PUSH_DESCRIPTION = (
     "be run by hand outside a pre-push hook."
 )
 
+_RESOLVE_INSTANCE_DESCRIPTION = (
+    "Resolves which instance INSTANCE/DEFAULT_REMOTE_INSTANCE/the sole "
+    "configured directory selects (spec Section 4.1.1) and prints the "
+    "resolved name plus the statically derivable half of its Section 9 "
+    "addressing block -- Terragrunt directory, state key, docker context, "
+    "parameter prefix, certificate directory -- as one KEY=value line per "
+    "artifact on stdout, so the shell layer reads values instead of "
+    "re-deriving them. Prints nothing to stdout and exits 1 on any "
+    "resolution failure, with the operator-facing text on stderr."
+)
+
+_RESOLVE_INSTANCE_LOCAL_BACKEND_HELP = (
+    "Pass this when the local backend is active (spec Section 1.1): "
+    "INSTANCE, if set, is unused on that backend and is reported as a "
+    "warning on stderr rather than an error, and nothing is resolved."
+)
+
 
 def _build_parser() -> argparse.ArgumentParser:
     """The top-level parser, with `lint-secrets` as its first subcommand.
@@ -173,6 +190,19 @@ def _build_parser() -> argparse.ArgumentParser:
         description=_HOOKS_PRE_PUSH_DESCRIPTION,
     )
     hooks_pre_push_parser.set_defaults(handler=_run_hooks_pre_push)
+
+    resolve_instance_parser = subparsers.add_parser(
+        "resolve-instance",
+        help="Resolve INSTANCE/DEFAULT_REMOTE_INSTANCE and print its addressing block "
+        "(spec Section 4.1.1, 9).",
+        description=_RESOLVE_INSTANCE_DESCRIPTION,
+    )
+    resolve_instance_parser.add_argument(
+        "--local-backend-active",
+        action="store_true",
+        help=_RESOLVE_INSTANCE_LOCAL_BACKEND_HELP,
+    )
+    resolve_instance_parser.set_defaults(handler=_run_resolve_instance)
 
     return parser
 
@@ -241,21 +271,55 @@ def _run_hooks_pre_push(args: argparse.Namespace) -> int:
     return 1 if found_anything else 0
 
 
+def _print_address_block(root: Path, name: str) -> None:
+    """The statically derivable half of `name`'s Section 9 addressing block, one line each.
+
+    `forwarded_port` is deliberately excluded: it needs a real docker
+    context (AC-FUNC-009 names only "the statically derivable half"), and
+    this entry point's own suite runs with no docker, no AWS and no network
+    (AC-TEST-004).
+    """
+    print(f"INSTANCE={name}")
+    print(f"TERRAGRUNT_DIR={instances.terragrunt_dir(root, name)}")
+    print(f"STATE_KEY={instances.state_key(name)}")
+    print(f"DOCKER_CONTEXT={instances.docker_context(root, name)}")
+    print(f"PARAMETER_PREFIX={instances.parameter_prefix(name)}")
+    print(f"CERTS_DIR={instances.certs_dir(name)}")
+
+
+def _run_resolve_instance(args: argparse.Namespace) -> int:
+    """Resolve an instance under the current repository root and print its addressing block.
+
+    `resolution.warning`, when set (the local-backend edge case, spec
+    Section 4.1.1), is printed to stderr regardless of outcome; nothing is
+    printed to stdout when `resolution.instance` is `None`, since there is
+    no address block to derive without a resolved name.
+    """
+    root = repo.find_root(Path.cwd())
+    resolution = instances.resolve(root, local_backend_active=args.local_backend_active)
+    if resolution.warning is not None:
+        print(resolution.warning, file=sys.stderr)
+    if resolution.instance is None:
+        return 0
+    _print_address_block(root, resolution.instance)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Parse `argv`, run the selected command, and exit the process.
 
     One of this module's two public console entry points (AC-FUNC-006), and
     the only `sys.exit` site on the `devcontainer_config` command path: every
-    command handler raises `SecretScanError`, `repo.RepoError` or
-    `GitHooksError` on a real failure instead of exiting itself, and this is
-    where that exception becomes an exit code -- printed with an `ERROR:`
-    prefix to stderr, never a stack trace.
+    command handler raises `SecretScanError`, `repo.RepoError`,
+    `GitHooksError` or `instances.InstancesError` on a real failure instead
+    of exiting itself, and this is where that exception becomes an exit
+    code -- printed with an `ERROR:` prefix to stderr, never a stack trace.
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
         exit_code = args.handler(args)
-    except (SecretScanError, repo.RepoError, GitHooksError) as exc:
+    except (SecretScanError, repo.RepoError, GitHooksError, instances.InstancesError) as exc:
         print(str(exc), file=sys.stderr)
         exit_code = 1
     sys.exit(exit_code)
@@ -529,9 +593,9 @@ def _run_devsecret_get(args: argparse.Namespace, client: catalog.CatalogClient) 
 
     `instance` is always `None` (see the module docstring): the resolution
     set `catalog.scope_set(None)` computes is the shared scope alone, the
-    correct answer for an engine with no instance-detection mechanism yet
-    (decision D11), not a partial implementation of instance-first
-    resolution.
+    correct answer for an engine with no instance resolved (decision D11),
+    independent of `devcontainer_config.instances`, which this module's
+    `devsecret` commands do not call.
     """
     resolved = catalog.resolve(client, None, args.name)
     sys.stdout.write(resolved.value)

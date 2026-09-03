@@ -49,7 +49,7 @@ PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer
         keybindings validate test cert-status
 
 help:
-	@printf '\n\033[1mgeneral-dev\033[0m devcontainer control. Project: \033[1m%s\033[0m   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
+	@printf '\n\033[1m%s\033[0m devcontainer control.   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
 	@printf 'Local engine builds bind-mount this folder. The remote engine clones the repo into a volume on EC2.\n'
 	@printf 'Second column: \033[1mboth\033[0m = works on either engine via the active context, \033[1mlocal\033[0m/\033[1mremote\033[0m = that engine only,\n'
 	@printf '\033[1mhost\033[0m = runs on this machine and touches no engine at all.\n'

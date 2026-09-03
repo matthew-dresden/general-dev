@@ -1,5 +1,5 @@
 
-general-dev devcontainer control. Project: <REPO_DIR>   Backend follows the active docker context.
+<REPO_DIR> devcontainer control.   Backend follows the active docker context.
 Local engine builds bind-mount this folder. The remote engine clones the repo into a volume on EC2.
 Second column: both = works on either engine via the active context, local/remote = that engine only,
 host = runs on this machine and touches no engine at all.

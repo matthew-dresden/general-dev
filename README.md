@@ -112,10 +112,12 @@ lists the commands and key bindings.
 ## Working on projects
 
 ```sh
-# inside the (local or remote) devcontainer
-cd /workspaces/general-dev/repos
-git clone https://github.com/caylent-solutions/kanon
-git clone https://github.com/caylent-solutions/devbench
+# inside the (local or remote) devcontainer.
+# $PROJECT_NAME is this repository's own directory name, so the path is
+# correct whatever the project is called; nothing here names another project.
+cd "/workspaces/${PROJECT_NAME}/repos"
+git clone https://github.com/<org>/<your-project>
+git clone https://github.com/<org>/<another-project>
 ```
 
 Each clone shows up as its own repo in Source Control, with nothing to add

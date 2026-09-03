@@ -263,17 +263,31 @@ def _normalize_make_help_output(
 ) -> str:
     """`raw_output` with ANSI stripped and every machine-dependent value replaced by a placeholder.
 
-    `repo_dir` is `$(notdir $(CURDIR))`'s value, which only ever appears
-    after the literal `"Project: "` label the `help` recipe's opening banner
-    prints -- the recipe's own hardcoded product-name text ("general-dev",
-    bold, with no such label) is left untouched even when a checkout happens
-    to be cloned into a directory that also happens to be named
-    `general-dev`. `local_context` / `remote_context` are `$(LOCAL_CONTEXT)`
-    / `$(REMOTE_CONTEXT)`, each of which only ever appears inside a single
-    pair of parentheses in the `ENGINE` section.
+    `repo_dir` is `$(notdir $(CURDIR))`'s value. It opens the banner line,
+    which the `help` recipe now derives rather than printing a hardcoded
+    product name beside it.
+
+    That hardcoded name is why this substitution was once anchored to a
+    literal `"Project: "` label: with a product name baked into the recipe, a
+    blanket replacement would also have rewritten that name whenever a
+    checkout happened to live in a directory called the same thing, masking
+    real drift. The recipe no longer carries such a name -- the banner and
+    the project label were the same derived value printed twice -- so the
+    anchor guards nothing and is dropped. Anchoring the replacement to the
+    start of the line keeps it from matching the word elsewhere in the help
+    text.
+
+    `local_context` / `remote_context` are `$(LOCAL_CONTEXT)` /
+    `$(REMOTE_CONTEXT)`, each of which only ever appears inside a single pair
+    of parentheses in the `ENGINE` section.
     """
     text = _strip_ansi(raw_output)
-    text = text.replace(f"Project: {repo_dir}", f"Project: {_REPO_DIR_PLACEHOLDER}")
+    text = re.sub(
+        rf"^{re.escape(repo_dir)}(?= devcontainer control\.)",
+        _REPO_DIR_PLACEHOLDER,
+        text,
+        flags=re.MULTILINE,
+    )
     text = text.replace(f"({local_context})", f"({_LOCAL_CONTEXT_PLACEHOLDER})")
     text = text.replace(f"({remote_context})", f"({_REMOTE_CONTEXT_PLACEHOLDER})")
     return text
@@ -468,7 +482,7 @@ def test_normalize_strips_ansi_and_substitutes_dynamic_values() -> None:
     local_context = "a-local-ctx"
     remote_context = "a-remote-ctx"
     raw = (
-        f"\033[1mgeneral-dev\033[0m devcontainer control. Project: \033[1m{repo_dir}\033[0m\n"
+        f"\033[1m{repo_dir}\033[0m devcontainer control.   Backend follows the context.\n"
         "  \033[1;36mmake local             \033[0m host    "
         f"Point docker and VS Code at the local engine ({local_context}). Nothing.\n"
         "  \033[1;36mmake remote            \033[0m host    "
@@ -478,12 +492,34 @@ def test_normalize_strips_ansi_and_substitutes_dynamic_values() -> None:
         raw, repo_dir=repo_dir, local_context=local_context, remote_context=remote_context
     )
     assert "\033[" not in normalized
-    assert f"Project: {_REPO_DIR_PLACEHOLDER}" in normalized
+    assert normalized.startswith(f"{_REPO_DIR_PLACEHOLDER} devcontainer control.")
     assert f"({_LOCAL_CONTEXT_PLACEHOLDER})" in normalized
     assert f"({_REMOTE_CONTEXT_PLACEHOLDER})" in normalized
     assert "some-other-checkout" not in normalized
     assert "a-local-ctx" not in normalized
     assert "a-remote-ctx" not in normalized
+
+
+def test_normalize_only_substitutes_the_repo_dir_at_the_banner() -> None:
+    """The replacement is anchored, so the same word elsewhere in help text survives.
+
+    Dropping the old `"Project: "` anchor made a blanket replacement tempting.
+    A blanket one would corrupt any help line that legitimately mentions the
+    project's name, so the substitution is anchored to the start of the banner
+    line and this pins that.
+    """
+    repo_dir = "widgets"
+    raw = (
+        f"{repo_dir} devcontainer control.   Backend follows the active docker context.\n"
+        f"  make thing    both    Does a thing to the {repo_dir} workspace.\n"
+    )
+    normalized = _normalize_make_help_output(
+        raw, repo_dir=repo_dir, local_context="l", remote_context="r"
+    )
+    assert normalized.startswith(f"{_REPO_DIR_PLACEHOLDER} devcontainer control.")
+    assert f"the {repo_dir} workspace" in normalized, (
+        "the anchored substitution must leave a later, legitimate mention intact"
+    )
 
 
 _FIXTURE_VARIABLE_NAMES = ("MAKE_HELP_FIXTURE", "DEVSECRET_HELP_FIXTURE", "UNADVERTISED_FILE")

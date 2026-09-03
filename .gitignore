@@ -55,7 +55,6 @@
 /devcontainer-environment-variables.json
 .devcontainer/aws-profile-map.json
 .devcontainer/devcontainer-lock.json
-.devcontainer/ssh-private-key
 .claude/settings.local.json
 
 # Environment files
@@ -64,3 +63,10 @@ devcontainer-environment-variables.json
 
 # Python bytecode
 __pycache__/
+
+# Terraform / Terragrunt working directories. `terraform init` downloads
+# provider binaries here -- hundreds of megabytes of them -- and nothing in
+# this cache belongs in version control. Without this rule a routine
+# `terraform init` followed by `git add -A` stages those binaries, and the
+# only thing that catches it is the secret scanner refusing to decode them.
+.terraform/

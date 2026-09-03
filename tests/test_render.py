@@ -331,33 +331,12 @@ def test_render_shell_env_remote_block_populated_on_remote_payload(tmp_path: Pat
     home = _generated_dir(tmp_path, "home")
     example = (root / repo.example_for(repo.SHELL_ENV)).read_text(encoding="utf-8")
     payload = _valid_remote_payload()
-    payload["remote_ssh_key_path"] = str(home / ".ssh" / "example-key.pem")
 
     rendered = render.render_shell_env(answers_module.ensure_valid(payload), example, root, home)
 
     assert _export_value(rendered, "REMOTE_INSTANCE_ID") == f"'{payload['remote_instance_id']}'"
     assert _export_value(rendered, "REMOTE_AWS_REGION") == f"'{payload['remote_aws_region']}'"
     assert _export_value(rendered, "REMOTE_AWS_PROFILE") == f"'{payload['remote_aws_profile']}'"
-    ssh_line = _active_export_lines(rendered, "REMOTE_SSH_KEY_PATH")
-    assert ssh_line, "REMOTE_SSH_KEY_PATH must be an active (uncommented) export"
-    assert '"${HOME}/.ssh/example-key.pem"' in ssh_line[0]
-
-
-def test_render_shell_env_remote_ssh_key_outside_home_falls_back_to_quoted_literal(
-    tmp_path: Path,
-) -> None:
-    render = _import_render()
-    root = _example_root(tmp_path)
-    home = _generated_dir(tmp_path, "home")
-    outside = _generated_dir(tmp_path, "outside-home")
-    example = (root / repo.example_for(repo.SHELL_ENV)).read_text(encoding="utf-8")
-    payload = _valid_remote_payload()
-    payload["remote_ssh_key_path"] = str(outside / "keys" / "example-key.pem")
-
-    rendered = render.render_shell_env(answers_module.ensure_valid(payload), example, root, home)
-
-    expected_path = str(outside / "keys" / "example-key.pem")
-    assert _export_value(rendered, "REMOTE_SSH_KEY_PATH") == f"'{expected_path}'"
 
 
 def test_render_shell_env_remote_block_commented_on_local_payload(tmp_path: Path) -> None:
@@ -372,7 +351,6 @@ def test_render_shell_env_remote_block_commented_on_local_payload(tmp_path: Path
 
     for variable in (
         "REMOTE_INSTANCE_ID",
-        "REMOTE_SSH_KEY_PATH",
         "REMOTE_AWS_REGION",
         "REMOTE_AWS_PROFILE",
     ):
@@ -671,7 +649,6 @@ def test_end_to_end_remote_render_write_source_and_parse(tmp_path: Path) -> None
     root = _example_root(tmp_path)
     home = _generated_dir(tmp_path, "home")
     payload = _valid_remote_payload()
-    payload["remote_ssh_key_path"] = str(home / ".ssh" / "example-key.pem")
     payload["aws_config_enabled"] = True
     payload["aws_profiles"] = [
         _valid_aws_profile(name="dev"),

@@ -13,9 +13,7 @@ written for.
 
 ## Owned by E7-F1-S1-T2 (configuration and schema)
 
-- .devcontainer/remote-docker/config.env
 - shell.env.example
-- .claude/plugins/devcontainer/skills/setup-remote/SKILL.md
 
 ## Owned by the E7-F2 documentation tasks
 

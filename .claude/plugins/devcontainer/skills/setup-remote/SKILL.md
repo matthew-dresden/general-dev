@@ -77,7 +77,6 @@ Interview backend: remote
 | remote_instance_id | What is the id of the EC2 instance this backend addresses (`i-` plus 8 or 17 hexadecimal characters)? |
 | remote_aws_region | Which AWS region is that instance in? |
 | remote_aws_profile | Which AWS SSO profile authenticates to that region? |
-| remote_ssh_key_path | What is the path to the SSH private key `shell.env`'s phase-1 legacy remote path still reads? This skill's own transport is the SSM port forward secured with mTLS below -- it never uses this value -- but `render.render_shell_env` still writes `REMOTE_SSH_KEY_PATH` whenever the answered backend is `remote`, because spec Section 11.5's phase 1 keeps the existing SSH-based scripts (`container.sh`, `docker-tunnel.sh`) working unchanged. Spec Section 5.1 records that the field, and this row, are removed in phase 4 along with SSH; E7-F1-S1-T2 is the work unit that removes them. |
 
 Every row whose Prompt names a condition is asked only under that
 condition; every other row is asked unconditionally. `backend` is set
@@ -127,7 +126,7 @@ continuing.
    overwrite=False)` (refusing and naming every existing path rather than
    merging into or replacing one), then `verify.verify_all` reporting every
    finding. `render.render_shell_env` writes `REMOTE_INSTANCE_ID`,
-   `REMOTE_AWS_REGION`, `REMOTE_AWS_PROFILE` and `REMOTE_SSH_KEY_PATH`
+   `REMOTE_AWS_REGION` and `REMOTE_AWS_PROFILE`
    because the answered `backend` is `remote`.
 6. Verify the SSO session for the answered `remote_aws_profile` with
    `hostprobe.probe_aws_identity(runner, profile=<remote_aws_profile>)`. On
@@ -250,8 +249,6 @@ continuing.
   discovery, the resolution order and the Section 9 addressing
   derivations. This skill decides none of them itself.
 - Section 5.1: the interview schema, including which fields are asked only
-  when the backend is remote, and that `remote_ssh_key_path` is removed in
-  phase 4.
 - Section 5.3 and 5.5: the Parameter Store paths and the certificate
   material, modes, SANs and lifetimes this skill's procedure follows
   exactly.

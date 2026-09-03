@@ -12,7 +12,7 @@ would drift, and the correspondence test would then be the only thing
 holding them together.
 
 `FIELDS` declares sixteen fields: the fifteen rows of the spec Section 5.1
-table (AC-FUNC-001), plus `remote_ssh_key_path`, which the table's row list
+table (AC-FUNC-001). `remote_ssh_key_path` was removed with SSH itself and
 omits but the section's own prose keeps -- spec Section 11.5 Phase 4 removes
 it together with SSH, but Phase 1 (this phase) keeps the remote path working
 unchanged, so it stays declared until Phase 4 lands (AC-FUNC-011).
@@ -398,17 +398,6 @@ FIELDS: Final[tuple[Field, ...]] = (
         required=Requiredness.WHEN_REMOTE,
         validator=_profile_name_validator,
         default="default",
-    ),
-    Field(
-        name="remote_ssh_key_path",
-        required=Requiredness.WHEN_REMOTE,
-        validator=_text_validator,
-        notes=(
-            "Carried forward from the draft; spec Section 11.5 Phase 4 removes "
-            "this field together with SSH itself, but Phase 1 keeps the "
-            "remote path working unchanged, so it stays declared here until "
-            "then."
-        ),
     ),
 )
 

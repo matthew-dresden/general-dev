@@ -55,7 +55,6 @@ RENDERED_HEADER = """\
 # ships it on a local payload.
 _REMOTE_VARIABLES: tuple[str, ...] = (
     "REMOTE_INSTANCE_ID",
-    "REMOTE_SSH_KEY_PATH",
     "REMOTE_AWS_REGION",
     "REMOTE_AWS_PROFILE",
 )
@@ -108,7 +107,7 @@ def shell_quote(value: str) -> str:
 def home_relative(path: str, home: Path) -> str:
     """A path expressed against `${HOME}` when it is under it, quoted for shell.
 
-    The example writes `REMOTE_SSH_KEY_PATH` this way. Keeping the form means
+    Retained for any under-`${HOME}` path a future field renders. Keeping the form means
     the rendered file stays readable and portable between accounts. A path
     outside `home` falls back to a single-quoted literal instead, since there
     is nothing to make it relative to.
@@ -210,9 +209,6 @@ def render_shell_env(validated: dict[str, Any], example: str, root: Path, home: 
 
     if validated["backend"] == _BACKEND_REMOTE:
         text = set_export(text, "REMOTE_INSTANCE_ID", shell_quote(validated["remote_instance_id"]))
-        text = set_export(
-            text, "REMOTE_SSH_KEY_PATH", home_relative(validated["remote_ssh_key_path"], home)
-        )
         text = set_export(text, "REMOTE_AWS_REGION", shell_quote(validated["remote_aws_region"]))
         text = set_export(text, "REMOTE_AWS_PROFILE", shell_quote(validated["remote_aws_profile"]))
     else:

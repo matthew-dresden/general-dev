@@ -97,23 +97,43 @@ def test_fields_table_matches_spec_section_5_1(
 
 def test_fields_declares_no_fields_outside_the_schema() -> None:
     """AC-FUNC-001 plus AC-FUNC-011: the fifteen table rows, plus the one
-    field the spec's prose (not the table) says stays -- remote_ssh_key_path
+    the schema table alone; remote_ssh_key_path was removed with SSH
     -- and nothing else.
     """
     answers = _import_answers()
-    expected = {name for name, _, _ in _FIELD_TABLE} | {"remote_ssh_key_path"}
+    expected = {name for name, _, _ in _FIELD_TABLE}
 
     assert set(answers.FIELDS_BY_NAME) == expected
     assert len(answers.FIELDS) == len(expected)
 
 
-def test_remote_ssh_key_path_remains_declared() -> None:
-    """AC-FUNC-011: still declared, required only on the remote branch."""
+def test_remote_ssh_key_path_is_no_longer_declared() -> None:
+    """The field was removed with the SSH transport it existed to configure.
+
+    It survived phase 1 only because the SSH scripts still read the value it
+    rendered. Those scripts are gone, so a schema that still declared it would
+    ask an operator for a path nothing reads.
+    """
     answers = _import_answers()
+    assert "remote_ssh_key_path" not in answers.FIELDS_BY_NAME
+    assert all(field.name != "remote_ssh_key_path" for field in answers.FIELDS)
 
-    field = answers.FIELDS_BY_NAME["remote_ssh_key_path"]
 
-    assert field.required is answers.Requiredness.WHEN_REMOTE
+def test_a_payload_still_carrying_the_removed_field_is_rejected() -> None:
+    """An old answers file is refused by name rather than silently ignored.
+
+    Silently dropping it would leave an operator believing a key path is still
+    configured and still used. The rejection names the field so the fix is
+    obvious.
+    """
+    answers = _import_answers()
+    payload = _valid_remote_payload()
+    payload["remote_ssh_key_path"] = "/home/someone/.ssh/old-key.pem"
+    problems = answers.validate(payload)
+    assert any("remote_ssh_key_path" in str(problem) for problem in problems), (
+        "a payload carrying the removed field must be rejected naming that field, "
+        f"got: {problems}"
+    )
 
 
 def test_backends_is_exactly_local_and_remote() -> None:
@@ -131,7 +151,7 @@ def test_backends_is_exactly_local_and_remote() -> None:
 
 _ALWAYS_FIELD_NAMES = frozenset(name for name, label, _ in _FIELD_TABLE if label == "always")
 _REMOTE_FIELD_NAMES = frozenset(
-    {"remote_instance_id", "remote_aws_region", "remote_aws_profile", "remote_ssh_key_path"}
+    {"remote_instance_id", "remote_aws_region", "remote_aws_profile"}
 )
 
 
@@ -287,7 +307,7 @@ def test_scalar_validators_accept_and_reject(
 
 @pytest.mark.parametrize(
     "field_name",
-    ["developer_name", "git_user", "template_name", "local_docker_context", "remote_ssh_key_path"],
+    ["developer_name", "git_user", "template_name", "local_docker_context"],
 )
 def test_text_fields_reject_non_string_and_empty(field_name: str) -> None:
     answers = _import_answers()
@@ -306,7 +326,7 @@ def test_text_fields_reject_non_string_and_empty(field_name: str) -> None:
 
 @pytest.mark.parametrize(
     "field_name",
-    ["developer_name", "git_user", "template_name", "local_docker_context", "remote_ssh_key_path"],
+    ["developer_name", "git_user", "template_name", "local_docker_context"],
 )
 def test_placeholder_value_always_fails(field_name: str) -> None:
     answers = _import_answers()

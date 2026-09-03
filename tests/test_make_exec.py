@@ -1,7 +1,7 @@
 """`make exec` opens a shell in the container; `make shell` reports its removal.
 
-The cutover deleted the SSH transport, and with it `shell.sh` and any
-interactive path to the EC2 host. That is deliberate: the remote engine is now
+The cutover deleted the SSH transport, and with it the host-shell script and
+any interactive path to the EC2 host. That is deliberate: the remote engine is now
 reached over an SSM port forward carrying the docker API only, and the host has
 no human access path by design.
 

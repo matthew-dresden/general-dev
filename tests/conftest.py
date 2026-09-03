@@ -268,7 +268,6 @@ def _valid_remote_payload() -> dict[str, Any]:
     payload["remote_instance_id"] = _synthetic_instance_id(17)
     payload["remote_aws_region"] = "us-east-1"
     payload["remote_aws_profile"] = "default"
-    payload["remote_ssh_key_path"] = "/home/dev/.ssh/example-key.pem"
     return payload
 
 

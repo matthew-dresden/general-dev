@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import ast
 import datetime
+import json
 import hashlib
 import importlib
 import shutil
@@ -42,6 +43,7 @@ import stat
 import subprocess
 import sys
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -1579,3 +1581,272 @@ def test_main_status_respects_cert_warn_days_override(
     exit_code = certs.main(["status", "--root", str(tmp_path)])
     assert exit_code == 0
     assert "RENEW" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# publish (E6-F2-S1-T3): the step that hands an instance's TLS material to
+# Parameter Store. `issue_server` returns PEM text and persists nothing
+# precisely so this function can exist; without it the daemon has no
+# certificate and never opens its 2376 listener. Every test below drives a
+# real `catalog.CatalogClient` over a recording Runner double, so the argv/
+# stdin split these tests assert is the one production actually takes.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingRunner:
+    """A `catalog.Runner` double: an in-memory parameter store that spawns nothing.
+
+    Faithful enough for `publish` to run end to end -- a `put-parameter` stores
+    the document's value, a `get-parameter` serves it back -- so the read-back
+    `publish` performs is exercised rather than stubbed, and every argv and
+    stdin is recorded for the assertions that inspect them.
+
+    `tamper` stands in for the store returning something other than what was
+    written: it is applied to the value on the way in, so the write succeeds and
+    only the read-back disagrees, which is the failure the read-back exists to
+    catch and cannot be produced any other way.
+    """
+
+    def __init__(
+        self,
+        failure: subprocess.CompletedProcess[str] | None = None,
+        tamper: object | None = None,
+    ) -> None:
+        self.calls: list[tuple[tuple[str, ...], str | None]] = []
+        self._stored: dict[str, str] = {}
+        self._failure = failure
+        self._tamper = tamper
+
+    def _response(self, payload: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(payload), stderr=""
+        )
+
+    def __call__(
+        self, argv: Sequence[str], stdin: str | None
+    ) -> subprocess.CompletedProcess[str]:
+        argv = tuple(argv)
+        self.calls.append((argv, stdin))
+        if self._failure is not None:
+            return self._failure
+        if "put-parameter" in argv:
+            assert stdin is not None, "a put must carry its document on stdin"
+            document = json.loads(stdin)
+            value = str(document["Value"])
+            if self._tamper is not None:
+                value = self._tamper(str(document["Name"]), value)
+            self._stored[str(document["Name"])] = value
+            return self._response({"Version": len(self.calls)})
+        if "get-parameter" in argv:
+            name = argv[argv.index("--name") + 1]
+            assert name in self._stored, f"read of {name} before it was written"
+            return self._response({"Parameter": {"Value": self._stored[name]}})
+        raise AssertionError(f"unexpected operation: {argv}")
+
+    def documents(self) -> list[dict[str, object]]:
+        """Every `--cli-input-json` document this runner was handed, parsed."""
+        return [json.loads(stdin) for _, stdin in self.calls if stdin is not None]
+
+
+def _publish_client(runner: _RecordingRunner) -> object:
+    catalog = importlib.import_module("devcontainer_config.catalog")
+    return catalog.CatalogClient(runner)
+
+
+def test_publish_writes_exactly_the_publication_set_destinations(
+    issued_material: _IssuedMaterial,
+) -> None:
+    """The three entries `publication_set` allows, and nothing else."""
+    certs = issued_material.certs
+    runner = _RecordingRunner()
+
+    written = certs.publish(issued_material.paths, _publish_client(runner))
+
+    expected = tuple(
+        entry.parameter_path
+        for entry in certs.publication_set(issued_material.paths.instance)
+    )
+    assert written == expected
+    assert [doc["Name"] for doc in runner.documents()] == list(expected)
+
+
+def test_publish_sends_each_destination_the_type_publication_set_declares(
+    issued_material: _IssuedMaterial,
+) -> None:
+    """The CA certificate is public `String`; the key and certificate are `SecureString`."""
+    certs = issued_material.certs
+    runner = _RecordingRunner()
+
+    certs.publish(issued_material.paths, _publish_client(runner))
+
+    observed = {doc["Name"]: doc["Type"] for doc in runner.documents()}
+    declared = {
+        entry.parameter_path: entry.parameter_type
+        for entry in certs.publication_set(issued_material.paths.instance)
+    }
+    assert observed == declared
+
+
+def test_publish_never_places_material_in_argv(issued_material: _IssuedMaterial) -> None:
+    """The private key reaches the child on stdin, never in the process table.
+
+    The invariant `catalog`'s module docstring establishes for a stored secret
+    (E3-F1-S1-T1 AC-FUNC-004), asserted here for the other sensitive material
+    this repository writes. A `--value <pem>` implementation would publish
+    correctly and still fail this test, which is the point.
+    """
+    certs = issued_material.certs
+    runner = _RecordingRunner()
+
+    certs.publish(issued_material.paths, _publish_client(runner))
+
+    assert runner.calls, "publish issued no call at all"
+    # Every call, reads included: a read names a path, never a value.
+    for argv, _ in runner.calls:
+        joined = " ".join(argv)
+        assert "BEGIN" not in joined, f"PEM material appeared in argv: {joined}"
+        assert "--value" not in argv
+    writes = [argv for argv, _ in runner.calls if "put-parameter" in argv]
+    assert writes, "publish wrote nothing"
+    for argv in writes:
+        assert "--cli-input-json" in argv
+    for document in runner.documents():
+        assert "BEGIN" in str(document["Value"])
+
+
+def test_publish_overwrites_so_reissued_material_replaces_the_old(
+    issued_material: _IssuedMaterial,
+) -> None:
+    """Re-issuing is normal; a publish that refused an existing value would strand the instance."""
+    certs = issued_material.certs
+    runner = _RecordingRunner()
+
+    certs.publish(issued_material.paths, _publish_client(runner))
+
+    assert all(doc["Overwrite"] is True for doc in runner.documents())
+
+
+def test_publish_never_sends_the_ca_private_key(issued_material: _IssuedMaterial) -> None:
+    """The CA key is not a `publication_set` destination, so it must appear in no call."""
+    certs = issued_material.certs
+    runner = _RecordingRunner()
+    ca_key_pem = issued_material.paths.ca_key.read_text(encoding="utf-8")
+
+    certs.publish(issued_material.paths, _publish_client(runner))
+
+    for argv, stdin in runner.calls:
+        assert ca_key_pem not in " ".join(argv)
+        assert stdin is None or ca_key_pem not in stdin
+    assert not any(str(doc["Name"]).endswith("ca-key.pem") for doc in runner.documents())
+
+
+def test_publish_publishes_the_server_certificate_and_the_ca_that_signed_it(
+    issued_material: _IssuedMaterial, tmp_path: Path
+) -> None:
+    """Each destination carries the material its name promises, not merely valid PEM.
+
+    Verifying the certificate against the CA alone is too weak an assertion to
+    rest on: the CA is self-signed, so publishing the CA certificate to the
+    server-certificate destination would satisfy it. These assertions
+    distinguish the two by role -- the server certificate carries the
+    serverAuth usage and is not a CA, the CA certificate is -- and confirm the
+    published key and certificate are actually a pair, which is what the
+    daemon needs to open its listener at all.
+    """
+    certs = issued_material.certs
+    runner = _RecordingRunner()
+
+    certs.publish(issued_material.paths, _publish_client(runner))
+
+    values = {doc["Name"]: str(doc["Value"]) for doc in runner.documents()}
+    instance = issued_material.paths.instance
+    cert_pem = values[f"/devcontainer/{instance}/tls/server-cert.pem"]
+    key_pem = values[f"/devcontainer/{instance}/tls/server-key.pem"]
+    ca_pem = values[f"/devcontainer/{instance}/tls/ca.pem"]
+
+    cert_text = _openssl_text_from_pem(cert_pem, tmp_path, "published-cert")
+    assert "TLS Web Server Authentication" in cert_text
+    assert "CA:TRUE" not in cert_text
+    assert "CA:TRUE" in _openssl_text_from_pem(ca_pem, tmp_path, "published-ca")
+
+    cert_path = tmp_path / "pair-cert.pem"
+    ca_path = tmp_path / "pair-ca.pem"
+    key_path = tmp_path / "pair-key.pem"
+    cert_path.write_text(cert_pem, encoding="utf-8")
+    ca_path.write_text(ca_pem, encoding="utf-8")
+    key_path.write_text(key_pem, encoding="utf-8")
+    assert _verifies_against_ca(cert_path, ca_path)
+
+    def _public_key(*args: str) -> str:
+        return subprocess.run(
+            ["openssl", *args], capture_output=True, text=True, check=True
+        ).stdout
+
+    assert _public_key("x509", "-in", str(cert_path), "-pubkey", "-noout") == _public_key(
+        "pkey", "-in", str(key_path), "-pubout"
+    )
+
+
+def test_publish_requires_an_existing_ca_and_calls_nothing_without_one(tmp_path: Path) -> None:
+    """Fail before the first network call, naming the command that creates the CA."""
+    certs = _import_certs()
+    paths = certs.CertPaths(instance=f"test-{uuid.uuid4().hex[:8]}", root=tmp_path)
+    runner = _RecordingRunner()
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.publish(paths, _publish_client(runner))
+
+    assert "create-ca" in str(excinfo.value)
+    assert runner.calls == []
+
+
+def test_publish_lets_a_store_failure_surface_with_its_own_remedy(
+    issued_material: _IssuedMaterial,
+) -> None:
+    """A catalog error is not re-wrapped: its message already carries the fix."""
+    certs = issued_material.certs
+    catalog = importlib.import_module("devcontainer_config.catalog")
+    runner = _RecordingRunner(
+        failure=subprocess.CompletedProcess(
+            args=[], returncode=254, stdout="", stderr="AccessDeniedException: not authorized"
+        )
+    )
+
+    with pytest.raises(catalog.CatalogError):
+        certs.publish(issued_material.paths, _publish_client(runner))
+
+
+def test_publish_fails_when_a_parameter_does_not_read_back_as_written(
+    issued_material: _IssuedMaterial,
+) -> None:
+    """A write's exit code says the store accepted the call, not that the bytes survived.
+
+    Without the read-back, the mismatch below is published as a success and
+    surfaces much later as a TLS handshake failure on the instance that names
+    neither this publish nor the certificate.
+    """
+    certs = issued_material.certs
+    runner = _RecordingRunner(tamper=lambda name, value: value + "corrupted")
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.publish(issued_material.paths, _publish_client(runner))
+
+    message = str(excinfo.value)
+    assert "does not read back as it was written" in message
+    assert issued_material.paths.instance in message
+
+
+def test_publish_reads_back_every_destination_it_wrote(
+    issued_material: _IssuedMaterial,
+) -> None:
+    """Each published path is confirmed by an independent read, not just the write."""
+    certs = issued_material.certs
+    runner = _RecordingRunner()
+
+    written = certs.publish(issued_material.paths, _publish_client(runner))
+
+    read_paths = [
+        argv[argv.index("--name") + 1] for argv, _ in runner.calls if "get-parameter" in argv
+    ]
+    assert read_paths == list(written)
+    assert all("--with-decryption" in argv for argv, _ in runner.calls if "get-parameter" in argv)

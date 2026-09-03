@@ -37,11 +37,21 @@ from the set that module enforces. `ca-key.pem` is never among them:
 `certs.publication_set` raises rather than returning an entry for it under
 any spelling, the CA private key's own second, structural enforcement of the
 "never leaves the laptop" rule `## Material` states in prose (spec Section
-5.5). No AWS call is made from `certs.py` itself (Section 3.4, standard
-library only); publishing an entry `publication_set` returns is this
-skill's own responsibility, performed the same way
-`/devcontainer:secrets`'s own `## Operations` table publishes a `devsecret
-set` value. Publishing to `/devcontainer/<instance>/tls/*` (`## Operations`,
+5.5). Publication is `certs.publish`'s own
+operation, behind `make cert-publish` (Section 4.1.2): it issues the server
+material, writes each entry `publication_set` returned through
+`catalog.CatalogClient.write_parameter`, then reads every one back through
+`catalog.CatalogClient.read_parameter` and compares it against what it wrote
+before reporting anything published. It reaches the store through that client
+rather than shelling out to `aws` here for two reasons. The value travels to
+the child process inside a `--cli-input-json` document on stdin and never in
+argv, so a TLS private key is never visible in the process table nor echoed
+back by this repository's own failure translator -- the identical invariant
+`catalog`'s own module docstring states for a stored secret, which a
+hand-written `put-parameter --value` call would break silently. And the error
+classification an operator needs -- an expired SSO session, a denied prefix --
+already exists there with its remedy, rather than being reinvented at this
+call site. Publishing to `/devcontainer/<instance>/tls/*` (`## Operations`,
 Section 5.3) is `certs`'s own path, never `catalog`'s or `devsecret`'s:
 Section 4.3's `devsecret` CLI and the `catalog` module
 `/devcontainer:secrets` wraps reach only
@@ -62,6 +72,17 @@ the command line, then `DEFAULT_REMOTE_INSTANCE`, then the sole directory
 under `remote-instances/` if exactly one exists, otherwise fail listing what
 is configured) rather than this skill inventing a second way to disambiguate
 which instance "which instance" refers to.
+
+Each operation has an operator-invocable entry point, so the lifecycle is
+reachable without this skill as well as through it: `make cert-ca`,
+`make cert-client`, `make cert-publish` and `make cert-status`. All four
+resolve the instance through that same order -- the first three by way of
+`.devcontainer/remote-docker/certs.sh`, which calls the shared resolver and
+adds no addressing policy of its own. They are deliberately separate targets
+rather than one idempotent "ensure": each underlying operation refuses to
+overwrite existing material, so running the wrong one names the path that
+already exists instead of silently replacing a certificate the other half of
+the pair still trusts.
 
 ## Material
 

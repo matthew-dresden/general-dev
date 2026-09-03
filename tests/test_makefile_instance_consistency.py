@@ -1,4 +1,14 @@
-"""AC-4.8: the set of remote targets and the set accepting `INSTANCE` are the same set.
+"""AC-4.8: the set of instance-scoped targets and the set accepting `INSTANCE` are equal.
+
+"Instance-scoped" is read off the Makefile as "dispatches through one of the
+instance-aware entry scripts" -- the scripts that call `rd_resolve_instance` and
+so act on one named instance. Two of them reach the remote engine
+(`container.sh`, `push-secrets.sh`) and one addresses an instance's material
+without touching an engine at all (`certs.sh`, whose `ca` and `client`
+subcommands write only to the local certificate directory). The property that
+matters is the same for all three: a target scoped to one instance must accept
+`INSTANCE`, or `INSTANCE=<name> make <target>` silently acts on the default
+instead.
 
 `tests/test_remote_target_instance_wiring.py` checks that each remote recipe
 passes `INSTANCE` through. That is a forward check, and a forward check alone
@@ -24,10 +34,12 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _MAKEFILE = _REPO_ROOT / "Makefile"
 
-# Targets that reach the remote engine through a script, and so must accept an
-# instance. Known members, used only as a guard that the parse still works --
+# Targets dispatched through an instance-aware script, and so required to accept
+# an instance. Known members, used only as a guard that the parse still works --
 # never as the expected set itself, which is derived below.
-_KNOWN_REMOTE_TARGETS = frozenset({"status", "build", "up", "clean", "push-secrets"})
+_KNOWN_REMOTE_TARGETS = frozenset(
+    {"status", "build", "up", "clean", "push-secrets", "cert-publish"}
+)
 
 
 def _makefile_text() -> str:
@@ -52,7 +64,7 @@ def _targets_reaching_the_remote_engine() -> set[str]:
     return {
         target
         for target, lines in _target_recipes().items()
-        if any(re.search(r"\$\((CONTAINER_SH|SECRETS_SH)\)", line) for line in lines)
+        if any(re.search(r"\$\((CONTAINER_SH|SECRETS_SH|CERTS_SH)\)", line) for line in lines)
     }
 
 

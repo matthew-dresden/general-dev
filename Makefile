@@ -12,6 +12,7 @@ INSTANCE ?=
 
 CONTAINER_SH := $(RD_DIR)/container.sh
 SECRETS_SH := $(RD_DIR)/push-secrets.sh
+CERTS_SH := $(RD_DIR)/certs.sh
 PROXY_SH := .devcontainer/tinyproxy-daemon.sh
 KEYBINDINGS_PY := .devcontainer/vscode-keybindings-install.py
 # Where devcontainer_config lives (spec Section 4.5). Named once here so no
@@ -65,7 +66,7 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make keybindings"      "host"   "Bind Shift+Enter to a newline in VS Code terminals. Must run on the host, not in the container."
 	@printf '\n\033[1mENGINE\033[0m  pick where builds and containers live\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make local"            "host"   "Point docker and VS Code at the local engine ($(LOCAL_CONTEXT)). Nothing remote is stopped."
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)), refreshing the SSH-over-SSM tunnel first."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)), refreshing the SSM port forward first."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make instances"        "host" "List every configured instance and mark the active one."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make connect"          "remote" "What 'make remote' calls. Re-run after a reboot, after sleep, or when SSO expires."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make disconnect"       "host"   "What 'make local' calls. Only changes where new commands and windows point."
@@ -88,6 +89,9 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make push-git-creds"   "both"   "Copy this machine's git credentials into the container so it can push with no editor attached."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-status"      "host"   "Client and CA expiry per instance."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-ca"          "host"   "Create this instance's certificate authority. Once per instance; refuses if one exists."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-client"      "host"   "Issue the client certificate 'make connect' presents. Run after cert-ca, and again at renewal."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-publish"     "remote" "Issue server material and publish it to Parameter Store. The daemon needs it to open its listener."
 	@printf '\n\033[1mHOST PROXY\033[0m  only needed behind a corporate proxy; remote builds force HOST_PROXY=false\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-start"      "local"  "Run tinyproxy on this machine. Local containers reach it via host.docker.internal."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-status"     "local"  "Whether it is running, and on which port."
@@ -111,7 +115,7 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "NO_CACHE=1"            ""       "What the no-cache targets set. Works with build and rebuild directly."
 	@printf '\n\033[1mPREREQUISITES\033[0m\n'
 	@printf '  %-23s %s\n' "container targets"     "docker"
-	@printf '  %-23s %s\n' "remote engine"         "aws, ssh, session-manager-plugin, and REMOTE_INSTANCE_ID in shell.env"
+	@printf '  %-23s %s\n' "remote engine"         "aws, session-manager-plugin, and REMOTE_INSTANCE_ID in shell.env"
 	@printf '  %-23s %s\n' "build and rebuild"     "devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli"
 	@printf '  %-23s %s\n' "lint"                  "uv                                      brew install uv"
 	@printf '  %-23s %s\n' "test"                  "uv, zsh                                 uv: $(TEST_INSTALL_HINT_uv)   zsh: $(TEST_INSTALL_HINT_zsh)"
@@ -248,6 +252,19 @@ push-secrets:
 # inside it), exit 1 when any has expired.
 cert-status:
 	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.certs status
+
+# spec Section 4.5: the issuing half. Separate targets, not one idempotent
+# "ensure": each underlying operation refuses to overwrite existing material,
+# so running the wrong one names the path that already exists rather than
+# silently replacing a certificate the other half of the pair still trusts.
+cert-ca:
+	@INSTANCE="$(INSTANCE)" $(CERTS_SH) ca
+
+cert-client:
+	@INSTANCE="$(INSTANCE)" $(CERTS_SH) client
+
+cert-publish:
+	@INSTANCE="$(INSTANCE)" $(CERTS_SH) publish
 
 proxy-start:
 	@$(PROXY_ENV) $(PROXY_SH) start

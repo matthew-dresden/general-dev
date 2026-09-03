@@ -2046,3 +2046,57 @@ def test_default_mount_table_reader_returns_none_when_proc_mounts_absent(
     monkeypatch.setattr(catalog, "_PROC_MOUNTS_PATH", tmp_path / "does-not-exist")
 
     assert catalog.default_mount_table_reader() is None
+
+
+# ---------------------------------------------------------------------------
+# write_parameter: the raw put `write` is built on, and the one
+# devcontainer_config.certs.publish uses for material that is not a secret and
+# does not live under a secrets scope.
+# ---------------------------------------------------------------------------
+
+
+def test_write_parameter_writes_the_given_path_and_type_verbatim() -> None:
+    """No secrets-path composition and no forced SecureString: both are the caller's."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(_ok({"Version": 3}))
+    client = catalog.CatalogClient(runner)
+
+    version = client.write_parameter("/devcontainer/sandbox/tls/ca.pem", "public-pem", "String")
+
+    assert version == 3
+    (argv, stdin) = runner.calls[0]
+    assert stdin is not None
+    document = json.loads(stdin)
+    assert document["Name"] == "/devcontainer/sandbox/tls/ca.pem"
+    assert document["Type"] == "String"
+    assert document["Value"] == "public-pem"
+    assert document["Overwrite"] is True
+    assert "public-pem" not in " ".join(argv)
+
+
+def test_write_parameter_omits_description_when_none_is_given() -> None:
+    """`write`'s exported flag is a secret-specific field, not part of every put."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(_ok({"Version": 1}))
+    client = catalog.CatalogClient(runner)
+
+    client.write_parameter("/devcontainer/sandbox/tls/ca.pem", "value", "String")
+
+    document = json.loads(runner.calls[0][1])
+    assert "Description" not in document
+
+
+def test_write_still_sends_its_exported_description_through_the_shared_put() -> None:
+    """The delegation must not have dropped the field `list` reads back."""
+    catalog = _import_catalog()
+    runner = _FakeRunner()
+    runner.queue(_ok({"Version": 1}))
+    client = catalog.CatalogClient(runner)
+
+    client.write("shared", "TOKEN", "value", exported=True)
+
+    document = json.loads(runner.calls[0][1])
+    assert json.loads(document["Description"]) == {"exported": True}
+    assert document["Type"] == catalog.SECURE_STRING_TYPE

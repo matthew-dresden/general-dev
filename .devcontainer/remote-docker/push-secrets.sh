@@ -36,20 +36,29 @@ REMOTE_SHELL_ENV=$(sed \
   "$SHELL_ENV_SOURCE")
 [ -n "$REMOTE_SHELL_ENV" ] || rd_die "transformed shell.env is empty"
 
+# Values go to the child on stdin as a --cli-input-json document, never in
+# argv: shell.env carries every credential this repository has, and an
+# argument is visible in the process table to any other process on this
+# machine for as long as the call runs. This is the same invariant
+# devcontainer_config.catalog states for a stored secret and
+# devcontainer_config.certs.publish applies to a TLS private key.
+rd_put_parameter() {
+  local name="$1" type="$2" value="$3"
+  # printf, not a here-string: a here-string appends a newline, which would
+  # store bytes the local file does not have and make every later comparison
+  # against it report a difference that is not there.
+  printf '%s' "$value" \
+    | python3 -c 'import json,sys; sys.stdout.write(json.dumps({"Name":sys.argv[1],"Value":sys.stdin.read(),"Type":sys.argv[2],"Overwrite":True}))' \
+      "$name" "$type" \
+    | rd_aws ssm put-parameter \
+      --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" \
+      --cli-input-json file:///dev/stdin > /dev/null
+}
+
 rd_log "Publishing ${SSM_PREFIX}/shell.env (SecureString)..."
-rd_aws ssm put-parameter \
-  --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" \
-  --name "${SSM_PREFIX}/shell.env" \
-  --type SecureString \
-  --value "$REMOTE_SHELL_ENV" \
-  --overwrite > /dev/null
+rd_put_parameter "${SSM_PREFIX}/shell.env" SecureString "$REMOTE_SHELL_ENV"
 
 rd_log "Publishing ${SSM_PREFIX}/aws-profile-map.json (String)..."
-rd_aws ssm put-parameter \
-  --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" \
-  --name "${SSM_PREFIX}/aws-profile-map.json" \
-  --type String \
-  --value "$(cat "$PROFILE_MAP_SOURCE")" \
-  --overwrite > /dev/null
+rd_put_parameter "${SSM_PREFIX}/aws-profile-map.json" String "$(cat "$PROFILE_MAP_SOURCE")"
 
 rd_ok "Secrets published for project '${PROJECT_NAME}'. Remote workspaces of this project can now bootstrap."

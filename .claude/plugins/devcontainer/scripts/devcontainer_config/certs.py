@@ -192,6 +192,8 @@ DEFAULT_CERTS_ROOT = instances.certs_root()
 CA_SUBDIR = "ca"
 CA_KEY_FILENAME = "ca-key.pem"
 CA_CERT_FILENAME = "ca.pem"
+SERVER_KEY_FILENAME = "server-key.pem"
+SERVER_CERT_FILENAME = "server-cert.pem"
 CLIENT_CERT_FILENAME = "cert.pem"
 CLIENT_KEY_FILENAME = "key.pem"
 
@@ -282,8 +284,8 @@ STRING_TYPE = "String"
 # `_is_ca_private_key_request` before this mapping is even consulted, so its
 # absence here is a second, independent enforcement of the same rule.
 _PUBLISHABLE: dict[str, str] = {
-    "server-key.pem": SECURE_STRING_TYPE,
-    "server-cert.pem": SECURE_STRING_TYPE,
+    SERVER_KEY_FILENAME: SECURE_STRING_TYPE,
+    SERVER_CERT_FILENAME: SECURE_STRING_TYPE,
     CA_CERT_FILENAME: STRING_TYPE,
 }
 
@@ -295,6 +297,7 @@ _PUBLISHABLE: dict[str, str] = {
 _CA_PRIVATE_KEY_NAMES: frozenset[str] = frozenset(
     {CA_KEY_FILENAME, f"{CA_SUBDIR}/{CA_KEY_FILENAME}"}
 )
+
 
 
 class CertsError(RuntimeError):
@@ -419,6 +422,79 @@ class PublicationEntry:
 
     parameter_path: str
     parameter_type: str
+
+
+
+def publish(paths: CertPaths, client: catalog.CatalogClient) -> tuple[str, ...]:
+    """Publish `paths.instance`'s TLS material to Parameter Store, returning the paths written.
+
+    `issue_server` returns the server key and certificate as PEM text and
+    persists neither, precisely so this function can hand them to Parameter
+    Store without an intermediate file: the private key never touches disk
+    outside the temporary directory `issue_server` already removed. It reaches
+    the store through `catalog.CatalogClient.write_parameter`, which passes
+    every value on the child's stdin rather than in argv, so the key never
+    reaches the process table either -- the same invariant that protects a
+    stored secret (spec Section 5.4), applied to the one other kind of
+    sensitive material this repository writes.
+
+    Only the three destinations `publication_set` allows are written, with the
+    types it declares: `SecureString` for the key and certificate, `String`
+    for the CA certificate, which is public by construction. The CA *private*
+    key is never a destination `publication_set` returns, so it cannot be
+    published even by mistake.
+
+    Each parameter overwrites rather than creates-if-absent: re-issuing
+    material for an instance is a normal operation, and a publish that failed
+    because a previous value existed would leave the instance pinned to a
+    certificate the operator has already replaced.
+
+    Every parameter is read back and compared against what was written before
+    this function reports it published. A write's own exit code says the store
+    accepted the call, not that the bytes an instance will later read are the
+    bytes that were issued, and the failure that distinction produces surfaces
+    much later as a handshake error naming neither the publish nor the
+    certificate.
+
+    Raises:
+        CertsError: the CA is missing, so there is nothing to sign with.
+        catalog.CatalogError: the store rejected or could not serve a write.
+            Deliberately not translated -- `CatalogUnavailableError` and
+            `CatalogUnauthorizedError` already carry the remedy an operator
+            needs, and re-wrapping them here would only bury it.
+    """
+    if not paths.ca_key.is_file() or not paths.ca_cert.is_file():
+        raise CertsError(
+            f"ERROR: no certificate authority for {paths.instance!r}\n"
+            f"Expected {paths.ca_key} and {paths.ca_cert}.\n"
+            f"Create it first: create-ca --instance {paths.instance}"
+        )
+
+    server = issue_server(paths)
+    contents = {
+        SERVER_KEY_FILENAME: server.key_pem,
+        SERVER_CERT_FILENAME: server.cert_pem,
+        CA_CERT_FILENAME: paths.ca_cert.read_text(encoding="utf-8"),
+    }
+
+    written: list[str] = []
+    for entry in publication_set(paths.instance):
+        filename = entry.parameter_path.rsplit("/", 1)[1]
+        value = contents[filename]
+        client.write_parameter(entry.parameter_path, value, entry.parameter_type)
+        stored = client.read_parameter(entry.parameter_path)
+        if stored != value:
+            raise CertsError(
+                f"ERROR: {entry.parameter_path} does not read back as it was written\n"
+                f"Wrote {len(value)} bytes, read back {len(stored)}.\n"
+                "The daemon reads this parameter at container create; starting it against "
+                "material that is not what was issued would fail the TLS handshake with an "
+                "error naming neither this publish nor the certificate.\n"
+                f"Re-run the publish for {paths.instance!r}, and check whether another "
+                "process is writing the same prefix."
+            )
+        written.append(entry.parameter_path)
+    return tuple(written)
 
 
 def _require_openssl() -> None:
@@ -900,8 +976,8 @@ def issue_server(paths: CertPaths) -> ServerCertificate:
     _require_ca(paths)
     lifetime = _resolve_lifetime_days(CERT_SERVER_DAYS_ENV_VAR, CERT_SERVER_DAYS_DEFAULT)
     with tempfile.TemporaryDirectory(prefix="devcontainer-certs-server-") as tmp_dir:
-        key_path = Path(tmp_dir) / "server-key.pem"
-        cert_path = Path(tmp_dir) / "server-cert.pem"
+        key_path = Path(tmp_dir) / SERVER_KEY_FILENAME
+        cert_path = Path(tmp_dir) / SERVER_CERT_FILENAME
         _issue_certificate(
             paths,
             role_cn_suffix="server",
@@ -1355,6 +1431,18 @@ def _build_parser() -> argparse.ArgumentParser:
     add_instance_arguments(issue_client_parser)
     issue_client_parser.set_defaults(handler=_run_issue_client)
 
+    publish_parser = subparsers.add_parser(
+        "publish",
+        help="Publish this instance's TLS material to Parameter Store.",
+    )
+    add_instance_arguments(publish_parser)
+    publish_parser.add_argument(
+        "--region",
+        default=None,
+        help="The AWS region (default: resolved from the environment by the aws CLI).",
+    )
+    publish_parser.set_defaults(handler=_run_publish)
+
     publication_set_parser = subparsers.add_parser(
         "publication-set",
         help="Print the Parameter Store entries this instance's material may publish.",
@@ -1400,6 +1488,15 @@ def _run_issue_client(args: argparse.Namespace) -> int:
     paths = CertPaths(instance=args.instance, root=args.root)
     issue_client(paths)
     print(f"Issued client certificate for {args.instance!r} at {paths.client_cert}.")
+    return 0
+
+
+def _run_publish(args: argparse.Namespace) -> int:
+    """Issue server material and publish it, printing each destination written."""
+    paths = CertPaths(instance=args.instance, root=args.root)
+    client = catalog.CatalogClient(catalog.subprocess_runner, region=args.region)
+    for path in publish(paths, client):
+        print(f"published {path}")
     return 0
 
 

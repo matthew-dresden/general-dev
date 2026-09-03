@@ -43,6 +43,7 @@ _RD_DIR = _REPO_ROOT / ".devcontainer" / "remote-docker"
 _LIB_SH = _RD_DIR / "lib.sh"
 _CONTAINER_SH = _RD_DIR / "container.sh"
 _PUSH_SECRETS_SH = _RD_DIR / "push-secrets.sh"
+_CERTS_SH = _RD_DIR / "certs.sh"
 
 _TIMEOUT_ENV_VAR = "MAKE_INSTANCE_WIRING_TEST_TIMEOUT_SECONDS"
 _DEFAULT_TIMEOUT_SECONDS = 60.0
@@ -66,11 +67,11 @@ def _makefile_text() -> str:
 
 
 def _remote_recipe_lines() -> list[str]:
-    """Every recipe line invoking a script that reaches the remote engine."""
+    """Every recipe line invoking one of the instance-aware entry scripts."""
     return [
         line
         for line in _makefile_text().splitlines()
-        if line.startswith("\t") and re.search(r"\$\((CONTAINER_SH|SECRETS_SH)\)", line)
+        if line.startswith("\t") and re.search(r"\$\((CONTAINER_SH|SECRETS_SH|CERTS_SH)\)", line)
     ]
 
 
@@ -136,7 +137,7 @@ def test_resolution_is_guarded_against_running_twice() -> None:
 
 def test_the_resolver_is_the_only_policy_holder() -> None:
     """No shell script may re-derive an address the resolver already computes."""
-    for path in (_CONTAINER_SH, _PUSH_SECRETS_SH):
+    for path in (_CONTAINER_SH, _PUSH_SECRETS_SH, _CERTS_SH):
         text = path.read_text(encoding="utf-8")
         assert not re.search(r'"/devcontainer/\$\{PROJECT_NAME\}"', text), (
             f"{path.name} still derives a Parameter Store prefix from PROJECT_NAME instead of "
@@ -155,6 +156,29 @@ def test_push_secrets_resolves_before_any_aws_call() -> None:
     assert resolve_at < first_aws, (
         "push-secrets.sh must resolve the instance before its first AWS call, or it can "
         "publish under a prefix belonging to a different instance"
+    )
+
+
+def test_certs_sh_resolves_before_any_aws_call() -> None:
+    """Publishing under the wrong prefix hands an instance a certificate it will reject."""
+    text = _CERTS_SH.read_text(encoding="utf-8")
+    resolve_at = text.index("rd_resolve_instance")
+    first_aws = min(
+        (text.index(token) for token in ("rd_check_aws_auth", "aws ssm") if token in text),
+        default=len(text),
+    )
+    assert resolve_at < first_aws, (
+        "certs.sh must resolve the instance before its first AWS call, or it can publish "
+        "TLS material under a prefix belonging to a different instance"
+    )
+
+
+def test_certs_sh_writes_material_under_the_resolved_certificate_directory() -> None:
+    """The resolver owns spec Section 9's certificate directory; certs.sh must not re-derive it."""
+    text = _CERTS_SH.read_text(encoding="utf-8")
+    assert 'dirname "$CERTS_DIR"' in text, (
+        "certs.sh must take the certificate root from the resolved CERTS_DIR, or an operator "
+        "who sets DOCKER_CONFIG writes material under one directory and reads it from another"
     )
 
 

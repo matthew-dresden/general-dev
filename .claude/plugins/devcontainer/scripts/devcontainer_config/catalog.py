@@ -691,7 +691,27 @@ class CatalogClient:
                 reason this client does not classify (for example
                 throttling, a validation failure, or an invalid region).
         """
-        path = parameter_path(scope, name)
+        return self.read_parameter(parameter_path(scope, name))
+
+    def read_parameter(self, path: str) -> str:
+        """The value stored at the fully-qualified `path`, byte for byte.
+
+        The read counterpart of `write_parameter`, and symmetric with it: it
+        takes the path as given rather than composing the secrets path, so a
+        caller that wrote material outside a secrets scope can read back
+        exactly what it wrote. `devcontainer_config.certs.publish` uses it to
+        confirm each published parameter independently, rather than trusting
+        the write call's own exit code.
+
+        Raises:
+            CatalogUnavailableError: the store could not be reached.
+            CatalogUnauthorizedError: the caller lacks access to this prefix.
+            SecretNotFoundError: no parameter exists at this path.
+            CatalogError: the response has no `Parameter.Value` field, or is
+                not valid JSON.
+            CatalogUnclassifiedError: the store rejected the operation for a
+                reason this client does not classify.
+        """
         argv = self._argv(GET_PARAMETER_OP, "--name", path, "--with-decryption")
         result = self._invoke(argv, None, path, operation=GET_PARAMETER_OP)
         payload = _parse_response_json(result.stdout, path, GET_PARAMETER_OP)
@@ -707,8 +727,9 @@ class CatalogClient:
     def write(self, scope: str, name: str, value: str, *, exported: bool = False) -> int:
         """Store `value` at `scope`/`name` as a SecureString, overwriting any existing version.
 
-        `value` is handed to the child process on stdin inside a
-        `--cli-input-json` document; it is never placed in argv, so it never
+        Delegates to `write_parameter`, which is where the argv invariant
+        lives: `value` is handed to the child process on stdin inside a
+        `--cli-input-json` document and is never placed in argv, so it never
         reaches the process table (E3-F1-S1-T1 AC-FUNC-004).
 
         Returns:
@@ -726,18 +747,60 @@ class CatalogClient:
             CatalogError: the response has no integer `Version` field, or is
                 not valid JSON.
         """
-        path = parameter_path(scope, name)
-        document = json.dumps(
-            {
-                "Name": path,
-                "Value": value,
-                "Type": SECURE_STRING_TYPE,
-                "Overwrite": True,
-                "Description": json.dumps({"exported": exported}),
-            }
+        return self.write_parameter(
+            parameter_path(scope, name),
+            value,
+            SECURE_STRING_TYPE,
+            description=json.dumps({"exported": exported}),
         )
+
+    def write_parameter(
+        self,
+        path: str,
+        value: str,
+        parameter_type: str,
+        *,
+        description: str | None = None,
+    ) -> int:
+        """Store `value` at the fully-qualified `path`, overwriting any existing version.
+
+        The one place in this repository a parameter is written. `write`
+        above is the secret-shaped caller -- it composes the secrets path and
+        pins `SecureString`; this method takes the path and type as given, so
+        material that is not a secret and does not live under a secrets scope
+        (`devcontainer_config.certs.publish`'s TLS entries, which include a
+        deliberately public `String` CA certificate) can be written without
+        either duplicating this argv or being forced into the secrets path
+        shape.
+
+        Keeping both callers on this method is what makes the argv invariant
+        structural rather than a discipline each caller has to remember:
+        `value` is handed to the child on stdin inside a `--cli-input-json`
+        document and never appears in argv, so no secret -- a stored password
+        or a TLS private key alike -- can reach the process table
+        (E3-F1-S1-T1 AC-FUNC-004).
+
+        Returns:
+            The integer `Version` the store assigned to the parameter.
+
+        Raises:
+            CatalogUnavailableError: the store could not be reached.
+            CatalogUnauthorizedError: the caller lacks access to this prefix.
+            CatalogUnclassifiedError: the store rejected the operation for a
+                reason this client does not classify.
+            CatalogError: the response has no integer `Version` field, or is
+                not valid JSON.
+        """
+        document: dict[str, object] = {
+            "Name": path,
+            "Value": value,
+            "Type": parameter_type,
+            "Overwrite": True,
+        }
+        if description is not None:
+            document["Description"] = description
         argv = self._argv(PUT_PARAMETER_OP, "--cli-input-json", CLI_INPUT_STDIN_URI)
-        result = self._invoke(argv, document, path, operation=PUT_PARAMETER_OP)
+        result = self._invoke(argv, json.dumps(document), path, operation=PUT_PARAMETER_OP)
         payload = _parse_response_json(result.stdout, path, PUT_PARAMETER_OP)
         version = payload.get("Version")
         if not isinstance(version, int) or isinstance(version, bool):

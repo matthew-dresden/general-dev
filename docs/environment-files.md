@@ -405,6 +405,43 @@ readers apply the same fail-fast rule to every non-empty value other than
 `transport.py`'s `resolve_transport` does the same; the one value they
 disagree on, the empty string, is documented above.
 
+### Repository slug derivation
+
+E8-F1-S1-T3 adds a repository-slug derivation,
+`devcontainer_config.repo.repo_slug`, that will read `git config --get
+remote.origin.url` and apply the same `basename()`-plus-`trimsuffix(".git")`
+transform `remote-instances/root.hcl`'s own `repo_slug` local already
+applies, for building the per-instance docker context name (spec Section
+9). That git-config read is local and network-free, but will still be
+bounded rather than unbounded, by `REPO_SLUG_GIT_TIMEOUT_SECONDS`, resolved
+through `hostprobe.py`'s `read_positive_seconds`, the same shared reader
+`transport.py` uses for `DOCKER_HANDSHAKE_TIMEOUT`. `tests/test_state_bucket_name.py`'s
+private `_repo_slug_from_git_remote` already declares the identical
+`REPO_SLUG_GIT_TIMEOUT_SECONDS` name and `10` second default for the same
+git-remote read, independently of `repo.py`, and reads it today at import
+time. As of this revision E8-F1-S1-T3 has not landed in this repository:
+`repo.py` declares neither `repo_slug` nor `REPO_SLUG_GIT_TIMEOUT_SECONDS`,
+so `repo.py` itself has no reader for this variable yet, which leaves
+`tests/test_state_bucket_name.py`'s reader as this variable's only reader
+in this repository right now. That whole sentence, and the "not yet
+landed" caveat below, describe a transient state tied to E8-F1-S1-T3
+landing, not a permanent fact about this variable: once
+`devcontainer_config.repo` declares `repo_slug`, both must be rewritten to
+name `repo.py`'s reader as landed and to drop the "only reader" claim,
+since `tests/test_state_bucket_name.py`'s reader would then no longer be
+the only one.
+
+| Variable | Default | Defined in |
+|---|---|---|
+| `REPO_SLUG_GIT_TIMEOUT_SECONDS` | `10` | `tests/test_state_bucket_name.py`'s private `_repo_slug_from_git_remote`, resolved through `hostprobe.py`'s `read_positive_seconds` (this variable's only reader today; `repo.py`'s `repo_slug` will become a second, independent reader of the identical name and default once it lands, not yet landed, E8-F1-S1-T3) |
+
+`read_positive_seconds` already applies, to `tests/test_state_bucket_name.py`'s
+reader today, the same fail-fast rule `DOCKER_HANDSHAKE_TIMEOUT`'s reader
+applies: it rejects a non-numeric or non-positive value by name rather than
+silently falling back to the default. Once `repo_slug` lands (E8-F1-S1-T3),
+`repo.py`'s reader will apply that identical rule too; until then, `repo.py`
+itself has no reader for this variable.
+
 ### What did not change
 
 - `shell.env` is still published to Parameter Store by `make push-secrets`

@@ -121,7 +121,7 @@ from pathlib import Path
 
 import pytest
 from conftest import _makefile_text, _normalize_whitespace
-from devcontainer_config import transport
+from devcontainer_config import repo, transport
 from gitignore_check import repo_root
 
 _DOC_RELATIVE_PATH = "docs/environment-files.md"
@@ -430,19 +430,105 @@ _TRANSPORT_SSH_UNQUALIFIED_FALLBACK_PATTERN = re.compile(
 )
 
 
-def _transport_section_text() -> str:
-    """The `### Transport` section only, from its heading up to the next heading.
+def _section_text(heading: str) -> str:
+    """The section starting at `heading` only, up to the next heading or EOF.
 
-    Scoping to this slice, the same technique `_secrets_section_text` uses
-    for `## Secrets`, means a fact this section is responsible for stating
-    cannot be satisfied by the same words appearing somewhere else in the
-    document for an unrelated reason. The next `##`- or `###`-level
-    heading, or end of file, ends the slice.
+    E8-F1-S1-T4 (round 2, code_review REVIEW_FAIL DRY): extracted from what
+    were previously two byte-identical copies, `_transport_section_text`
+    (`### Transport`) and `_repo_section_text` (`### Repository slug
+    derivation`), which differed only in the heading literal. Scoping to
+    this slice, the same technique `_secrets_section_text` uses for
+    `## Secrets`, means a fact a section is responsible for stating cannot
+    be satisfied by the same words appearing somewhere else in the document
+    for an unrelated reason. The next `##`- or `###`-level heading, or end
+    of file, ends the slice.
     """
     text = _doc_text()
-    match = re.search(r"^### Transport\n.*?(?=^## |^### |\Z)", text, re.MULTILINE | re.DOTALL)
-    assert match, f"{_DOC_RELATIVE_PATH} has no '{_TRANSPORT_HEADING}' section."
+    match = re.search(
+        rf"^{re.escape(heading)}\n.*?(?=^## |^### |\Z)", text, re.MULTILINE | re.DOTALL
+    )
+    assert match, f"{_DOC_RELATIVE_PATH} has no {heading!r} section."
     return match.group(0)
+
+
+def _section_table_variable_names(heading: str) -> tuple[str, ...]:
+    """The first-column variable names of the rendered `Variable | Default |
+    Defined in` table under `heading`.
+
+    E8-F1-S1-T4 (round 2, code_review REVIEW_FAIL DRY): extracted from what
+    were previously two byte-identical copies, `_transport_table_variable_names`
+    and `_repo_table_variable_names`. Parses the actual Markdown table rather
+    than any list this module declares, the same technique
+    `_configuration_variable_names` uses for the `### Configuration
+    variables` table, so a table row added, removed, or renamed in
+    `docs/environment-files.md` changes what this function returns on the
+    very next test run.
+    """
+    section = _section_text(heading)
+    table_match = _TRANSPORT_TABLE_PATTERN.search(section)
+    if table_match is None:
+        return ()
+    return _markdown_table_first_column_names(table_match.group(1))
+
+
+def _section_table_variable_defaults(heading: str) -> dict[str, str]:
+    """Maps each row's first-column variable name to its own second-column
+    (`Default`) cell, backtick-stripped, for the `Variable | Default |
+    Defined in` table under `heading`.
+
+    test_review WARN (round 2, echoed as an observation by code_review):
+    `test_repo_section_documents_repo_slug_git_timeout_seconds` previously
+    paired `_section_table_variable_names` (which only proves the ROW
+    exists) with a section-wide `expected_default_text in section` scan,
+    so a table cell mutated from `` `10` `` to `` `30` `` while the
+    surrounding prose still said `10` left that test green -- the default
+    was pinned to the SECTION, not to the ROW that is supposed to state
+    it. This function parses the identical table
+    `_section_table_variable_names` parses, keeping each row's second
+    column attached to its first, so a caller can assert on the row's own
+    cell instead of the section as a whole.
+    """
+    section = _section_text(heading)
+    table_match = _TRANSPORT_TABLE_PATTERN.search(section)
+    if table_match is None:
+        return {}
+    defaults: dict[str, str] = {}
+    for line in table_match.group(1).splitlines():
+        if not line.strip().startswith("|"):
+            continue
+        cells = line.split("|")
+        if len(cells) < 3:
+            continue
+        name = cells[1].strip().strip("`")
+        default = cells[2].strip().strip("`")
+        defaults[name] = default
+    return defaults
+
+
+def _module_env_var_names(module: object) -> frozenset[str]:
+    """Every environment variable `module`'s own namespace declares as a
+    `*_ENV_VAR` module-level constant.
+
+    E8-F1-S1-T4 (round 2, code_review REVIEW_FAIL DRY): extracted from what
+    were previously two byte-identical copies, `_transport_module_env_var_names`
+    (`devcontainer_config.transport`) and `_repo_module_env_var_names`
+    (`devcontainer_config.repo`). Reads `vars(module)` rather than parsing
+    source text, so an imported constant a module re-exports by name
+    (rather than declaring directly) counts the same as one it assigns
+    itself, and this extraction exists exactly once rather than as
+    per-module copies that could silently diverge on the next
+    naming-convention quirk either module's constants take on.
+    """
+    return frozenset(
+        value
+        for name, value in vars(module).items()
+        if name.endswith("_ENV_VAR") and isinstance(value, str)
+    )
+
+
+def _transport_section_text() -> str:
+    """The `### Transport` section only, from its heading up to the next heading."""
+    return _section_text(_TRANSPORT_HEADING)
 
 
 def _transport_section_text_normalized() -> str:
@@ -450,27 +536,16 @@ def _transport_section_text_normalized() -> str:
 
 
 def _transport_table_variable_names() -> tuple[str, ...]:
-    """The first-column variable names of the rendered `### Transport` table.
-
-    Parses the actual Markdown table rather than any list this module
-    declares, the same technique `_configuration_variable_names` uses for
-    the `### Configuration variables` table, so a table row added,
-    removed, or renamed in `docs/environment-files.md` changes what this
-    function returns on the very next test run.
-    """
-    section = _transport_section_text()
-    table_match = _TRANSPORT_TABLE_PATTERN.search(section)
-    if table_match is None:
-        return ()
-    return _markdown_table_first_column_names(table_match.group(1))
+    """The first-column variable names of the rendered `### Transport` table."""
+    return _section_table_variable_names(_TRANSPORT_HEADING)
 
 
 def _transport_module_env_var_names() -> frozenset[str]:
     """Every environment variable name `devcontainer_config.transport`'s own
     namespace declares as a `*_ENV_VAR` module-level constant.
 
-    Imports the module and reads `vars(transport)` rather than parsing its
-    source text, so an imported constant such as
+    Delegates to `_module_env_var_names`, which reads `vars(transport)`
+    rather than parsing source text, so an imported constant such as
     `DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR` (declared in `hostprobe.py`, and
     reachable from `transport`'s own namespace only because `transport.py`
     imports it by name in a `from ... import (...)` statement rather than
@@ -481,11 +556,7 @@ def _transport_module_env_var_names() -> frozenset[str]:
     than a literal list this test module would otherwise have to keep in
     sync with `transport.py` by hand.
     """
-    return frozenset(
-        value
-        for name, value in vars(transport).items()
-        if name.endswith("_ENV_VAR") and isinstance(value, str)
-    )
+    return _module_env_var_names(transport)
 
 
 def test_transport_section_documents_every_transport_environment_variable() -> None:
@@ -957,9 +1028,7 @@ def test_connect_recipe_reads_devcontainer_transport_extracts_from_the_real_make
         "_connect_recipe_body() returned an empty recipe body; the `connect:` target "
         "extraction regex may be stale against the current Makefile."
     )
-    assert _connect_recipe_reads_devcontainer_transport() == (
-        "DEVCONTAINER_TRANSPORT" in body
-    ), (
+    assert _connect_recipe_reads_devcontainer_transport() == ("DEVCONTAINER_TRANSPORT" in body), (
         "_connect_recipe_reads_devcontainer_transport() must equal "
         "'DEVCONTAINER_TRANSPORT' in _connect_recipe_body(), not a hardcoded literal: "
         f"body={body!r}."
@@ -1019,9 +1088,7 @@ _NEITHER_LANDED_TRUE_STATEMENT_TEXT = (
 # Proves `makefile_reads_variable` alone (independent of resolve_transport)
 # also triggers the stale-phrase forbid, closing the round-2 finding that
 # the parameter was dead at its only real call site (code_review).
-_MAKEFILE_ONLY_STALE_TEXT = (
-    "make connect ... resolve_transport has not landed ... no effect at all"
-)
+_MAKEFILE_ONLY_STALE_TEXT = "make connect ... resolve_transport has not landed ... no effect at all"
 
 # Proves the mirror-image check (`_connect_recipe_mentions_without_landed_caveat`)
 # fires: a mention of the Makefile's `connect` recipe reading/dispatching the
@@ -1406,3 +1473,435 @@ def test_transport_section_does_not_describe_ssh_as_the_fallback_for_unrecognize
         f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not scope the SSH "
         "transport branch to only unset or the literal `ssh`."
     )
+
+
+# E8-F1-S1-T4: widens the doc-completeness gate this module already applies
+# to catalog.py (_catalog_declared_env_var_names) and transport.py
+# (_transport_module_env_var_names) to devcontainer_config.repo, closing the
+# coverage gap that let REPO_SLUG_GIT_TIMEOUT_SECONDS (E8-F1-S1-T3) ship as a
+# production-read environment variable with no row in this document
+# (changes_manifest REVIEW_FAIL, E8-F1-S1-T3 round 1: "the existing doc-sync
+# tests in tests/test_docs_environment_files.py only scan catalog.py and
+# transport.py namespaces for *_ENV_VAR constants, so repo.py's new constant
+# escapes enforcement"). E8-F1-S1-T3 is Status: blocked pending this task, so
+# devcontainer_config.repo carries no *_ENV_VAR constant in this repository
+# right now; unlike `test_transport_section_documents_every_transport_environment_variable`,
+# `test_repo_section_documents_every_repo_environment_variable` below does
+# not assert `_repo_module_env_var_names()` is non-empty, since an empty
+# result is the correct, expected state today and must not fail this gate.
+# The gate still does real work: it is what fails, by name, the moment
+# GIT_REMOTE_TIMEOUT_ENV_VAR (or any future *_ENV_VAR constant) lands on
+# devcontainer_config.repo's namespace without a matching table row.
+_REPO_HEADING = "### Repository slug derivation"
+
+
+def _repo_section_text() -> str:
+    """The `### Repository slug derivation` section only, up to the next heading."""
+    return _section_text(_REPO_HEADING)
+
+
+def _repo_section_text_normalized() -> str:
+    return _normalize_whitespace(_repo_section_text())
+
+
+def _repo_table_variable_names() -> tuple[str, ...]:
+    """The first-column variable names of the rendered `### Repository slug
+    derivation` table.
+
+    Reuses `_TRANSPORT_TABLE_PATTERN` (via `_section_table_variable_names`):
+    the `### Transport` and `### Repository slug derivation` tables share the
+    identical `Variable | Default | Defined in` header shape, so one regex
+    serves both sections rather than a second, byte-for-byte copy of it.
+    """
+    return _section_table_variable_names(_REPO_HEADING)
+
+
+def _repo_table_variable_defaults() -> dict[str, str]:
+    """Maps each `### Repository slug derivation` table row's variable name
+    to its own `Default` cell.
+
+    Delegates to `_section_table_variable_defaults`, the same technique
+    `_repo_table_variable_names` uses for `_section_table_variable_names`,
+    so `test_repo_section_documents_repo_slug_git_timeout_seconds` can
+    assert the documented default against `REPO_SLUG_GIT_TIMEOUT_SECONDS`'s
+    OWN row rather than a section-wide text scan (test_review WARN round 2:
+    a section-wide scan let the table cell drift from the prose while
+    staying green).
+    """
+    return _section_table_variable_defaults(_REPO_HEADING)
+
+
+def _repo_module_env_var_names() -> frozenset[str]:
+    """Every environment variable `devcontainer_config.repo`'s own namespace
+    declares as a `*_ENV_VAR` module-level constant.
+
+    Delegates to `_module_env_var_names`, the same technique
+    `_transport_module_env_var_names` uses, so a future `*_ENV_VAR` constant
+    added to `repo.py` is picked up here without this test module changing.
+    Returns an empty `frozenset` today: `devcontainer_config.repo` declares
+    no such constant while E8-F1-S1-T3 remains blocked, which is the
+    correct current state, not a stale extraction.
+    """
+    return _module_env_var_names(repo)
+
+
+def test_repo_section_documents_every_repo_environment_variable() -> None:
+    """AC-TEST-001: every environment variable `devcontainer_config.repo`'s own
+    namespace names must appear in the `### Repository slug derivation` table.
+
+    Deliberately does not assert `_repo_module_env_var_names()` is non-empty
+    (contrast `test_transport_section_documents_every_transport_environment_variable`,
+    which does): `repo.py` legitimately declares zero `*_ENV_VAR` constants
+    while E8-F1-S1-T3 (which adds `GIT_REMOTE_TIMEOUT_ENV_VAR`) remains
+    blocked, and that must not fail this gate. What this test guards is the
+    completeness gate itself: once any `*_ENV_VAR` constant lands on
+    `devcontainer_config.repo`'s namespace, it must appear in this table or
+    this test fails by name, closing the coverage gap that let
+    `REPO_SLUG_GIT_TIMEOUT_SECONDS` ship undocumented in the first place.
+    `test_repo_section_completeness_gate_fires_on_synthetic_undocumented_variable`
+    below is this test's own positive control, proving the gate can fail.
+    """
+    declared = _repo_module_env_var_names()
+    documented = set(_repo_table_variable_names())
+    undocumented = declared - documented
+    assert not undocumented, (
+        f"devcontainer_config.repo reads environment variable(s) that "
+        f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' table does not document: "
+        f"{sorted(undocumented)!r}."
+    )
+
+
+def test_repo_section_completeness_gate_fires_on_synthetic_undocumented_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive control for `test_repo_section_documents_every_repo_environment_variable`
+    (test_review REVIEW_FAIL round 2, mutation-proved vacuous): that test's
+    `declared` set is empty today, because `devcontainer_config.repo`
+    legitimately declares zero `*_ENV_VAR` constants while E8-F1-S1-T3
+    remains blocked, so it cannot demonstrate its own gate can ever fail.
+
+    Uses the same synthetic-input discipline this module already established
+    for `test_connect_recipe_reads_devcontainer_transport_extracts_from_the_real_makefile`
+    (and `_NEITHER_LANDED_TRUE_STATEMENT_TEXT`/`_MAKEFILE_ONLY_STALE_TEXT`
+    elsewhere in this module): monkeypatch a `*_ENV_VAR` constant directly
+    onto `devcontainer_config.repo`'s namespace at call time, then prove
+    both halves of the extraction-and-comparison contract fire on it --
+    that `_module_env_var_names` picks it up, and that the same
+    `declared - documented` comparison
+    `test_repo_section_documents_every_repo_environment_variable` performs
+    flags it as undocumented by name. `vars(repo)` is read at call time
+    inside `_module_env_var_names`, so the monkeypatch is visible to it
+    without reimporting `devcontainer_config.repo`.
+    """
+    monkeypatch.setattr(repo, "FAKE_TIMEOUT_ENV_VAR", "FAKE_TIMEOUT_SECONDS", raising=False)
+    declared = _repo_module_env_var_names()
+    assert "FAKE_TIMEOUT_SECONDS" in declared, (
+        "_repo_module_env_var_names() did not pick up a synthetic *_ENV_VAR constant "
+        "monkeypatched directly onto devcontainer_config.repo's own namespace; the "
+        "extraction may be stale."
+    )
+    documented = set(_repo_table_variable_names())
+    undocumented = declared - documented
+    assert "FAKE_TIMEOUT_SECONDS" in undocumented, (
+        f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' completeness gate did not flag the "
+        "synthetic undocumented variable FAKE_TIMEOUT_SECONDS by name; the gate cannot be "
+        "trusted to fire the moment a real *_ENV_VAR constant lands on "
+        "devcontainer_config.repo's namespace without a matching table row."
+    )
+
+
+def test_repo_section_documents_repo_slug_git_timeout_seconds() -> None:
+    """AC-DOC-001: the `REPO_SLUG_GIT_TIMEOUT_SECONDS` row states its default,
+    its reader today (`tests/test_state_bucket_name.py`'s private
+    `_repo_slug_from_git_remote`), the shared resolver, and the caveat that
+    `repo.py`'s own reader (`repo_slug`, E8-F1-S1-T3) has not landed yet.
+
+    Parses the rendered table and section prose rather than restating the
+    row's content as a literal expectation this test module would otherwise
+    have to keep in sync with `docs/environment-files.md` by hand -- the
+    same discipline `test_transport_table_documents_devcontainer_transport`
+    applies to `DEVCONTAINER_TRANSPORT`'s row. The expected default is
+    derived from `tests/test_state_bucket_name.py`'s own declared
+    `_GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS` constant (the technique
+    `_catalog_declared_env_var_names` uses for `catalog.py`) rather than
+    restated as the literal `10`, so the documented default cannot drift
+    from the declaration this AC requires it to match (test_review WARN
+    round 2).
+
+    round-2 doc_review REVIEW_FAIL: an earlier revision of this section
+    claimed the variable "has no reader here yet" and "changes nothing
+    today", which `tests/test_state_bucket_name.py`'s import-time read
+    disproves -- that module's `_repo_slug_from_git_remote` reads
+    `REPO_SLUG_GIT_TIMEOUT_SECONDS` via `hostprobe.read_positive_seconds`
+    at import time and already fails fast on an invalid value. Only
+    `repo.py`'s own reader (`repo_slug`) is future tense, since
+    `devcontainer_config.repo` declares neither `repo_slug` nor
+    `GIT_REMOTE_TIMEOUT_ENV_VAR` in this repository today (E8-F1-S1-T3 is
+    Status: blocked pending this task); this test scopes its "not yet
+    landed" assertion to that reader alone, not to the variable as a
+    whole, and separately pins that the section names
+    `tests/test_state_bucket_name.py` as reading the variable today.
+    """
+    from test_state_bucket_name import (
+        _GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS,
+        _GIT_REMOTE_TIMEOUT_ENV_VAR,
+    )
+
+    default_seconds = _GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS
+    expected_default_text = (
+        f"`{int(default_seconds)}`" if default_seconds.is_integer() else f"`{default_seconds}`"
+    )
+
+    names = _repo_table_variable_names()
+    assert _GIT_REMOTE_TIMEOUT_ENV_VAR in names, (
+        f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' table does not document "
+        f"{_GIT_REMOTE_TIMEOUT_ENV_VAR}: {names!r}."
+    )
+    section = _repo_section_text_normalized()
+    defaults = _repo_table_variable_defaults()
+    row_default = defaults.get(_GIT_REMOTE_TIMEOUT_ENV_VAR)
+    assert row_default == expected_default_text.strip("`"), (
+        f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' table row for "
+        f"{_GIT_REMOTE_TIMEOUT_ENV_VAR} states its Default cell as {row_default!r}, not "
+        f"{expected_default_text.strip('`')!r}, matching tests/test_state_bucket_name.py's "
+        f"declared _GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS ({default_seconds!r}); a table cell "
+        "can drift from the surrounding prose without this assertion, since it now checks "
+        "the ROW's own cell rather than the section as a whole (test_review WARN round 2)."
+    )
+    assert expected_default_text in section, (
+        f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not state "
+        f"{expected_default_text} as {_GIT_REMOTE_TIMEOUT_ENV_VAR}'s default anywhere in its "
+        "prose, matching tests/test_state_bucket_name.py's declared "
+        f"_GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS ({default_seconds!r})."
+    )
+    assert "repo_slug" in section, (
+        f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not name `repo_slug` as "
+        f"{_GIT_REMOTE_TIMEOUT_ENV_VAR}'s future repo.py reader."
+    )
+    assert "read_positive_seconds" in section, (
+        f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not name "
+        f"`read_positive_seconds` as the shared reader {_GIT_REMOTE_TIMEOUT_ENV_VAR} is "
+        "resolved through."
+    )
+    assert "test_state_bucket_name.py" in section, (
+        f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not name the sibling "
+        "declaration in tests/test_state_bucket_name.py."
+    )
+    assert "reads it today" in section, (
+        f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not state that "
+        f"tests/test_state_bucket_name.py reads {_GIT_REMOTE_TIMEOUT_ENV_VAR} today, not "
+        "merely as repo.py's future reader."
+    )
+    _assert_repo_landed_caveat_state(section)
+    false_no_reader_needles = ("has no reader here yet", "changes nothing")
+    for needle in false_no_reader_needles:
+        assert needle not in section, (
+            f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section still claims {needle!r}, "
+            "which tests/test_state_bucket_name.py's import-time read of "
+            f"{_GIT_REMOTE_TIMEOUT_ENV_VAR} disproves (round-2 doc_review REVIEW_FAIL)."
+        )
+
+
+_REPO_NO_READER_TEXT = "no reader for this variable"
+_REPO_ONLY_READER_TEXT = "only reader"
+
+
+def _assert_repo_landed_caveat_state(section: str) -> None:
+    """AC-DOC-001 caveat lifecycle guard, keyed to `repo.py`'s own reader signal.
+
+    round-3 doc_review REVIEW_FAIL: an earlier revision of
+    `test_repo_section_documents_repo_slug_git_timeout_seconds` pinned
+    `"has not landed" in section` UNCONDITIONALLY. `REPO_SLUG_GIT_TIMEOUT_SECONDS`
+    has exactly one reader-to-be, `devcontainer_config.repo.repo_slug`
+    (E8-F1-S1-T3), which is finished, review-passed work sitting in `git
+    stash@{0}` ('devbench-quarantine:E8-F1-S1-T3'), blocked solely on this
+    task, and barred by its own charter from ever editing
+    `docs/environment-files.md`. The instant that stash is restored and
+    `repo.py` declares `repo_slug`, THREE claims in the '### Repository
+    slug derivation' section go false at once, and the unconditional pin
+    forbade ever removing them:
+
+    * The `_LANDED_CAVEAT_PHRASE_PATTERN` caveat ("has not landed" / "not
+      yet landed"), naming E8-F1-S1-T3's own landed state.
+    * `_REPO_NO_READER_TEXT` ("no reader for this variable"): `repo.py`'s
+      own, current absence of a reader.
+    * `_REPO_ONLY_READER_TEXT` ("only reader"): true only while `repo.py`
+      has none of its own; `tests/test_state_bucket_name.py`'s reader is
+      no longer the ONLY reader once `repo.py`'s `repo_slug` joins it.
+
+    This mirrors `_assert_transport_landed_caveat_state`'s precedent for
+    `DEVCONTAINER_TRANSPORT` (`resolve_transport_landed = hasattr(transport,
+    "resolve_transport")`), at the single-reader scale this section
+    actually needs: `REPO_SLUG_GIT_TIMEOUT_SECONDS` has only one
+    reader-to-be, unlike `DEVCONTAINER_TRANSPORT`'s two independent ones,
+    so no mention-scoped vicinity walk is needed here -- a section-wide
+    presence check on each phrase is enough, and is verified to flip
+    polarity correctly by
+    `test_repo_landed_caveat_state_branches_on_repo_slug_signal` below.
+
+    Requires all three phrases while `repo.py` has no reader of its own
+    (`hasattr(repo, "repo_slug")` is False) and FORBIDS all three once it
+    does, so a future edit that lands `repo_slug` without updating this
+    section's prose fails this test by name, and so does a future edit
+    that keeps any of these caveats after `repo_slug` has landed.
+    """
+    repo_slug_landed = hasattr(repo, "repo_slug")
+    landed_caveat_present = bool(_LANDED_CAVEAT_PHRASE_PATTERN.search(section))
+    no_reader_claim_present = _REPO_NO_READER_TEXT in section
+    only_reader_claim_present = _REPO_ONLY_READER_TEXT in section
+    if repo_slug_landed:
+        assert not landed_caveat_present, (
+            f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section still states that "
+            "E8-F1-S1-T3 has not landed, but devcontainer_config.repo now declares "
+            "repo_slug; remove the stale 'has not landed' / 'not yet landed' caveat."
+        )
+        assert not no_reader_claim_present, (
+            f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section still claims repo.py has "
+            "no reader for this variable, but devcontainer_config.repo now declares "
+            "repo_slug; update the prose to describe repo.py's reader as landed."
+        )
+        assert not only_reader_claim_present, (
+            f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section still claims "
+            "tests/test_state_bucket_name.py is this variable's only reader, but "
+            "devcontainer_config.repo's repo_slug is now a second, independent reader; "
+            "update the prose and the table row's 'Defined in' cell to name both readers."
+        )
+    else:
+        assert landed_caveat_present, (
+            f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not state that "
+            "E8-F1-S1-T3 (repo.py's repo_slug reader) has not landed in this repository "
+            "yet, which is this repository's current true state."
+        )
+        assert no_reader_claim_present, (
+            f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not state that "
+            "repo.py has no reader for this variable yet, which is this repository's "
+            "current true state."
+        )
+        assert only_reader_claim_present, (
+            f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not state that "
+            "tests/test_state_bucket_name.py is this variable's only reader today, which "
+            "is this repository's current true state while repo.py has no reader of its "
+            "own."
+        )
+
+
+_REPO_ALL_CAVEATS_TEXT = (
+    "As of this revision E8-F1-S1-T3 has not landed; repo.py has no reader for this "
+    "variable yet; tests/test_state_bucket_name.py is this variable's only reader today."
+)
+_REPO_NO_CAVEATS_TEXT = (
+    "E8-F1-S1-T3 has landed; repo.py's repo_slug and "
+    "tests/test_state_bucket_name.py's _repo_slug_from_git_remote both read this variable."
+)
+_REPO_MISSING_LANDED_CAVEAT_TEXT = (
+    "repo.py has no reader for this variable yet; tests/test_state_bucket_name.py is this "
+    "variable's only reader today."
+)
+_REPO_MISSING_NO_READER_TEXT = (
+    "E8-F1-S1-T3 has not landed; tests/test_state_bucket_name.py is this variable's only "
+    "reader today."
+)
+_REPO_MISSING_ONLY_READER_TEXT = (
+    "E8-F1-S1-T3 has not landed; repo.py has no reader for this variable yet."
+)
+_REPO_STALE_LANDED_CAVEAT_ONLY_TEXT = "E8-F1-S1-T3 has not landed."
+_REPO_STALE_NO_READER_ONLY_TEXT = "repo.py has no reader for this variable."
+_REPO_STALE_ONLY_READER_ONLY_TEXT = (
+    "tests/test_state_bucket_name.py is this variable's only reader."
+)
+
+_REPO_MISSING_LANDED_CAVEAT_MATCH = r"does not state that E8-F1-S1-T3"
+_REPO_MISSING_NO_READER_MATCH = r"does not state that repo\.py has no reader"
+_REPO_MISSING_ONLY_READER_MATCH = (
+    r"does not state that tests/test_state_bucket_name\.py is this variable's only reader"
+)
+_REPO_STALE_LANDED_CAVEAT_MATCH = r"still states that E8-F1-S1-T3 has not landed"
+_REPO_STALE_NO_READER_MATCH = r"still claims repo\.py has no reader"
+_REPO_STALE_ONLY_READER_MATCH = (
+    r"still claims tests/test_state_bucket_name\.py is this variable's only reader"
+)
+
+
+@pytest.mark.parametrize(
+    ("repo_slug_landed", "section_text", "should_raise", "match"),
+    [
+        pytest.param(
+            False, _REPO_ALL_CAVEATS_TEXT, False, None, id="not-landed-all-caveats-present-passes"
+        ),
+        pytest.param(
+            False,
+            _REPO_MISSING_LANDED_CAVEAT_TEXT,
+            True,
+            _REPO_MISSING_LANDED_CAVEAT_MATCH,
+            id="not-landed-missing-landed-caveat-fails",
+        ),
+        pytest.param(
+            False,
+            _REPO_MISSING_NO_READER_TEXT,
+            True,
+            _REPO_MISSING_NO_READER_MATCH,
+            id="not-landed-missing-no-reader-claim-fails",
+        ),
+        pytest.param(
+            False,
+            _REPO_MISSING_ONLY_READER_TEXT,
+            True,
+            _REPO_MISSING_ONLY_READER_MATCH,
+            id="not-landed-missing-only-reader-claim-fails",
+        ),
+        pytest.param(True, _REPO_NO_CAVEATS_TEXT, False, None, id="landed-no-caveats-passes"),
+        pytest.param(
+            True,
+            _REPO_STALE_LANDED_CAVEAT_ONLY_TEXT,
+            True,
+            _REPO_STALE_LANDED_CAVEAT_MATCH,
+            id="landed-stale-landed-caveat-fails",
+        ),
+        pytest.param(
+            True,
+            _REPO_STALE_NO_READER_ONLY_TEXT,
+            True,
+            _REPO_STALE_NO_READER_MATCH,
+            id="landed-stale-no-reader-claim-fails",
+        ),
+        pytest.param(
+            True,
+            _REPO_STALE_ONLY_READER_ONLY_TEXT,
+            True,
+            _REPO_STALE_ONLY_READER_MATCH,
+            id="landed-stale-only-reader-claim-fails",
+        ),
+    ],
+)
+def test_repo_landed_caveat_state_branches_on_repo_slug_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    repo_slug_landed: bool,
+    section_text: str,
+    should_raise: bool,
+    match: str | None,
+) -> None:
+    """Exercises both states of `_assert_repo_landed_caveat_state`'s single
+    reader signal (`hasattr(repo, "repo_slug")`) against synthetic section
+    text, independently of the current, real state of
+    `docs/environment-files.md` and `devcontainer_config.repo`.
+
+    round-3 doc_review REVIEW_FAIL fix verification: proves the guard
+    genuinely flips polarity in both directions rather than only ever
+    requiring the caveat. `monkeypatch.setattr(repo, "repo_slug", ...)` /
+    `monkeypatch.delattr(repo, "repo_slug", ...)` toggle the live signal
+    the same way `test_repo_section_completeness_gate_fires_on_synthetic_undocumented_variable`
+    toggles `devcontainer_config.repo`'s namespace for its own gate, so
+    this test observes the assertion switch polarity directly rather than
+    asserting it by inspection. Each `should_raise=True` case supplies a
+    `match` fragment anchored on the specific assertion its id names, so a
+    case can only go green by hitting the assertion it claims to.
+    """
+    if repo_slug_landed:
+        monkeypatch.setattr(repo, "repo_slug", lambda: "example", raising=False)
+    else:
+        monkeypatch.delattr(repo, "repo_slug", raising=False)
+    if should_raise:
+        with pytest.raises(AssertionError, match=match):
+            _assert_repo_landed_caveat_state(section_text)
+    else:
+        _assert_repo_landed_caveat_state(section_text)

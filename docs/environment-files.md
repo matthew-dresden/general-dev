@@ -408,8 +408,8 @@ disagree on, the empty string, is documented above.
 ### Repository slug derivation
 
 `remote-instances/root.hcl`'s own `repo_slug` local derives a repo-slug
-component of the Terraform state bucket name (root.hcl lines 63-66,
-feeding `state_bucket_name` at line 81) from `git config --get
+component of the Terraform state bucket name, consumed by that same
+file's `state_bucket_name` local, from `git config --get
 remote.origin.url`, applying a `basename()`-plus-`trimsuffix(".git")`
 transform to that URL. `tests/test_state_bucket_name.py`'s private
 `_repo_slug_from_git_remote` reads the identical git remote the same way,

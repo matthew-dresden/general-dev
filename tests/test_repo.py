@@ -335,6 +335,95 @@ def test_repo_slug_raises_when_git_config_read_times_out(
         repo.repo_slug(root)
 
 
+_WORK_UNIT_ID_PATTERN = re.compile(r"E\d+-F\d+-S\d+(-T\d+)?")
+
+
+def _git_remote_timeout_comment_block() -> str:
+    """The contiguous `#` comment run immediately preceding
+    `GIT_REMOTE_TIMEOUT_ENV_VAR`'s assignment in `repo.py`'s own source.
+
+    Isolating exactly this block, rather than scanning the whole module
+    body, is what lets the assertions below fail specifically on this
+    block's own drift instead of being satisfiable by unrelated comment
+    text elsewhere in the file, such as `PRIVATE_FILES`'s own
+    backlog-identifier comment, an established convention this task does
+    not touch (out of scope, per this unit's Description).
+    """
+    repo = _import_repo()
+    lines = Path(repo.__file__).read_text(encoding="utf-8").splitlines()
+
+    assignment_needle = "GIT_REMOTE_TIMEOUT_ENV_VAR = "
+    assignment_index = next(
+        (index for index, line in enumerate(lines) if line.startswith(assignment_needle)),
+        None,
+    )
+    assert assignment_index is not None, (
+        "repo.py no longer declares GIT_REMOTE_TIMEOUT_ENV_VAR at module scope."
+    )
+
+    comment_lines: list[str] = []
+    index = assignment_index - 1
+    while index >= 0 and lines[index].startswith("#"):
+        comment_lines.insert(0, lines[index])
+        index -= 1
+
+    assert comment_lines, "No comment block precedes GIT_REMOTE_TIMEOUT_ENV_VAR in repo.py."
+    return "\n".join(comment_lines)
+
+
+def test_git_remote_timeout_comment_names_no_backlog_identifier() -> None:
+    """AC-DOC-002 / AC-TEST-001: the comment above `GIT_REMOTE_TIMEOUT_ENV_VAR` names no
+    work-unit identifier and no longer claims the test module declares its own pair.
+
+    Both assertions were observed to FAIL against the comment E8-F1-S1-T3
+    committed (`... E8-F1-S1-T6 is the tracked follow-up ...` and
+    `... presently declares its own ...`), the stale forward reference this
+    task rewrites now that E8-F1-S1-T6 is done. Restoring that committed
+    text makes this test fail again (AC-TEST-003's mutation check), so
+    these assertions are not tautological.
+    """
+    block = _git_remote_timeout_comment_block()
+
+    match = _WORK_UNIT_ID_PATTERN.search(block)
+    assert match is None, (
+        f"GIT_REMOTE_TIMEOUT_ENV_VAR's comment names a work-unit identifier "
+        f"({match.group(0)!r}); operator-facing comments describe the current "
+        "state of the code, not the backlog task that produced it."
+    )
+    assert "presently declares its own" not in block, (
+        "GIT_REMOTE_TIMEOUT_ENV_VAR's comment still claims "
+        "tests/test_state_bucket_name.py declares its own timeout pair, which "
+        "E8-F1-S1-T6 made false by rebinding those names onto this module."
+    )
+
+
+def test_git_remote_timeout_comment_still_names_the_binding_test_module() -> None:
+    """AC-DOC-001 / AC-TEST-002: the rewritten comment still names
+    `tests/test_state_bucket_name.py` as the consumer that binds to these two
+    names by importing them, not merely mentions the file's name.
+
+    Without this assertion, GREEN could satisfy the previous test by
+    deleting the cross-reference outright instead of correcting it, losing
+    the operator-facing fact that another module depends on this
+    declaration. The committed comment names the file too, but only as the
+    module that declares its own competing pair (`... rather than importing
+    these two names ...`), the opposite relationship; this test was
+    observed to FAIL against that text on the second assertion below, since
+    it never states the names are reached `by importing` them.
+    """
+    block = _git_remote_timeout_comment_block()
+    assert "tests/test_state_bucket_name.py" in block, (
+        "GIT_REMOTE_TIMEOUT_ENV_VAR's comment no longer names "
+        "tests/test_state_bucket_name.py as the module that binds to these "
+        "two names."
+    )
+    assert "by importing" in block, (
+        "GIT_REMOTE_TIMEOUT_ENV_VAR's comment no longer states that "
+        "tests/test_state_bucket_name.py binds to these two names by "
+        "importing them, rather than restating either."
+    )
+
+
 @pytest.mark.parametrize("selector", list(_PRESENT_SELECTORS))
 def test_missing_examples_reports_absent_examples(tmp_path: Path, selector: str) -> None:
     repo = _import_repo()

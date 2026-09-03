@@ -771,14 +771,22 @@ rdc_build_remote() {
 
   rdc_seed_volume "$volume" "$branch" "$url"
 
+  # The override carries the resolved Parameter Store prefix into the
+  # container, not just the volume mount. Without it the create-time bootstrap
+  # falls back to /devcontainer/$(basename "$(pwd)") -- the workspace folder
+  # name -- and an instance whose name differs from the project folder reads a
+  # different environment's secrets entirely. Observed: instance 'sandbox'
+  # bootstrapped from /devcontainer/general-dev/shell.env.
   RDC_OVERRIDE_CONFIG="$(mktemp "${TMPDIR:-/tmp}/devcontainer-override.XXXXXX")"
   trap 'rm -f "$RDC_OVERRIDE_CONFIG"' EXIT
   rdc_read_configuration \
     | jq --arg mount "source=${volume},target=${CONTAINER_WORKSPACES_ROOT},type=volume" \
       --arg configdir "${REPO_ROOT}/.devcontainer" \
+      --arg ssmprefix "${DEVCONTAINER_SSM_PREFIX}" \
       '.configuration
        | del(.configFilePath)
        | .workspaceMount = $mount
+       | .containerEnv = ((.containerEnv // {}) + {DEVCONTAINER_SSM_PREFIX: $ssmprefix})
        | if .build.dockerfile then
            .build.dockerfile = "\($configdir)/\(.build.dockerfile)"
            | .build.context = (if .build.context then "\($configdir)/\(.build.context)" else $configdir end)

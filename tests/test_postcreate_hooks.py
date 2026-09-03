@@ -274,3 +274,26 @@ def test_provisioning_flow_intro_enumerates_every_required_step() -> None:
         f"provisioning-flow intro enumerates {len(enumerated_items)} step(s) but "
         f"the table marks {required_row_count} row(s) required"
     )
+
+
+def test_git_identity_variables_fail_with_a_named_error_not_an_unbound_variable() -> None:
+    """`set -u` turns a missing shell.env value into a line number, not a remedy.
+
+    `configure_git` reads GIT_USER, GIT_USER_EMAIL and GIT_PROVIDER_URL straight
+    out of the environment. With any of them unset the script died with
+    "GIT_USER: unbound variable" and a line number, naming neither where the
+    value comes from nor how to supply it -- observed during a real container
+    bring-up. The fail-fast standard requires the error to be actionable, which
+    the sibling DEFAULT_GIT_BRANCH check already demonstrates.
+    """
+    text = (_repo_root() / ".devcontainer" / ".devcontainer.postcreate.sh").read_text(
+        encoding="utf-8"
+    )
+    section = text[text.index("configure_git() {") : text.index("install_git_hooks() {")]
+    for name in ("GIT_USER", "GIT_USER_EMAIL", "GIT_PROVIDER_URL"):
+        assert name in section, f"{name} is no longer read here; update this test"
+    assert "is not set in the environment." in section, (
+        "configure_git must name the missing variable and where it comes from, rather than "
+        "letting set -u report an unbound variable"
+    )
+    assert "shell.env" in section, "the error must name where the value comes from"

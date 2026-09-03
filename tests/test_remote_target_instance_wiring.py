@@ -247,3 +247,36 @@ def test_the_fatal_resolver_still_names_both_remedies() -> None:
     fatal = lib[lib.index("rd_resolve_instance() {") :]
     assert "INSTANCE=<name> make <target>" in fatal
     assert "DEFAULT_REMOTE_INSTANCE=<name>" in fatal
+
+
+def test_the_resolved_parameter_prefix_reaches_the_container() -> None:
+    """The container must be told the prefix, not left to derive one of its own.
+
+    `.devcontainer/postcreate-wrapper.sh` defaults `DEVCONTAINER_SSM_PREFIX` to
+    `/devcontainer/$(basename "$(pwd)")` -- the workspace folder name. That is a
+    second, independent derivation of the address the resolver already owns, and
+    when the two disagree the container bootstraps from a different environment's
+    secrets. Observed against a real instance: with the instance named `sandbox`,
+    the container read `/devcontainer/general-dev/shell.env`, an unrelated
+    environment that happens to share the project's folder name.
+
+    Forwarding it through the generated override is what makes the container's
+    prefix the resolved one rather than a guess.
+    """
+    text = _CONTAINER_SH.read_text(encoding="utf-8")
+    assert '--arg ssmprefix "${DEVCONTAINER_SSM_PREFIX}"' in text, (
+        "the override generator must be given the resolved prefix"
+    )
+    assert "DEVCONTAINER_SSM_PREFIX: $ssmprefix" in text, (
+        "the override must set containerEnv.DEVCONTAINER_SSM_PREFIX, or the container "
+        "falls back to deriving a prefix from its workspace folder name"
+    )
+
+
+def test_the_override_preserves_any_container_env_the_configuration_declares() -> None:
+    """Adding the prefix must not drop what devcontainer.json already set."""
+    text = _CONTAINER_SH.read_text(encoding="utf-8")
+    assert "((.containerEnv // {}) + {DEVCONTAINER_SSM_PREFIX: $ssmprefix})" in text, (
+        "containerEnv must be merged, not replaced; a bare assignment would discard "
+        "every variable the checked-in configuration declares"
+    )

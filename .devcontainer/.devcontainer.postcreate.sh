@@ -488,6 +488,19 @@ configure_git() {
     return 0
   fi
   log_section "Git configuration" "identity and credential helper"
+  # Named, not left to `set -u`. Each of these comes from shell.env, and an
+  # incomplete one is an ordinary operator mistake; without these guards the
+  # script dies with "GIT_USER: unbound variable" and a line number, which
+  # names neither the variable's source nor the fix. Checked here rather than
+  # in main() so a CICD run, or a container with no git, is not required to
+  # set variables it never uses.
+  local name
+  for name in GIT_USER GIT_USER_EMAIL GIT_PROVIDER_URL; do
+    [ -n "${!name:-}" ] || exit_with_error "$(printf '%s\n' \
+      "${name} is not set in the environment." \
+      "It comes from shell.env; add it there, or to this instance's shell.env in" \
+      "Parameter Store, then rebuild.")"
+  done
   configure_git_shared "${CONTAINER_USER}" "${GIT_USER}" "${GIT_USER_EMAIL}"
   configure_git_credential_helper "${CONTAINER_USER}" "${GIT_PROVIDER_URL}"
   log_section_done "Git configuration"

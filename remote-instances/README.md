@@ -140,6 +140,49 @@ layer enforces that agreement:
 | Certificates | `~/.docker/certs/<name>/` | `E6` |
 | Local forwarded port | Allocated per instance, recorded, never a fixed number | `E6` |
 
+## Reusing an existing network: `create_network = false`
+
+An operations team that already owns a VPC does not have to let this module
+build another one. Setting `create_network = false` switches the root module
+from creating a network to attaching to one, and the compute and security
+submodules are unchanged either way: identifiers are passed in, never looked up.
+
+Turning the toggle off makes two inputs required that are otherwise unused:
+
+| Input | Required when | Why |
+|-------|---------------|-----|
+| `vpc_id` | `create_network = false` | The security group is created in this VPC |
+| `subnet_id` | `create_network = false` | The instance is launched into this subnet |
+
+**The refusal happens at plan time, and it names the input that is missing.**
+This is deliberate: a missing identifier surfaces before anything is created,
+and the message says which one rather than failing generically at apply. With
+neither supplied, the plan reports both:
+
+```text
+Error: Invalid value for variable
+  var.vpc_id is null
+  var.vpc_id is required when var.create_network is false: supply the ...
+  var.subnet_id is null
+  var.subnet_id is required when var.create_network is false: supply the ...
+```
+
+Supply `vpc_id` alone and the plan still refuses, naming only `subnet_id`.
+
+A deployment in this mode creates no networking resource at all. Against the
+same module, a network-creating deployment plans 13 resources and a
+network-reusing one plans 8: the VPC, internet gateway, subnet, route table and
+route-table association are simply absent, and what remains is the instance, its
+data volume and attachment, the security group, and the IAM role, inline policy,
+managed-policy attachment and instance profile.
+
+Attaching does not adopt. A second deployment placed into a first deployment's
+network leaves that first deployment's state alone, and re-planning it after the
+second one applies reports `No changes.` The two remain separate deployments
+that happen to share a network, each with its own state key, docker context,
+parameter prefix, certificate directory and forwarded port, as described under
+"Artifacts namespaced by instance name" above.
+
 ## No instance directory is committed
 
 No instance directory exists in this repository, and none is added by this

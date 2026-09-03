@@ -71,6 +71,7 @@ answer by the time it calls `resolve`.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -433,3 +434,63 @@ def resolve(root: Path, *, local_backend_active: bool) -> Resolution:
         return Resolution(instance=candidates[0])
 
     raise _ambiguous_instance_error(candidates)
+
+@dataclass(frozen=True)
+class InstanceListing:
+    """One row of `make instances`: what an instance is called and where it is.
+
+    `region` is `None` when the deployment does not record one, and `active`
+    is True for the instance the current docker context points at. Both are
+    reported rather than inferred, so a row never claims more than was found.
+    """
+
+    name: str
+    region: str | None
+    docker_context: str
+    active: bool
+
+
+_REGION_INPUT_PATTERN = re.compile(r'^\s*(?:aws_region|region)\s*=\s*"([^"]+)"', re.MULTILINE)
+
+
+def region_of(root: Path, name: str) -> str | None:
+    """The AWS region a deployment declares, or None when it declares none.
+
+    Read from the per-instance Terragrunt file rather than assumed from the
+    ambient environment: two instances may live in different regions, and a
+    listing that printed the caller's current region against both would be
+    confidently wrong.
+    """
+    validate_name(name)
+    hcl = terragrunt_dir(root, name) / "terragrunt.hcl"
+    try:
+        text = hcl.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    match = _REGION_INPUT_PATTERN.search(text)
+    return match.group(1) if match else None
+
+
+def listing(
+    root: Path,
+    *,
+    active_context: str | None,
+) -> tuple[InstanceListing, ...]:
+    """Every configured instance, in discovery order, marking the active one.
+
+    `active_context` is the docker context the caller found active, passed in
+    rather than probed here so this stays a pure function of the repository
+    and one string. A caller that cannot determine the active context passes
+    None, and no row is marked active -- which is honest, rather than
+    guessing that the first row is current.
+    """
+    return tuple(
+        InstanceListing(
+            name=name,
+            region=region_of(root, name),
+            docker_context=docker_context(root, name),
+            active=(active_context is not None and docker_context(root, name) == active_context),
+        )
+        for name in discover(root)
+    )
+

@@ -41,7 +41,7 @@ SPELL_FILES ?= $(MD_FILES)
 PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer/aws-profile-map.json
 
 .DEFAULT_GOAL := help
-.PHONY: help connect disconnect status exec shell start stop restart rename check build push-git-creds clean rebuild push-secrets \
+.PHONY: help connect disconnect status exec shell instances start stop restart rename check build push-git-creds clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test cert-status
@@ -59,6 +59,7 @@ help:
 	@printf '\n\033[1mENGINE\033[0m  pick where builds and containers live\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make local"            "host"   "Point docker and VS Code at the local engine ($(LOCAL_CONTEXT)). Nothing remote is stopped."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)), refreshing the SSH-over-SSM tunnel first."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make instances"        "host" "List every configured instance and mark the active one."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make connect"          "remote" "What 'make remote' calls. Re-run after a reboot, after sleep, or when SSO expires."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make disconnect"       "host"   "What 'make local' calls. Only changes where new commands and windows point."
 	@printf '\n\033[1mBUILD\033[0m  every target blocks until the container is up and exits non-zero if anything fails\n'
@@ -208,6 +209,9 @@ reopen:
 
 exec:
 	@$(CONTAINER_SH) exec
+
+instances:
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instances
 
 shell:
 	@printf '\033[0;31m[ERROR]\033[0m make shell is gone: the EC2 host has no interactive access path.\n' >&2

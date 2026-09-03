@@ -204,7 +204,64 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     resolve_instance_parser.set_defaults(handler=_run_resolve_instance)
 
+    instances_parser = subparsers.add_parser(
+        "instances",
+        help="List every configured instance and mark the active one (spec Section 9).",
+        description=_INSTANCES_DESCRIPTION,
+    )
+    instances_parser.set_defaults(handler=_run_instances)
+
     return parser
+
+
+_INSTANCES_DESCRIPTION = """List every instance configured under remote-instances/.
+
+Prints one row per instance with its region and docker context, marking the
+one the active docker context points at. Reports what it finds rather than
+inferring: an instance whose deployment records no region prints a dash, and
+when the active context cannot be determined no row is marked, since guessing
+which instance is current is worse than saying nothing.
+"""
+
+
+def _run_instances(args: argparse.Namespace) -> int:
+    """Render the instance listing as a table.
+
+    The active-context probe is `docker context show`, run here rather than
+    inside `instances.listing` so the listing itself stays a pure function and
+    a test can drive it without docker present. A probe failure is not fatal:
+    the listing still prints, with nothing marked active.
+    """
+    root = repo.find_root(Path.cwd())
+    try:
+        completed = subprocess.run(
+            ["docker", "context", "show"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        active = completed.stdout.strip() if completed.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        active = None
+
+    rows = instances.listing(root, active_context=active)
+    if not rows:
+        print(
+            "No instances configured. Run /devcontainer:setup-remote to add one.",
+            file=sys.stderr,
+        )
+        return 0
+
+    name_width = max(len("INSTANCE"), max(len(r.name) for r in rows))
+    region_width = max(len("REGION"), max(len(r.region or "-") for r in rows))
+    print(f"{'INSTANCE':<{name_width}}  {'REGION':<{region_width}}  ACTIVE  DOCKER CONTEXT")
+    for row in rows:
+        marker = "  *   " if row.active else "      "
+        print(
+            f"{row.name:<{name_width}}  {(row.region or '-'):<{region_width}}  "
+            f"{marker}  {row.docker_context}"
+        )
+    return 0
 
 
 def _run_lint_secrets(args: argparse.Namespace) -> int:

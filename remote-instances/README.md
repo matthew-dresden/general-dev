@@ -163,6 +163,25 @@ A script or skill that needs one of these values calls into that module
 recomputing the pattern above independently; recomputing it a second time
 is exactly the drift this table exists to prevent.
 
+## Seeing what is configured
+
+`make instances` lists every instance under `remote-instances/`, with the AWS
+region its deployment declares and the docker context it addresses, and marks
+the one the active context currently points at.
+
+```text
+INSTANCE  REGION     ACTIVE  DOCKER CONTEXT
+sandbox   us-east-1          <repo-slug>-sandbox
+personal  eu-west-2    *     <repo-slug>-personal
+```
+
+Two "unknown" cases are reported rather than guessed. An instance whose
+deployment records no region prints `-`, instead of the region the caller
+happens to be using, because two instances may live in different regions and
+printing one against both would be confidently wrong. And when the active
+docker context cannot be determined at all, no row is marked, instead of
+assuming the first one is current.
+
 ## Reusing an existing network: `create_network = false`
 
 An operations team that already owns a VPC does not have to let this module

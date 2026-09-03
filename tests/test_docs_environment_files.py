@@ -304,7 +304,15 @@ _CATALOG_FACTS: tuple[tuple[str, str], ...] = (
     ("command_export_list", "devsecret export-list"),
     ("help_reference_pointer", "devsecret --help"),
     ("value_never_a_command_line_argument", "never accepted as a command-line argument"),
-    ("no_value_written_to_any_filesystem", "No value is ever written to any filesystem"),
+    # Decision D11 said "no value is ever written to any filesystem". The aws
+    # CLI v2 cannot read a --cli-input-json document from stdin, so the only
+    # two ways to pass a value are an argument (readable by every process on
+    # the host, for the life of the call) and a file. The file wins, and the
+    # documented fact is now the property that actually protects the value:
+    # the window is private (0600 inside a 0700 directory) and bounded (removed
+    # before the call returns). See docs/environment-files.md.
+    ("document_file_is_private_and_bounded", "removes before returning"),
+    ("value_never_reaches_the_process_table", "never reaches the process table"),
     ("remote_engine_uses_instance_role", "instance role"),
     ("local_engine_uses_sso_session", "developer's already-valid AWS SSO session"),
 )

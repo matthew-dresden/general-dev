@@ -203,8 +203,18 @@ printf '%s' "$VALUE" | devsecret set <NAME> --exported
 ```
 
 `devsecret set` also refuses an interactive TTY paste with exit 2 unless
-`--stdin` confirms it is deliberate. No value is ever written to any
-filesystem by this client.
+`--stdin` confirms it is deliberate.
+
+The value still never reaches the process table. It travels to the `aws` CLI
+inside a `--cli-input-json` document rather than as an argument, and that
+document is a file the client creates with `O_EXCL` at mode `0600`, inside a
+directory at mode `0700` that it removes before returning. A file is used
+because the `aws` CLI v2 cannot read `file:///dev/stdin`: it reports "Invalid
+JSON received" whether stdin is a pipe or a redirected regular file, and
+blocks indefinitely on a FIFO. That bounded, private on-disk window is the
+same one certificate issuance already accepts for a server private key, and a
+far smaller exposure than an argument every process on the host can read for
+the life of the call.
 
 Neither engine needs a stored credential: the remote engine reaches the
 store through the instance role over IMDSv2, and the local engine reaches

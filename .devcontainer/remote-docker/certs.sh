@@ -58,7 +58,9 @@ case "$command" in
     rd_ok "Client certificate issued for '${INSTANCE}'. 'make connect' can now present it."
     ;;
   publish)
-    rd_require_remote_config
+    # Region and profile only: this publishes to a path the resolver addressed
+    # by instance name, and never names an instance id over the wire.
+    rd_require_aws_config
     rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
     rd_check_aws_auth
     # AWS_PROFILE rather than a --profile flag: the catalog client reaches the

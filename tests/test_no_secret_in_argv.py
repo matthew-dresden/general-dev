@@ -10,7 +10,8 @@ states the invariant that closes both -- the value travels inside a
 `tests/test_catalog.py` pins it for the Python client.
 
 This module pins the same invariant for the shell entry points, which reach the
-store directly rather than through the client. It is a source scan rather than
+store directly rather than through the client, and additionally pins that they
+do not reach for `file:///dev/stdin`, a form the aws CLI v2 cannot read at all. It is a source scan rather than
 an execution test on purpose: the property is "no such call exists", which a
 test that runs one call cannot establish, and which must hold without an AWS
 account or a network to check it.
@@ -37,10 +38,19 @@ def _shell_scripts() -> list[Path]:
     return sorted(_RD_DIR.glob("*.sh"))
 
 
+_INVOCATION = re.compile(r"\bssm\s+put-parameter\b")
+
+
 def _put_parameter_invocations(text: str) -> list[str]:
-    """Each `put-parameter` call in `text`, flattened across its line continuations."""
+    """Each `aws ssm put-parameter` call in `text`, flattened across continuations.
+
+    Anchored on the `ssm put-parameter` subcommand pair rather than the bare
+    string, which also occurs in a helper's name and in the document's own
+    filename; matching those would report a call where there is none and, worse,
+    would let a real call hide among them.
+    """
     joined = re.sub(r"\\\n\s*", " ", text)
-    return [line.strip() for line in joined.splitlines() if "put-parameter" in line]
+    return [line.strip() for line in joined.splitlines() if _INVOCATION.search(line)]
 
 
 def test_shell_scripts_exist_so_this_module_cannot_pass_vacuously() -> None:
@@ -75,11 +85,29 @@ def test_no_shell_script_passes_a_parameter_value_in_argv(script: Path) -> None:
     )
 
 
-def test_the_stdin_form_is_actually_used_where_parameters_are_written() -> None:
+def test_the_document_form_is_actually_used_where_parameters_are_written() -> None:
     """Absence of `--value` is not enough: the calls must use the form that replaced it."""
     for script in _shell_scripts():
-        calls = _put_parameter_invocations(script.read_text(encoding="utf-8"))
-        for call in calls:
+        for call in _put_parameter_invocations(script.read_text(encoding="utf-8")):
             assert "--cli-input-json" in call, (
                 f"{script.name} writes a parameter without --cli-input-json: {call}"
+            )
+
+
+def test_no_shell_script_asks_the_aws_cli_to_read_the_document_from_stdin() -> None:
+    """`file:///dev/stdin` does not work, and fails in ways that read as something else.
+
+    The aws CLI v2 reports "Invalid JSON received" for a piped or redirected
+    document and blocks indefinitely on a FIFO, so a script using that form is
+    broken rather than merely unconventional -- and the hang, in particular,
+    looks like a network problem rather than a usage error.
+
+    Scoped to the invocations, not the file: a comment recording why the form
+    is unusable must be free to name it, exactly as it does today.
+    """
+    for script in _shell_scripts():
+        for call in _put_parameter_invocations(script.read_text(encoding="utf-8")):
+            assert "/dev/stdin" not in call, (
+                f"{script.name} passes the document on stdin, which the aws CLI v2 cannot "
+                f"read; write it to a private file and pass file://<path>: {call}"
             )

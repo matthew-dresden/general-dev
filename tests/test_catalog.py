@@ -87,16 +87,37 @@ class _FakeRunner:
 
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
+        self.documents: list[str] = []
+        self.document_modes: list[int] = []
         self._queue: list[subprocess.CompletedProcess[str]] = []
 
     def queue(self, result: subprocess.CompletedProcess[str]) -> None:
         self._queue.append(result)
 
     def __call__(self, argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
-        self.calls.append((tuple(argv), stdin))
+        argv = tuple(argv)
+        self.calls.append((argv, stdin))
+        self._capture_document(argv)
         if not self._queue:
             raise AssertionError("_FakeRunner invoked with no queued response")
         return self._queue.pop(0)
+
+    def _capture_document(self, argv: tuple[str, ...]) -> None:
+        """Read any `--cli-input-json` document now, while the file still exists.
+
+        `write_parameter` removes the document's directory before it returns,
+        so a test cannot inspect the file afterwards; capturing it here, at the
+        moment the real aws CLI would read it, is the only point where its
+        content and its mode can be observed at all.
+        """
+        if "--cli-input-json" not in argv:
+            return
+        reference = argv[argv.index("--cli-input-json") + 1]
+        assert reference.startswith("file://"), reference
+        path = Path(reference[len("file://") :])
+        assert path.is_file(), f"the document must be a regular file, not {path}"
+        self.document_modes.append(stat.S_IMODE(path.stat().st_mode))
+        self.documents.append(path.read_text(encoding="utf-8"))
 
 
 class _RaisingRunner:
@@ -162,7 +183,7 @@ def test_read_issues_get_parameter_with_decryption_and_returns_exact_value() -> 
     assert stdin is None
 
 
-def test_write_issues_put_parameter_with_value_only_on_stdin() -> None:
+def test_write_issues_put_parameter_with_value_only_in_a_private_document() -> None:
     catalog = _import_catalog()
     runner = _FakeRunner()
     version = _seeded_version()
@@ -176,9 +197,11 @@ def test_write_issues_put_parameter_with_value_only_on_stdin() -> None:
     (argv, stdin) = runner.calls[0]
     assert "put-parameter" in argv
     assert value not in argv
-    assert stdin is not None
-    assert value in stdin
-    document = json.loads(stdin)
+    assert value not in " ".join(argv)
+    assert stdin is None, "the aws CLI v2 cannot read the document from stdin"
+    assert runner.document_modes == [0o600], "the document must not be readable by other users"
+    document = json.loads(runner.documents[0])
+    assert document["Value"] == value
     assert document["Type"] == "SecureString"
     assert document["Name"] == "/devcontainer/shared/secrets/NOTION_TOKEN"
     assert document["Value"] == value
@@ -2065,9 +2088,8 @@ def test_write_parameter_writes_the_given_path_and_type_verbatim() -> None:
     version = client.write_parameter("/devcontainer/sandbox/tls/ca.pem", "public-pem", "String")
 
     assert version == 3
-    (argv, stdin) = runner.calls[0]
-    assert stdin is not None
-    document = json.loads(stdin)
+    (argv, _stdin) = runner.calls[0]
+    document = json.loads(runner.documents[0])
     assert document["Name"] == "/devcontainer/sandbox/tls/ca.pem"
     assert document["Type"] == "String"
     assert document["Value"] == "public-pem"
@@ -2084,7 +2106,7 @@ def test_write_parameter_omits_description_when_none_is_given() -> None:
 
     client.write_parameter("/devcontainer/sandbox/tls/ca.pem", "value", "String")
 
-    document = json.loads(runner.calls[0][1])
+    document = json.loads(runner.documents[0])
     assert "Description" not in document
 
 
@@ -2097,6 +2119,6 @@ def test_write_still_sends_its_exported_description_through_the_shared_put() -> 
 
     client.write("shared", "TOKEN", "value", exported=True)
 
-    document = json.loads(runner.calls[0][1])
+    document = json.loads(runner.documents[0])
     assert json.loads(document["Description"]) == {"exported": True}
     assert document["Type"] == catalog.SECURE_STRING_TYPE

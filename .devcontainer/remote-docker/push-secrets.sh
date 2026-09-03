@@ -36,23 +36,37 @@ REMOTE_SHELL_ENV=$(sed \
   "$SHELL_ENV_SOURCE")
 [ -n "$REMOTE_SHELL_ENV" ] || rd_die "transformed shell.env is empty"
 
-# Values go to the child on stdin as a --cli-input-json document, never in
-# argv: shell.env carries every credential this repository has, and an
-# argument is visible in the process table to any other process on this
-# machine for as long as the call runs. This is the same invariant
-# devcontainer_config.catalog states for a stored secret and
-# devcontainer_config.certs.publish applies to a TLS private key.
+# The value travels inside a --cli-input-json document, never in argv:
+# shell.env carries every credential this repository has, and an argument is
+# visible in the process table to any other process on this machine for as
+# long as the call runs -- and is echoed back verbatim by rd_run's own error
+# translator. This is the same invariant devcontainer_config.catalog states
+# for a stored secret and devcontainer_config.certs.publish applies to a TLS
+# private key.
+#
+# The document is a real file rather than stdin because the aws CLI v2 does
+# not read file:///dev/stdin: it reports "Invalid JSON received" whether stdin
+# is a pipe or a redirected regular file, and blocks indefinitely on a FIFO.
+#
+# One directory, created at mode 0700 and removed by an EXIT trap. The trap is
+# on EXIT rather than RETURN because rd_aws reports a failure through rd_fail,
+# which calls exit: a RETURN trap never runs on that path, and the document
+# would outlive the script holding the secret it carried.
+RD_PUT_DIR="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/rd-put.XXXXXX")"
+trap 'rm -rf "$RD_PUT_DIR"' EXIT
+
 rd_put_parameter() {
-  local name="$1" type="$2" value="$3"
+  local name="$1" type="$2" value="$3" document="${RD_PUT_DIR}/put-parameter.json"
   # printf, not a here-string: a here-string appends a newline, which would
   # store bytes the local file does not have and make every later comparison
   # against it report a difference that is not there.
-  printf '%s' "$value" \
-    | python3 -c 'import json,sys; sys.stdout.write(json.dumps({"Name":sys.argv[1],"Value":sys.stdin.read(),"Type":sys.argv[2],"Overwrite":True}))' \
-      "$name" "$type" \
-    | rd_aws ssm put-parameter \
-      --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" \
-      --cli-input-json file:///dev/stdin > /dev/null
+  ( umask 077
+    printf '%s' "$value" \
+      | python3 -c 'import json,sys; sys.stdout.write(json.dumps({"Name":sys.argv[1],"Value":sys.stdin.read(),"Type":sys.argv[2],"Overwrite":True}))' \
+        "$name" "$type" > "$document" )
+  rd_aws ssm put-parameter \
+    --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" \
+    --cli-input-json "file://${document}" > /dev/null
 }
 
 rd_log "Publishing ${SSM_PREFIX}/shell.env (SecureString)..."

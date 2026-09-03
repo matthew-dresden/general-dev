@@ -98,7 +98,13 @@ NEXT_TOKEN_FLAG = "--next-token"
 # `--cli-input-json` accepts a `file://` URI; pointing it at the process's
 # own stdin is what lets `write` hand the value to `aws` without it ever
 # appearing in argv (E3-F1-S1-T1 AC-FUNC-004).
-CLI_INPUT_STDIN_URI = "file:///dev/stdin"
+# The `--cli-input-json` document is handed to the aws CLI as a file, in a
+# directory this process creates at mode 0700 and removes before returning.
+# stdin is not an option: the aws CLI v2 does not read `file:///dev/stdin`
+# (it reports "Invalid JSON received" whether stdin is a pipe or a redirected
+# regular file, and blocks indefinitely on a FIFO), so the document must be a
+# real, regular file for the duration of the call.
+PUT_DOCUMENT_FILENAME = "put-parameter.json"
 
 AWS_PROFILE_ENV_VAR = "AWS_PROFILE"
 DEFAULT_AWS_PROFILE = "default"
@@ -728,9 +734,9 @@ class CatalogClient:
         """Store `value` at `scope`/`name` as a SecureString, overwriting any existing version.
 
         Delegates to `write_parameter`, which is where the argv invariant
-        lives: `value` is handed to the child process on stdin inside a
-        `--cli-input-json` document and is never placed in argv, so it never
-        reaches the process table (E3-F1-S1-T1 AC-FUNC-004).
+        lives: `value` travels inside a `--cli-input-json` document and is
+        never placed in argv, so it never reaches the process table
+        (E3-F1-S1-T1 AC-FUNC-004).
 
         Returns:
             The integer `Version` the store assigned to the parameter it
@@ -775,10 +781,10 @@ class CatalogClient:
 
         Keeping both callers on this method is what makes the argv invariant
         structural rather than a discipline each caller has to remember:
-        `value` is handed to the child on stdin inside a `--cli-input-json`
-        document and never appears in argv, so no secret -- a stored password
-        or a TLS private key alike -- can reach the process table
-        (E3-F1-S1-T1 AC-FUNC-004).
+        `value` travels inside a `--cli-input-json` document written to a
+        private file this method creates and removes, and never appears in
+        argv, so no secret -- a stored password or a TLS private key alike --
+        can reach the process table (E3-F1-S1-T1 AC-FUNC-004).
 
         Returns:
             The integer `Version` the store assigned to the parameter.
@@ -799,8 +805,17 @@ class CatalogClient:
         }
         if description is not None:
             document["Description"] = description
-        argv = self._argv(PUT_PARAMETER_OP, "--cli-input-json", CLI_INPUT_STDIN_URI)
-        result = self._invoke(argv, json.dumps(document), path, operation=PUT_PARAMETER_OP)
+        with tempfile.TemporaryDirectory() as directory:
+            document_path = Path(directory) / PUT_DOCUMENT_FILENAME
+            descriptor = os.open(
+                document_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(document))
+            argv = self._argv(
+                PUT_PARAMETER_OP, "--cli-input-json", f"file://{document_path}"
+            )
+            result = self._invoke(argv, None, path, operation=PUT_PARAMETER_OP)
         payload = _parse_response_json(result.stdout, path, PUT_PARAMETER_OP)
         version = payload.get("Version")
         if not isinstance(version, int) or isinstance(version, bool):

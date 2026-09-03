@@ -367,6 +367,7 @@ class _FakeCatalogRunner:
 
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
+        self.documents: list[str] = []
         self._queue: list[subprocess.CompletedProcess[str]] = []
 
     def queue(self, result: subprocess.CompletedProcess[str]) -> None:
@@ -375,7 +376,16 @@ class _FakeCatalogRunner:
     def __call__(
         self, argv: list[str] | tuple[str, ...], stdin: str | None
     ) -> subprocess.CompletedProcess[str]:
-        self.calls.append((tuple(argv), stdin))
+        argv = tuple(argv)
+        self.calls.append((argv, stdin))
+        if "--cli-input-json" in argv:
+            # Read it now: write_parameter removes the document's directory
+            # before returning, so it cannot be inspected afterwards.
+            reference = argv[argv.index("--cli-input-json") + 1]
+            assert reference.startswith("file://"), reference
+            self.documents.append(
+                Path(reference[len("file://") :]).read_text(encoding="utf-8")
+            )
         if not self._queue:
             raise AssertionError("_FakeCatalogRunner invoked with no queued response")
         return self._queue.pop(0)
@@ -719,9 +729,9 @@ def test_devsecret_set_stdin_flag_reads_the_interactive_value(
     )
 
     assert exit_code == 0
-    (_argv, stdin_document) = runner.calls[0]
-    assert stdin_document is not None
-    assert value in stdin_document
+    (_argv, stdin) = runner.calls[0]
+    assert stdin is None, "the aws CLI v2 cannot read the document from stdin"
+    assert value in runner.documents[0]
 
 
 def test_devsecret_set_exported_records_marker_and_success_line_names_path_and_version(
@@ -745,10 +755,9 @@ def test_devsecret_set_exported_records_marker_and_success_line_names_path_and_v
     assert "/devcontainer/shared/secrets/NOTION_TOKEN" in out
     assert "version 3" in out
     assert "Exported" in out
-    (argv, stdin_document) = runner.calls[0]
+    (argv, _stdin) = runner.calls[0]
     assert value not in " ".join(argv)
-    assert stdin_document is not None
-    document = json.loads(stdin_document)
+    document = json.loads(runner.documents[0])
     assert document["Description"] == json.dumps({"exported": True})
     assert document["Value"] == value
 

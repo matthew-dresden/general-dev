@@ -44,9 +44,9 @@ material, writes each entry `publication_set` returned through
 `catalog.CatalogClient.read_parameter` and compares it against what it wrote
 before reporting anything published. It reaches the store through that client
 rather than shelling out to `aws` here for two reasons. The value travels to
-the child process inside a `--cli-input-json` document on stdin and never in
-argv, so a TLS private key is never visible in the process table nor echoed
-back by this repository's own failure translator -- the identical invariant
+the child process inside a `--cli-input-json` document and never in argv, so a
+TLS private key is never visible in the process table nor echoed back by this
+repository's own failure translator -- the identical invariant
 `catalog`'s own module docstring states for a stored secret, which a
 hand-written `put-parameter --value` call would break silently. And the error
 classification an operator needs -- an expired SSO session, a denied prefix --

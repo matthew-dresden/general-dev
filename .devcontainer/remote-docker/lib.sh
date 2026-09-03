@@ -60,14 +60,23 @@ rd_load_config() {
 # Only remote operations need the EC2 identity, so this is separate from
 # rd_load_config: local-engine commands must keep working on a machine where
 # none of it is configured.
+# The region and profile every AWS call needs, and nothing more. An operation
+# that reaches AWS but never names the instance over the wire -- publishing
+# this instance's TLS material, which the resolver addresses by name -- must
+# require only these, or an unrelated placeholder blocks work that does not
+# depend on it.
+rd_require_aws_config() {
+  : "${REMOTE_AWS_REGION:?REMOTE_AWS_REGION must be set}"
+  : "${REMOTE_AWS_PROFILE:?REMOTE_AWS_PROFILE must be set}"
+}
+
 rd_require_remote_config() {
   case "${REMOTE_INSTANCE_ID:-}" in
     "<"*">") rd_die "REMOTE_INSTANCE_ID is still the placeholder ${REMOTE_INSTANCE_ID}. Set it in shell.env (see shell.env.example) or export it." ;;
   esac
 
   : "${REMOTE_INSTANCE_ID:?REMOTE_INSTANCE_ID must be set}"
-  : "${REMOTE_AWS_REGION:?REMOTE_AWS_REGION must be set}"
-  : "${REMOTE_AWS_PROFILE:?REMOTE_AWS_PROFILE must be set}"
+  rd_require_aws_config
   : "${REMOTE_DOCKER_CONTEXT:?REMOTE_DOCKER_CONTEXT must be set}"
 }
 

@@ -1613,6 +1613,8 @@ class _RecordingRunner:
         tamper: object | None = None,
     ) -> None:
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
+        self.document_modes: list[int] = []
+        self._documents: list[str] = []
         self._stored: dict[str, str] = {}
         self._failure = failure
         self._tamper = tamper
@@ -1630,8 +1632,15 @@ class _RecordingRunner:
         if self._failure is not None:
             return self._failure
         if "put-parameter" in argv:
-            assert stdin is not None, "a put must carry its document on stdin"
-            document = json.loads(stdin)
+            assert stdin is None, "the aws CLI v2 cannot read the document from stdin"
+            reference = argv[argv.index("--cli-input-json") + 1]
+            assert reference.startswith("file://"), reference
+            path = Path(reference[len("file://") :])
+            assert path.is_file(), f"the document must be a regular file, not {path}"
+            self.document_modes.append(stat.S_IMODE(path.stat().st_mode))
+            raw = path.read_text(encoding="utf-8")
+            self._documents.append(raw)
+            document = json.loads(raw)
             value = str(document["Value"])
             if self._tamper is not None:
                 value = self._tamper(str(document["Name"]), value)
@@ -1644,8 +1653,12 @@ class _RecordingRunner:
         raise AssertionError(f"unexpected operation: {argv}")
 
     def documents(self) -> list[dict[str, object]]:
-        """Every `--cli-input-json` document this runner was handed, parsed."""
-        return [json.loads(stdin) for _, stdin in self.calls if stdin is not None]
+        """Every `--cli-input-json` document this runner was handed, parsed.
+
+        Captured as each call arrived: `write_parameter` removes the document's
+        directory before returning, so the file cannot be read afterwards.
+        """
+        return [json.loads(raw) for raw in self._documents]
 
 
 def _publish_client(runner: _RecordingRunner) -> object:
@@ -1710,6 +1723,12 @@ def test_publish_never_places_material_in_argv(issued_material: _IssuedMaterial)
     assert writes, "publish wrote nothing"
     for argv in writes:
         assert "--cli-input-json" in argv
+        reference = argv[argv.index("--cli-input-json") + 1]
+        assert reference.startswith("file://") and "BEGIN" not in reference
+    assert runner.document_modes and set(runner.document_modes) == {0o600}, (
+        "each document holds a TLS private key and must not be readable by other users: "
+        f"{[oct(mode) for mode in runner.document_modes]}"
+    )
     for document in runner.documents():
         assert "BEGIN" in str(document["Value"])
 

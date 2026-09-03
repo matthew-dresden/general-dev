@@ -407,40 +407,28 @@ disagree on, the empty string, is documented above.
 
 ### Repository slug derivation
 
-E8-F1-S1-T3 adds a repository-slug derivation,
-`devcontainer_config.repo.repo_slug`, that will read `git config --get
-remote.origin.url` and apply the same `basename()`-plus-`trimsuffix(".git")`
-transform `remote-instances/root.hcl`'s own `repo_slug` local already
-applies, for building the per-instance docker context name (spec Section
-9). That git-config read is local and network-free, but will still be
-bounded rather than unbounded, by `REPO_SLUG_GIT_TIMEOUT_SECONDS`, resolved
-through `hostprobe.py`'s `read_positive_seconds`, the same shared reader
-`transport.py` uses for `DOCKER_HANDSHAKE_TIMEOUT`. `tests/test_state_bucket_name.py`'s
-private `_repo_slug_from_git_remote` already declares the identical
-`REPO_SLUG_GIT_TIMEOUT_SECONDS` name and `10` second default for the same
-git-remote read, independently of `repo.py`, and reads it today at import
-time. As of this revision E8-F1-S1-T3 has not landed in this repository:
-`repo.py` declares neither `repo_slug` nor `REPO_SLUG_GIT_TIMEOUT_SECONDS`,
-so `repo.py` itself has no reader for this variable yet, which leaves
-`tests/test_state_bucket_name.py`'s reader as this variable's only reader
-in this repository right now. That whole sentence, and the "not yet
-landed" caveat below, describe a transient state tied to E8-F1-S1-T3
-landing, not a permanent fact about this variable: once
-`devcontainer_config.repo` declares `repo_slug`, both must be rewritten to
-name `repo.py`'s reader as landed and to drop the "only reader" claim,
-since `tests/test_state_bucket_name.py`'s reader would then no longer be
-the only one.
+`remote-instances/root.hcl`'s own `repo_slug` local derives a repo-slug
+component of the Terraform state bucket name (root.hcl lines 63-66,
+feeding `state_bucket_name` at line 81) from `git config --get
+remote.origin.url`, applying a `basename()`-plus-`trimsuffix(".git")`
+transform to that URL. `tests/test_state_bucket_name.py`'s private
+`_repo_slug_from_git_remote` reads the identical git remote the same way,
+bounded, for readers of the variable, by `REPO_SLUG_GIT_TIMEOUT_SECONDS`,
+resolved through `hostprobe.py`'s `read_positive_seconds`, the same shared
+reader `transport.py` uses for `DOCKER_HANDSHAKE_TIMEOUT`.
+`read_positive_seconds` rejects a non-numeric or non-positive value by
+name rather than silently falling back to the default, and
+`_repo_slug_from_git_remote` reads a `10` second default for that
+git-remote read.
 
 | Variable | Default | Defined in |
 |---|---|---|
-| `REPO_SLUG_GIT_TIMEOUT_SECONDS` | `10` | `tests/test_state_bucket_name.py`'s private `_repo_slug_from_git_remote`, resolved through `hostprobe.py`'s `read_positive_seconds` (this variable's only reader today; `repo.py`'s `repo_slug` will become a second, independent reader of the identical name and default once it lands, not yet landed, E8-F1-S1-T3) |
+| `REPO_SLUG_GIT_TIMEOUT_SECONDS` | `10` | Resolved through `hostprobe.py`'s `read_positive_seconds`; read by `tests/test_state_bucket_name.py`'s private `_repo_slug_from_git_remote` |
 
-`read_positive_seconds` already applies, to `tests/test_state_bucket_name.py`'s
-reader today, the same fail-fast rule `DOCKER_HANDSHAKE_TIMEOUT`'s reader
-applies: it rejects a non-numeric or non-positive value by name rather than
-silently falling back to the default. Once `repo_slug` lands (E8-F1-S1-T3),
-`repo.py`'s reader will apply that identical rule too; until then, `repo.py`
-itself has no reader for this variable.
+`read_positive_seconds` applies the same fail-fast rule
+`DOCKER_HANDSHAKE_TIMEOUT`'s reader applies to every reader of
+`REPO_SLUG_GIT_TIMEOUT_SECONDS`: it rejects a non-numeric or non-positive
+value by name rather than silently falling back to the default.
 
 ### What did not change
 

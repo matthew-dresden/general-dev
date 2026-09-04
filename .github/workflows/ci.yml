@@ -70,9 +70,10 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/hashicorp.list > /dev/null
           sudo apt-get update
           sudo apt-get install -y terraform
-          tg_version="$(curl -fsSL https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+          # The releases/latest/download redirect, not the API: an unauthenticated
+          # api.github.com call from a runner is rate-limited and answered 403.
           sudo curl -fsSL -o /usr/local/bin/terragrunt \
-            "https://github.com/gruntwork-io/terragrunt/releases/download/${tg_version}/terragrunt_linux_amd64"
+            https://github.com/gruntwork-io/terragrunt/releases/latest/download/terragrunt_linux_amd64
           sudo chmod +x /usr/local/bin/terragrunt
           terraform version
           terragrunt --version

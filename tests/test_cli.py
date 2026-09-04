@@ -1289,10 +1289,31 @@ def devsecret_run_repo(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def secret_cache_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A dedicated SECRET_CACHE_DIR base, so cleanup can be asserted by checking it is empty."""
+    """A dedicated SECRET_CACHE_DIR base, so cleanup can be asserted by checking it is empty.
+
+    The mount table is faked alongside it. `catalog.secret_cache_dir` refuses a
+    cache directory it cannot prove is RAM-backed, and it proves that from
+    `/proc/mounts`: on Linux this base is an ordinary on-disk temporary
+    directory, so the real reader classifies it correctly and every `devsecret
+    run` test fails with exit 5. On macOS there is no `/proc/mounts`, the
+    reader returns None, the check is skipped, and the same tests pass. That
+    difference is why these twelve tests passed on the developer's machine and
+    failed in CI.
+
+    Declaring the base tmpfs here makes the platform irrelevant: the tests
+    exercise `run` rather than the host's filesystem layout, and
+    `tests/test_catalog.py` is where the refusal itself is tested, with its own
+    tables built for the purpose.
+    """
     base = tmp_path / f"secret-cache-base-{uuid.uuid4().hex}"
     base.mkdir()
     monkeypatch.setenv("SECRET_CACHE_DIR", str(base))
+    catalog = importlib.import_module("devcontainer_config.catalog")
+    monkeypatch.setattr(
+        catalog,
+        "default_mount_table_reader",
+        lambda: (catalog.MountEntry(mount_point=str(base), filesystem_type="tmpfs"),),
+    )
     return base
 
 

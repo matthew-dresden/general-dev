@@ -26,6 +26,7 @@ comparison away from putting that secret in a pytest failure log.
 from __future__ import annotations
 
 import re
+import os
 import subprocess
 import tempfile
 import uuid
@@ -44,6 +45,28 @@ endif
 {target}:
 \t@echo $(PRIVATE_FILES)
 """
+
+
+
+def _make_environment() -> dict[str, str]:
+    """The environment for a `make` this suite invokes itself.
+
+    `make test` runs pytest, so any `make` a test spawns is a sub-make: it
+    inherits MAKEFLAGS and MAKELEVEL and, from GNU make 4.x onward, announces
+    itself with "make[1]: Entering directory ..." on stdout. Those lines are
+    not part of what the command prints for an operator running it from a
+    shell, which is what these assertions are about, and they land in the
+    middle of the output the extraction parses.
+
+    Dropping the two variables makes the child a top-level make again, so the
+    suite observes the same output an operator does whether or not it was
+    started through `make`. This is why the failure appeared only in CI: the
+    macOS make in the developer path is 3.81, which does not print the banner.
+    """
+    environment = dict(os.environ)
+    for inherited in ("MAKEFLAGS", "MAKELEVEL", "MFLAGS"):
+        environment.pop(inherited, None)
+    return environment
 
 
 class MakeInvocationError(RuntimeError):
@@ -92,6 +115,7 @@ def _makefile_private_files(makefile_dir: Path) -> tuple[str, ...]:
             capture_output=True,
             text=True,
             check=True,
+            env=_make_environment(),
         )
     except FileNotFoundError as exc:
         raise MakeInvocationError(

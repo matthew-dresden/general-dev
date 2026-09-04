@@ -98,6 +98,12 @@ class FakeLauncher:
         return object()
 
 
+# Attempts allowed when another process takes the ephemeral port between this
+# suite choosing it and binding it. Bounded so a genuine regression still
+# fails rather than looping.
+_PORT_RACE_ATTEMPTS = 8
+
+
 def _free_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
@@ -423,30 +429,59 @@ def test_allocate_local_port_reuses_a_recorded_port_left_in_time_wait_by_a_previ
     the same as it would an idle, never-used port, rather than raising
     `PortOccupiedError` with a "foreign process" remedy that would find
     nothing.
+
+    The attempt loop is not tolerance for the behaviour under test, which
+    must hold on every attempt. It covers an OS race the test cannot close:
+    the ephemeral port is chosen by binding port 0 and reading the number
+    back, and between that socket closing and this one binding, any other
+    process on the machine may take it. On a busy CI runner that happens,
+    and it presents as exactly the `PortOccupiedError` this test exists to
+    catch -- a real foreign process, correctly reported. Retrying with a
+    fresh port distinguishes the two; exhausting the attempts fails loudly
+    rather than passing quietly.
     """
     transport = _import_transport()
-    port = _free_loopback_port()
+    last_error: Exception | None = None
 
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(("127.0.0.1", port))
-    server.listen(1)
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect(("127.0.0.1", port))
-    conn, _ = server.accept()
-    server.close()
-    conn.close()  # the server side actively closes first: it enters TIME_WAIT
-    client.close()
+    for _ in range(_PORT_RACE_ATTEMPTS):
+        port = _free_loopback_port()
 
-    command = _context_inspect_command("general-dev-sandbox")
-    runner = FakeRunner(
-        {
-            command: transport.CommandResult(
-                exit_code=0, stdout=f'{{"docker":{{"Host":"tcp://127.0.0.1:{port}"}}}}'
-            )
-        }
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.bind(("127.0.0.1", port))
+        except OSError as exc:  # taken between the probe and here
+            server.close()
+            last_error = exc
+            continue
+        server.listen(1)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.connect(("127.0.0.1", port))
+        conn, _ = server.accept()
+        server.close()
+        conn.close()  # the server side actively closes first: it enters TIME_WAIT
+        client.close()
+
+        command = _context_inspect_command("general-dev-sandbox")
+        runner = FakeRunner(
+            {
+                command: transport.CommandResult(
+                    exit_code=0, stdout=f'{{"docker":{{"Host":"tcp://127.0.0.1:{port}"}}}}'
+                )
+            }
+        )
+
+        try:
+            assert transport.allocate_local_port(runner, "general-dev-sandbox") == port
+        except transport.PortOccupiedError as exc:
+            last_error = exc
+            continue
+        return
+
+    raise AssertionError(
+        f"could not obtain a port left in TIME_WAIT by this test alone after "
+        f"{_PORT_RACE_ATTEMPTS} attempts; another process took each one first. "
+        f"Last error: {last_error}"
     )
-
-    assert transport.allocate_local_port(runner, "general-dev-sandbox") == port
 
 
 def test_allocate_local_port_gives_two_instances_distinct_ports() -> None:

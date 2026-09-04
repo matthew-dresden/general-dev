@@ -51,6 +51,32 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zsh
 
+      # tests/test_tool_version_floors.py asserts that the terraform and
+      # terragrunt actually installed satisfy the floors remote-instances/root.hcl
+      # declares (">= 1.10" and ">= 1.1.3"). In the devcontainer both come from
+      # the terraform feature in .devcontainer/devcontainer.json; a bare runner
+      # has neither, so without this step those cases fail on a missing binary
+      # rather than on a version, reporting a toolchain gap as a floor violation.
+      # Installed from the vendors' own current releases: the test checks a
+      # floor, so any current version satisfies it, and pinning here would add a
+      # second place to bump whenever the floor moves.
+      - name: Install terraform and terragrunt
+        shell: bash
+        run: |
+          set -euo pipefail
+          wget -qO- https://apt.releases.hashicorp.com/gpg \
+            | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/hashicorp.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y terraform
+          tg_version="$(curl -fsSL https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest | grep -m1 '"tag_name"' | cut -d'"' -f4)"
+          sudo curl -fsSL -o /usr/local/bin/terragrunt \
+            "https://github.com/gruntwork-io/terragrunt/releases/download/${tg_version}/terragrunt_linux_amd64"
+          sudo chmod +x /usr/local/bin/terragrunt
+          terraform version
+          terragrunt --version
+
       # A red step here means a broken test: run `make test` locally to
       # reproduce.
       - name: make test

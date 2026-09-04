@@ -368,6 +368,7 @@ to request the default; leave it unset instead.
 | `DOCKER_TLS_PORT` | `2376` | `transport.py`, read by `build_start_session_argv` |
 | `SSM_FORWARD_TIMEOUT` | `30` | `transport.py`, read by `wait_ready` and `stop_forward` |
 | `MATERIAL_INSTALL_TIMEOUT` | `300` | `transport.py`, read by `install_material` for the instance-side fetch and daemon start |
+| `PORT_PROBE_TIMEOUT` | `2` | `transport.py`, read by `_port_has_live_listener` for the loopback connect that decides whether a recorded port is genuinely occupied |
 | `DOCKER_HANDSHAKE_TIMEOUT` | `30` | `hostprobe.py`'s `read_positive_seconds`, the one place its name, default and validation are declared; `transport.py`'s `handshake` (E6-F2-S1-T2) calls the same function rather than declaring its own copy |
 | `DEVCONTAINER_TRANSPORT` | `ssm` | selector for `make connect`'s transport dispatch; both the Makefile's `connect` recipe and `transport.py`'s `resolve_transport` (used by the module's own `connect` subcommand) read and dispatch on it; `ssm` is the only accepted value, and `ssh` is rejected by name as removed at cutover |
 
@@ -406,12 +407,13 @@ port and this variable together is a different error,
 only once the retried `docker version` call itself either never answers
 before the deadline or answers with no budget left for the rootless probe
 that follows it -- `handshake` already knows the context and the port at
-that point, which the timeout reader itself never does. All five
+that point, which the timeout reader itself never does. All six
 variables, `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`,
-`MATERIAL_INSTALL_TIMEOUT`, `DOCKER_HANDSHAKE_TIMEOUT` and
-`DEVCONTAINER_TRANSPORT`, are optional. `DOCKER_TLS_PORT`,
-`SSM_FORWARD_TIMEOUT`, `MATERIAL_INSTALL_TIMEOUT` and
-`DOCKER_HANDSHAKE_TIMEOUT` are read by code in this repository today: each default above applies
+`MATERIAL_INSTALL_TIMEOUT`, `PORT_PROBE_TIMEOUT`,
+`DOCKER_HANDSHAKE_TIMEOUT` and `DEVCONTAINER_TRANSPORT`, are optional.
+`DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`, `MATERIAL_INSTALL_TIMEOUT`,
+`PORT_PROBE_TIMEOUT` and `DOCKER_HANDSHAKE_TIMEOUT` are read by code in this
+repository today: each default above applies
 whenever the variable is unset, and each reader rejects a non-numeric or
 non-positive value naming the variable and its value rather than
 silently falling back to the default. `DEVCONTAINER_TRANSPORT`'s two

@@ -174,6 +174,8 @@ _DOCKER_TLS_PORT_DEFAULT = 2376
 
 MATERIAL_INSTALL_TIMEOUT_ENV_VAR = "MATERIAL_INSTALL_TIMEOUT"
 _MATERIAL_INSTALL_TIMEOUT_DEFAULT_SECONDS = 300.0
+PORT_PROBE_TIMEOUT_ENV_VAR = "PORT_PROBE_TIMEOUT"
+_PORT_PROBE_TIMEOUT_DEFAULT_SECONDS = 2.0
 SSM_FORWARD_TIMEOUT_ENV_VAR = "SSM_FORWARD_TIMEOUT"
 _SSM_FORWARD_TIMEOUT_DEFAULT_SECONDS = 30.0
 
@@ -671,28 +673,61 @@ def _bind_free_port() -> int:
         return int(probe_socket.getsockname()[1])
 
 
+def _port_has_live_listener(port: int) -> bool:
+    """Whether something is actually accepting connections on `port` right now.
+
+    The half of the probe that a bind attempt cannot supply. A bind failure
+    alone does not mean a process holds the port: on Linux a `TIME_WAIT`
+    connection left by this module's own previous forward refuses the bind
+    even with `SO_REUSEADDR` set, while nothing is listening. A connect
+    attempt separates the two, because only a live listener accepts one.
+
+    Bounded by `PORT_PROBE_TIMEOUT`. The target is always loopback, so the
+    deadline exists to stop a pathological stack from hanging the probe, not
+    to accommodate a slow network.
+    """
+    deadline = read_positive_seconds(
+        PORT_PROBE_TIMEOUT_ENV_VAR, _PORT_PROBE_TIMEOUT_DEFAULT_SECONDS
+    )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_socket:
+        probe_socket.settimeout(deadline)
+        try:
+            probe_socket.connect((_LOCALHOST, port))
+        except OSError:
+            return False
+    return True
+
+
 def _ensure_port_free(port: int, context_name: str) -> None:
     """Raise `PortOccupiedError` if `port` is currently bound by another process.
 
-    A bind-and-release probe, not a connect probe: a port with nothing
-    listening on it would report "closed" to a connect attempt just as a
-    genuinely free port would, so only a bind attempt actually distinguishes
-    "free" from "occupied by a foreign listener" here. `SO_REUSEADDR` is set
-    on the probe socket so a `TIME_WAIT` connection left behind by this
-    module's *own* previous forward through this exact port (this module
-    always tears the session down through `stop_forward`, which closes the
-    connection actively) does not masquerade as a foreign listener: without
-    it, the OS refuses the bind for any socket still winding down in
-    `TIME_WAIT` on this address, even though no process actually holds the
-    port anymore. A genuinely occupied port (another process actively
-    listening) still fails this bind either way, `SO_REUSEADDR` does not
-    permit binding over a live listener.
+    Two probes, because neither alone answers the question on both platforms
+    this program runs on -- the developer's macOS laptop and the Linux
+    devcontainer and CI runner.
+
+    A bind attempt distinguishes "free" from "occupied": a port with nothing
+    listening reports "closed" to a connect just as a free one does. But a
+    bind failure does not by itself mean a process holds the port. This module
+    always tears its own session down through `stop_forward`, which closes the
+    connection actively, leaving the local end in `TIME_WAIT`. On macOS
+    `SO_REUSEADDR` lets the bind through anyway; on Linux it does not, and the
+    bind fails with `EADDRINUSE` while no process is listening at all.
+    Measured on both, 2026-09-04: TIME_WAIT gives bind=True on macOS and
+    bind=False on Linux, and connect is refused on each; a live listener gives
+    bind=False and connect=True on both.
+
+    So the bind is tried first, and its failure is only believed when a
+    connect confirms someone is actually listening. Without the second probe
+    this refuses every reconnect on Linux for the length of `TIME_WAIT`,
+    naming a "foreign process" the operator would never find.
     """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_socket:
             probe_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe_socket.bind((_LOCALHOST, port))
     except OSError as exc:
+        if not _port_has_live_listener(port):
+            return
         raise PortOccupiedError(
             f"ERROR: local port {port} recorded for docker context {context_name!r} is "
             "already in use\n"

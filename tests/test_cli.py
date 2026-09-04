@@ -1301,19 +1301,21 @@ def secret_cache_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     failed in CI.
 
     Declaring the base tmpfs here makes the platform irrelevant: the tests
-    exercise `run` rather than the host's filesystem layout, and
-    `tests/test_catalog.py` is where the refusal itself is tested, with its own
-    tables built for the purpose.
+    exercise `run` rather than the host's filesystem layout. The mount table is
+    supplied by pointing `catalog._PROC_MOUNTS_PATH` at a fixture file, the
+    same technique
+    `test_devsecret_run_secret_cache_dir_not_ram_backed_exits_five` already
+    uses to reach the opposite outcome, so the real reader still runs and only
+    the table it reads is substituted. `tests/test_catalog.py` is where the
+    refusal itself is tested, with its own tables built for the purpose.
     """
     base = tmp_path / f"secret-cache-base-{uuid.uuid4().hex}"
     base.mkdir()
     monkeypatch.setenv("SECRET_CACHE_DIR", str(base))
     catalog = importlib.import_module("devcontainer_config.catalog")
-    monkeypatch.setattr(
-        catalog,
-        "default_mount_table_reader",
-        lambda: (catalog.MountEntry(mount_point=str(base), filesystem_type="tmpfs"),),
-    )
+    mounts = tmp_path / f"mounts-{uuid.uuid4().hex}"
+    mounts.write_text(f"tmpfs {base} tmpfs rw,relatime 0 0\n", encoding="utf-8")
+    monkeypatch.setattr(catalog, "_PROC_MOUNTS_PATH", mounts)
     return base
 
 

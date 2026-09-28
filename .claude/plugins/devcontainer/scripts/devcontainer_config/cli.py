@@ -15,7 +15,13 @@ whatever is currently staged for the next commit, using
 instead scans every commit in that range, oldest first, using
 `devcontainer_config.secrets.scan_range` (E2-F1-S2-T1): scanning only the
 tip would miss a secret introduced earlier in the range and removed later,
-which still reaches the remote in history. Either mode prints its report and
+which still reaches the remote in history. Both modes also compare every
+scanned line against the hostcreds credentials resolved live from the
+host's gitignored manifest (see
+`devcontainer_config.secrets.hostcreds_values`): a credential whose source
+command fails is reported by name as unavailable rather than failing the
+scan, and a resolved value never reaches stdout, stderr or the report.
+Either mode prints its report and
 calls `sys.exit(1)` if it found anything, `sys.exit(0)` otherwise. There is
 no flag, environment variable or marker comment on this command that
 suppresses a finding: a finding is either real, and fixed, or a false

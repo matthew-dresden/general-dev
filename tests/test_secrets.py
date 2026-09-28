@@ -30,6 +30,7 @@ import re
 import socket
 import subprocess
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 
@@ -166,7 +167,7 @@ def test_positive_sample_yields_one_finding(case: dict[str, object], prefix: str
     """AC-TEST-001: every positive sample yields exactly one correctly identified finding."""
     secrets = _import_secrets()
     sample = _composed_sample(case, prefix)
-    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=(), hostcreds_values=())
 
     findings = secrets.scan_lines([(1, sample)], sources)
 
@@ -180,7 +181,7 @@ def test_positive_sample_yields_one_finding(case: dict[str, object], prefix: str
 def test_negative_lookalike_yields_no_findings(case: dict[str, object]) -> None:
     """AC-TEST-002: a look-alike that must not match yields zero findings."""
     secrets = _import_secrets()
-    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=(), hostcreds_values=())
 
     findings = secrets.scan_lines([(1, str(case["negative_sample"]))], sources)
 
@@ -204,7 +205,7 @@ def test_render_finding_never_contains_the_full_composed_sample(
     """AC-TEST-006: a redacted render never contains the full composed sample."""
     secrets = _import_secrets()
     sample = _composed_sample(case, prefix)
-    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=(), hostcreds_values=())
     finding = secrets.scan_lines([(1, sample)], sources)[0]
     detector = secrets.DETECTORS_BY_ID[finding.detector_id]
 
@@ -221,7 +222,9 @@ def test_shell_env_line_detector_flags_matching_line() -> None:
     """AC-TEST-004: a line present in ScanSources.shell_env_lines is reported."""
     secrets = _import_secrets()
     shell_env_line = f"SOME_VAR=example-value-{uuid.uuid4().hex}"
-    sources = secrets.ScanSources(shell_env_lines=(shell_env_line,), catalog_secret_names=())
+    sources = secrets.ScanSources(
+        shell_env_lines=(shell_env_line,), catalog_secret_names=(), hostcreds_values=()
+    )
 
     findings = secrets.scan_lines([(3, shell_env_line)], sources)
 
@@ -237,6 +240,7 @@ def test_shell_env_line_detector_ignores_unrelated_line() -> None:
     sources = secrets.ScanSources(
         shell_env_lines=(f"SOME_VAR=example-value-{uuid.uuid4().hex}",),
         catalog_secret_names=(),
+        hostcreds_values=(),
     )
 
     findings = secrets.scan_lines([(1, "an unrelated line of code")], sources)
@@ -248,7 +252,9 @@ def test_catalog_secret_name_detector_flags_line_containing_name() -> None:
     """AC-TEST-004: a line containing a name in ScanSources.catalog_secret_names is reported."""
     secrets = _import_secrets()
     name = f"CATALOG_SECRET_{uuid.uuid4().hex}"
-    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=(name,))
+    sources = secrets.ScanSources(
+        shell_env_lines=(), catalog_secret_names=(name,), hostcreds_values=()
+    )
     line = f"token = lookup({name})"
 
     findings = secrets.scan_lines([(7, line)], sources)
@@ -263,12 +269,185 @@ def test_catalog_secret_name_detector_ignores_line_without_any_name() -> None:
     """AC-TEST-004: a line naming no catalog secret yields no finding."""
     secrets = _import_secrets()
     sources = secrets.ScanSources(
-        shell_env_lines=(), catalog_secret_names=(f"CATALOG_SECRET_{uuid.uuid4().hex}",)
+        shell_env_lines=(),
+        catalog_secret_names=(f"CATALOG_SECRET_{uuid.uuid4().hex}",),
+        hostcreds_values=(),
     )
 
     findings = secrets.scan_lines([(1, "an unrelated line of code")], sources)
 
     assert findings == ()
+
+
+def test_hostcreds_value_detector_flags_line_containing_the_value() -> None:
+    """A line containing a resolved hostcreds value yields exactly one finding that
+    names the credential -- and neither the finding nor its redacted render ever
+    contains the value itself."""
+    secrets = _import_secrets()
+    name = "ZAI_API_KEY"
+    probe = uuid.uuid4().hex
+    sources = secrets.ScanSources(
+        shell_env_lines=(), catalog_secret_names=(), hostcreds_values=((name, probe),)
+    )
+
+    findings = secrets.scan_lines([(5, f"export TOKEN={probe}")], sources)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.detector_id == "hostcreds-value"
+    assert finding.line_number == 5
+    assert finding.matched_text == f"{name} value"
+    assert finding.printable is False
+    detector = secrets.DETECTORS_BY_ID["hostcreds-value"]
+    assert detector.description == "hostcreds credential value"
+    rendered = secrets.render_finding(finding, detector)
+    rendered_report_line = f"src/leak.py:5: {detector.description}: {rendered}"
+    assert probe not in finding.matched_text
+    assert probe not in rendered
+    assert probe not in rendered_report_line
+    assert name in finding.matched_text
+
+
+def test_hostcreds_value_detector_catches_value_embedded_mid_line() -> None:
+    """A forty-character value embedded in longer surrounding text is caught."""
+    secrets = _import_secrets()
+    probe = (uuid.uuid4().hex + uuid.uuid4().hex)[:40]
+    sources = secrets.ScanSources(
+        shell_env_lines=(), catalog_secret_names=(), hostcreds_values=(("LONG_TOKEN", probe),)
+    )
+    line = f"curl -H 'Authorization: Basic {probe}' https://example.test/v1/data"
+
+    findings = secrets.scan_lines([(1, line)], sources)
+
+    assert len(findings) == 1
+    assert findings[0].detector_id == "hostcreds-value"
+
+
+def test_hostcreds_value_detector_matches_a_short_value_only_whole() -> None:
+    """A value under the segment threshold is matched whole, never in part."""
+    secrets = _import_secrets()
+    probe = uuid.uuid4().hex[:8]
+    assert len(probe) < 12
+    sources = secrets.ScanSources(
+        shell_env_lines=(), catalog_secret_names=(), hostcreds_values=(("SHORT_TOKEN", probe),)
+    )
+
+    whole = secrets.scan_lines([(1, f"key={probe}")], sources)
+    partial = secrets.scan_lines([(1, f"key={probe[:5]}")], sources)
+
+    assert len(whole) == 1
+    assert whole[0].detector_id == "hostcreds-value"
+    assert partial == ()
+
+
+def test_hostcreds_value_detector_matches_a_multiline_value_per_long_segment() -> None:
+    """A newline-bearing value is matched per maximal segment at least the threshold
+    long, from any qualifying segment; shorter segments are never matched, because a
+    fragment that small collides with ordinary content."""
+    secrets = _import_secrets()
+    first_segment = (uuid.uuid4().hex + uuid.uuid4().hex)[:40]
+    second_segment = uuid.uuid4().hex + "tail-of-second"
+    value = f"{first_segment}\nshort\n{second_segment}"
+    sources = secrets.ScanSources(
+        shell_env_lines=(), catalog_secret_names=(), hostcreds_values=(("MULTI_LINE", value),)
+    )
+
+    first = secrets.scan_lines([(1, f"data: {first_segment}")], sources)
+    second = secrets.scan_lines([(2, f"data: {second_segment}")], sources)
+    short = secrets.scan_lines([(3, "a line that merely mentions short things")], sources)
+
+    assert len(first) == 1
+    assert first[0].detector_id == "hostcreds-value"
+    assert len(second) == 1
+    assert second[0].detector_id == "hostcreds-value"
+    assert short == ()
+
+
+def test_hostcreds_value_detector_matches_a_crlf_value_on_every_segment() -> None:
+    """A `\\r\\n`-separated value is matched on every qualifying segment once staged
+    split into its lines: scanned lines are `str.splitlines` output, which breaks on
+    `\\r\\n` and keeps no trailing `\\r`, so a segment split on `\\n` alone -- still
+    carrying its `\\r` -- could never match any scanned line but the value's last."""
+    secrets = _import_secrets()
+    first_segment = (uuid.uuid4().hex + uuid.uuid4().hex)[:40]
+    second_segment = uuid.uuid4().hex + "tail-of-second"
+    value = f"{first_segment}\r\n{second_segment}"
+    sources = secrets.ScanSources(
+        shell_env_lines=(), catalog_secret_names=(), hostcreds_values=(("CRLF_TOKEN", value),)
+    )
+
+    findings = secrets.scan_lines([(1, first_segment), (2, second_segment)], sources)
+
+    assert [finding.line_number for finding in findings] == [1, 2]
+    assert {finding.detector_id for finding in findings} == {"hostcreds-value"}
+
+
+def test_hostcreds_value_detector_matches_a_carriage_return_bearing_single_line_value() -> None:
+    """A value holding a `\\r` but no `\\n` is still matched: under the
+    `str.splitlines` grammar it spans two segments, and the segment a scanned line
+    actually contains is found, where comparing the value whole -- `\\r` included --
+    could match nothing, no scanned line ever carrying a `\\r`."""
+    secrets = _import_secrets()
+    head = (uuid.uuid4().hex + uuid.uuid4().hex)[:24]
+    value = f"{head}\r{uuid.uuid4().hex}"
+    sources = secrets.ScanSources(
+        shell_env_lines=(), catalog_secret_names=(), hostcreds_values=(("CR_TOKEN", value),)
+    )
+
+    findings = secrets.scan_lines([(1, f"token={head}")], sources)
+
+    assert len(findings) == 1
+    assert findings[0].detector_id == "hostcreds-value"
+
+
+def test_hostcreds_value_detector_never_matches_a_value_of_only_short_segments() -> None:
+    """A value whose every segment is under the threshold matches nothing, so its
+    fragments cannot collide with ordinary lines."""
+    secrets = _import_secrets()
+    sources = secrets.ScanSources(
+        shell_env_lines=(),
+        catalog_secret_names=(),
+        hostcreds_values=(
+            ("FRAGMENTS", "tiny\nfragment"),
+            ("TRAILING", f"{uuid.uuid4().hex[:6]}\n"),
+        ),
+    )
+
+    findings = secrets.scan_lines(
+        [(1, "here: tiny"), (2, "there: fragment"), (3, "and: elsewhere")], sources
+    )
+
+    assert findings == ()
+
+
+def test_hostcreds_value_detector_ignores_unrelated_lines() -> None:
+    """A line containing no configured value yields no hostcreds-value finding."""
+    secrets = _import_secrets()
+    sources = secrets.ScanSources(
+        shell_env_lines=(),
+        catalog_secret_names=(),
+        hostcreds_values=(("ZAI_API_KEY", uuid.uuid4().hex),),
+    )
+
+    findings = secrets.scan_lines([(1, "an unrelated line of code")], sources)
+
+    assert findings == ()
+
+
+def test_detector_ids_filter_includes_hostcreds_value() -> None:
+    """A detector_ids filter naming hostcreds-value restricts scanning to it."""
+    secrets = _import_secrets()
+    probe = uuid.uuid4().hex
+    sources = secrets.ScanSources(
+        shell_env_lines=(), catalog_secret_names=(), hostcreds_values=(("ZAI_API_KEY", probe),)
+    )
+    lines = [(1, _sample_sso_portal_url()), (2, f"token={probe}")]
+
+    findings = secrets.scan_lines(lines, sources, detector_ids=("hostcreds-value",))
+
+    assert len(findings) == 1
+    assert findings[0].detector_id == "hostcreds-value"
+    assert findings[0].line_number == 2
 
 
 def test_build_registry_rejects_duplicated_identifier() -> None:
@@ -301,15 +480,46 @@ def test_scan_sources_rejects_blank_shell_env_line() -> None:
     secrets = _import_secrets()
 
     with pytest.raises(secrets.SecretScanError, match="shell_env_lines") as exc_info:
-        secrets.ScanSources(shell_env_lines=("VALID=1", "   "), catalog_secret_names=())
+        secrets.ScanSources(
+            shell_env_lines=("VALID=1", "   "), catalog_secret_names=(), hostcreds_values=()
+        )
 
     assert "index 1" in str(exc_info.value).lower()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        pytest.param("", "a-resolved-value", id="empty-name"),
+        pytest.param("   ", "a-resolved-value", id="whitespace-name"),
+        pytest.param("SOME_NAME", "", id="empty-value"),
+        pytest.param("SOME_NAME", " \t ", id="whitespace-value"),
+    ],
+)
+def test_scan_sources_rejects_blank_hostcreds_entries(name: str, value: str) -> None:
+    """Error Handling Contract: a blank hostcreds name or value names the field and index.
+
+    A blank value would be a substring of nearly every scanned line and a
+    blank name could not name the credential a finding reports; both must
+    be rejected at construction, the same denial the blank `shell_env_lines`
+    entry above guards against.
+    """
+    secrets = _import_secrets()
+
+    with pytest.raises(secrets.SecretScanError, match="hostcreds_values") as exc_info:
+        secrets.ScanSources(
+            shell_env_lines=(),
+            catalog_secret_names=(),
+            hostcreds_values=((name, value),),
+        )
+
+    assert "index 0" in str(exc_info.value).lower()
 
 
 def test_scan_lines_rejects_unknown_detector_filter() -> None:
     """Error Handling Contract: an unknown detector_ids entry lists the known identifiers."""
     secrets = _import_secrets()
-    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=(), hostcreds_values=())
 
     with pytest.raises(secrets.SecretScanError, match="unknown-detector-id") as exc_info:
         secrets.scan_lines([(1, "irrelevant")], sources, detector_ids=("unknown-detector-id",))
@@ -339,10 +549,19 @@ def test_scan_sources_requires_both_fields_explicitly() -> None:
         secrets.ScanSources(**kwargs)
 
 
+def test_scan_sources_requires_hostcreds_values_explicitly() -> None:
+    """AC-FUNC-004: omitting hostcreds_values is a TypeError, not a silent default."""
+    secrets = _import_secrets()
+    kwargs: dict[str, tuple[str, ...]] = {"shell_env_lines": (), "catalog_secret_names": ()}
+
+    with pytest.raises(TypeError, match="hostcreds_values"):
+        secrets.ScanSources(**kwargs)
+
+
 def test_scan_lines_detector_ids_filter_restricts_detectors() -> None:
     """A detector_ids filter limits scanning to the named detectors only."""
     secrets = _import_secrets()
-    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=(), hostcreds_values=())
     lines = [(1, _sample_sso_portal_url()), (2, _sample_account_id())]
 
     findings = secrets.scan_lines(lines, sources, detector_ids=("sso-portal-url",))
@@ -362,7 +581,7 @@ def test_scan_lines_touches_no_file_subprocess_or_network(monkeypatch: pytest.Mo
     monkeypatch.setattr(subprocess, "run", _forbidden)
     monkeypatch.setattr(socket, "socket", _forbidden)
 
-    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=(), hostcreds_values=())
     findings = secrets.scan_lines([(1, "AKIA" + "B" * 16)], sources)
 
     assert len(findings) == 1
@@ -382,7 +601,7 @@ def test_own_source_yields_no_findings_from_the_scanner_it_tests() -> None:
     physical line here ever matches a detector pattern.
     """
     secrets = _import_secrets()
-    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=())
+    sources = secrets.ScanSources(shell_env_lines=(), catalog_secret_names=(), hostcreds_values=())
 
     findings = secrets.scan_lines(_own_source_lines(), sources)
 
@@ -442,7 +661,9 @@ def test_scan_lines_end_to_end_multiple_detectors_and_lines() -> None:
     catalog_name = f"CATALOG_SECRET_{uuid.uuid4().hex}"
     shell_env_line = f"SOME_VAR=example-{uuid.uuid4().hex}"
     sources = secrets.ScanSources(
-        shell_env_lines=(shell_env_line,), catalog_secret_names=(catalog_name,)
+        shell_env_lines=(shell_env_line,),
+        catalog_secret_names=(catalog_name,),
+        hostcreds_values=(),
     )
     lines = [
         (1, _sample_sso_portal_url()),
@@ -749,6 +970,155 @@ def test_run_staged_scan_still_flags_a_leak_staged_into_shell_env_example_itself
         ("shell.env.example", "shell-env-line"),
         ("src/leaked.py", "shell-env-line"),
     }
+
+
+class _QueuedRunner:
+    """A `hostcreds.Runner` double answering from a queue; spawns nothing.
+
+    The hermetic stand-in for `hostcreds.subprocess_runner`, twin of
+    `tests/test_hostcreds.py`'s `_FakeRunner` (kept local rather than
+    shared because `tests/gitfixtures.py` is outside this unit's files):
+    every hostcreds resolution in this file goes through it, so no test
+    touches the real keychain, the real git credential store, aws or any
+    network.
+    """
+
+    def __init__(self, *results: subprocess.CompletedProcess[str]) -> None:
+        self._results = list(results)
+        self.calls: list[tuple[tuple[str, ...], str | None]] = []
+
+    def __call__(self, argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        self.calls.append((tuple(argv), stdin))
+        assert self._results, "_QueuedRunner was invoked with no queued response"
+        return self._results.pop(0)
+
+
+def _runner_ok(stdout: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+def _runner_failed(stderr: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=stderr)
+
+
+def _write_hostcreds_manifest(root: Path, payload: str) -> None:
+    """Write `payload` as `root`'s hostcreds manifest, at the path hostcreds spells.
+
+    Uses `hostcreds.manifest_path` rather than a hard-coded filename so the
+    manifest location stays declared in exactly one place, the same way the
+    loader under test resolves it.
+    """
+    hostcreds = importlib.import_module("devcontainer_config.hostcreds")
+    path = hostcreds.manifest_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload, encoding="utf-8")
+
+
+def test_hostcreds_values_with_no_manifest_resolves_nothing(tmp_path: Path) -> None:
+    """An absent manifest is the fresh-clone state: no values, nothing unavailable,
+    and the runner is never handed a command at all."""
+    secrets = _import_secrets()
+    runner = _QueuedRunner()  # empty queue: any invocation fails the assertion inside
+
+    source = secrets.hostcreds_values(tmp_path, runner)
+
+    assert source.values == ()
+    assert source.unavailable_names == ()
+    assert source.manifest_present is False
+    assert runner.calls == []
+
+
+def test_hostcreds_values_with_an_empty_manifest_present_resolves_nothing(
+    tmp_path: Path,
+) -> None:
+    """An explicitly empty manifest is present but holds no credentials, distinct
+    from no manifest at all."""
+    secrets = _import_secrets()
+    _write_hostcreds_manifest(tmp_path, "{}")
+    runner = _QueuedRunner()
+
+    source = secrets.hostcreds_values(tmp_path, runner)
+
+    assert source.values == ()
+    assert source.unavailable_names == ()
+    assert source.manifest_present is True
+    assert runner.calls == []
+
+
+def test_hostcreds_values_resolves_each_manifest_spec_through_the_runner(
+    tmp_path: Path,
+) -> None:
+    """Each spec resolves exactly once, in manifest order, under the injected runner."""
+    secrets = _import_secrets()
+    first_value, second_value = uuid.uuid4().hex, uuid.uuid4().hex
+    _write_hostcreds_manifest(
+        tmp_path,
+        json.dumps({"ZAI_API_KEY": {"source": "keychain"}, "GH_TOKEN": {"source": "keychain"}}),
+    )
+    runner = _QueuedRunner(_runner_ok(first_value + "\n"), _runner_ok(second_value + "\n"))
+
+    source = secrets.hostcreds_values(tmp_path, runner)
+
+    assert source.values == (("ZAI_API_KEY", first_value), ("GH_TOKEN", second_value))
+    assert source.unavailable_names == ()
+    assert source.manifest_present is True
+    assert len(runner.calls) == 2
+
+
+def test_hostcreds_values_skips_a_failed_resolution_and_records_its_name(
+    tmp_path: Path,
+) -> None:
+    """A ResolutionError skips exactly that credential -- a scan's availability must
+    not depend on live credentials -- while the resolved siblings still load, and the
+    skipped name is recorded so the report can show the gap."""
+    secrets = _import_secrets()
+    probe = uuid.uuid4().hex
+    payload = json.dumps(
+        {"ZAI_API_KEY": {"source": "keychain"}, "LEGACY_TOKEN": {"source": "keychain"}}
+    )
+    _write_hostcreds_manifest(tmp_path, payload)
+    runner = _QueuedRunner(_runner_ok(probe + "\n"), _runner_failed("synthetic: no such item\n"))
+
+    source = secrets.hostcreds_values(tmp_path, runner)
+
+    assert source.values == (("ZAI_API_KEY", probe),)
+    assert source.unavailable_names == ("LEGACY_TOKEN",)
+    assert source.manifest_present is True
+
+
+def test_hostcreds_values_treats_a_whitespace_only_resolution_as_unavailable(
+    tmp_path: Path,
+) -> None:
+    """A resolution that succeeds but yields a whitespace-only value is skipped and
+    named unavailable, the same policy as a ResolutionError: `ScanSources` rejects a
+    blank value outright, and its remedy (remove the entry from ScanSources) is an
+    action no caller of this loader can take, so the loader never hands one over and
+    the scan proceeds with the resolved sibling."""
+    secrets = _import_secrets()
+    probe = uuid.uuid4().hex
+    payload = json.dumps(
+        {"ZAI_API_KEY": {"source": "keychain"}, "BLANK_TOKEN": {"source": "keychain"}}
+    )
+    _write_hostcreds_manifest(tmp_path, payload)
+    runner = _QueuedRunner(_runner_ok(probe + "\n"), _runner_ok(" \n"))
+
+    source = secrets.hostcreds_values(tmp_path, runner)
+
+    assert source.values == (("ZAI_API_KEY", probe),)
+    assert source.unavailable_names == ("BLANK_TOKEN",)
+    assert source.manifest_present is True
+
+
+def test_hostcreds_values_fails_fast_on_a_manifest_that_cannot_be_loaded(
+    tmp_path: Path,
+) -> None:
+    """A manifest that exists but cannot be parsed fails the scan rather than
+    silently narrowing it to zero hostcreds values."""
+    secrets = _import_secrets()
+    _write_hostcreds_manifest(tmp_path, "{ not json")
+
+    with pytest.raises(secrets.SecretScanError, match="cannot load the hostcreds manifest"):
+        secrets.hostcreds_values(tmp_path, _QueuedRunner())
 
 
 def test_run_staged_scan_still_flags_a_leak_staged_as_a_comment_into_shell_env_example(

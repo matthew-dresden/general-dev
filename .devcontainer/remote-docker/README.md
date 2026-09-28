@@ -160,7 +160,7 @@ own.
 So the container gets a credential of its own:
 
 ```bash
-make push-git-creds
+make push-creds
 ```
 
 `make build` runs this as its final step, so a freshly built container already
@@ -191,7 +191,7 @@ docker exec -u vscode <container> bash -lc \
   'cd /workspaces/<project> && GIT_TERMINAL_PROMPT=0 git ls-remote origin'
 ```
 
-`could not read Username` means it has none, run `make push-git-creds`. Local
+`could not read Username` means it has none, run `make push-creds`. Local
 commands like `git status` and `make check` keep working regardless, so this
 failure stays hidden until something tries to push.
 

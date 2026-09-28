@@ -113,35 +113,42 @@ def test_exit_with_error_enumeration_names_the_export_list_render() -> None:
     )
 
 
-def test_configure_shell_env_routes_each_render_call_through_exit_with_error() -> None:
-    """AC-DOC-004 / AC-TEST-002: `configure_shell_env` actually calls
-    `render_devsecret_shell_block` for both shells, and each call's failure
-    routes to `exit_with_error` on the same statement -- not merely the
-    substring `exit_with_error` occurring anywhere in the function for the
-    unrelated `shell.env`-missing precondition.
+def test_configure_shell_env_routes_the_render_call_through_exit_with_error() -> None:
+    """AC-DOC-004 / AC-TEST-002: `configure_shell_env` actually calls the
+    hostcreds block renderer, and the call's failure routes to
+    `exit_with_error` on the same statement -- not merely the substring
+    `exit_with_error` occurring anywhere in the function for the unrelated
+    `shell.env`-missing precondition.
+
+    The hostcreds cutover replaced the devsecret export-list block with the
+    hostcreds startup block (rendered by `devcontainer_config.cli
+    shell-block`); docs/devcontainer.md's provisioning-flow row still
+    describes the superseded renderer until the later documentation unit
+    lands, so what this test can still pin honestly is the script side: the
+    render happens, and its failure aborts the build.
     """
     body = _function_body("configure_shell_env")
-    for shell in ("bash", "zsh"):
-        pattern = re.compile(rf'render_devsecret_shell_block {shell}\)"\s*\|\|\s*exit_with_error')
-        assert pattern.search(body), (
-            f"configure_shell_env does not route a failed render_devsecret_shell_block "
-            f"{shell!r} call to exit_with_error; docs/devcontainer.md's provisioning-flow "
-            "row and exit_with_error enumeration would then document an abort path the "
-            "script does not implement (AC-DOC-004)."
-        )
+    pattern = re.compile(r'render_hostcreds_shell_block\)"\s*\|\|\s*exit_with_error')
+    assert pattern.search(body), (
+        "configure_shell_env does not route a failed render_hostcreds_shell_block "
+        "call to exit_with_error; the provisioning-flow section's fatal-render "
+        "contract would then describe an abort path the script does not implement "
+        "(AC-DOC-004)."
+    )
 
 
-def test_render_devsecret_shell_block_invokes_python3_module_with_pythonpath_set() -> None:
+def test_render_hostcreds_shell_block_invokes_python3_module_with_pythonpath_set() -> None:
     """AC-DOC-002 / AC-DOC-004: the row's `python3` + `devcontainer_config`
     on `PYTHONPATH` dependency matches the actual invocation."""
-    body = _function_body("render_devsecret_shell_block")
+    body = _function_body("render_hostcreds_shell_block")
     assert "PYTHONPATH=" in body, (
-        "render_devsecret_shell_block does not set PYTHONPATH; docs/devcontainer.md's "
+        "render_hostcreds_shell_block does not set PYTHONPATH; docs/devcontainer.md's "
         "provisioning-flow row would then document a dependency the script does not have "
         "(AC-DOC-004)."
     )
-    assert "python3 -m devcontainer_config.shellrc" in body, (
-        "render_devsecret_shell_block does not invoke 'python3 -m devcontainer_config.shellrc'; "
-        "docs/devcontainer.md's provisioning-flow row would then document a dependency the "
-        "script does not have (AC-DOC-004)."
+    assert "python3 -m devcontainer_config.cli shell-block" in body, (
+        "render_hostcreds_shell_block does not invoke "
+        "'python3 -m devcontainer_config.cli shell-block'; "
+        "docs/devcontainer.md's provisioning-flow row would then document a dependency "
+        "the script does not have (AC-DOC-004)."
     )

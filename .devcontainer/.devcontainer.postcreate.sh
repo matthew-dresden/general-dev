@@ -58,14 +58,13 @@ is_cicd() { [ "${CICD,,}" = "true" ]; }
 
 export PATH="${DEVCONTAINER_EXTRA_PATH}:${USER_BIN}:${PATH}"
 
-# The devsecret export-list startup block for one shell (spec Section 11),
-# rendered by devcontainer_config.shellrc rather than hand-written here
-# (spec Section 3.5: all new logic is Python, no new shell script). Reused
-# for both shells configure_shell_env wires below so the render invocation
-# exists in exactly one place.
-render_devsecret_shell_block() {
-  local shell="$1"
-  PYTHONPATH="${DEVCONTAINER_SCRIPTS_DIR}" python3 -m devcontainer_config.shellrc "${shell}"
+# The hostcreds credential-startup block, rendered by devcontainer_config
+# rather than hand-written here (the same render-once-in-Python rule the
+# hooks and every other generated text in this script follow). The block is
+# shell-agnostic -- one text serves bash and zsh -- so it is rendered once
+# and appended to both startup files configure_shell_env wires below.
+render_hostcreds_shell_block() {
+  PYTHONPATH="${DEVCONTAINER_SCRIPTS_DIR}" python3 -m devcontainer_config.cli shell-block
 }
 
 configure_shell_env() {
@@ -85,31 +84,27 @@ configure_shell_env() {
     echo "${path_prepend}"
   } > "${ZSH_ENV}"
 
-  # A container whose shells silently lack their exported secrets is worse
+  # A container whose shells silently lack their pushed credentials is worse
   # than a container that failed to create, so a non-zero render is fatal
   # through exit_with_error rather than warned about or skipped.
-  local bash_block zsh_block
-  bash_block="$(render_devsecret_shell_block bash)" || exit_with_error "$(printf '%s\n' \
-    "devcontainer_config.shellrc failed to render the bash devsecret export-list block." \
-    "Rerun 'PYTHONPATH=${DEVCONTAINER_SCRIPTS_DIR} python3 -m devcontainer_config.shellrc bash'" \
-    "from ${WORK_DIR} to see the underlying error.")"
-  zsh_block="$(render_devsecret_shell_block zsh)" || exit_with_error "$(printf '%s\n' \
-    "devcontainer_config.shellrc failed to render the zsh devsecret export-list block." \
-    "Rerun 'PYTHONPATH=${DEVCONTAINER_SCRIPTS_DIR} python3 -m devcontainer_config.shellrc zsh'" \
+  local startup_block
+  startup_block="$(render_hostcreds_shell_block)" || exit_with_error "$(printf '%s\n' \
+    "devcontainer_config.cli failed to render the hostcreds startup block." \
+    "Rerun 'PYTHONPATH=${DEVCONTAINER_SCRIPTS_DIR} python3 -m devcontainer_config.cli shell-block'" \
     "from ${WORK_DIR} to see the underlying error.")"
 
   # Idempotent: a rebuild or a manual rerun of this function must not
-  # duplicate the block (AC-FUNC-006). Each rendered block's own first line
-  # is its marker (devcontainer_config.shellrc.MARKER); grepping the target
-  # startup file for that line before appending, the same
-  # 'grep -q ... || <action>' guard style already used elsewhere in this
-  # file, is what makes a second run a no-op instead of a second copy.
-  local bash_marker zsh_marker
-  bash_marker="$(printf '%s\n' "${bash_block}" | head -n 1)"
-  zsh_marker="$(printf '%s\n' "${zsh_block}" | head -n 1)"
+  # duplicate the block. The rendered block's own first line is its marker
+  # (devcontainer_config.hostcreds.MARKER); grepping each target startup
+  # file for that line before appending, the same 'grep -q ... || <action>'
+  # guard style used elsewhere in this file, is what makes a second run a
+  # no-op instead of a second copy. One marker guards both files because
+  # the same block text is appended to each.
+  local startup_marker
+  startup_marker="$(printf '%s\n' "${startup_block}" | head -n 1)"
 
-  grep -qF -- "${bash_marker}" "${BASH_RC}" || printf '%s\n' "${bash_block}" >> "${BASH_RC}"
-  grep -qF -- "${zsh_marker}" "${ZSH_ENV}" || printf '%s\n' "${zsh_block}" >> "${ZSH_ENV}"
+  grep -qF -- "${startup_marker}" "${BASH_RC}" || printf '%s\n' "${startup_block}" >> "${BASH_RC}"
+  grep -qF -- "${startup_marker}" "${ZSH_ENV}" || printf '%s\n' "${startup_block}" >> "${ZSH_ENV}"
 
   log_section_done "Shell environment"
 }
@@ -164,32 +159,6 @@ npm_package_parents() {
     fi
   done
   return 0
-}
-
-# devsecret, the catalog CLI the export-list startup block configure_shell_env
-# renders into .bashrc and .zshenv requires on PATH (its absence is the
-# "devsecret is not on PATH" error every shell then prints). This project
-# carries the console script itself (pyproject [project.scripts]), and its
-# build backend exists precisely so a bootstrap step can install it; uv tool
-# install is that step. --force keeps a rerun of postCreate on an existing
-# container a reinstall rather than an error. uv places the binary in
-# ~/.local/bin, which the path_prepend line configure_shell_env writes has
-# already put on PATH for every shell.
-configure_devsecret() {
-  if ! container_user_has uv; then
-    log_section_skipped "devsecret" \
-      "uv is not installed, add the uv feature to devcontainer.json"
-    return 0
-  fi
-  local user_path="${CONTAINER_USER_PATH:-${PATH}}"
-  log_section "devsecret" "uv tool install --force from ${WORK_DIR}"
-  as_container_user "HOME='${USER_HOME}' PATH='${user_path}' uv tool install --force '${WORK_DIR}'" \
-    || exit_with_error "$(printf '%s\n' \
-      "uv tool install failed, so the devsecret console script is absent and every" \
-      "shell prints 'devsecret is not on PATH' on open.")"
-  as_container_user "HOME='${USER_HOME}' PATH='${user_path}' devsecret --help" > /dev/null \
-    || exit_with_error "devsecret is installed but does not run"
-  log_section_done "devsecret" "${USER_HOME}/.local/bin/devsecret"
 }
 
 configure_npm_global_ownership() {
@@ -683,7 +652,6 @@ main() {
 
   configure_vscode_server_dir
   configure_shell_env
-  configure_devsecret
   configure_npm_global_ownership
   configure_claude_aliases
   configure_claude_settings

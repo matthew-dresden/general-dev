@@ -16,9 +16,11 @@ This module is the core of that mechanism: the manifest contract
 (`load_manifest`), the three resolvers (`resolve_keychain`, `resolve_git`,
 `resolve_aws_export`, dispatched by `resolve`), and the two renderers
 (`render_startup_block`, `render_env_fragment`) whose text later units
-install. The CLI, Makefile target and postCreate wiring -- and the deletion
-of the devsecret SSM catalog this mechanism replaces -- land in later
-units; nothing here imports or modifies them.
+install, and `write_fragment`, which persists a rendered fragment to disk
+at the private mode its content demands. The CLI, Makefile target and
+postCreate wiring -- and the deletion of the devsecret SSM catalog this
+mechanism replaces -- land in later units; nothing here imports or
+modifies them.
 
 Argv discipline shapes every resolver: a resolved value travels only on a
 subprocess's stdout, never in its argv, so it never appears in the process
@@ -47,6 +49,7 @@ temporary directory instead of the real checkout.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -635,26 +638,45 @@ def _require_label(spec: CredentialSpec, key: str) -> str:
     return value
 
 
-def resolve_keychain(spec: CredentialSpec, runner: Runner) -> ResolvedCredential:
-    """The keychain password for `spec`, from `security find-generic-password -w`.
+def keychain_find_argv(spec: CredentialSpec) -> tuple[str, ...]:
+    """The `security find-generic-password -w` argv for `spec`, built once.
 
+    The single builder for the keychain read argv, used by
+    `resolve_keychain` at push time and by creds-init's pre-store probe
+    (cli), so the two can never drift into addressing different items.
     Only labels appear on the argv: the service (and the account, only
     when the manifest set one -- the flag is omitted entirely otherwise,
     not passed empty, because an empty `-a` matches a different item than
-    no account constraint at all). The password arrives on stdout, is
-    stripped of the CLI's one trailing newline, and is never placed in any
-    argument or message.
+    no account constraint at all). The password itself never does: it
+    travels on stdout alone.
 
     Raises:
-        HostCredsError: `spec` carries no 'service' label.
-        ResolutionError: `security` is not on PATH; exits non-zero (the
-            message quotes its stderr); or prints an empty value.
+        HostCredsError: `spec` carries no 'service' label (a hand-built
+            spec; `load_manifest` always applies the default).
     """
     service = _require_label(spec, KEYCHAIN_SERVICE_LABEL)
     argv = [SECURITY_EXECUTABLE, "find-generic-password", "-w", "-s", service]
     account = spec.labels.get(KEYCHAIN_ACCOUNT_LABEL)
     if account is not None:
         argv += ["-a", account]
+    return tuple(argv)
+
+
+def resolve_keychain(spec: CredentialSpec, runner: Runner) -> ResolvedCredential:
+    """The keychain password for `spec`, from `security find-generic-password -w`.
+
+    The argv is `keychain_find_argv`'s, so the resolver and creds-init's
+    probe address the item through one shared shape instead of two
+    hand-rolled copies. The password arrives on stdout, is stripped of the
+    CLI's one trailing newline, and is never placed in any argument or
+    message.
+
+    Raises:
+        HostCredsError: `spec` carries no 'service' label.
+        ResolutionError: `security` is not on PATH; exits non-zero (the
+            message quotes its stderr); or prints an empty value.
+    """
+    argv = keychain_find_argv(spec)
     result = _invoke(spec.name, spec.source, argv, None, runner)
     value = _stdout_value(result.stdout)
     if not value:
@@ -1237,3 +1259,50 @@ def render_env_fragment(credential: ResolvedCredential) -> str:
     else:
         lines = [*header, *actions]
     return "\n".join(lines) + "\n"
+
+
+def write_fragment(output_dir: Path, name: str, fragment: str) -> None:
+    """Write one `<NAME>.env` fragment into `output_dir` at mode 0600, O_EXCL.
+
+    The file-creation half of `render_env_fragment`'s contract: the value a
+    fragment carries may exist on disk only in a file the owner alone can
+    read, so the file is created by one `os.open` at 0600 (never created
+    wider and narrowed afterwards, which would leave a wider mode visible
+    for the instant between) and never over an existing file -- a stale
+    fragment in a reused directory fails loudly instead of being silently
+    replaced. The name shape is re-checked against the same rule
+    `load_manifest` enforces before any path is composed from it, so a
+    future loosening of the manifest rule cannot turn `<NAME>.env` into a
+    path traversal out of the output directory.
+
+    Raises:
+        HostCredsError: `name` does not match the credential shape, a
+            fragment of the same name already exists, or the open fails
+            for any other reason. The message names the path and never
+            includes `fragment`, whose content is the value.
+    """
+    if _CREDENTIAL_NAME_PATTERN.fullmatch(name) is None:
+        raise HostCredsError(
+            f"ERROR: cannot write a fragment for {name!r}\n"
+            "The name does not match [A-Z][A-Z0-9_]*, so it cannot become a "
+            "filename in the fragment directory. load_manifest rejects such "
+            "names, so one reaching here is a bug in the caller's wiring."
+        )
+    path = output_dir / f"{name}.env"
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise HostCredsError(
+            f"ERROR: cannot write the fragment {path}\n"
+            "A file already exists there, and fragments are created O_EXCL so a "
+            "stale one fails loudly instead of being overwritten.\n"
+            "The caller passes a fresh temp directory; pass one, then retry."
+        ) from exc
+    except OSError as exc:
+        raise HostCredsError(
+            f"ERROR: cannot write the fragment {path}\n"
+            f"The open failed: {exc.strerror or exc}.\n"
+            "Check the output directory exists and is writable, then retry."
+        ) from exc
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(fragment)

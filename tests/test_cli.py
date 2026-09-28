@@ -51,12 +51,15 @@ import ast
 import importlib
 import io
 import json
+import os
+import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tomllib
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import ModuleType
 
@@ -383,9 +386,7 @@ class _FakeCatalogRunner:
             # before returning, so it cannot be inspected afterwards.
             reference = argv[argv.index("--cli-input-json") + 1]
             assert reference.startswith("file://"), reference
-            self.documents.append(
-                Path(reference[len("file://") :]).read_text(encoding="utf-8")
-            )
+            self.documents.append(Path(reference[len("file://") :]).read_text(encoding="utf-8"))
         if not self._queue:
             raise AssertionError("_FakeCatalogRunner invoked with no queued response")
         return self._queue.pop(0)
@@ -2021,3 +2022,668 @@ def test_devsecret_end_to_end_export_list_then_run_narrows_to_the_named_secret(
     assert not Path(cache_dir).exists()
     assert list(secret_cache_base.iterdir()) == []
     assert jenkins_value not in json.dumps(report)
+
+
+# ---------------------------------------------------------------------------
+# hostcreds: creds-init, creds-fragments, shell-block -- the CLI half of
+# 'make push-creds' and the postCreate startup-block render. The manifest
+# contract, resolvers and renderers are tested in tests/test_hostcreds.py;
+# what this section covers is the wiring: argparse, exit codes, the argv
+# discipline of the keychain STORE path (the value rides the 'security -i'
+# stdin document, never argv), fragment file modes, and stdout carrying
+# exactly the names container.sh consumes.
+# ---------------------------------------------------------------------------
+
+
+def _import_hostcreds() -> ModuleType:
+    """Import devcontainer_config.hostcreds from inside a function body.
+
+    Deferred for the same reason `import_cli` is: a module-level import
+    would fail collection for the whole file instead of failing the one
+    test for the real reason under the TDD RED gate.
+    """
+    return importlib.import_module("devcontainer_config.hostcreds")
+
+
+class _FakeKeychain:
+    """A hostcreds.Runner double backing a real-shaped in-memory keychain.
+
+    Answers 'security find-generic-password' probes from an in-memory item
+    map (non-zero exit for an absent item, the value plus one trailing
+    newline for a present one, exactly what the real CLI prints) and
+    executes 'security -i' add-generic-password documents by parsing them
+    with shlex -- which reads the same double-quoted, backslash-escaped
+    forms cli._security_command_quoted emits -- so a store is observably
+    readable by the next probe, like the real keychain. A probe carrying
+    no '-a' matches any account for the service, like the real
+    find-generic-password. Records every (argv, stdin) pair so argv
+    discipline is assertable per call.
+    """
+
+    def __init__(self) -> None:
+        self.items: dict[tuple[str, str | None], str] = {}
+        self.calls: list[tuple[tuple[str, ...], str | None]] = []
+        self.git_password = _seeded_value()
+        # Flipping this to False simulates a store whose items vanish again
+        # immediately, exercising the post-store re-probe failure branch.
+        self.persist = True
+
+    def __call__(
+        self, argv: list[str] | tuple[str, ...], stdin: str | None
+    ) -> subprocess.CompletedProcess[str]:
+        argv = tuple(argv)
+        self.calls.append((argv, stdin))
+        if "find-generic-password" in argv:
+            service = argv[argv.index("-s") + 1]
+            if "-a" in argv:
+                value = self.items.get((service, argv[argv.index("-a") + 1]))
+            else:
+                # No account on the probe: any account for the service
+                # matches, like the real `security find-generic-password`.
+                found = [v for (s, _a), v in self.items.items() if s == service]
+                value = found[0] if found else None
+            if value is None:
+                return subprocess.CompletedProcess(
+                    args=[],
+                    returncode=44,
+                    stdout="",
+                    stderr="The specified item could not be found",
+                )
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=value + "\n", stderr=""
+            )
+        if argv == ("security", "-i"):
+            document = stdin or ""
+            words = shlex.split(document)
+            if not words or words[0] != "add-generic-password":
+                return subprocess.CompletedProcess(
+                    args=[], returncode=1, stdout="", stderr=f"unknown command: {document!r}"
+                )
+            service = words[words.index("-s") + 1]
+            account = words[words.index("-a") + 1] if "-a" in words else None
+            value = words[words.index("-w") + 1]
+            if self.persist:
+                self.items[(service, account)] = value
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        if argv[0:2] == ("git", "credential"):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=f"username=dev\npassword={self.git_password}\n\n",
+                stderr="",
+            )
+        raise AssertionError(f"_FakeKeychain invoked with an unexpected command: {argv!r}")
+
+
+class _StubGetpass:
+    """A getpass double: records prompts, answers from a queue.
+
+    An empty queue raises, so a test that expects no prompt fails loudly on
+    the first unexpected one instead of silently answering ''.
+    """
+
+    def __init__(self, values: Sequence[str] = ()) -> None:
+        self._values = list(values)
+        self.prompts: list[str] = []
+
+    def getpass(self, prompt: str = "") -> str:
+        self.prompts.append(prompt)
+        return self._values.pop(0)
+
+
+def _write_hostcreds_manifest(root: Path, entries: dict[str, object]) -> None:
+    devcontainer = root / ".devcontainer"
+    devcontainer.mkdir(exist_ok=True)
+    (devcontainer / "hostcreds.map.json").write_text(json.dumps(entries), encoding="utf-8")
+
+
+def _creds_repo(tmp_path: Path) -> Path:
+    """A real, disposable git repository the creds commands can find_root in."""
+    root = generated_root(tmp_path)
+    init_repo(root)
+    return root
+
+
+def run_hostcreds_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    args: list[str],
+    *,
+    stdin: io.StringIO | None = None,
+) -> int:
+    """Run `devcontainer_config.cli.main(args)` chdir'd into `root`; the exit code."""
+    cli = import_cli()
+    monkeypatch.chdir(root)
+    if stdin is not None:
+        monkeypatch.setattr("sys.stdin", stdin)
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(args)
+    code = exc_info.value.code
+    if not isinstance(code, int):
+        raise AssertionError(f"cli.main exited with a non-integer code: {code!r}")
+    return code
+
+
+def _install_fake_keychain(monkeypatch: pytest.MonkeyPatch, fake: _FakeKeychain) -> None:
+    """Point hostcreds.subprocess_runner at `fake` for the current test.
+
+    The creds handlers read the runner from the hostcreds module at call
+    time precisely so this substitution needs no patching of the cli module
+    itself.
+    """
+    hostcreds_module = _import_hostcreds()
+    monkeypatch.setattr(hostcreds_module, "subprocess_runner", fake)
+
+
+def test_creds_init_prompts_once_and_stores_the_value_on_stdin_never_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A missing keychain item prompts once, and the store's value rides stdin."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root, {"API_TOKEN": {"source": "keychain", "service": "devcontainer/test/API_TOKEN"}}
+    )
+    fake = _FakeKeychain()
+    _install_fake_keychain(monkeypatch, fake)
+    value = _seeded_value()
+    stub = _StubGetpass([value])
+    monkeypatch.setattr(import_cli(), "getpass", stub)
+
+    exit_code = run_hostcreds_cli(monkeypatch, root, ["creds-init"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "stored: API_TOKEN" in out
+    assert fake.items[("devcontainer/test/API_TOKEN", "API_TOKEN")] == value
+    assert len(stub.prompts) == 1, "a missing item must prompt exactly once"
+    assert "API_TOKEN" in stub.prompts[0]
+    assert "devcontainer/test/API_TOKEN" in stub.prompts[0]
+    assert value not in stub.prompts[0]
+    stores = [(argv, stdin) for argv, stdin in fake.calls if argv == ("security", "-i")]
+    assert len(stores) == 1
+    (store_argv, store_stdin) = stores[0]
+    assert "add-generic-password" in store_stdin
+    assert '-a "API_TOKEN"' in store_stdin, (
+        "add-generic-password without -a fails on current macOS; the "
+        "credential's own name is the stable default account"
+    )
+    assert value in store_stdin
+    assert value not in " ".join(store_argv)
+    for argv, _stdin in fake.calls:
+        assert value not in " ".join(argv), "a value must never ride any runner argv"
+
+
+def test_creds_init_skips_prompting_for_an_item_already_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An existing item is reported already-present with no prompt and no store."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root, {"API_TOKEN": {"source": "keychain", "service": "devcontainer/test/API_TOKEN"}}
+    )
+    fake = _FakeKeychain()
+    fake.items[("devcontainer/test/API_TOKEN", "API_TOKEN")] = _seeded_value()
+    _install_fake_keychain(monkeypatch, fake)
+    stub = _StubGetpass()  # empty: any prompt raises inside the stub
+    monkeypatch.setattr(import_cli(), "getpass", stub)
+
+    exit_code = run_hostcreds_cli(monkeypatch, root, ["creds-init"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "already present: API_TOKEN" in out
+    assert "stored:" not in out
+    assert stub.prompts == []
+    assert all(argv != ("security", "-i") for argv, _stdin in fake.calls)
+
+
+def test_creds_init_stdin_flag_stores_one_named_value_without_prompting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--stdin NAME takes exactly that credential's value from stdin, no prompt.
+
+    The one trailing newline is stripped (and only one: a value ending in
+    real newline bytes keeps them). Other missing keychain items would
+    still prompt; here the only other entry is already present, so no
+    prompt is expected at all.
+    """
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root,
+        {
+            "API_TOKEN": {"source": "keychain", "service": "devcontainer/test/API_TOKEN"},
+            "SECOND_TOKEN": {"source": "keychain", "service": "devcontainer/test/SECOND_TOKEN"},
+        },
+    )
+    fake = _FakeKeychain()
+    fake.items[("devcontainer/test/SECOND_TOKEN", "SECOND_TOKEN")] = _seeded_value()
+    _install_fake_keychain(monkeypatch, fake)
+    stub = _StubGetpass()
+    monkeypatch.setattr(import_cli(), "getpass", stub)
+    value = _seeded_value()
+
+    exit_code = run_hostcreds_cli(
+        monkeypatch,
+        root,
+        ["creds-init", "--stdin", "API_TOKEN"],
+        stdin=io.StringIO(value + "\n"),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "stored: API_TOKEN" in out
+    assert fake.items[("devcontainer/test/API_TOKEN", "API_TOKEN")] == value
+    assert stub.prompts == []
+
+
+def test_creds_init_stdin_empty_value_is_an_error_and_stores_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root, {"API_TOKEN": {"source": "keychain", "service": "devcontainer/test/API_TOKEN"}}
+    )
+    fake = _FakeKeychain()
+    _install_fake_keychain(monkeypatch, fake)
+
+    exit_code = run_hostcreds_cli(
+        monkeypatch, root, ["creds-init", "--stdin", "API_TOKEN"], stdin=io.StringIO("\n")
+    )
+
+    assert exit_code != 0
+    assert fake.items == {}
+    assert all(argv != ("security", "-i") for argv, _stdin in fake.calls)
+    assert "empty" in capsys.readouterr().err
+
+
+def test_creds_init_stdin_newline_value_is_refused_before_the_store_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A value carrying a newline would split the 'security -i' document and
+    run the remainder as a second command, so it is refused on sight, before
+    anything is stored."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root, {"API_TOKEN": {"source": "keychain", "service": "devcontainer/test/API_TOKEN"}}
+    )
+    fake = _FakeKeychain()
+    _install_fake_keychain(monkeypatch, fake)
+
+    exit_code = run_hostcreds_cli(
+        monkeypatch,
+        root,
+        ["creds-init", "--stdin", "API_TOKEN"],
+        stdin=io.StringIO("first\nsecond\n"),
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "API_TOKEN" in captured.err, "the error names the credential"
+    assert "newline" in captured.err
+    assert "first" not in captured.err, "the value is never echoed"
+    assert fake.items == {}
+    assert all(argv != ("security", "-i") for argv, _stdin in fake.calls)
+
+
+def test_creds_init_store_failure_prints_exit_code_only_never_security_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """'security -i' can echo command tokens -- value fragments included --
+    on its stderr, so a failed store reports the exit status and a generic
+    remedy, never that stderr."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root, {"API_TOKEN": {"source": "keychain", "service": "devcontainer/test/API_TOKEN"}}
+    )
+    value = _seeded_value()
+    fragment = value[: len(value) // 2]
+
+    def failing_store(
+        argv: list[str] | tuple[str, ...], stdin: str | None
+    ) -> subprocess.CompletedProcess[str]:
+        if "-i" in tuple(argv):
+            return subprocess.CompletedProcess(
+                args=[], returncode=45, stdout="", stderr=f"security: bad token {fragment}"
+            )
+        return subprocess.CompletedProcess(
+            args=[], returncode=44, stdout="", stderr="The specified item could not be found"
+        )
+
+    _install_fake_keychain(monkeypatch, failing_store)
+
+    exit_code = run_hostcreds_cli(
+        monkeypatch,
+        root,
+        ["creds-init", "--stdin", "API_TOKEN"],
+        stdin=io.StringIO(value + "\n"),
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "API_TOKEN" in captured.err, "the error names the credential"
+    assert "45" in captured.err, "the exit status is named"
+    assert "security -i" in captured.err, "the remedy names the command to re-run by hand"
+    assert fragment not in captured.err, "no stderr fragment may be echoed"
+    assert value not in captured.err
+
+
+def test_creds_init_stdin_name_outside_the_manifest_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--stdin naming a non-keychain entry is refused before anything is read."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(root, {"GIT_GITHUB": {"source": "git", "host": "github.com"}})
+    fake = _FakeKeychain()
+    _install_fake_keychain(monkeypatch, fake)
+
+    exit_code = run_hostcreds_cli(
+        monkeypatch, root, ["creds-init", "--stdin", "GIT_GITHUB"], stdin=io.StringIO("x")
+    )
+
+    assert exit_code == 2
+    assert "GIT_GITHUB" in capsys.readouterr().err
+    assert fake.calls == []
+
+
+def test_creds_init_missing_manifest_names_the_path_and_make_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _creds_repo(tmp_path)
+
+    exit_code = run_hostcreds_cli(monkeypatch, root, ["creds-init"])
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "hostcreds.map.json" in err
+    assert "make init" in err
+
+
+def test_creds_init_store_that_does_not_persist_fails_the_reprobe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exit 0 requires the post-store re-probe to find the item."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root, {"API_TOKEN": {"source": "keychain", "service": "devcontainer/test/API_TOKEN"}}
+    )
+    fake = _FakeKeychain()
+    fake.persist = False
+    _install_fake_keychain(monkeypatch, fake)
+    monkeypatch.setattr(import_cli(), "getpass", _StubGetpass([_seeded_value()]))
+
+    exit_code = run_hostcreds_cli(monkeypatch, root, ["creds-init"])
+
+    assert exit_code == 1
+    assert "probing" in capsys.readouterr().err
+
+
+def test_creds_init_probe_argv_is_the_shared_hostcreds_builder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe's argv is `hostcreds.keychain_find_argv`'s output verbatim:
+    one builder serves creds-init's probe and the push-time resolver, so
+    the two can never drift into addressing different items."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(root, {"API_TOKEN": {"source": "keychain"}})
+    fake = _FakeKeychain()
+    fake.items[(f"devcontainer/{root.name}/API_TOKEN", "API_TOKEN")] = _seeded_value()
+    _install_fake_keychain(monkeypatch, fake)
+
+    exit_code = run_hostcreds_cli(monkeypatch, root, ["creds-init"])
+
+    hostcreds_module = _import_hostcreds()
+    assert exit_code == 0
+    spec = hostcreds_module.load_manifest(root)[0]
+    probes = [argv for argv, _stdin in fake.calls if "find-generic-password" in argv]
+    assert probes, "a present item is still probed once"
+    for argv in probes:
+        assert tuple(argv) == hostcreds_module.keychain_find_argv(spec)
+
+
+def test_keychain_find_argv_omits_the_account_only_when_the_manifest_has_none() -> None:
+    """The shared builder's exact shape for both account states: `-a`
+    appears when the manifest sets an account and is omitted entirely
+    otherwise (an empty `-a` matches a different item than none at all)."""
+    hostcreds_module = _import_hostcreds()
+    default_account_spec = hostcreds_module.CredentialSpec(
+        name="API_TOKEN",
+        source=hostcreds_module.SOURCE_KEYCHAIN,
+        labels={"service": "devcontainer/t/API_TOKEN"},
+    )
+    assert hostcreds_module.keychain_find_argv(default_account_spec) == (
+        "security",
+        "find-generic-password",
+        "-w",
+        "-s",
+        "devcontainer/t/API_TOKEN",
+    )
+    manifest_account_spec = hostcreds_module.CredentialSpec(
+        name="API_TOKEN",
+        source=hostcreds_module.SOURCE_KEYCHAIN,
+        labels={"service": "svc.example/token", "account": "alice"},
+    )
+    assert hostcreds_module.keychain_find_argv(manifest_account_spec) == (
+        "security",
+        "find-generic-password",
+        "-w",
+        "-s",
+        "svc.example/token",
+        "-a",
+        "alice",
+    )
+
+
+def test_creds_fragments_writes_private_fragments_and_prints_exactly_the_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One 0600 fragment per resolved credential; stdout is only the names."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root,
+        {
+            "API_TOKEN": {"source": "keychain", "service": "devcontainer/test/API_TOKEN"},
+            "GIT_GITHUB": {"source": "git", "host": "github.com"},
+        },
+    )
+    fake = _FakeKeychain()
+    value = _seeded_value()
+    fake.items[("devcontainer/test/API_TOKEN", None)] = value
+    _install_fake_keychain(monkeypatch, fake)
+    output_dir = tmp_path / "fragments"
+    output_dir.mkdir()
+
+    exit_code = run_hostcreds_cli(
+        monkeypatch, root, ["creds-fragments", "--output-dir", str(output_dir)]
+    )
+
+    captured = capsys.readouterr()
+    hostcreds_module = _import_hostcreds()
+    assert exit_code == 0
+    assert captured.out == "API_TOKEN\nGIT_GITHUB\n"
+    token_fragment = (output_dir / "API_TOKEN.env").read_text(encoding="utf-8")
+    git_fragment = (output_dir / "GIT_GITHUB.env").read_text(encoding="utf-8")
+    assert token_fragment.startswith(hostcreds_module.FRAGMENT_MARKER)
+    assert f"export API_TOKEN='{value}'" in token_fragment
+    assert git_fragment.startswith(hostcreds_module.FRAGMENT_MARKER)
+    assert fake.git_password not in git_fragment
+    for fragment in (output_dir / "API_TOKEN.env", output_dir / "GIT_GITHUB.env"):
+        assert stat.S_IMODE(fragment.stat().st_mode) == 0o600
+    assert value not in captured.err
+    assert fake.git_password not in captured.err
+
+
+def test_creds_fragments_refuses_to_overwrite_an_existing_fragment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """O_EXCL: a stale fragment in a reused directory fails the run."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root, {"API_TOKEN": {"source": "keychain", "service": "devcontainer/test/API_TOKEN"}}
+    )
+    fake = _FakeKeychain()
+    fake.items[("devcontainer/test/API_TOKEN", None)] = _seeded_value()
+    _install_fake_keychain(monkeypatch, fake)
+    output_dir = tmp_path / "fragments"
+    output_dir.mkdir()
+    stale = output_dir / "API_TOKEN.env"
+    stale.write_text("stale\n", encoding="utf-8")
+
+    exit_code = run_hostcreds_cli(
+        monkeypatch, root, ["creds-fragments", "--output-dir", str(output_dir)]
+    )
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "API_TOKEN.env" in err
+    assert stale.read_text(encoding="utf-8") == "stale\n"
+
+
+def test_creds_fragments_any_unresolved_entry_fails_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fail fast: one unresolvable entry aborts the run with exit 1 even
+    though its siblings resolved -- a container silently shipping a subset
+    of the manifest is the failure this prevents."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root,
+        {
+            "API_TOKEN": {"source": "keychain", "service": "devcontainer/test/API_TOKEN"},
+            "MISSING_TOKEN": {"source": "keychain", "service": "devcontainer/test/MISSING_TOKEN"},
+        },
+    )
+    fake = _FakeKeychain()
+    fake.items[("devcontainer/test/API_TOKEN", "API_TOKEN")] = _seeded_value()
+    _install_fake_keychain(monkeypatch, fake)
+    output_dir = tmp_path / "fragments"
+    output_dir.mkdir()
+
+    exit_code = run_hostcreds_cli(
+        monkeypatch, root, ["creds-fragments", "--output-dir", str(output_dir)]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == "API_TOKEN\n"
+    assert (output_dir / "API_TOKEN.env").is_file()
+    assert not (output_dir / "MISSING_TOKEN.env").exists()
+    assert "MISSING_TOKEN" in captured.err
+    assert "aborted" in captured.err, "the summary states that the push aborted"
+
+
+def test_creds_fragments_exits_one_when_nothing_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root, {"MISSING_TOKEN": {"source": "keychain", "service": "devcontainer/test/x"}}
+    )
+    _install_fake_keychain(monkeypatch, _FakeKeychain())
+
+    exit_code = run_hostcreds_cli(
+        monkeypatch, root, ["creds-fragments", "--output-dir", str(tmp_path / "fragments")]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "MISSING_TOKEN" in captured.err
+    assert "aborted" in captured.err, "the summary states that the push aborted"
+
+
+def test_creds_fragments_empty_manifest_exits_zero_printing_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An empty manifest is the explicit statement that nothing is pushed."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(root, {})
+
+    exit_code = run_hostcreds_cli(
+        monkeypatch, root, ["creds-fragments", "--output-dir", str(tmp_path / "fragments")]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == ""
+
+
+def test_creds_fragments_requires_output_dir_without_print_git_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(root, {})
+
+    exit_code = run_hostcreds_cli(monkeypatch, root, ["creds-fragments"])
+
+    err = capsys.readouterr().err
+    assert exit_code == 2
+    assert "--output-dir" in err
+
+
+def test_creds_fragments_print_git_hosts_prints_only_the_hosts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--print-git-hosts writes nothing and prints only git-source hostnames."""
+    root = _creds_repo(tmp_path)
+    _write_hostcreds_manifest(
+        root,
+        {
+            "GIT_GITHUB": {"source": "git", "host": "github.com"},
+            "GIT_OTHER": {"source": "git", "host": "gitlab.example.com"},
+            "API_TOKEN": {"source": "keychain", "service": "devcontainer/test/API_TOKEN"},
+        },
+    )
+    _install_fake_keychain(monkeypatch, _FakeKeychain())
+
+    exit_code = run_hostcreds_cli(monkeypatch, root, ["creds-fragments", "--print-git-hosts"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == "github.com\ngitlab.example.com\n"
+
+
+def test_creds_fragments_missing_manifest_names_the_path_and_make_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _creds_repo(tmp_path)
+
+    exit_code = run_hostcreds_cli(
+        monkeypatch, root, ["creds-fragments", "--output-dir", str(tmp_path / "fragments")]
+    )
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "hostcreds.map.json" in err
+    assert "make init" in err
+
+
+def test_shell_block_prints_the_startup_block_with_its_marker_first(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli = import_cli()
+    hostcreds_module = _import_hostcreds()
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["shell-block"])
+
+    out = capsys.readouterr().out
+    assert exc_info.value.code == 0
+    assert out == hostcreds_module.render_startup_block()
+    assert out.splitlines()[0] == hostcreds_module.MARKER
+
+
+def test_shell_block_module_invocation_prints_the_block_via_subprocess() -> None:
+    """The exact invocation postCreate uses: `-m devcontainer_config.cli shell-block`."""
+    repo_root = Path(__file__).resolve().parents[1]
+    scripts_dir = repo_root / ".claude" / "plugins" / "devcontainer" / "scripts"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(scripts_dir)
+    result = subprocess.run(
+        ["python3", "-m", "devcontainer_config.cli", "shell-block"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[0] == "# hostcreds-credential-startup-block"

@@ -350,116 +350,105 @@ def test_render_twice_marker_makes_a_second_application_detectable(shell: str) -
 
 # ---------------------------------------------------------------------------
 # The postCreate wiring (AC-FUNC-007, AC-FUNC-008, AC-TEST-003)
+#
+# The devsecret export-list block configure_shell_env used to render is gone:
+# the hostcreds startup block replaced it (same render-once-in-Python rule,
+# new renderer -- devcontainer_config.cli shell-block, which prints
+# devcontainer_config.hostcreds.render_startup_block()). These tests pin the
+# new wiring with the same strength they pinned the old one: the render
+# helper exists and delegates, one shell-agnostic block is appended to BOTH
+# startup files under one marker, a render failure is fatal, and the append
+# is idempotent.
 # ---------------------------------------------------------------------------
 
 
-def test_postcreate_defines_a_render_helper_for_the_devsecret_block() -> None:
-    """AC-FUNC-007: postCreate calls the renderer rather than hand-writing the block."""
-    assert "devcontainer_config.shellrc" in _postcreate_text()
+def test_postcreate_defines_a_render_helper_for_the_hostcreds_block() -> None:
+    """The block is rendered by devcontainer_config, never hand-written here."""
+    assert "devcontainer_config.cli shell-block" in _postcreate_text()
 
 
-def test_configure_shell_env_renders_the_bash_block() -> None:
-    """AC-FUNC-007: the bash startup file's block is rendered for the bash shell."""
+def test_configure_shell_env_renders_the_startup_block_once() -> None:
+    """One shell-agnostic block serves both files, so there is exactly one render."""
     body = _configure_shell_env_body()
-    assert re.search(r"render_devsecret_shell_block\s+bash", body)
+    assert len(re.findall(r"render_hostcreds_shell_block\b", body)) == 1
 
 
-def test_configure_shell_env_renders_the_zsh_block() -> None:
-    """AC-FUNC-007: the zsh environment file's block is rendered for the zsh shell."""
+def test_render_helper_takes_no_shell_argument() -> None:
+    """The block is the same text for bash and zsh; a shell argument would be dead."""
+    body = _function_body("render_hostcreds_shell_block")
+    assert "local shell" not in body
+    assert '"${DEVCONTAINER_SCRIPTS_DIR}"' in body
+
+
+def test_configure_shell_env_appends_the_block_to_the_bash_startup_file() -> None:
+    """The rendered block is written into BASH_RC, beside the shell.env lines."""
     body = _configure_shell_env_body()
-    assert re.search(r"render_devsecret_shell_block\s+zsh", body)
+    assert re.search(r'startup_block.*>>\s*"\$\{BASH_RC\}"', body, re.DOTALL)
 
 
-def test_configure_shell_env_appends_the_bash_block_to_the_bash_startup_file() -> None:
-    """AC-FUNC-007: the rendered bash block is written into BASH_RC, beside the shell.env
-
-    lines, not left unused.
-    """
+def test_configure_shell_env_appends_the_block_to_the_zsh_environment_file() -> None:
+    """The same rendered block is written into ZSH_ENV, beside the shell.env lines."""
     body = _configure_shell_env_body()
-    assert re.search(r'bash_block.*>>\s*"\$\{BASH_RC\}"', body, re.DOTALL)
-
-
-def test_configure_shell_env_appends_the_zsh_block_to_the_zsh_environment_file() -> None:
-    """AC-FUNC-007: the rendered zsh block is written into ZSH_ENV, beside the shell.env
-
-    lines, not left unused.
-    """
-    body = _configure_shell_env_body()
-    assert re.search(r'zsh_block.*>>\s*"\$\{ZSH_ENV\}"', body, re.DOTALL)
+    assert re.search(r'startup_block.*>>\s*"\$\{ZSH_ENV\}"', body, re.DOTALL)
 
 
 def test_configure_shell_env_does_not_swallow_a_render_failure() -> None:
-    """AC-FUNC-008 / AC-TEST-002 discipline: nothing discards the render command's status."""
+    """Nothing discards the render command's status."""
     body = _configure_shell_env_body()
     forgiving_suffixes = ("|| true", "|| :", "; true", "2>/dev/null", "> /dev/null")
     for line in body.splitlines():
-        if "render_devsecret_shell_block" not in line:
+        if "render_hostcreds_shell_block" not in line:
             continue
         for suffix in forgiving_suffixes:
             assert suffix not in line, f"{suffix!r} would swallow a non-zero render status"
 
 
-def test_configure_shell_env_aborts_through_exit_with_error_on_a_bash_render_failure() -> None:
-    """AC-FUNC-008: a non-zero render is fatal through exit_with_error, not warned about."""
+def test_configure_shell_env_aborts_through_exit_with_error_on_a_render_failure() -> None:
+    """A non-zero render is fatal through exit_with_error, not warned about."""
     body = _configure_shell_env_body()
-    render_idx = body.index("render_devsecret_shell_block bash")
+    render_idx = body.index("render_hostcreds_shell_block")
     error_idx = body.index("exit_with_error", render_idx)
     tail = body[render_idx:error_idx]
-    assert "||" in tail, "the bash render's failure is not wired to a handler"
+    assert "||" in tail, "the render's failure is not wired to a handler"
     assert "log_section_skipped" not in body[render_idx : error_idx + 400]
 
 
-def test_configure_shell_env_aborts_through_exit_with_error_on_a_zsh_render_failure() -> None:
-    """AC-FUNC-008: a non-zero render is fatal through exit_with_error, not warned about."""
-    body = _configure_shell_env_body()
-    render_idx = body.index("render_devsecret_shell_block zsh")
-    error_idx = body.index("exit_with_error", render_idx)
-    tail = body[render_idx:error_idx]
-    assert "||" in tail, "the zsh render's failure is not wired to a handler"
-
-
 def test_configure_shell_env_reuses_the_shared_printers() -> None:
-    """AC-3.1: no new error printer is introduced; the existing primitives are reused."""
+    """No new error printer is introduced; the existing primitives are reused."""
     body = _configure_shell_env_body()
     assert re.search(r"\bexit_with_error\b", body)
     assert re.search(r"\blog_section_done\b", body)
 
 
-def test_configure_shell_env_derives_the_bash_marker_from_the_rendered_block() -> None:
-    """AC-FUNC-006: the guard's marker text is read back out of the rendered block itself
-
-    (its own first line), rather than a second hand-copied literal of `shellrc.MARKER`
-    that could drift out of sync with the renderer.
-    """
-    body = _configure_shell_env_body()
-    assert re.search(r'bash_marker="\$\(printf[^\n]*bash_block[^\n]*\|\s*head\s+-n\s*1\)"', body)
-
-
-def test_configure_shell_env_derives_the_zsh_marker_from_the_rendered_block() -> None:
-    """AC-FUNC-006: same as the bash case, for the zsh marker."""
-    body = _configure_shell_env_body()
-    assert re.search(r'zsh_marker="\$\(printf[^\n]*zsh_block[^\n]*\|\s*head\s+-n\s*1\)"', body)
-
-
-def test_configure_shell_env_guards_the_bash_append_against_a_second_application() -> None:
-    """AC-FUNC-006: idempotence -- a second `configure_shell_env` run must not duplicate
-
-    the block in `BASH_RC`. The append is guarded by a grep for the block's own marker
-    line, the same `grep -q ... || <action>` guard style this file already uses (see
-    `zsh_path` in the tmux step and `ZSH_THEME` in the Oh My Zsh step).
+def test_configure_shell_env_derives_the_marker_from_the_rendered_block() -> None:
+    """The guard's marker text is read back out of the rendered block itself
+    (its own first line), rather than a second hand-copied literal of
+    hostcreds.MARKER that could drift out of sync with the renderer.
     """
     body = _configure_shell_env_body()
     assert re.search(
-        r'grep\s+-qF\s+--\s+"\$\{bash_marker\}"\s+"\$\{BASH_RC\}"\s*\|\|.*bash_block.*>>\s*"\$\{BASH_RC\}"',
+        r'startup_marker="\$\(printf[^\n]*startup_block[^\n]*\|\s*head\s+-n\s*1\)"', body
+    )
+
+
+def test_configure_shell_env_guards_the_bash_append_against_a_second_application() -> None:
+    """Idempotence: a second configure_shell_env run must not duplicate the
+    block in BASH_RC. The append is guarded by a grep for the block's own
+    marker line, the same `grep -q ... || <action>` guard style this file
+    already uses.
+    """
+    body = _configure_shell_env_body()
+    assert re.search(
+        r'grep\s+-qF\s+--\s+"\$\{startup_marker\}"\s+"\$\{BASH_RC\}"\s*\|\|.*startup_block.*>>\s*"\$\{BASH_RC\}"',
         body,
     ), "the bash append is not guarded by a marker grep"
 
 
 def test_configure_shell_env_guards_the_zsh_append_against_a_second_application() -> None:
-    """AC-FUNC-006: same as the bash case, for `ZSH_ENV`."""
+    """Same idempotence guard as the bash case, for ZSH_ENV."""
     body = _configure_shell_env_body()
     assert re.search(
-        r'grep\s+-qF\s+--\s+"\$\{zsh_marker\}"\s+"\$\{ZSH_ENV\}"\s*\|\|.*zsh_block.*>>\s*"\$\{ZSH_ENV\}"',
+        r'grep\s+-qF\s+--\s+"\$\{startup_marker\}"\s+"\$\{ZSH_ENV\}"\s*\|\|.*startup_block.*>>\s*"\$\{ZSH_ENV\}"',
         body,
     ), "the zsh append is not guarded by a marker grep"
 

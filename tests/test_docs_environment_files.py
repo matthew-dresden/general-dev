@@ -390,9 +390,9 @@ def test_git_credential_still_documented_as_not_from_shell_env() -> None:
         f"{_DOC_RELATIVE_PATH} no longer states the AC-DOC-009 fact that the git credential does "
         "not come from `shell.env`, in the '## Secrets' section."
     )
-    assert "make push-git-creds" in text, (
+    assert "make push-creds" in text, (
         f"{_DOC_RELATIVE_PATH} no longer states the AC-DOC-009 fact that the git credential is "
-        "copied by `make push-git-creds`, in the '## Secrets' section."
+        "copied by `make push-creds`, in the '## Secrets' section."
     )
 
 

@@ -54,6 +54,7 @@
 /shell.env
 /devcontainer-environment-variables.json
 .devcontainer/aws-profile-map.json
+.devcontainer/hostcreds.map.json
 .devcontainer/devcontainer-lock.json
 .claude/settings.local.json
 

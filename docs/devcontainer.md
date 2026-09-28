@@ -354,7 +354,7 @@ EC2 reference, troubleshooting) live in
 
 The container holds no credential of its own until one is pushed to it.
 postCreate only sets `credential.helper store` and the SSH→HTTPS URL rewrite;
-`make push-git-creds`, which `make build` runs as its last step, copies in
+`make push-creds`, which `make build` runs as its last step, copies in
 the credential that already works on the developer's machine, obtained through
 `git credential fill` so it works with any configured helper (osxkeychain,
 libsecret, gh, store). The step resets `credential.helper` with

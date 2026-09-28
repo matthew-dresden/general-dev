@@ -1,0 +1,13 @@
+{
+  "EXAMPLE_API_TOKEN": {
+    "source": "keychain"
+  },
+  "GIT_GITHUB": {
+    "source": "git",
+    "host": "github.com"
+  },
+  "AWS_DEFAULT": {
+    "source": "aws-export",
+    "profile": "default"
+  }
+}

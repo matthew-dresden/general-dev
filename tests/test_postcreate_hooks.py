@@ -297,3 +297,36 @@ def test_git_identity_variables_fail_with_a_named_error_not_an_unbound_variable(
         "letting set -u report an unbound variable"
     )
     assert "shell.env" in section, "the error must name where the value comes from"
+
+
+# ---------------------------------------------------------------------------
+# The hostcreds cutover: postCreate no longer installs or renders anything
+# devsecret. A later unit deletes the devsecret modules and docs themselves;
+# this unit removes exactly the two postCreate wiring points -- the
+# configure_devsecret bootstrap step and the devsecret export-list block
+# render -- so these tests pin their absence while the rest of the devsecret
+# surface is still intentionally present.
+# ---------------------------------------------------------------------------
+
+
+def test_main_no_longer_calls_configure_devsecret() -> None:
+    """The devsecret bootstrap step is out of the provisioning flow."""
+    assert "configure_devsecret" not in _main_body()
+
+
+def test_configure_devsecret_function_and_its_uv_install_are_gone() -> None:
+    """Not merely uncalled: the function and its `uv tool install` are deleted."""
+    text = _postcreate_text()
+    assert "configure_devsecret" not in text, (
+        "configure_devsecret must be deleted with its main() call, not left as dead code"
+    )
+    assert "uv tool install" not in text, (
+        "the uv tool install existed only to put the devsecret console script on PATH"
+    )
+
+
+def test_configure_shell_env_renders_the_hostcreds_startup_block() -> None:
+    """The startup block configure_shell_env renders is the hostcreds one."""
+    body = _function_body("configure_shell_env")
+    assert "render_hostcreds_shell_block" in body
+    assert "shellrc" not in body, "the superseded devsecret renderer must not linger here"

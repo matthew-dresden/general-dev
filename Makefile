@@ -47,9 +47,18 @@ JSON_FILES = $(shell find . -name '*.json' $(LINT_EXCLUDES))
 # under repos/:  make lint-spell SPELL_FILES="repos/<name>/*.md"
 SPELL_FILES ?= $(MD_FILES)
 PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer/aws-profile-map.json
+# The hostcreds manifest is private like the PRIVATE_FILES entries (make init
+# creates it from its committed example; lint-private refuses to let it be
+# tracked) but it is NOT rendered from setup answers -- the operator and
+# 'make creds-init' own its content -- so it stays out of PRIVATE_FILES,
+# which tests/test_private_files_consistency.py pins to
+# devcontainer_config.repo.PRIVATE_FILES (the files render/verify own). The
+# two PRIVATE_FILES consumers that must also cover the manifest iterate this
+# union instead.
+PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
 
 .DEFAULT_GOAL := help
-.PHONY: help connect disconnect status exec shell instances start stop restart rename check build push-git-creds clean rebuild push-secrets \
+.PHONY: help connect disconnect status exec shell instances start stop restart rename check build push-creds creds-init verify-container clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test cert-status
@@ -62,7 +71,7 @@ help:
 	@printf '\n\033[1mSTART HERE\033[0m\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make up"               "both"   "Get working from any state: refreshes the tunnel (remote), builds or starts as needed, then opens VS Code."
 	@printf '\n\033[1mFIRST RUN\033[0m  once per machine\n'
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make init"             "host"   "Create the three gitignored config files from their examples. Never overwrites an existing one."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make init"             "host"   "Create the gitignored config files (incl. the hostcreds manifest) from their examples. Never overwrites an existing one."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make keybindings"      "host"   "Bind Shift+Enter to a newline in VS Code terminals. Must run on the host, not in the container."
 	@printf '\n\033[1mENGINE\033[0m  pick where builds and containers live\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make local"            "host"   "Point docker and VS Code at the local engine ($(LOCAL_CONTEXT)). Nothing remote is stopped."
@@ -87,7 +96,9 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make check"            "both"   "Remote: report uncommitted or unpushed work in the volume, non-zero when dirty. Local: a no-op, the container shares this folder."
 	@printf '\n\033[1mSECRETS AND CERTIFICATES\033[0m\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make push-git-creds"   "both"   "Copy this machine's git credentials into the container so it can push with no editor attached."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make push-creds"       "both"   "Resolve every hostcreds manifest entry on this machine and push it into the container. Git entries also seed ~/.git-credentials."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make creds-init"       "host"   "Prompt once per missing keychain item the hostcreds manifest names and store it. CREDS_INIT_ARGS='--stdin NAME' feeds one value from stdin."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make verify-container" "both"   "Check the pushed credentials inside the container: fragment modes, startup block, git and aws reachability."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-status"      "host"   "Client and CA expiry per instance."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-ca"          "host"   "Create this instance's certificate authority. Once per instance; refuses if one exists."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-client"      "host"   "Issue the client certificate 'make connect' presents. Run after cert-ca, and again at renewal."
@@ -164,7 +175,7 @@ check:
 
 init:
 	@printf '\033[0;36m[INIT]\033[0m creating config files from their examples\n'
-	@for target in $(PRIVATE_FILES); do \
+	@for target in $(PRIVATE_FILES_AND_MANIFEST); do \
 		source="$$target.example"; \
 		if [ ! -f "$$source" ]; then \
 			printf '\033[0;31m[ERROR]\033[0m %s is missing, so %s cannot be created\n' "$$source" "$$target" >&2; \
@@ -179,7 +190,7 @@ init:
 	done
 	@printf '\n'
 	@remaining=0; \
-	for target in $(PRIVATE_FILES); do \
+	for target in $(PRIVATE_FILES_AND_MANIFEST); do \
 		[ -f "$$target" ] || continue; \
 		n=$$(grep -o '<[^<>]*>' "$$target" 2>/dev/null | sort -u | wc -l | tr -d ' '); \
 		if [ "$$n" -gt 0 ]; then \
@@ -235,8 +246,26 @@ shell:
 vscode-server:
 	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) vscode-server
 
-push-git-creds:
-	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) push-git-creds
+# The hostcreds push: resolves every manifest entry on this machine (the
+# container never resolves anything itself) and writes the fragments into
+# the container. Delegates to container.sh, which pipes each fragment over
+# stdin so no value rides a docker exec's argv.
+push-creds:
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) push-creds
+
+# Host only: prompts once per keychain credential the manifest names whose
+# item is missing, storing each through 'security -i' with the value on
+# stdin. CREDS_INIT_ARGS passes flags through to the subcommand for
+# automation: make creds-init CREDS_INIT_ARGS="--stdin NAME" with the value
+# piped on stdin.
+creds-init:
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli creds-init $(CREDS_INIT_ARGS)
+
+# Structural plus functional verification of the pushed credentials, through
+# docker exec against the active context, so it works identically on either
+# engine.
+verify-container:
+	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) verify
 
 clean:
 	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) clean
@@ -349,7 +378,7 @@ lint-json:
 
 lint-private:
 	@printf '\033[0;36m[LINT]\033[0m private files not tracked\n'
-	@for f in $(PRIVATE_FILES); do \
+	@for f in $(PRIVATE_FILES_AND_MANIFEST); do \
 		if git ls-files --error-unmatch "$$f" > /dev/null 2>&1; then \
 			printf '\033[0;31m[ERROR]\033[0m %s is tracked by git, it holds identity/secrets. Untrack it: git rm --cached %s\n' "$$f" "$$f" >&2; \
 			exit 1; \

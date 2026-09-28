@@ -531,4 +531,4 @@ wants one instance to be their implicit default sets it in their own
   the stored copy, so editing it is enough, no separate step to remember.
 - The container's **git credential** does not come from `shell.env`. It is
   copied from the credential helper already working on your machine by
-  `make push-git-creds`, which `make build` runs automatically.
+  `make push-creds`, which `make build` runs automatically.

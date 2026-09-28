@@ -303,6 +303,7 @@ EC2 reference, troubleshooting) live in
    | `shell.env` sourcing into `.bashrc` / `.zshenv`, plus the devsecret export-list startup block appended to both | `python3` + `devcontainer_config` on `PYTHONPATH`, required |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
    | `claude-settings.json` merged into `~/.claude/settings.json` | `claude-code` feature + `jq` |
+   | opencode installed globally, `~/.config/opencode/opencode.json` written from `.devcontainer/opencode.json` (GLM 5.3 flagship + GLM 5.3 Flash; the z.ai key is injected at run time through `{env:ZAI_API_KEY}`, exported by shell.env) | the node feature + `jq` |
    | `tm-*` commands sourced into both shells | `tmux` |
    | `resmon-disks.py` linked into `~/.local/bin` for postAttach | `python3`, required |
    | `vscode-settings-sync.py` linked into `~/.local/bin` for postAttach | `python3`, required |

@@ -39,6 +39,7 @@ TMUX_CONF="${WORK_DIR}/.devcontainer/tmux.conf"
 PROJECT_SETUP="${WORK_DIR}/.devcontainer/project-setup.sh"
 AWS_PROFILE_MAP_FILE="${WORK_DIR}/.devcontainer/aws-profile-map.json"
 CLAUDE_SETTINGS_FILE="${WORK_DIR}/.devcontainer/claude-settings.json"
+OPENCODE_CONFIG_FILE="${WORK_DIR}/.devcontainer/opencode.json"
 REPOS_PATH="${WORK_DIR}/${DEVCONTAINER_REPOS_DIR}"
 RESMON_DISKS="${WORK_DIR}/.devcontainer/resmon-disks.py"
 VSCODE_SETTINGS_SYNC="${WORK_DIR}/.devcontainer/vscode-settings-sync.py"
@@ -288,6 +289,44 @@ configure_claude_settings() {
   done < <(jq -r 'keys[]' "${CLAUDE_SETTINGS_FILE}")
 
   log_section_done "Claude Code settings"
+}
+
+# opencode, the one CLI here no devcontainer feature ships. Installed as the
+# container user into the prefix configure_npm_global_ownership just handed
+# over, so the package and its bin symlink are user-owned from the start and
+# self-update never needs the handover to be re-run. The committed config
+# carries no credential: it injects the z.ai coding plan key through
+# {env:ZAI_API_KEY}, which every container shell exports from shell.env.
+configure_opencode() {
+  if ! container_user_has npm; then
+    log_section_skipped "opencode" \
+      "npm is not installed, add the node feature to devcontainer.json"
+    return 0
+  fi
+  [ -s "${OPENCODE_CONFIG_FILE}" ] \
+    || exit_with_error "opencode config not found at ${OPENCODE_CONFIG_FILE}"
+  jq empty "${OPENCODE_CONFIG_FILE}" > /dev/null 2>&1 \
+    || exit_with_error "${OPENCODE_CONFIG_FILE} is not valid JSON"
+  grep -q '{env:ZAI_API_KEY}' "${OPENCODE_CONFIG_FILE}" \
+    || exit_with_error "$(printf '%s\n' \
+      "${OPENCODE_CONFIG_FILE} does not reference {env:ZAI_API_KEY}." \
+      "The key reaches opencode only through that interpolation; a config without" \
+      "it would carry no credential path at all.")"
+
+  local user_path="${CONTAINER_USER_PATH:-${PATH}}"
+  local target="${USER_HOME}/.config/opencode/opencode.json"
+  log_section "opencode" "npm install, config -> ${target}"
+
+  as_container_user "PATH='${user_path}' npm install --global opencode-ai" \
+    || exit_with_error "npm install --global opencode-ai failed, so opencode is not installed"
+  as_container_user "PATH='${user_path}' opencode --version" > /dev/null \
+    || exit_with_error "opencode is installed but does not run"
+
+  install -d -m 755 -o "${CONTAINER_USER}" -g "${CONTAINER_USER}" "$(dirname "${target}")"
+  install -m 644 -o "${CONTAINER_USER}" -g "${CONTAINER_USER}" "${OPENCODE_CONFIG_FILE}" "${target}"
+  grep -q '{env:ZAI_API_KEY}' "${target}" \
+    || exit_with_error "the installed ${target} does not match ${OPENCODE_CONFIG_FILE}"
+  log_section_done "opencode"
 }
 
 configure_tmux_commands() {
@@ -621,6 +660,7 @@ main() {
   configure_npm_global_ownership
   configure_claude_aliases
   configure_claude_settings
+  configure_opencode
   configure_tmux_commands
   configure_resmon_disks
   configure_vscode_settings_sync

@@ -217,6 +217,10 @@ Every project gets its own container + volume on the shared engine.
 
 - `ccd`, `claude --dangerously-skip-permissions`
 - `ccdr`, `claude --dangerously-skip-permissions --resume`
+- opencode, installed by postCreate (no devcontainer feature ships it),
+  configured for the z.ai coding plan with GLM 5.3 flagship and GLM 5.3
+  Flash; its key is injected from `shell.env` through `{env:ZAI_API_KEY}`,
+  never committed.
 - Claude Code starts on the classic renderer and never offers the flicker-free
   fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen`
   still opts in for the current container.

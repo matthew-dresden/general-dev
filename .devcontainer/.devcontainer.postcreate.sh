@@ -166,6 +166,32 @@ npm_package_parents() {
   return 0
 }
 
+# devsecret, the catalog CLI the export-list startup block configure_shell_env
+# renders into .bashrc and .zshenv requires on PATH (its absence is the
+# "devsecret is not on PATH" error every shell then prints). This project
+# carries the console script itself (pyproject [project.scripts]), and its
+# build backend exists precisely so a bootstrap step can install it; uv tool
+# install is that step. --force keeps a rerun of postCreate on an existing
+# container a reinstall rather than an error. uv places the binary in
+# ~/.local/bin, which the path_prepend line configure_shell_env writes has
+# already put on PATH for every shell.
+configure_devsecret() {
+  if ! container_user_has uv; then
+    log_section_skipped "devsecret" \
+      "uv is not installed, add the uv feature to devcontainer.json"
+    return 0
+  fi
+  local user_path="${CONTAINER_USER_PATH:-${PATH}}"
+  log_section "devsecret" "uv tool install --force from ${WORK_DIR}"
+  as_container_user "HOME='${USER_HOME}' PATH='${user_path}' uv tool install --force '${WORK_DIR}'" \
+    || exit_with_error "$(printf '%s\n' \
+      "uv tool install failed, so the devsecret console script is absent and every" \
+      "shell prints 'devsecret is not on PATH' on open.")"
+  as_container_user "HOME='${USER_HOME}' PATH='${user_path}' devsecret --help" > /dev/null \
+    || exit_with_error "devsecret is installed but does not run"
+  log_section_done "devsecret" "${USER_HOME}/.local/bin/devsecret"
+}
+
 configure_npm_global_ownership() {
   if ! container_user_has npm; then
     log_section_skipped "Global npm ownership" \
@@ -657,6 +683,7 @@ main() {
 
   configure_vscode_server_dir
   configure_shell_env
+  configure_devsecret
   configure_npm_global_ownership
   configure_claude_aliases
   configure_claude_settings

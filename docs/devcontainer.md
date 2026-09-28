@@ -301,6 +301,7 @@ EC2 reference, troubleshooting) live in
    | every npm prefix holding a global CLI handed to the container user | the node feature |
    | `~/.vscode-server` handed to the container user | the `mounts` volume, required |
    | `shell.env` sourcing into `.bashrc` / `.zshenv`, plus the devsecret export-list startup block appended to both | `python3` + `devcontainer_config` on `PYTHONPATH`, required |
+   | `devsecret` installed from this project via `uv tool install --force`, so the export-list startup block finds its CLI on PATH (its catalog calls need an AWS session: locally, `aws sso login` once per container) | the uv feature |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
    | `claude-settings.json` merged into `~/.claude/settings.json` | `claude-code` feature + `jq` |
    | opencode installed globally, `~/.config/opencode/opencode.json` written from `.devcontainer/opencode.json` (GLM 5.3 flagship + GLM 5.3 Flash; the z.ai key is injected at run time through `{env:ZAI_API_KEY}`, exported by shell.env) | the node feature + `jq` |

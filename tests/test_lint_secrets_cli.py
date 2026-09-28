@@ -23,26 +23,37 @@ positive sample is built at run time from `devcontainer_config.secrets
 `tests/test_secrets.py` documents for the scanner's own case table, so this
 file itself never becomes something a future `make lint-secrets` run would
 flag.
+
+The hostcreds end-to-end tests below keep that hermeticity with one seam:
+the tmp repository's `.devcontainer/hostcreds.map.json` is a real file (so
+the manifest loading runs for real), but `hostcreds.subprocess_runner` is
+monkeypatched to a fake answering from a queue -- no test here touches the
+real keychain, the real git credential store, aws or any network, and no
+resolved value is ever anything but a generated `uuid.uuid4()` probe.
 """
 
 from __future__ import annotations
 
 import ast
 import importlib
+import json
 import re
 import subprocess
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import cast
 
 import pytest
 from gitfixtures import (
+    commit_text,
     credential_line,
     generated_root,
     import_cli,
     import_secrets,
     init_repo,
+    rev_parse,
     run_cli,
     stage_bytes,
     stage_text,
@@ -152,6 +163,187 @@ def test_shell_env_lines_counted_in_header(
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "shell.env lines: 2" in out
+
+
+def _write_hostcreds_manifest(root: Path, entries: dict[str, dict[str, str]]) -> None:
+    """Write `entries` as `root`'s .devcontainer/hostcreds.map.json.
+
+    A real manifest file, so the loader's manifest half (path resolution,
+    JSON parsing, validation, defaults) runs for real; only the source
+    commands are faked, by `_patch_hostcreds_runner` below.
+    """
+    hostcreds = importlib.import_module("devcontainer_config.hostcreds")
+    path = hostcreds.manifest_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(entries), encoding="utf-8")
+
+
+class _QueuedHostCredsRunner:
+    """The fake `hostcreds.subprocess_runner`: answers from a queue, spawns nothing.
+
+    `secrets` wires the production runner directly into `_scan_sources` (no
+    runner parameter threads through `run_staged_scan`, matching how the
+    shell.env loaders are wired), so patching this module attribute is the
+    seam: the real manifest and the real resolver dispatch run, but every
+    source command is answered here and nothing touches the host.
+    """
+
+    def __init__(self, results: list[subprocess.CompletedProcess[str]]) -> None:
+        self._results = list(results)
+
+    def __call__(self, argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        assert self._results, "the fake hostcreds runner was called with nothing queued"
+        return self._results.pop(0)
+
+
+def _runner_ok(value: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=value + "\n", stderr="")
+
+
+def _runner_failed(stderr: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=stderr)
+
+
+def _patch_hostcreds_runner(
+    monkeypatch: pytest.MonkeyPatch, results: list[subprocess.CompletedProcess[str]]
+) -> None:
+    """Point the production hostcreds runner at a `_QueuedHostCredsRunner`."""
+    monkeypatch.setattr(
+        "devcontainer_config.hostcreds.subprocess_runner", _QueuedHostCredsRunner(results)
+    )
+
+
+def test_staged_hostcreds_value_reported_and_exit_code_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A staged line containing a resolved hostcreds value exits 1 with a finding
+    naming the credential, and the value appears nowhere in stdout or stderr."""
+    root = generated_root(tmp_path)
+    init_repo(root)
+    probe = uuid.uuid4().hex
+    _write_hostcreds_manifest(root, {"ZAI_API_KEY": {"source": "keychain"}})
+    _patch_hostcreds_runner(monkeypatch, [_runner_ok(probe)])
+    stage_text(root, "src/config.py", f"export ZAI_API_KEY={probe}\n")
+
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "src/config.py:1: hostcreds credential value:" in captured.out
+    assert "  hostcreds values: 1" in captured.out
+    assert probe not in captured.out
+    assert probe not in captured.err
+
+
+def test_staged_clean_file_with_a_resolved_hostcreds_value_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A resolved hostcreds value nothing staged contains is reported as one
+    compared value and the scan still exits clean."""
+    root = generated_root(tmp_path)
+    init_repo(root)
+    probe = uuid.uuid4().hex
+    _write_hostcreds_manifest(root, {"ZAI_API_KEY": {"source": "keychain"}})
+    _patch_hostcreds_runner(monkeypatch, [_runner_ok(probe)])
+    stage_text(root, "README.md", "nothing sensitive here\n")
+
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "  hostcreds values: 1\n" in captured.out
+    assert probe not in captured.out
+
+
+def test_unresolvable_hostcreds_spec_reported_unavailable_scan_still_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A spec whose resolution raises ResolutionError is skipped and named as
+    unavailable in the report line, with the scan still exiting clean when nothing
+    staged matches -- and the resolved sibling still counts."""
+    root = generated_root(tmp_path)
+    init_repo(root)
+    probe = uuid.uuid4().hex
+    entries = {"ZAI_API_KEY": {"source": "keychain"}, "LEGACY_TOKEN": {"source": "keychain"}}
+    _write_hostcreds_manifest(root, entries)
+    _patch_hostcreds_runner(monkeypatch, [_runner_ok(probe), _runner_failed("expired\n")])
+    stage_text(root, "README.md", "nothing sensitive here\n")
+
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "  hostcreds values: 1 (1 unavailable: LEGACY_TOKEN)\n" in captured.out
+    assert probe not in captured.out
+
+
+def test_hostcreds_report_line_when_no_manifest_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A fresh clone with no hostcreds manifest pins the no-manifest report line."""
+    root = generated_root(tmp_path)
+    init_repo(root)
+    stage_text(root, "README.md", "nothing sensitive here\n")
+
+    exit_code = run_cli(monkeypatch, root, ["lint-secrets"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "  hostcreds values: 0 (no manifest)\n" in out
+
+
+def test_range_scan_reports_unresolvable_hostcreds_spec_and_still_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A --range scan whose manifest holds one resolvable and one unresolvable spec
+    still exits clean when nothing in history matches, and the range report names
+    the unavailable credential: a skipped entry narrows a range scan visibly, the
+    same way staged mode's report does, never silently."""
+    root = generated_root(tmp_path)
+    init_repo(root)
+    probe = uuid.uuid4().hex
+    commit_text(root, "README.md", "base\n", "base commit")
+    base_commit = rev_parse(root, "HEAD")
+    commit_text(root, "src/config.py", "VALUE=benign\n", "add a line no detector matches")
+    tip_commit = rev_parse(root, "HEAD")
+
+    entries = {"ZAI_API_KEY": {"source": "keychain"}, "LEGACY_TOKEN": {"source": "keychain"}}
+    _write_hostcreds_manifest(root, entries)
+    _patch_hostcreds_runner(monkeypatch, [_runner_ok(probe), _runner_failed("expired\n")])
+
+    exit_code = run_cli(
+        monkeypatch, root, ["lint-secrets", "--range", f"{base_commit}..{tip_commit}"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "  hostcreds values: 1 (1 unavailable: LEGACY_TOKEN)\n" in captured.out
+    assert "commits scanned: 1" in captured.out
+    assert probe not in captured.out
+    assert probe not in captured.err
+
+
+def test_range_scan_reports_the_no_manifest_variant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A --range scan in a fresh clone with no hostcreds manifest prints the
+    no-manifest variant in the range report's header, the same line staged mode
+    prints."""
+    root = generated_root(tmp_path)
+    init_repo(root)
+    commit_text(root, "README.md", "base\n", "base commit")
+    base_commit = rev_parse(root, "HEAD")
+    commit_text(root, "README.md", "updated\n", "second commit")
+    tip_commit = rev_parse(root, "HEAD")
+
+    exit_code = run_cli(
+        monkeypatch, root, ["lint-secrets", "--range", f"{base_commit}..{tip_commit}"]
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "[LINT] secrets in pushed range" in out
+    assert "  hostcreds values: 0 (no manifest)\n" in out
 
 
 def test_outside_git_work_tree_errors(

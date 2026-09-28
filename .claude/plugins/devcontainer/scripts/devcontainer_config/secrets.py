@@ -4,8 +4,11 @@ Detects, in scanned line content: AWS access key identifiers (`AKIA` and
 `ASIA` prefixes), AWS secret access key assignments, private key blocks,
 GitHub tokens (`ghp_`, `gho_`, `github_pat_`), Slack tokens (`xoxb-`,
 `xoxp-`), bearer tokens, SSO portal URLs, twelve-digit account identifiers,
-EC2 instance identifiers, every catalog secret name, and any line also
-present in the developer's own `shell.env` -- excluding a line that also
+EC2 instance identifiers, every catalog secret name, every resolved
+hostcreds credential value (whole when the value holds no newline, per
+maximal newline-free segment of at least twelve characters otherwise), and
+any line also present in the developer's own `shell.env` -- excluding a
+line that also
 appears, verbatim, in both the git index and `HEAD` version of the tracked
 `shell.env.example` (E2-F1-S1-T4): a line this commit does not introduce or
 change. A line a developer stages into `shell.env.example` itself, whatever
@@ -22,8 +25,9 @@ detector.
 
 `scan_lines` is pure: it opens no file, spawns no subprocess and reaches no
 network. Its only inputs are the lines handed to it and the `ScanSources`
-value carrying the developer's `shell.env` lines and the catalog secret
-names. Both sources are injected because the catalog client does not exist
+value carrying the developer's `shell.env` lines, the catalog secret
+names and the resolved hostcreds credential values. All three sources are
+injected because the catalog client does not exist
 until E3 and because the Scanner suite (spec Section 10.2) has to run with no
 AWS, no docker and no network at all (AC-10.14).
 
@@ -48,9 +52,20 @@ shape, means a developer who stages a real, filled-in value into
 else in the same commit: that value has no counterpart in `HEAD` yet (it was
 never committed before this staged edit), so it is never excluded no matter
 what it looks like -- an assignment, a comment, or anything else
-(E2-F1-S1-T4 security review round 4). `run_staged_scan` composes all four
-into one `LintReport` that `render_lint_report` turns into the text
-`devcontainer_config.cli` prints.
+(E2-F1-S1-T4 security review round 4). `hostcreds_values` is the fifth
+loader in that shell: it loads the gitignored
+`.devcontainer/hostcreds.map.json` through `devcontainer_config.hostcreds`
+and resolves every credential the manifest names live from the host, on
+the machine the scan runs on. The manifest's absence is the normal state
+of a fresh clone and resolves nothing; a credential whose source command
+fails is skipped and recorded by name only, because a scan's availability
+must not depend on live credentials (an expired SSO session or a
+not-yet-created keychain item must not block every commit); and a manifest
+that exists but cannot be loaded fails the scan rather than silently
+narrowing it. Resolved values live in memory only: they reach
+`ScanSources`, never a report, a log line or an exception message.
+`run_staged_scan` composes all five into one `LintReport` that
+`render_lint_report` turns into the text `devcontainer_config.cli` prints.
 None of these raise on a caller's behalf silently: an unreadable or
 undecodable source is a `SecretScanError`, never an empty result standing in
 for one.
@@ -90,7 +105,7 @@ from re import Pattern
 from types import MappingProxyType
 from typing import Protocol, overload
 
-from devcontainer_config import repo
+from devcontainer_config import hostcreds, repo
 
 # The number of leading characters of a redacted match that are safe to
 # print. Declared once and reused by every credential-bearing detector below,
@@ -116,14 +131,14 @@ class SecretScanError(RuntimeError):
 class Detector(Protocol):
     """What every detector record carries, regardless of how it matches.
 
-    `PatternDetector` matches with a compiled expression; `ShellEnvLineDetector`
-    and `CatalogSecretNameDetector` match by comparing against a field of
-    `ScanSources` instead. `scan_lines` depends on this protocol, not on any
-    one of the three concrete records, so adding a new kind of detector never
-    requires changing `scan_lines`.
+    `PatternDetector` matches with a compiled expression; `ShellEnvLineDetector`,
+    `CatalogSecretNameDetector` and `HostCredsValueDetector` match by comparing
+    against a field of `ScanSources` instead. `scan_lines` depends on this
+    protocol, not on any one of the four concrete records, so adding a new kind
+    of detector never requires changing `scan_lines`.
 
     Every member below is declared as a read-only `@property` rather than a
-    plain attribute. All three concrete records are frozen dataclasses, so
+    plain attribute. All four concrete records are frozen dataclasses, so
     their fields are read-only too; a plain-attribute Protocol member is
     structurally a settable variable and mypy would reject a frozen
     dataclass as satisfying it, even though nothing here ever needs to
@@ -215,16 +230,86 @@ class CatalogSecretNameDetector:
         return None
 
 
+# The shortest fragment of a multi-line hostcreds value the detector below
+# compares a scanned line against. Segments shorter than this are dropped:
+# a fragment this small matches ordinary content (a stray word, a brace, a
+# JSON punctuation run) often enough that matching it would trade a
+# near-certain false positive for a marginal chance of catching a leak the
+# value's longer segments do not already cover.
+_HOSTCREDS_SEGMENT_MIN_LEN = 12
+
+
+def _hostcreds_value_segments(value: str) -> tuple[str, ...]:
+    """The substrings of `value` the hostcreds-value detector compares a line against.
+
+    A value that is a single line under `str.splitlines`' grammar is
+    compared whole, however short: the thing being detected is an exact
+    secret the host resolved, not a shape, so even a short value appearing
+    verbatim in scanned content is a leak. A value spanning more than one
+    line under that grammar can never appear verbatim in one scanned line
+    (scanned lines are line-free), so it is compared per maximal
+    line-free segment, keeping only the segments at least
+    `_HOSTCREDS_SEGMENT_MIN_LEN` characters long (see that constant's own
+    comment for why the short ones are dropped rather than matched).
+
+    The value is split with `str.splitlines`, not with a bare `\\n` split,
+    because scanned content is itself broken into lines by
+    `str.splitlines`, whose break set also holds `\\r`, `\\v`, `\\f`,
+    `\\x85`, `\\u2028` and `\\u2029`. Splitting the value by the same
+    grammar is what makes a segment comparable to a scanned line as that
+    line actually reads: under a `\\n`-only split a `\\r\\n`-separated
+    value's segments keep a trailing `\\r` no scanned line can contain
+    (so only the value's last segment could ever match), and a
+    single-`\\n`-line value with a `\\r` inside would be compared whole,
+    `\\r` included, and could match nothing.
+    """
+    segments = value.splitlines()
+    if len(segments) == 1:
+        return (segments[0],)
+    return tuple(segment for segment in segments if len(segment) >= _HOSTCREDS_SEGMENT_MIN_LEN)
+
+
+@dataclass(frozen=True)
+class HostCredsValueDetector:
+    """A detector that matches when `line` contains a resolved hostcreds value.
+
+    The values live in `ScanSources.hostcreds_values` as `(name, value)`
+    pairs injected by `hostcreds_values`, never discovered here: this
+    record stays a pure comparison, exactly like the two field-comparing
+    detectors above it.
+
+    Returns the credential's name plus the word "value" -- never any part
+    of the value itself, not even a prefix -- so a finding names which
+    credential leaked while a redacted render cannot disclose what it
+    leaked. Redacted like `CatalogSecretNameDetector` (the name is a
+    label, not a secret, but it travels the same withheld-prefix rendering
+    as every other credential-bearing finding so no render path ever
+    special-cases printing more of a match).
+    """
+
+    identifier: str
+    description: str
+    printable: bool
+    safe_prefix_len: int
+
+    def find(self, line: str, sources: ScanSources) -> str | None:
+        for name, value in sources.hostcreds_values:
+            if any(segment in line for segment in _hostcreds_value_segments(value)):
+                return f"{name} value"
+        return None
+
+
 @dataclass(frozen=True)
 class ScanSources:
-    """The two sources `scan_lines` compares content against, injected rather than discovered.
+    """The sources `scan_lines` compares content against, injected rather than discovered.
 
-    Both fields are required with no default, so a caller cannot omit one
+    Every field is required with no default, so a caller cannot omit one
     without the omission being visible in the call itself (AC-FUNC-004).
     """
 
     shell_env_lines: tuple[str, ...]
     catalog_secret_names: tuple[str, ...]
+    hostcreds_values: tuple[tuple[str, str], ...]
 
     def __post_init__(self) -> None:
         for index, line in enumerate(self.shell_env_lines):
@@ -236,6 +321,26 @@ class ScanSources:
                     "turning the shell-env-line detector into a permanent "
                     "denial. Remove the blank entry from the shell.env lines "
                     "passed to ScanSources."
+                )
+        for index, (name, value) in enumerate(self.hostcreds_values):
+            if not name.strip():
+                raise SecretScanError(
+                    "ERROR: ScanSources.hostcreds_values contains a blank name\n"
+                    f"Index {index} has an empty or whitespace-only credential "
+                    "name.\n"
+                    "A blank name cannot name the credential a finding "
+                    "reports. Remove the blank entry from the hostcreds "
+                    "values passed to ScanSources."
+                )
+            if not value.strip():
+                raise SecretScanError(
+                    "ERROR: ScanSources.hostcreds_values contains a blank value\n"
+                    f"Index {index} (name {name!r}) has an empty or "
+                    "whitespace-only value.\n"
+                    "A blank value is a substring of nearly every scanned "
+                    "line, turning the hostcreds-value detector into a "
+                    "permanent denial. Remove the blank entry from the "
+                    "hostcreds values passed to ScanSources."
                 )
 
 
@@ -394,6 +499,12 @@ PATTERNS: tuple[Detector, ...] = build_registry(
         CatalogSecretNameDetector(
             identifier="catalog-secret-name",
             description="Catalog secret name",
+            printable=False,
+            safe_prefix_len=_REDACTED_SAFE_PREFIX_LEN,
+        ),
+        HostCredsValueDetector(
+            identifier="hostcreds-value",
+            description="hostcreds credential value",
             printable=False,
             safe_prefix_len=_REDACTED_SAFE_PREFIX_LEN,
         ),
@@ -901,6 +1012,130 @@ def shell_env_lines(root: Path) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True)
+class HostCredsSource:
+    """One hostcreds load's outcome: the resolved values plus the printable record.
+
+    `values` holds `(name, value)` pairs whose second element is the
+    secret itself: it exists in memory only, feeds
+    `ScanSources.hostcreds_values`, and never reaches a report, an
+    exception message or a log line. `unavailable_names` (credentials
+    whose resolution was skipped) and `manifest_present` (whether a
+    manifest existed at all) are everything about this load a report may
+    print, because a credential name is a label, not a secret.
+    """
+
+    values: tuple[tuple[str, str], ...]
+    unavailable_names: tuple[str, ...]
+    manifest_present: bool
+
+
+def hostcreds_values(root: Path, runner: hostcreds.Runner) -> HostCredsSource:
+    """Every credential `root`'s hostcreds manifest names, resolved live via `runner`.
+
+    Loads the manifest through `devcontainer_config.hostcreds.load_manifest`
+    and resolves each spec through `hostcreds.resolve`, both under the
+    injected `runner`, so a test drives the whole load with a fake runner
+    and never touches the real keychain, the real git credential store,
+    aws or any network. An absent manifest is the normal state of a fresh
+    clone, not an error: it resolves nothing and reports
+    `manifest_present=False`. A manifest that exists but cannot be loaded
+    fails the scan, because treating an unreadable manifest as an empty
+    one would silently narrow the scan without telling the operator why.
+
+    A `ResolutionError` skips exactly that credential and records its name
+    in `unavailable_names`: a scan's availability must not depend on live
+    credentials -- an expired SSO session, a keychain item not created
+    yet, a source binary not installed -- none of those may block every
+    commit, and the report names what it could not check so the gap is
+    visible rather than silent. Any other `HostCredsError` (a structural
+    failure no manifest-loaded spec can produce) fails the scan rather
+    than being skipped, for the same reason a malformed manifest does.
+
+    A resolution that succeeds but yields an empty or whitespace-only
+    value is treated the same way as a `ResolutionError` -- skipped, with
+    its name recorded in `unavailable_names`: `ScanSources` rejects a
+    blank value outright, and that rejection's remedy (remove the entry
+    from `ScanSources`) names a place this loader's callers cannot reach,
+    so the blank value must be resolved away here instead, under the same
+    skip-and-name policy.
+
+    Resolved values live in memory only, in this record's `values`: they
+    never appear in a report, an exception message or any other printed
+    text. The names in `unavailable_names` are labels, safe to print.
+
+    Raises:
+        SecretScanError: if the manifest exists but `load_manifest`
+            rejects it, or a resolver raises a `HostCredsError` that is
+            not a `ResolutionError` -- never for a missing manifest, and
+            never for a failed source command.
+    """
+    if not hostcreds.manifest_path(root).is_file():
+        return HostCredsSource(values=(), unavailable_names=(), manifest_present=False)
+    try:
+        specs = hostcreds.load_manifest(root)
+    except hostcreds.HostCredsError as exc:
+        raise SecretScanError(
+            f"ERROR: cannot load the hostcreds manifest under {root}\n"
+            f"hostcreds_values reported: {exc}\n"
+            "A manifest that exists but cannot be loaded must not silently "
+            "narrow this scan. Fix the manifest (the committed example shows "
+            "the expected shape), or remove it, then retry."
+        ) from exc
+    values: list[tuple[str, str]] = []
+    unavailable: list[str] = []
+    for spec in specs:
+        try:
+            resolved = hostcreds.resolve(spec, runner)
+        except hostcreds.ResolutionError:
+            unavailable.append(spec.name)
+            continue
+        except hostcreds.HostCredsError as exc:
+            raise SecretScanError(
+                f"ERROR: cannot resolve the hostcreds credential {spec.name}\n"
+                f"hostcreds_values reported: {exc}\n"
+                "This is a structural failure, not a failed source command; "
+                "fix the manifest entry, then retry."
+            ) from exc
+        if not resolved.value.strip():
+            unavailable.append(spec.name)
+            continue
+        values.append((spec.name, resolved.value))
+    return HostCredsSource(
+        values=tuple(values), unavailable_names=tuple(unavailable), manifest_present=True
+    )
+
+
+def _scan_sources(root: Path, shell_env: tuple[str, ...]) -> tuple[ScanSources, HostCredsSource]:
+    """The one `ScanSources` every scan mode constructs, with the hostcreds load behind it.
+
+    `run_staged_scan` and `scan_range` both reach `scan_lines` through this
+    helper, so a comparison source added here is present in both modes and
+    cannot be wired into one while being forgotten in the other. The
+    shell.env lines differ between the modes (staged mode needs the split
+    `_shell_env_comparison_lines` returns; range mode needs the plain
+    lines), so each loads its own and hands them in. The hostcreds load
+    happens exactly once here, with the production runner wired directly:
+    no `runner` parameter threads through `run_staged_scan` or
+    `scan_range`, matching how the shell.env loaders are wired, so a test
+    injects through the `hostcreds_values` function or the
+    `hostcreds.subprocess_runner` attribute instead of a parameter.
+
+    Catalog secret names remain an explicit empty tuple (see
+    `_CATALOG_SECRET_NAMES_NOT_WIRED_NOTE`): the catalog client is not
+    wired into a scan yet, and nothing here infers or guesses a value for
+    it until a follow-up unit adds that call.
+    """
+    creds = hostcreds_values(root, hostcreds.subprocess_runner)
+    catalog_secret_names: tuple[str, ...] = ()
+    sources = ScanSources(
+        shell_env_lines=shell_env,
+        catalog_secret_names=catalog_secret_names,
+        hostcreds_values=creds.values,
+    )
+    return sources, creds
+
+
+@dataclass(frozen=True)
 class StagedFinding:
     """One `Finding` together with the repo-relative staged path it came from."""
 
@@ -922,12 +1157,23 @@ class LintReport:
     `shell.env lines: 0` can tell a genuinely empty `shell.env` apart from one
     whose entire comparison set the template exclusion suppressed, rather than
     the label alone standing in for a number the report never showed.
+
+    `hostcreds_value_count`, `hostcreds_unavailable_names` and
+    `hostcreds_manifest_present` carry the hostcreds load's outcome the
+    same way: how many values were actually compared against, which named
+    credentials could not be resolved (names are labels, safe to print --
+    values never are), and whether a manifest existed at all, so a
+    rendered `hostcreds values: 0` is distinguishable from
+    `hostcreds values: 0 (no manifest)`.
     """
 
     staged_path_count: int
     shell_env_line_count: int
     shell_env_excluded_line_count: int
     catalog_secret_name_count: int
+    hostcreds_value_count: int
+    hostcreds_unavailable_names: tuple[str, ...]
+    hostcreds_manifest_present: bool
     findings: tuple[StagedFinding, ...]
 
 
@@ -955,15 +1201,17 @@ def run_staged_scan(root: Path) -> LintReport:
     Reads the git index, never the working tree (AC-FUNC-001): `staged_paths`
     lists what is staged and `staged_blob` reads each one from the index, so
     a file edited after being staged is still scanned as it will actually be
-    committed (AC-TEST-002). Catalog secret names are an explicit empty
-    tuple (spec Section 4.5): the catalog client landed in E3-F1-S1-T1, but
-    its call site is not wired into this staged scan yet, so nothing here
-    infers or guesses a value for it until a follow-up unit adds that call.
+    committed (AC-TEST-002). The comparison sources come from the shared
+    `_scan_sources` helper: the developer's `shell.env` lines (template
+    intersection already applied), the not-yet-wired catalog names, and the
+    hostcreds values resolved live from the host, whose resolved count,
+    unavailable names and manifest presence the report carries so an
+    operator can tell "nothing to resolve" apart from "could not resolve"
+    apart from "fresh clone, no manifest".
     """
     paths = staged_paths(root)
     shell_env, shell_env_excluded_count = _shell_env_comparison_lines(root)
-    catalog_secret_names: tuple[str, ...] = ()
-    sources = ScanSources(shell_env_lines=shell_env, catalog_secret_names=catalog_secret_names)
+    sources, creds = _scan_sources(root, shell_env)
 
     lines_by_path = {path: staged_blob(root, path) for path in paths}
     findings = tuple(
@@ -975,9 +1223,39 @@ def run_staged_scan(root: Path) -> LintReport:
         staged_path_count=len(paths),
         shell_env_line_count=len(shell_env),
         shell_env_excluded_line_count=shell_env_excluded_count,
-        catalog_secret_name_count=len(catalog_secret_names),
+        catalog_secret_name_count=len(sources.catalog_secret_names),
+        hostcreds_value_count=len(creds.values),
+        hostcreds_unavailable_names=creds.unavailable_names,
+        hostcreds_manifest_present=creds.manifest_present,
         findings=findings,
     )
+
+
+def _render_hostcreds_report_line(
+    value_count: int, unavailable_names: tuple[str, ...], manifest_present: bool
+) -> str:
+    """The `hostcreds values:` header line, written once for both report modes.
+
+    `render_lint_report` (staged mode) and `render_range_report` (range
+    mode) call this with their report's hostcreds fields, so the two
+    reports cannot grow different spellings of the same fact. The line
+    prints the resolved count, and only when relevant how many named
+    credentials could not be resolved or that no manifest existed at all:
+    three states an operator must be able to tell apart ("resolved none
+    because there are none to resolve", "resolved none because the
+    sources failed", "fresh clone, no manifest") that one bare number
+    could not distinguish. Credential names are labels and are printed;
+    values never are.
+    """
+    if not manifest_present:
+        return "  hostcreds values: 0 (no manifest)"
+    if unavailable_names:
+        unavailable = ", ".join(unavailable_names)
+        return (
+            f"  hostcreds values: {value_count} "
+            f"({len(unavailable_names)} unavailable: {unavailable})"
+        )
+    return f"  hostcreds values: {value_count}"
 
 
 def render_lint_report(report: LintReport) -> str:
@@ -991,11 +1269,18 @@ def render_lint_report(report: LintReport) -> str:
     so an operator reading `shell.env lines: 0` can tell a genuinely empty
     `shell.env` apart from one whose entire comparison set the tracked
     `shell.env.example` intersection excluded -- the label alone, with no
-    count, could not make that distinction. Each finding line names
+    count, could not make that distinction. The hostcreds line comes from
+    `_render_hostcreds_report_line`, the same line range mode prints.
+    Each finding line names
     the staged path, the line number and the detector description
     (AC-FUNC-004); the value itself comes from `render_finding`, which
     redacts every non-printable detector's match.
     """
+    hostcreds_line = _render_hostcreds_report_line(
+        report.hostcreds_value_count,
+        report.hostcreds_unavailable_names,
+        report.hostcreds_manifest_present,
+    )
     lines = [
         "[LINT] secrets in staged content",
         f"  staged paths scanned: {report.staged_path_count}",
@@ -1003,6 +1288,7 @@ def render_lint_report(report: LintReport) -> str:
         f"({report.shell_env_excluded_line_count} template lines excluded)",
         f"  catalog secret names: {report.catalog_secret_name_count} "
         f"({_CATALOG_SECRET_NAMES_NOT_WIRED_NOTE})",
+        hostcreds_line,
     ]
     for staged in report.findings:
         detector = DETECTORS_BY_ID[staged.finding.detector_id]
@@ -1541,11 +1827,25 @@ class RangeFinding:
 
 @dataclass(frozen=True)
 class RangeReport:
-    """The range scanned, how many commits it held, and every finding from `scan_range`."""
+    """The range scanned, how many commits it held, and every finding from `scan_range`.
+
+    `hostcreds_value_count`, `hostcreds_unavailable_names` and
+    `hostcreds_manifest_present` carry the hostcreds load's outcome the
+    same way `LintReport` carries it (see that class's docstring): how
+    many values were actually compared against, which named credentials
+    could not be resolved, and whether a manifest existed at all. Without
+    them a skipped entry -- an expired SSO session, a missing keychain
+    item -- would silently narrow a `--range` or pre-push scan; the range
+    report prints the same hostcreds line staged mode does, so the gap is
+    visible instead.
+    """
 
     revision_range: str
     range_base: str
     commit_count: int
+    hostcreds_value_count: int
+    hostcreds_unavailable_names: tuple[str, ...]
+    hostcreds_manifest_present: bool
     findings: tuple[RangeFinding, ...]
 
 
@@ -1554,17 +1854,22 @@ def scan_range(root: Path, revision_range: str) -> RangeReport:
 
     Each commit's added lines (`added_lines`) are grouped by path and
     scanned with the same `scan_lines` and `PATTERNS` registry staged mode
-    uses (AC-FUNC-005): no second pattern list exists for history. A
+    uses (AC-FUNC-005): no second pattern list -- and, through the shared
+    `_scan_sources` helper, no second comparison-source construction --
+    exists for history. A
     credential added in one commit and removed in a later commit is still
     reported, attributed to the commit that added it (AC-FUNC-001), because
     each commit is diffed and scanned independently rather than the range
-    being collapsed into one net diff.
+    being collapsed into one net diff. The shared helper's hostcreds load
+    outcome travels into the report on the same hostcreds fields
+    `LintReport` carries, so a credential the host could not resolve is
+    named by the rendered range report rather than narrowing the scan
+    silently.
     """
     base, _tip = _parse_range(revision_range)
     commits = commits_in_range(root, revision_range)
     shell_env = shell_env_lines(root)
-    catalog_secret_names: tuple[str, ...] = ()
-    sources = ScanSources(shell_env_lines=shell_env, catalog_secret_names=catalog_secret_names)
+    sources, creds = _scan_sources(root, shell_env)
 
     findings: list[RangeFinding] = []
     for commit in commits:
@@ -1580,6 +1885,9 @@ def scan_range(root: Path, revision_range: str) -> RangeReport:
         revision_range=revision_range,
         range_base=base,
         commit_count=len(commits),
+        hostcreds_value_count=len(creds.values),
+        hostcreds_unavailable_names=creds.unavailable_names,
+        hostcreds_manifest_present=creds.manifest_present,
         findings=tuple(findings),
     )
 
@@ -1590,7 +1898,10 @@ def render_range_report(report: RangeReport) -> str:
     The header names the scanned range and how many commits it held, even
     when the range is empty, so "zero commits were scanned" is a fact the
     header states rather than an empty screen the operator has to
-    interpret. Each finding names the commit, the path, the line and the
+    interpret. The hostcreds line comes from
+    `_render_hostcreds_report_line`, the same line staged mode prints, so
+    a credential the host could not resolve narrows a range scan visibly
+    there too. Each finding names the commit, the path, the line and the
     detector description; the value itself comes from `render_finding`, so
     redaction cannot diverge between staged mode and range mode. When any
     finding exists, the report closes with the sentence Section 4.6
@@ -1602,6 +1913,11 @@ def render_range_report(report: RangeReport) -> str:
     lines = [
         f"[LINT] secrets in pushed range {report.revision_range}",
         f"  commits scanned: {report.commit_count}",
+        _render_hostcreds_report_line(
+            report.hostcreds_value_count,
+            report.hostcreds_unavailable_names,
+            report.hostcreds_manifest_present,
+        ),
     ]
     for item in report.findings:
         detector = DETECTORS_BY_ID[item.finding.detector_id]

@@ -469,7 +469,15 @@ set -e
 umask 077
 printf 'https://%s:%s@%s\n' '${git_user}' '${git_secret}' '${host}' > "\$HOME/.git-credentials"
 chmod 600 "\$HOME/.git-credentials"
-git config --global credential.helper store
+# --replace-all, not a plain set: the Dev Containers extension copies the
+# host's ~/.gitconfig into the container when a window attaches, and adds its
+# own forwarding helper next to whatever postCreate left, so credential.helper
+# can hold several values by the time this runs. A plain set then fails with
+# "cannot overwrite multiple values" and the build errors out after the
+# container is otherwise complete. Exactly one helper, store, is the intended
+# state: the credential this script writes is the one the container uses, with
+# or without a window attached, and the ls-remote probe below proves it works.
+git config --global --replace-all credential.helper store
 CREDS
   [ "$written" -eq 0 ] || rd_fail "The credential could not be written into the container" \
     "Nothing inside it was changed, so its git access is whatever it was before." \

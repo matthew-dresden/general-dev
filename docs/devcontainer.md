@@ -356,7 +356,13 @@ postCreate only sets `credential.helper store` and the SSH→HTTPS URL rewrite;
 `make push-git-creds`, which `make build` runs as its last step, copies in
 the credential that already works on the developer's machine, obtained through
 `git credential fill` so it works with any configured helper (osxkeychain,
-libsecret, gh, store).
+libsecret, gh, store). The step resets `credential.helper` with
+`git config --replace-all`, because the Dev Containers extension copies the
+host's `~/.gitconfig` into the container when a window attaches -- which a
+rebuild usually has one already attached to the previous container -- and that
+copy leaves several helper values in place, against which a plain
+`git config` set fails with "cannot overwrite multiple values" after the
+container is otherwise complete. One helper, `store`, is the intended state.
 
 This replaced `GIT_AUTH_METHOD` / `GIT_TOKEN` / ssh-key handling driven by
 `shell.env`, which had two problems: the token had to be rotated by hand, and

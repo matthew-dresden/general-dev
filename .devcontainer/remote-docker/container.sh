@@ -96,6 +96,15 @@ rdc_exec_probe() {
 rdc_cred_user() { printf '%s' "$1" | sed -n 1p; }
 rdc_cred_secret() { printf '%s' "$1" | sed -n 2p; }
 
+# Shell-escape a value for interpolation inside a single-quoted string: each '
+# becomes '\'' (close the quoting, a literal quote, reopen). The seed heredocs
+# below are expanded before the container's sh parses them, so every
+# credential-bearing value must pass through this first or a quote inside it
+# terminates the quoting and the rest of the value runs as shell.
+rdc_sh_escape() {
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+}
+
 rdc_backend() {
   if [ "$(docker context show)" = "$REMOTE_DOCKER_CONTEXT" ]; then
     printf 'remote\n'
@@ -404,10 +413,14 @@ rdc_remote_host() {
   printf '%s' "$1" | sed -e 's|^[a-z]*://||' -e 's|^[^@]*@||' -e 's|[:/].*$||'
 }
 
+# This machine's stored credential for a git host, as two lines (username,
+# then password), or no output when nothing is stored. Each answer line is
+# split on its FIRST '=' only -- field splitting on '=' would truncate a
+# username or password that itself carries '='.
 rdc_git_credentials() {
   printf 'protocol=https\nhost=%s\n\n' "$1" \
     | GIT_TERMINAL_PROMPT=0 git credential fill 2> /dev/null \
-    | awk -F= '$1=="username"{u=$2} $1=="password"{p=$2} END{if (u && p) printf "%s\n%s\n", u, p}'
+    | awk '{ key = $0; if (!sub(/=.*/, "", key)) next; value = $0; sub(/^[^=]*=/, "", value); if (key == "username") u = value; else if (key == "password") p = value } END { if (u && p) printf "%s\n%s\n", u, p }'
 }
 
 rdc_seed_volume() {
@@ -426,11 +439,18 @@ rdc_seed_volume() {
   rd_log "creating volume ${volume}"
   rd_docker volume create "$volume" > /dev/null
   rd_log "cloning ${url} (${branch}) into ${volume}"
+  # Values are escaped for the heredoc below: it is expanded before the seed container's sh parses it, so a raw single quote in any of them would terminate the quoting around it and run as shell inside the seed container.
+  local esc_user esc_secret esc_host esc_branch esc_url
+  esc_user="$(rdc_sh_escape "$git_user")"
+  esc_secret="$(rdc_sh_escape "$git_secret")"
+  esc_host="$(rdc_sh_escape "$host")"
+  esc_branch="$(rdc_sh_escape "$branch")"
+  esc_url="$(rdc_sh_escape "$url")"
   docker run --rm -i -v "${volume}:/workspaces" "$CLONE_IMAGE" sh -s <<SEED || {
 set -e
 umask 077
-printf 'https://%s:%s@%s\n' '${git_user}' '${git_secret}' '${host}' > /root/.git-credentials
-git -c credential.helper=store clone --branch '${branch}' '${url}' '${CONTAINER_WORKSPACE}'
+printf 'https://%s:%s@%s\n' '${esc_user}' '${esc_secret}' '${esc_host}' > /root/.git-credentials
+git -c credential.helper=store clone --branch '${esc_branch}' '${esc_url}' '${CONTAINER_WORKSPACE}'
 rm -f /root/.git-credentials
 chown -R ${CONTAINER_UID_GID} /workspaces
 SEED
@@ -468,10 +488,15 @@ rdc_seed_git_credentials() {
   git_secret="$(rdc_cred_secret "$creds")"
 
   written=0
+  # Values are escaped for the heredoc below: it is expanded before the container's sh parses it, so a raw single quote in any of them would terminate the quoting around it and run as shell inside the container.
+  local esc_user esc_secret esc_host
+  esc_user="$(rdc_sh_escape "$git_user")"
+  esc_secret="$(rdc_sh_escape "$git_secret")"
+  esc_host="$(rdc_sh_escape "$host")"
   docker exec -i -u "$CONTAINER_USER" "$id" sh -s <<CREDS || written=$?
 set -e
 umask 077
-printf 'https://%s:%s@%s\n' '${git_user}' '${git_secret}' '${host}' > "\$HOME/.git-credentials"
+printf 'https://%s:%s@%s\n' '${esc_user}' '${esc_secret}' '${esc_host}' > "\$HOME/.git-credentials"
 chmod 600 "\$HOME/.git-credentials"
 # --replace-all, not a plain set: the Dev Containers extension copies the
 # host's ~/.gitconfig into the container when a window attaches, and adds its

@@ -4,6 +4,7 @@
   "small_model": "zai-coding-plan/glm-5.3-flash",
   "share": "disabled",
   "autoupdate": true,
+  "enabled_providers": ["zai-coding-plan"],
   "provider": {
     "zai-coding-plan": {
       "options": {

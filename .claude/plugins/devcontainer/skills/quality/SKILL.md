@@ -155,10 +155,14 @@ on the operator's behalf:
   operator's own unpublished branch, or that the operator chooses to
   force-push despite having shared it.
 - **Rotate and push deliberately with a recorded approval**: replace the
-  exposed value at its real source -- the credential's own issuer, or the
-  secret's own entry in the catalog through `/devcontainer:secrets` -- so
-  the leaked value stops being valid, then push with the rotation and the
-  approval recorded.
+  exposed value at its real source -- the credential's own issuer -- so
+  the leaked value stops being valid, then store the replacement in the
+  keychain through the hostcreds manifest (`make creds-init`) and re-push
+  it into the container (`make push-creds`), the rotation
+  `/devcontainer:secrets` performs, with the rotation and the approval
+  recorded. Rewriting history does not remove the need for this remedy: a
+  value recoverable from earlier commits stays valid until its issuer
+  retires it.
 
 This skill never rewrites history and never rotates a value itself: both
 remedies change something outside the file that failed the check, and

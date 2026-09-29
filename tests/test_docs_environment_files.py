@@ -2,23 +2,16 @@
 `docs/environment-files.md` (E3-F2-S2-T2, E6-F2-S1-T5, E6-F2-S1-T6).
 
 Spec Section 8 makes this document's Secrets section part of "done" for E3:
-the catalog (spec Sections 5.3, 5.4) replaces the pre-E3 caveat that anything
-placed in `shell.env` reaches AWS and is acceptable there for a secret (spec
-Section 0 row B5). `shell.env` itself is unchanged as a bootstrap mechanism
-(spec Section 0 row B10); only what it is allowed to hold narrows.
+the hostcreds mechanism replaces the pre-E3 caveat that anything placed in
+`shell.env` reaches AWS and is acceptable there for a secret (spec Section 0
+row B5). `shell.env` itself is unchanged as a bootstrap mechanism (spec
+Section 0 row B10); only what it is allowed to hold narrows.
 
 Every test here reads the rendered document, not the source that produced
-it, so a future edit that reintroduces the retired caveat, drops a catalog
-fact, or names a configuration variable no module reads fails one of these
-tests by name rather than surviving as an unnoticed drift (spec Section 8).
-
-`_configuration_variable_names` and `_catalog_declared_env_var_names` both
-parse their source directly (the rendered table, and the `*_ENV_VAR`
-constants in `catalog.py`) instead of duplicating either list as a literal
-in this module, so the comparison in
-`test_documented_variables_match_catalog_declared_env_vars` fails on a real
-divergence between the two, not on this test module falling out of sync
-with either one.
+it, so a future edit that reintroduces the retired caveat, drops a
+hostcreds fact, or names a configuration variable no module reads fails one
+of these tests by name rather than surviving as an unnoticed drift (spec
+Section 8).
 
 The `### Transport` section tests below (E6-F2-S1-T5) follow the same
 "parse the rendered fact, don't restate it" discipline for
@@ -27,20 +20,16 @@ The `### Transport` section tests below (E6-F2-S1-T5) follow the same
 constants on `devcontainer_config.transport`'s own namespace now that
 `resolve_transport` and the `connect` entry point (E6-F2-S1-T3 and
 E6-F2-S1-T4) have landed, so `_transport_module_env_var_names` (which
-derives its set from that namespace, the same technique
-`_catalog_declared_env_var_names` uses for `catalog.py`) sees all four.
-That derivation only proves a name belongs in the table; it cannot
-produce the richer facts `DEVCONTAINER_TRANSPORT`'s own row states --
-its default, its two readers, its accepted values --
-so `test_transport_table_documents_devcontainer_transport` still pins
-those directly, the same way `_CATALOG_FACTS` pins Secrets-section facts
-the code does not make derivable.
+derives its set from that namespace) sees all four. That derivation only
+proves a name belongs in the table; it cannot produce the richer facts
+`DEVCONTAINER_TRANSPORT`'s own row states -- its default, its two readers,
+its accepted values -- so `test_transport_table_documents_devcontainer_transport`
+still pins those directly, the same way `_SECRETS_FACTS` pins Secrets-section
+facts the code does not make derivable.
 
 `_markdown_table_first_column_names` is the row-walking and
-backtick-stripping logic `_configuration_variable_names` and
-`_transport_table_variable_names` both need once a header regex has
-isolated a table's row text; before this extraction each function carried
-its own copy.
+backtick-stripping logic `_transport_table_variable_names` needs once a
+header regex has isolated a table's row text.
 
 E6-F2-S1-T6 narrows `_assert_transport_landed_caveat_state` from a single
 `hasattr(transport, "resolve_transport")` branch to two independent
@@ -126,24 +115,11 @@ from devcontainer_config import repo, transport
 from gitignore_check import repo_root
 
 _DOC_RELATIVE_PATH = "docs/environment-files.md"
-_CATALOG_RELATIVE_PATH = ".claude/plugins/devcontainer/scripts/devcontainer_config/catalog.py"
 
 # The sentence this task retires (pre-E3 text, still present verbatim until
 # the GREEN rewrite lands): anything in `shell.env` reaches AWS and that is
 # acceptable for a value that belongs in the catalog instead.
 _RETIRED_CAVEAT_NEEDLE = "acceptable for secrets you would store in Parameter Store anyway"
-
-_CONFIGURATION_VARIABLES_HEADING = "### Configuration variables"
-
-# `AWS_PROFILE_ENV_VAR = "AWS_PROFILE"`, `SECRET_CACHE_DIR_ENV_VAR =
-# "SECRET_CACHE_DIR"`: every environment variable `catalog.py` reads is
-# declared exactly once as a module-level `*_ENV_VAR` constant (see that
-# module's own docstring), so this pattern is the single source of truth
-# this test module reads from rather than re-declaring the variable names
-# itself.
-_ENV_VAR_CONST_PATTERN = re.compile(
-    r'^([A-Z][A-Z0-9_]*_ENV_VAR) = "([A-Za-z0-9_]+)"$', re.MULTILINE
-)
 
 
 def _doc_path() -> Path:
@@ -161,8 +137,9 @@ def _secrets_section_text() -> str:
     `_doc_text()`, which matches anywhere in the document) means a needle
     this section's rewrite is responsible for stating cannot be satisfied
     by the same words appearing somewhere else in the document for an
-    unrelated reason. `## Secrets`'s subsections (`### The secret catalog`,
-    `### Configuration variables`, `### What did not change`) use `###`,
+    unrelated reason. `## Secrets`'s subsections (`### Host credentials
+    (hostcreds)`, `### Certificate lifetimes`, `### Transport`,
+    `### Instances`, `### What did not change`) use `###`,
     not `##`, so they stay inside this slice; only the next `##`-level
     heading (or end of file) ends it.
     """
@@ -176,21 +153,16 @@ def _secrets_section_text_normalized() -> str:
     return _normalize_whitespace(_secrets_section_text())
 
 
-def _catalog_text() -> str:
-    return (repo_root() / _CATALOG_RELATIVE_PATH).read_text(encoding="utf-8")
-
-
 def _markdown_table_first_column_names(table_body: str) -> tuple[str, ...]:
     """The first-column cell of every data row in a rendered Markdown table body.
 
     `table_body` is the row text a table-header regex's own capture group
     already isolated (everything after the `|---|---|...|` separator line);
-    this function only walks those rows. Shared by
-    `_configuration_variable_names` (the `### Configuration variables`
-    table) and `_transport_table_variable_names` (the `### Transport`
+    this function only walks those rows. Used by
+    `_transport_table_variable_names` (the `### Transport`
     table) so the row-walking and backtick-stripping logic exists exactly
-    once, rather than as two copies that could silently diverge on the
-    next Markdown-table quirk either section's table grows.
+    once, rather than as a copy that could silently diverge on the
+    next Markdown-table quirk the section's table grows.
     """
     names = []
     for line in table_body.splitlines():
@@ -199,33 +171,6 @@ def _markdown_table_first_column_names(table_body: str) -> tuple[str, ...]:
         first_cell = line.split("|")[1].strip()
         names.append(first_cell.strip("`"))
     return tuple(names)
-
-
-def _configuration_variable_names() -> tuple[str, ...]:
-    """The first-column variable names of the rendered configuration-variable table.
-
-    Parses the actual Markdown table under `_CONFIGURATION_VARIABLES_HEADING`
-    rather than any list this module declares, so a table row added,
-    removed, or renamed in `docs/environment-files.md` changes what this
-    function returns on the very next test run.
-    """
-    text = _doc_text()
-    try:
-        heading_index = text.index(_CONFIGURATION_VARIABLES_HEADING)
-    except ValueError:
-        return ()
-    remainder = text[heading_index:]
-    table_match = re.search(
-        r"\| *Variable *\| *Default *\| *Governs *\|\n\|[-| ]+\|\n((?:\|.*\|\n?)+)",
-        remainder,
-    )
-    if table_match is None:
-        return ()
-    return _markdown_table_first_column_names(table_match.group(1))
-
-
-def _catalog_declared_env_var_names() -> frozenset[str]:
-    return frozenset(match.group(2) for match in _ENV_VAR_CONST_PATTERN.finditer(_catalog_text()))
 
 
 def test_retired_shell_env_caveat_is_absent() -> None:
@@ -282,80 +227,32 @@ def test_claude_callout_does_not_claim_secrets_it_invents() -> None:
     )
 
 
-# One case per catalog fact the Secrets section must state (spec Sections
-# 5.3, 5.4, 4.3, 14.2). Each case fails independently and names the missing
-# fact, rather than one assertion reporting a generic mismatch when several
-# facts are missing at once.
-_CATALOG_FACTS: tuple[tuple[str, str], ...] = (
+# One case per hostcreds fact the Secrets section must state. Each case
+# fails independently and names the missing fact, rather than one assertion
+# reporting a generic mismatch when several facts are missing at once.
+_SECRETS_FACTS: tuple[tuple[str, str], ...] = (
     ("shell_env_carries_no_credential", "carries no credential"),
-    ("single_backend", "no second provider"),
+    ("single_list_of_credentials", "no second provider"),
     ("no_offline_store", "no offline store"),
     ("no_fallback_to_local_copy", "no fallback to a local copy"),
-    ("shared_scope_path_prefix", "/devcontainer/shared/secrets/<NAME>"),
-    ("instance_scope_path_prefix", "/devcontainer/<instance>/secrets/<NAME>"),
-    ("both_prefixes_securestring", "SecureString"),
-    ("iam_enforces_boundary", "IAM enforces the boundary"),
-    ("resolution_instance_first_then_shared", "instance-first then shared"),
-    ("command_get", "devsecret get <NAME>"),
-    ("command_list", "devsecret list [--scope <scope>]"),
-    ("command_set", "devsecret set <NAME> [--scope <scope>] [--exported]"),
-    ("command_rm", "devsecret rm <NAME> --scope <scope>"),
-    ("command_run", "devsecret run --secrets A,B -- <cmd>"),
-    ("command_export_list", "devsecret export-list"),
-    ("help_reference_pointer", "devsecret --help"),
+    ("manifest_names_the_source_not_the_value", "no value is ever"),
     ("value_never_a_command_line_argument", "never accepted as a command-line argument"),
-    # Decision D11 said "no value is ever written to any filesystem". The aws
-    # CLI v2 cannot read a --cli-input-json document from stdin, so the only
-    # two ways to pass a value are an argument (readable by every process on
-    # the host, for the life of the call) and a file. The file wins, and the
-    # documented fact is now the property that actually protects the value:
-    # the window is private (0600 inside a 0700 directory) and bounded (removed
-    # before the call returns). See docs/environment-files.md.
-    ("document_file_is_private_and_bounded", "removes before returning"),
     ("value_never_reaches_the_process_table", "never reaches the process table"),
-    ("remote_engine_uses_instance_role", "instance role"),
     ("local_engine_uses_sso_session", "developer's already-valid AWS SSO session"),
+    ("failed_source_fails_the_push", "fails the push"),
 )
 
 
 @pytest.mark.parametrize(
     "fact_id,needle",
-    _CATALOG_FACTS,
-    ids=[fact_id for fact_id, _ in _CATALOG_FACTS],
+    _SECRETS_FACTS,
+    ids=[fact_id for fact_id, _ in _SECRETS_FACTS],
 )
-def test_secrets_section_states_catalog_fact(fact_id: str, needle: str) -> None:
+def test_secrets_section_states_hostcreds_fact(fact_id: str, needle: str) -> None:
     text = _secrets_section_text_normalized()
     assert needle in text, (
-        f"{_DOC_RELATIVE_PATH} is missing the catalog fact {fact_id!r}: "
+        f"{_DOC_RELATIVE_PATH} is missing the hostcreds fact {fact_id!r}: "
         f"expected to find {needle!r} in the '## Secrets' section."
-    )
-
-
-def test_configuration_variable_table_is_present() -> None:
-    names = _configuration_variable_names()
-    assert names, (
-        f"{_DOC_RELATIVE_PATH} has no configuration-variable table under "
-        f"{_CONFIGURATION_VARIABLES_HEADING!r}."
-    )
-
-
-def test_documented_variables_match_catalog_declared_env_vars() -> None:
-    documented = set(_configuration_variable_names())
-    declared = _catalog_declared_env_var_names()
-    assert declared, (
-        f"no *_ENV_VAR constant found in {_CATALOG_RELATIVE_PATH}; the extraction pattern "
-        "may be stale."
-    )
-    orphaned_in_doc = documented - declared
-    assert not orphaned_in_doc, (
-        f"{_DOC_RELATIVE_PATH} names configuration variable(s) that no module reads: "
-        f"{sorted(orphaned_in_doc)!r}. Checked against the *_ENV_VAR constants declared in "
-        f"{_CATALOG_RELATIVE_PATH}."
-    )
-    undocumented = declared - documented
-    assert not undocumented, (
-        f"{_CATALOG_RELATIVE_PATH} declares configuration variable(s) that "
-        f"{_DOC_RELATIVE_PATH} does not document: {sorted(undocumented)!r}."
     )
 
 
@@ -462,11 +359,9 @@ def _section_table_variable_names(heading: str) -> tuple[str, ...]:
     E8-F1-S1-T4 (round 2, code_review REVIEW_FAIL DRY): extracted from what
     were previously two byte-identical copies, `_transport_table_variable_names`
     and `_repo_table_variable_names`. Parses the actual Markdown table rather
-    than any list this module declares, the same technique
-    `_configuration_variable_names` uses for the `### Configuration
-    variables` table, so a table row added, removed, or renamed in
-    `docs/environment-files.md` changes what this function returns on the
-    very next test run.
+    than any list this module declares, so a table row added, removed, or
+    renamed in `docs/environment-files.md` changes what this function returns
+    on the very next test run.
     """
     section = _section_text(heading)
     table_match = _TRANSPORT_TABLE_PATTERN.search(section)
@@ -631,7 +526,7 @@ def test_transport_table_documents_devcontainer_transport() -> None:
     namespace derivation cannot produce is the row's own content -- its
     default, which of the two readers it names, the accepted values --
     so those facts are still pinned directly here, the same technique the
-    '## Secrets' section's `_CATALOG_FACTS` parametrized cases use for
+    '## Secrets' section's `_SECRETS_FACTS` parametrized cases use for
     facts the code does not make derivable.
     """
     names = _transport_table_variable_names()
@@ -1478,7 +1373,7 @@ def test_transport_section_documents_ssm_as_the_only_value_and_fails_fast() -> N
 
 
 # E8-F1-S1-T4: widens the doc-completeness gate this module already applies
-# to catalog.py (_catalog_declared_env_var_names) and transport.py
+# and transport.py
 # (_transport_module_env_var_names) to devcontainer_config.repo, closing the
 # coverage gap that let REPO_SLUG_GIT_TIMEOUT_SECONDS (E8-F1-S1-T3) ship as a
 # production-read environment variable with no row in this document
@@ -1630,8 +1525,7 @@ def _run_repo_slug_section_assertions() -> None:
     hand -- the same discipline `test_transport_table_documents_devcontainer_transport`
     applies to `DEVCONTAINER_TRANSPORT`'s row. The expected default is
     derived from `devcontainer_config.repo`'s own declared
-    `GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS` constant (the technique
-    `_catalog_declared_env_var_names` uses for `catalog.py`) rather than
+    `GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS` constant rather than
     restated as the literal `10`, so the documented default cannot drift
     from the single production declaration this assertion requires it to
     match (test_review WARN round 2; E8-F1-S1-T6 rebound the expectation

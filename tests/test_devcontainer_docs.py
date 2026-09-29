@@ -1,14 +1,15 @@
 """Pinning tests for the `docs/devcontainer.md` provisioning-flow documentation
-of the devsecret export-list startup block (E3-F2-S2-T3, spec Section 11).
+of the hostcreds credential-startup block.
 
-E3-F2-S2-T1 extends `configure_shell_env` in
-`.devcontainer/.devcontainer.postcreate.sh` to render that block for both
-shells through `devcontainer_config.shellrc` and to abort provisioning via
-`exit_with_error` on a non-zero render. This module owns the two facts of
-the 'Provisioning flow (postCreate)' section that describe that step: the
-step-table row for `shell.env` sourcing (AC-DOC-001, AC-DOC-002), and the
-sentence above the table enumerating every `required` step that aborts the
-build through `exit_with_error` (AC-DOC-003).
+`configure_shell_env` in `.devcontainer/.devcontainer.postcreate.sh`
+renders that block once through `devcontainer_config.cli shell-block`
+(`render_hostcreds_shell_block`) and appends it to both startup files,
+aborting provisioning via `exit_with_error` on a non-zero render. This
+module owns the two facts of the 'Provisioning flow (postCreate)' section
+that describe that step: the step-table row for `shell.env` sourcing
+(AC-DOC-001, AC-DOC-002), and the sentence above the table enumerating
+every `required` step that aborts the build through `exit_with_error`
+(AC-DOC-003).
 
 Every fact-presence assertion below reads the rendered document text, the
 same discipline `tests/test_docs_environment_files.py` documents, so a
@@ -25,10 +26,10 @@ round of this task shipped: its cross-check test read `assert
 script that had no render step, per that round's own TDD Cycle Log showing
 it as the '1 passed' case in an otherwise-red run). Instead these tests
 assert the render invocation and its abort branch specifically: that
-`configure_shell_env` routes each of its two `render_devsecret_shell_block`
-calls through `|| exit_with_error` on the same statement, and that
-`render_devsecret_shell_block` itself sets `PYTHONPATH` and invokes
-`python3 -m devcontainer_config.shellrc`.
+`configure_shell_env` routes its `render_hostcreds_shell_block`
+call through `|| exit_with_error` on the same statement, and that
+`render_hostcreds_shell_block` itself sets `PYTHONPATH` and invokes
+`python3 -m devcontainer_config.cli shell-block`.
 
 `_function_body`, `_provisioning_flow_table` and
 `_provisioning_flow_required_steps_prose` are imported from
@@ -59,7 +60,7 @@ _DOCS_RELATIVE_PATH = "docs/devcontainer.md"
 # near-identical test bodies (AC-TEST-003), so each case fails
 # independently naming the missing fact.
 _REQUIRED_ROW_SUBSTRINGS: tuple[tuple[str, str], ...] = (
-    ("export_list_block_named", "devsecret export-list startup block"),
+    ("startup_block_named", "hostcreds credential-startup block"),
     (
         "pythonpath_dependency_named",
         "`python3` + `devcontainer_config` on `PYTHONPATH`",
@@ -94,18 +95,18 @@ def _provisioning_flow_row() -> str:
     _REQUIRED_ROW_SUBSTRINGS,
     ids=[fact_id for fact_id, _ in _REQUIRED_ROW_SUBSTRINGS],
 )
-def test_provisioning_flow_row_states_export_list_fact(fact_id: str, needle: str) -> None:
+def test_provisioning_flow_row_states_startup_block_fact(fact_id: str, needle: str) -> None:
     row = _provisioning_flow_row()
     assert needle in row, (
         f"provisioning-flow row is missing fact {fact_id!r}: expected {needle!r} in {row!r}"
     )
 
 
-def test_exit_with_error_enumeration_names_the_export_list_render() -> None:
+def test_exit_with_error_enumeration_names_the_startup_block_render() -> None:
     prose = _provisioning_flow_required_steps_prose()
-    assert "devsecret export-list block render" in prose, (
-        f"{_DOCS_RELATIVE_PATH}'s exit_with_error enumeration does not name the devsecret "
-        "export-list block render (AC-DOC-003)."
+    assert "hostcreds startup block render" in prose, (
+        f"{_DOCS_RELATIVE_PATH}'s exit_with_error enumeration does not name the hostcreds "
+        "startup block render (AC-DOC-003)."
     )
     assert "worse than a container that failed to create" in prose, (
         f"{_DOCS_RELATIVE_PATH}'s exit_with_error enumeration no longer states why a non-zero "
@@ -119,13 +120,6 @@ def test_configure_shell_env_routes_the_render_call_through_exit_with_error() ->
     `exit_with_error` on the same statement -- not merely the substring
     `exit_with_error` occurring anywhere in the function for the unrelated
     `shell.env`-missing precondition.
-
-    The hostcreds cutover replaced the devsecret export-list block with the
-    hostcreds startup block (rendered by `devcontainer_config.cli
-    shell-block`); docs/devcontainer.md's provisioning-flow row still
-    describes the superseded renderer until the later documentation unit
-    lands, so what this test can still pin honestly is the script side: the
-    render happens, and its failure aborts the build.
     """
     body = _function_body("configure_shell_env")
     pattern = re.compile(r'render_hostcreds_shell_block\)"\s*\|\|\s*exit_with_error')

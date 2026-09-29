@@ -41,8 +41,8 @@ RENDERED_HEADER = """\
 #
 # Gitignored, and blocked from being committed by the pre-commit hook.
 # Carries per-developer identity and configuration only, never a credential:
-# every credential lives in the secret catalog, reached through `devsecret
-# set`, not in this file.
+# every credential is named in the hostcreds manifest and resolved from this
+# machine by `make creds-init` and `make push-creds`, not stored in this file.
 #
 # Re-run /devcontainer:setup-local (or /devcontainer:setup-remote for a
 # remote backend) to change any of it, or edit in place: the file is read

@@ -131,7 +131,6 @@ def test_clean_staged_tree_exits_zero_with_header(
     assert "[LINT]" in out
     assert "staged paths scanned: 1" in out
     assert "shell.env lines: 0" in out
-    assert "catalog secret names: 0 (catalog client not yet wired into this scan)" in out
 
 
 def test_empty_index_exits_zero_and_reports_zero_paths(

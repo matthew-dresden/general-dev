@@ -165,67 +165,46 @@ for whatever is missing.
 selection, proxy settings -- and carries no credential. It is still
 published to Parameter Store by `make push-secrets` so a remote container
 can bootstrap itself; that mechanism is unchanged. What changed is what the
-file is allowed to hold: every credential now lives in the secret catalog,
-at its own parameter path, never in `shell.env`.
+file is allowed to hold: every credential is named in the hostcreds
+manifest and resolved from the developer's own machine, never stored in
+`shell.env`.
 
-### The secret catalog
+### Host credentials (hostcreds)
 
-One backend, AWS Parameter Store: there is no second provider, no offline
-store and no fallback to a local copy. A secret lives at
-`/devcontainer/shared/secrets/<NAME>` or
-`/devcontainer/<instance>/secrets/<NAME>`, both `SecureString` parameters;
-the scope is a path prefix, so IAM enforces the boundary, not convention.
-Resolution is instance-first then shared: a name is looked up in the
-instance scope first, and in the shared scope only if the instance scope
-does not hold it.
+`.devcontainer/hostcreds.map.json` (created by `make init` from its
+committed example, gitignored) is the one list of credentials this
+repository pushes: there is no second provider and no offline store. Each
+entry names its source -- the macOS keychain, git's own credential helper,
+or `aws configure export-credentials` -- and nothing else; no value is ever
+written into the manifest.
 
-The `devsecret` CLI is the only way this repository reaches a catalog
-secret:
+`make creds-init` prompts once (getpass) for each keychain entry whose item
+does not exist yet and stores it through `security -i`, with the value on
+stdin: a value is never accepted as a command-line argument, because an
+argument reaches the process table, where any other user on this machine
+can read it. `CREDS_INIT_ARGS='--stdin NAME'` feeds one value from stdin
+for automation.
 
-- `devsecret get <NAME>` -- print one value on stdout, nothing else.
-- `devsecret list [--scope <scope>]` -- names, scopes, last-changed and the
-  exported flag; never a value.
-- `devsecret set <NAME> [--scope <scope>] [--exported]` -- write a value
-  read from stdin.
-- `devsecret rm <NAME> --scope <scope>` -- delete after confirmation.
-- `devsecret run --secrets A,B -- <cmd>` -- run `<cmd>` with only the named
-  secrets in its environment.
-- `devsecret export-list` -- names marked exported.
+`make push-creds` (run automatically by `make build`) resolves every entry
+on the host and pushes one `<NAME>.env` fragment per credential into the
+container under `~/.hostcreds/`, where shell startup sources it, so each
+credential arrives as an environment variable and a value never reaches
+the process table. Git entries also seed `~/.git-credentials` inside the
+container. A credential whose source command fails fails the push: there is
+no fallback to a local copy, and a container is never shipped a subset of
+the manifest. `make verify-container` re-checks the pushed credentials
+inside the container.
 
-Run `devsecret --help` for the full reference, including every exit code.
+An `aws-export` entry resolves through `aws configure export-credentials`
+on the host, using the developer's already-valid AWS SSO session -- the
+container itself holds no AWS credential for this path.
 
-A value is never accepted as a command-line argument. `devsecret set`
-refuses one with exit 5, since an argument reaches the process table, where
-any other user on this machine can read it. Pipe it on stdin instead:
-
-```bash
-printf '%s' "$VALUE" | devsecret set <NAME> --exported
-```
-
-`devsecret set` also refuses an interactive TTY paste with exit 2 unless
-`--stdin` confirms it is deliberate.
-
-The value still never reaches the process table. It travels to the `aws` CLI
-inside a `--cli-input-json` document rather than as an argument, and that
-document is a file the client creates with `O_EXCL` at mode `0600`, inside a
-directory at mode `0700` that it removes before returning. A file is used
-because the `aws` CLI v2 cannot read `file:///dev/stdin`: it reports "Invalid
-JSON received" whether stdin is a pipe or a redirected regular file, and
-blocks indefinitely on a FIFO. That bounded, private on-disk window is the
-same one certificate issuance already accepts for a server private key, and a
-far smaller exposure than an argument every process on the host can read for
-the life of the call.
-
-Neither engine needs a stored credential: the remote engine reaches the
-store through the instance role over IMDSv2, and the local engine reaches
-it through the developer's already-valid AWS SSO session.
-
-### Configuration variables
-
-| Variable | Default | Governs |
-|---|---|---|
-| `AWS_PROFILE` | `default` | The AWS CLI profile the local engine resolves credentials from when reaching the catalog. Read only; never set by this repository. |
-| `SECRET_CACHE_DIR` | A writable, RAM-backed (`tmpfs`/`ramfs`) mount point chosen from the mount table, outside the repository and the container workspace. Falls back to the platform temporary directory in two cases: when no mount table is available at all (used directly, for example macOS); or when a mount table is available but names no such writable, out-of-boundary RAM-backed row, in which case that same mount table then refuses the fallback with exit 5 (`SecretCacheExposureError`) rather than using it. | The RAM-backed, per-invocation, owner-only directory `devsecret run` creates outside the repository and the container workspace and hands to the child, so a tool that can read a value only from a file, not an environment variable, has somewhere to write one. `devsecret` itself never writes a value there. The directory, and everything under it, is removed when the child process exits. |
+`AWS_PROFILE` selects the profile the aws CLI resolves credentials through
+on the host-side cert publishing path: `certs.py`'s Parameter Store client
+takes no profile argument, so `make cert-publish` passes the profile the
+way the aws CLI reads it, and the CLI's own resolution -- including an
+already-valid SSO session for that profile -- applies. It defaults to
+`default` when unset and is never set by this repository.
 
 ### Certificate lifetimes
 

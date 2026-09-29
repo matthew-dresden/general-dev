@@ -236,8 +236,8 @@ def _installed_version(binary_path: str, *, source: str) -> tuple[int, ...]:
     toolchain version, and so on) -- the identical "check `returncode`
     before trusting output" contract `_repo_slug_from_git_remote` in
     `tests/test_state_bucket_name.py` applies to its own subprocess call,
-    and `catalog.py`'s `_invoke` and `certs.py`'s `_run_openssl` apply to
-    production subprocess calls.
+    and `certs.py`'s `_run_openssl` and `ParameterStoreClient._invoke`
+    apply to production subprocess calls.
 
     Only `stdout`'s first line is parsed on success: every tool this module
     probes (`terragrunt version <n>` / `Terraform v<n>`) reports its own

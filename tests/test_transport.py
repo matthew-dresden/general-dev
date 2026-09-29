@@ -3,7 +3,7 @@ and the docker context / handshake it hands off to (E6-F2-S1-T2).
 
 The `devcontainer_config.transport` import is deferred into function bodies
 (via `_import_transport`), the same convention `tests/test_hostprobe.py` and
-`tests/test_catalog.py` document: the TDD RED gate stashes this unit's
+`tests/test_repo.py` documents: the TDD RED gate stashes this unit's
 production-source files and re-runs a single named test node, and a
 module-level `from devcontainer_config import transport` would fail
 COLLECTION for the whole file (pytest exit 2, no test outcome recorded)

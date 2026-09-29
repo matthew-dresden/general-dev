@@ -297,7 +297,7 @@ def test_git_remote_timeout_name_and_default_are_bound_to_repo_module() -> None:
     is bound rather than what its current runtime value happens to be, so only an
     `ast.Attribute` load off the `repo` name satisfies the check; any `ast.Constant`
     right-hand side, including one that happens to equal the current default, fails. Mirrors
-    `tests/test_catalog.py::test_module_emits_exactly_one_external_command_name`'s convention
+    the deleted catalog suite's `test_module_emits_exactly_one_external_command_name` convention
     of asserting the module's own parsed source instead of a value observed at runtime.
     """
     source = Path(__file__).read_text(encoding="utf-8")

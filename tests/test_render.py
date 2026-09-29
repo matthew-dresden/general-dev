@@ -63,11 +63,10 @@ _PLACEHOLDER_PATTERN = re.compile(r"<[^<>]*>")
 # Deliberately excludes commented-out lines: shell.env.example ships several
 # commented samples that no answers.Field governs and render never touches,
 # so their bracketed placeholders are expected to survive rendering
-# untouched -- the devsecret guidance's `<NAME>` placeholder (E3-F2-S2-T1),
-# and the Remote docker block's `<ec2-instance-id>` (REMOTE_INSTANCE_ID) and
-# `<your-key-pair-name>` (REMOTE_SSH_KEY_PATH) samples. AC-CYCLE-001's "no
-# placeholder remains" property is about the active configuration the
-# container actually uses.
+# untouched -- the Remote docker block's `<ec2-instance-id>`
+# (REMOTE_INSTANCE_ID) and `<your-key-pair-name>` (REMOTE_SSH_KEY_PATH)
+# samples. AC-CYCLE-001's "no placeholder remains" property is about the
+# active configuration the container actually uses.
 _ACTIVE_EXPORT_LINE_PATTERN = re.compile(r"^export[ \t]+\w+=.*$", re.MULTILINE)
 
 
@@ -244,7 +243,7 @@ def test_rendered_header_does_not_claim_every_value_is_a_secret() -> None:
 
     assert "treat every value here as a secret" not in collapsed_header.lower()
     assert "never a credential" in collapsed_header
-    assert "devsecret set" in collapsed_header
+    assert "hostcreds manifest" in collapsed_header
 
 
 # ---------------------------------------------------------------------------
@@ -717,3 +716,90 @@ def test_shared_fixture_helpers_are_defined_once() -> None:
         f"tests/test_render.py must not locally define {local_helper_names}; "
         "import both from conftest instead"
     )
+
+
+# ---------------------------------------------------------------------------
+# shell.env.example, the committed template render rewrites: its header and
+# its Project-specific block must state the hostcreds truth -- a credential
+# belongs in the hostcreds manifest, never in this file -- and must not
+# reintroduce the retired "treat every value as a secret" misdirection.
+# Relocated from the deleted shellrc suite when the superseded renderer
+# went away; the template itself is render's source of truth, so its pins
+# live here.
+# ---------------------------------------------------------------------------
+
+
+def _shell_env_example_text() -> str:
+    """`shell.env.example`, read fresh for every call."""
+    from devcontainer_config.repo import find_root
+
+    root = find_root(Path(__file__).resolve().parent)
+    return (root / repo.example_for(repo.SHELL_ENV)).read_text(encoding="utf-8")
+
+
+def test_shell_env_example_no_longer_treats_every_value_as_a_secret() -> None:
+    """Behavior change B5's template half: the retired instruction is gone."""
+    text = _shell_env_example_text()
+    assert "treat every value here as a secret" not in text.lower()
+    assert "treat every value" not in text.lower()
+
+
+def _project_specific_block() -> str:
+    """The "Project-specific (optional)" section body of shell.env.example.
+
+    Bounded from its own heading to the next `#`-ruled section heading, so
+    an assertion meant for this block cannot be satisfied by an unrelated
+    mention elsewhere in the file (the header, or another section).
+    """
+    match = re.search(
+        r"# Project-specific \(optional\)\n#+\n(.*?)(?=\n#{10,}\n|\Z)",
+        _shell_env_example_text(),
+        re.DOTALL,
+    )
+    assert match is not None, "no Project-specific block found in shell.env.example"
+    return match.group(1)
+
+
+def test_shell_env_example_project_block_points_at_the_hostcreds_manifest() -> None:
+    """The project block names the hostcreds manifest and its make targets."""
+    block = _project_specific_block()
+    assert "hostcreds manifest" in block
+    assert "make creds-init" in block
+    assert "make push-creds" in block
+
+
+def test_shell_env_example_project_block_has_no_credential_shaped_placeholder() -> None:
+    """No example `export` line in the project block looks like a credential.
+
+    Only the (possibly commented-out) `export NAME=value` lines themselves
+    are checked, not the surrounding prose: the prose legitimately names
+    "credential" and "manifest" while explaining where a real one belongs,
+    and that explanation is not itself a credential-shaped placeholder.
+    """
+    export_lines = [
+        line for line in _project_specific_block().splitlines() if re.match(r"^#?\s*export\s", line)
+    ]
+    assert export_lines, "expected at least one example export line in the project block"
+    credential_shaped_tokens = ("token", "key", "password", "secret", "webhook", "credential")
+    for line in export_lines:
+        lowered = line.lower()
+        for token in credential_shaped_tokens:
+            assert token not in lowered, f"credential-shaped placeholder found: {line!r}"
+
+
+def test_shell_env_example_header_documents_identity_and_configuration_only() -> None:
+    """The header states the file carries identity and configuration only."""
+    text = _shell_env_example_text()
+    header = text.split("########################", 1)[0]
+    assert "credential" in header.lower()
+    assert "hostcreds" in header.lower()
+
+
+def test_shell_env_example_header_documents_automatic_export_at_shell_startup() -> None:
+    """The header states hostcreds credentials arrive automatically at shell
+    startup.
+    """
+    text = _shell_env_example_text()
+    header = text.split("########################", 1)[0]
+    assert "shell startup" in header.lower()
+    assert "exports" in header.lower()

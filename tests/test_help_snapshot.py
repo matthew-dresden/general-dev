@@ -1,11 +1,10 @@
-"""Snapshot and correspondence tests for `make help` and `devsecret --help` (E4-F4-S1-T1).
+"""Snapshot and correspondence tests for `make help` (E4-F4-S1-T1).
 
-Spec Section 14 specifies both help surfaces verbatim (14.1 for `make help`,
-14.2 for `devsecret --help`) and AC-14.1 requires a snapshot test that fails
-when either drifts. A snapshot alone only holds text steady; it says nothing
-about whether the text is true. This file adds two more assertions on top of
-the two snapshots, so `make help` cannot describe a `Makefile` that has moved
-out from under it:
+Spec Section 14 specifies the help surface verbatim (14.1 for `make help`)
+and AC-14.1 requires a snapshot test that fails when it drifts. A snapshot
+alone only holds text steady; it says nothing about whether the text is
+true. This file adds two more assertions on top of the snapshot, so `make
+help` cannot describe a `Makefile` that has moved out from under it:
 
 - `test_every_advertised_target_is_defined` (AC-FUNC-002): every target named
   in a help row is a real `Makefile` target.
@@ -18,32 +17,29 @@ out from under it:
   which cannot sensibly advertise itself -- stay unadvertised without going
   undetected by this correspondence check.
 
-Both snapshots are compared against the real, live output, never against a
+The snapshot is compared against the real, live output, never against a
 copy embedded in this file: `_run_make_help` shells out to the real `make
-help`, and `_devsecret_help_text` calls the real
-`devcontainer_config.cli.main_devsecret(["--help"])`, the same console entry
-point `pyproject.toml` installs as `devsecret`. `make help`'s output carries
-two machine-dependent interpolations -- the checkout's own directory name
-(the "Project: ..." banner) and the two docker context names `config.env`
-supplies -- so `_normalize_make_help_output` replaces exactly those three
-values (read the same way the `Makefile` itself reads them:
-`$(notdir $(CURDIR))`, and `config.env` sourced in a subshell the same way
-`$(LOCAL_CONTEXT)`/`$(REMOTE_CONTEXT)` are) with fixed placeholders before
-comparison, so `tests/data/make-help.txt` is identical on every machine and
-in CI regardless of the checkout's folder name or which docker context is
-active.
+help`. `make help`'s output carries two machine-dependent interpolations --
+the checkout's own directory name (the "Project: ..." banner) and the two
+docker context names `config.env` supplies -- so `_normalize_make_help_output`
+replaces exactly those three values (read the same way the `Makefile` itself
+reads them: `$(notdir $(CURDIR))`, and `config.env` sourced in a subshell the
+same way `$(LOCAL_CONTEXT)`/`$(REMOTE_CONTEXT)` are) with fixed placeholders
+before comparison, so `tests/data/make-help.txt` is identical on every
+machine and in CI regardless of the checkout's folder name or which docker
+context is active.
 
 AC-TEST-003, AC-TEST-004 and AC-TEST-005 each require a demonstrated failure
 path. Every one of those is exercised here as a real, permanent test against
 an in-memory mutation (a drifted string built from the real fixture's own
 text, a copy of the real declarations file with one reason blanked out, or a
 synthetic help row naming a target that does not exist) -- never by editing
-`Makefile`, `tests/data/make-help.txt`, `tests/data/devsecret-help.txt` or
-`tests/data/help-unadvertised.txt` on disk. `test_module_never_writes_to_a_fixture_path`
-(AC-TEST-006) pins that this module holds no write call against any of the
-three fixture variables it reads, by name, so a future edit that starts
-"self-healing" a fixture on drift is caught here rather than discovered by a
-snapshot that silently stopped meaning anything.
+`Makefile`, `tests/data/make-help.txt` or `tests/data/help-unadvertised.txt`
+on disk. `test_module_never_writes_to_a_fixture_path` (AC-TEST-006) pins
+that this module holds no write call against any of the fixture variables
+it reads, by name, so a future edit that starts "self-healing" a fixture on
+drift is caught here rather than discovered by a snapshot that silently
+stopped meaning anything.
 
 `_makefile_text` is imported from `tests/conftest.py` and `_phony_targets`
 from `tests/test_makefile_contract.py` rather than redefined here, the same
@@ -55,9 +51,7 @@ sibling the moment one of the two Makefile sections it reads changed shape.
 
 from __future__ import annotations
 
-import contextlib
 import difflib
-import io
 import os
 import re
 import shutil
@@ -66,13 +60,11 @@ from pathlib import Path
 
 import pytest
 from conftest import _makefile_text
-from devcontainer_config import cli as devcontainer_cli
 from devcontainer_config.repo import find_root
 from test_makefile_contract import _phony_targets
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "data"
 MAKE_HELP_FIXTURE = FIXTURES_DIR / "make-help.txt"
-DEVSECRET_HELP_FIXTURE = FIXTURES_DIR / "devsecret-help.txt"
 UNADVERTISED_FILE = FIXTURES_DIR / "help-unadvertised.txt"
 
 # A bounded safety net for the one real subprocess this file shells out to
@@ -293,7 +285,6 @@ def _normalize_make_help_output(
     return text
 
 
-
 def _make_environment() -> dict[str, str]:
     """The environment for a `make` this suite invokes itself.
 
@@ -329,22 +320,6 @@ def _run_make_help(repo_root: Path) -> str:
         env=_make_environment(),
     )
     return result.stdout
-
-
-def _devsecret_help_text() -> str:
-    """The real stdout of `devcontainer_config.cli.main_devsecret(["--help"])`.
-
-    `main_devsecret` parses `argv` before ever building a catalog client
-    (spec Section 4.3): `--help` is handled inside `argparse.parse_args`,
-    which prints and calls `parser.exit()` (raising `SystemExit(0)`) before
-    that client is ever constructed, so this never touches a real backend,
-    docker, AWS or the network.
-    """
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer), pytest.raises(SystemExit) as exc_info:
-        devcontainer_cli.main_devsecret(["--help"])
-    assert exc_info.value.code == 0, f"devsecret --help must exit 0, got {exc_info.value.code!r}"
-    return buffer.getvalue()
 
 
 def _compare_snapshot(expected: str, actual: str, fixture_name: str) -> None:
@@ -425,13 +400,6 @@ def test_make_help_output_matches_its_snapshot(normalized_help_output: str) -> N
     """AC-TEST-001: normalized `make help` output is byte-identical to its fixture."""
     expected = MAKE_HELP_FIXTURE.read_text(encoding="utf-8")
     _compare_snapshot(expected, normalized_help_output, "tests/data/make-help.txt")
-
-
-def test_devsecret_help_output_matches_its_snapshot() -> None:
-    """AC-TEST-002: `devsecret --help` output is byte-identical to its fixture."""
-    expected = DEVSECRET_HELP_FIXTURE.read_text(encoding="utf-8")
-    actual = _devsecret_help_text()
-    _compare_snapshot(expected, actual, "tests/data/devsecret-help.txt")
 
 
 def test_make_help_snapshot_reports_a_unified_diff_naming_the_changed_line() -> None:
@@ -545,7 +513,7 @@ def test_normalize_only_substitutes_the_repo_dir_at_the_banner() -> None:
     )
 
 
-_FIXTURE_VARIABLE_NAMES = ("MAKE_HELP_FIXTURE", "DEVSECRET_HELP_FIXTURE", "UNADVERTISED_FILE")
+_FIXTURE_VARIABLE_NAMES = ("MAKE_HELP_FIXTURE", "UNADVERTISED_FILE")
 
 
 def test_module_never_writes_to_a_fixture_path() -> None:

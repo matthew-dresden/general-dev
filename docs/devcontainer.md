@@ -289,8 +289,8 @@ EC2 reference, troubleshooting) live in
    provide it fails on every attach; the vscode-settings-sync postAttach
    link, for the same postAttach reason; the git hooks step, because a
    container whose hooks did not install would run `git commit` with no
-   secret scan; and the devsecret export-list block render, because a
-   container whose shells silently lack their exported secrets is worse
+   secret scan; and the hostcreds startup block render, because a
+   container whose shells silently lack their credentials is worse
    than a container that failed to create. Each of those aborts the build
    through `exit_with_error` instead of shipping a container missing the
    guarantee:
@@ -300,8 +300,7 @@ EC2 reference, troubleshooting) live in
    | apt proxy config (root-only, for later manual `apt` use) | `HTTP_PROXY` set |
    | every npm prefix holding a global CLI handed to the container user | the node feature |
    | `~/.vscode-server` handed to the container user | the `mounts` volume, required |
-   | `shell.env` sourcing into `.bashrc` / `.zshenv`, plus the devsecret export-list startup block appended to both | `python3` + `devcontainer_config` on `PYTHONPATH`, required |
-   | `devsecret` installed from this project via `uv tool install --force`, so the export-list startup block finds its CLI on PATH (its catalog calls need an AWS session: locally, `aws sso login` once per container) | the uv feature |
+   | `shell.env` sourcing into `.bashrc` / `.zshenv`, plus the hostcreds credential-startup block appended to both | `python3` + `devcontainer_config` on `PYTHONPATH`, required |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
    | `claude-settings.json` merged into `~/.claude/settings.json` | `claude-code` feature + `jq` |
    | opencode installed globally, `~/.config/opencode/opencode.json` written from `.devcontainer/opencode.json` (GLM 5.3 flagship + GLM 5.3 Flash; the z.ai key is injected at run time through `{env:ZAI_API_KEY}`, exported by shell.env) | the node feature + `jq` |
@@ -795,7 +794,7 @@ same run:
 | engine | `/devcontainer:engine` -- defines the validation contract the other skills reuse: the thirteen checks of Section 4.2.1 (six local, seven remote), asking which instance only when Section 4.1.1 resolution is ambiguous, fixing only what is reversible and needs no operator credential (selecting an existing context, re-establishing a port forward), and ending in a per-check verdict table |
 | launch | `/devcontainer:launch` -- asks nothing, delegates engine reachability (and with it the `rdc_backend` local-against-remote selection) to `/devcontainer:engine`, then resolves the container itself through `rdc_container_ids` and `rdc_require_container` and picks `make build`, `make start`, `make restart` or `make reopen`, verifying by re-reading state after every action; it never destroys anything and ends with a running container |
 | doctor | `/devcontainer:doctor` -- asks nothing, delegates the thirteen `/devcontainer:engine` checks by reference rather than restating them, and reports every configuration, secrets, container-state and drift finding engine does not cover, each with an exact remedy; it only reports, it never repairs anything itself |
-| secrets | `/devcontainer:secrets` -- asks which secret and which scope, runs add, list, update, rotate, delete, mark exported and move scope entirely through the `devsecret` CLI (never a second path to Parameter Store), never places a value in a command's arguments, never renders a value into the conversation, verifies every write or delete with an independent re-read rather than trusting the CLI's own exit code, and ends by naming the parameter path, its type and the resulting version |
+| secrets | `/devcontainer:secrets` -- asks which credential, manages the hostcreds manifest and the keychain items it names entirely through `make creds-init` and `make push-creds` (never a value on a command line, never a value rendered into the conversation), verifies every store by re-reading the keychain rather than trusting the command's own exit code, and ends by naming every credential affected and what now holds it |
 | certs | `/devcontainer:certs` -- asks which instance, creates the CA and issues the server and client certificates on first use, rotates the client certificate with the instance left running, reports expiry (the `make cert-status` view), states that certificate revocation does not exist and that removing the principal's `ssm:StartSession` grant is the mechanism, and ends every material-changing operation by rewriting the docker context and completing a handshake before reporting success |
 | teardown | `/devcontainer:teardown` -- asks for confirmation, always, taken against an inventory of what `make clean` or `make rebuild` will destroy (the container, its private volumes, its image) and what will survive (shared volumes, the base image); explains the unpushed-work and uncommitted-config guards rather than only enforcing them, never sets `FORCE` itself, destroys container state only (never an instance, which stays behind `GATE-DESTROY`), and ends by reporting what was destroyed and what survived from a fresh post-operation read, never from the target's own exit code |
 | quality | `/devcontainer:quality` -- asks nothing, reads the sub-target set `make validate` invokes from the Makefile itself rather than a copy embedded in the skill, interprets each failing sub-target's root cause and fixes it, never suppresses a finding (no bypass annotation, no linter-ignore entry, no raised threshold, no narrowed `LINT_EXCLUDES` or `SPELL_FILES`), stops and asks for human approval on a suspected false positive, hands anything else it cannot fix to `/devcontainer:doctor` or the operator, and ends by reporting the exit code of a fresh `make validate` run |

@@ -31,7 +31,7 @@ the AC-TEST-006 drift check itself could have silently mis-resolved while
 `_function_body`, `_provisioning_flow_table` and
 `_provisioning_flow_required_steps_prose` are shared
 `.devcontainer/.devcontainer.postcreate.sh` / `docs/devcontainer.md` text
-extractors for `tests/test_postcreate_hooks.py`, `tests/test_shellrc.py`
+extractors for `tests/test_postcreate_hooks.py`
 and `tests/test_docs_environment_files.py`, plus a planned consumer,
 `tests/test_devcontainer_docs.py` (owned by E3-F2-S2-T3, not yet landed).
 These suites need a function body pulled out of the same postCreate
@@ -361,10 +361,10 @@ def _postcreate_text() -> str:
     """`.devcontainer/.devcontainer.postcreate.sh`, read fresh for every call.
 
     Consumers: `tests/test_postcreate_hooks.py` (every assertion that reads
-    the script's text directly, plus `_git_hooks_step` and `_main_body` via
-    `_function_body`'s default source) and `tests/test_shellrc.py` (the
-    postCreate-wiring assertion that reads the script's text directly, plus
-    `_configure_shell_env_body` via `_function_body`'s default source). Not
+    the script's text directly, plus `_git_hooks_step`, `_main_body` and
+    `_configure_shell_env_body` via `_function_body`'s default source) and
+    `tests/test_devcontainer_docs.py` (the provisioning-flow wiring
+    assertions that read the script's text directly). Not
     cached at module scope, for the same reason `_makefile_text` above is
     not: a cached value would let one test's assertion about the file leak
     into another test's failure message instead of each test reading the
@@ -404,9 +404,10 @@ def _normalize_whitespace(text: str) -> str:
 def _function_body(name: str, text: str | None = None) -> str:
     """The body of shell function `name() { ... }`, scanned by brace depth.
 
-    Consumers: `tests/test_postcreate_hooks.py`'s `_git_hooks_step` and
-    `_main_body`, and `tests/test_shellrc.py`'s `_configure_shell_env_body`
-    -- all three read a function body out of
+    Consumers: `tests/test_postcreate_hooks.py`'s `_git_hooks_step`,
+    `_main_body` and `_configure_shell_env_body`, and
+    `tests/test_devcontainer_docs.py`'s `configure_shell_env` and
+    `render_hostcreds_shell_block` assertions -- all read a function body out of
     `.devcontainer/.devcontainer.postcreate.sh` (the default source, read
     fresh via `_postcreate_text`). Scans brace depth from the opening `{`
     of `name() {` to the `}` that returns depth to zero, so a body

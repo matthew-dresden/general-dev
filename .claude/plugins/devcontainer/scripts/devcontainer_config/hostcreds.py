@@ -15,12 +15,12 @@ startup sources those fragments; it never resolves anything itself.
 This module is the core of that mechanism: the manifest contract
 (`load_manifest`), the three resolvers (`resolve_keychain`, `resolve_git`,
 `resolve_aws_export`, dispatched by `resolve`), and the two renderers
-(`render_startup_block`, `render_env_fragment`) whose text later units
-install, and `write_fragment`, which persists a rendered fragment to disk
-at the private mode its content demands. The CLI, Makefile target and
-postCreate wiring -- and the deletion of the devsecret SSM catalog this
-mechanism replaces -- land in later units; nothing here imports or
-modifies them.
+(`render_startup_block`, `render_env_fragment`) whose text the CLI
+subcommands and postCreate install, and `write_fragment`, which persists a
+rendered fragment to disk at the private mode its content demands. The CLI
+half (`devcontainer_config.cli`'s creds-init, creds-fragments and
+shell-block), the Makefile targets and the postCreate wiring build on this
+module; nothing here imports them.
 
 Argv discipline shapes every resolver: a resolved value travels only on a
 subprocess's stdout, never in its argv, so it never appears in the process
@@ -37,13 +37,13 @@ collects every problem in the file into one `ManifestError` rather than
 reporting only the first, because an operator fixing a multi-entry
 manifest one error at a time re-runs push-creds once per mistake.
 
-Runner injection follows `devcontainer_config.catalog` exactly: every
-resolver takes the runner as an argument, so the whole module is testable
-with no keychain, no git, no aws and no network, and no test has to patch
-this module. Every function takes the repository root (or a rendered
-credential) as data rather than discovering the checkout itself, for the
-same reason `repo`'s docstring gives: a test points the whole package at a
-temporary directory instead of the real checkout.
+Runner injection keeps the whole module testable with no keychain, no
+git, no aws and no network, and no test has to patch this module: every
+resolver takes the runner as an argument, and every function takes the
+repository root (or a rendered credential) as data rather than discovering
+the checkout itself, for the same reason `repo`'s docstring gives: a test
+points the whole package at a temporary directory instead of the real
+checkout.
 """
 
 from __future__ import annotations
@@ -130,8 +130,8 @@ AWS_SESSION_TOKEN_FIELD = "SessionToken"
 AWS_EXPIRATION_FIELD = "Expiration"
 
 # A valid credential name (the manifest keys): starts with an uppercase
-# letter, then uppercase letters, digits or underscores. Stricter than
-# `catalog`'s identifier rule on purpose: a name becomes both a shell
+# letter, then uppercase letters, digits or underscores. Stricter than a
+# bare environment-variable rule on purpose: a name becomes both a shell
 # variable at startup and a <NAME>.env fragment filename in the store
 # directory, and the store directory is case-insensitive on macOS, where
 # Token and token would collide as filenames long before any shell saw
@@ -255,8 +255,7 @@ class ResolvedCredential:
 # The Runner every resolver is handed: given the full argv and an optional
 # stdin document, return a completed process. Injected rather than called
 # internally via `subprocess.run` directly, so every test substitutes a
-# fake runner instead of patching this module -- the same seam
-# `devcontainer_config.catalog` defines and its suite exercises.
+# fake runner instead of patching this module.
 Runner = Callable[[Sequence[str], "str | None"], subprocess.CompletedProcess[str]]
 
 
@@ -910,7 +909,7 @@ def resolve(spec: CredentialSpec, runner: Runner) -> ResolvedCredential:
 
 # Present once per rendered startup block, at the top: the idempotence
 # anchor a caller greps for before appending the block a second time, the
-# same pattern `devcontainer_config.shellrc.MARKER` established.
+# same pattern the deleted shell-startup renderer's MARKER established.
 MARKER = "# hostcreds-credential-startup-block"
 
 # The first line of every rendered fragment: identifies the file as

@@ -4,14 +4,14 @@ per-credential fragments).
 
 The `devcontainer_config` import is deferred into function bodies (via
 `_import_hostcreds`) instead of done once at module scope, for the same
-reason `tests/test_catalog.py` and `tests/test_shellrc.py` document: the
+reason `tests/test_repo.py` documents: the
 TDD RED gate stashes this unit's own production-source files and re-runs
 a single named test node, and a module-level import would fail COLLECTION
 for the whole file (pytest exit 2, no test outcome recorded) instead of
 failing the one test for the real reason.
 
-`_FakeRunner` stands in for the injected subprocess runner exactly as
-`tests/test_catalog.py`'s double does: it never spawns a process, records
+`_FakeRunner` stands in for the injected subprocess runner the way the
+deleted catalog suite's double did: it never spawns a process, records
 every argv/stdin pair it is handed, and answers from a queue the test
 fills beforehand. `_RaisingRunner` stands in for the one case a real
 runner can never return from normally: the source binary (security, git,
@@ -28,15 +28,15 @@ the failure tests queue a generated value on stdout and then assert that
 value never appears in the exception's text.
 
 The end-to-end section is the only place this file executes real shell
-processes, following the discipline `tests/test_shellrc.py` established:
+processes, following the discipline this suite's deleted shell-startup
+tests established:
 the rendered startup block runs for real under `bash -c` and `zsh -c`,
 with HOME pointed at a directory under tmp_path, so the block's
 store-directory probe reads only files this test wrote. Both
 interpreters are required, not skipped when absent: `make test` checks
 uv and zsh as prerequisites before pytest runs (TEST_PREREQUISITE_TOOLS
 in the Makefile), so a missing binary is a loud precondition failure of
-the test environment (via `_require_interpreter`, the local twin of
-`tests/test_shellrc.py`'s helper), never a silently narrowed matrix. The
+the test environment (via `_require_interpreter`), never a silently narrowed matrix. The
 empty-store-directory silence case is asserted for both shells because
 the block's glob probe exists precisely for zsh: a bare `for f in
 <dir>/*.env` loop aborts zsh outright when the glob matches nothing
@@ -171,7 +171,7 @@ def _resolved(
 def test_subprocess_runner_feeds_stdin_to_a_real_child_and_captures_stdout() -> None:
     """The production runner, round-tripped for real -- the fakes above
     never exercise it, and the resolvers' argv/stdin contract is only
-    proven if the seam itself works. Mirrors `tests/test_catalog.py`'s
+    proven if the seam itself works. Mirrors the deleted catalog suite's
     test of that module's twin runner. `sh -c cat` reads its stdin and
     writes it back verbatim, so one round trip proves both halves of the
     seam: the stdin document reaches the child, and the child's stdout
@@ -1200,7 +1200,7 @@ def test_render_startup_block_rejects_unsafe_store_dir_names(bad_name: str) -> N
 def _require_interpreter(interpreter: str) -> None:
     """Fail fast, with a diagnostic, if `interpreter` is not on PATH.
 
-    The local twin of `tests/test_shellrc.py`'s helper of the same name:
+    The suite's fail-fast interpreter precondition check:
     `subprocess.run([interpreter, ...])` would otherwise raise a raw
     `FileNotFoundError` on a machine missing the shell, instead of failing
     with an actionable message. Not a skip: `make test` checks uv and zsh

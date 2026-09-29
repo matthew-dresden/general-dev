@@ -31,6 +31,14 @@ inputs = {
   root_volume_size_gb = 30
   data_volume_size_gb = 30
 
+  # The compute submodule's defaults (both true) protect a long-lived
+  # production engine from a stray `terragrunt destroy`. This instance is
+  # ephemeral -- created and destroyed inside one work session -- so it must
+  # be destroyable by Terragrunt alone, which the module documents requires
+  # both flags false.
+  disable_api_termination = false
+  disable_api_stop        = false
+
   vpc_cidr           = "10.33.0.0/16"
   subnet_cidr        = "10.33.1.0/24"
   availability_zone  = "us-east-1a"

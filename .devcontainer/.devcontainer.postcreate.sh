@@ -291,7 +291,8 @@ configure_claude_settings() {
 # over, so the package and its bin symlink are user-owned from the start and
 # self-update never needs the handover to be re-run. The committed config
 # carries no credential: it injects the z.ai coding plan key through
-# {env:ZAI_API_KEY}, which every container shell exports from shell.env.
+# {env:ZAI_API_KEY}, which the hostcreds startup block exports from the
+# fragment 'make push-creds' wrote for the manifest's keychain entry.
 configure_opencode() {
   if ! container_user_has npm; then
     log_section_skipped "opencode" \

@@ -41,11 +41,13 @@ does now. The identifiers match Section 0 of the platform specification.
 | Path | Purpose |
 |---|---|
 | `.devcontainer/` | Devcontainer definition (image + features), postcreate setup, shared shell functions |
+| `.devcontainer/hostcreds.map.json` (+ committed `.example`) | Hostcreds manifest, gitignored: every credential this machine pushes into the container, named with its source |
 | `.devcontainer/remote-docker/` | Remote EC2 engine: transport, certificate and secret entry points, instance config, see its [README](.devcontainer/remote-docker/README.md) |
 | `.devcontainer/nix-family-os/`, `wsl-family-os/` | Host-side proxy (tinyproxy) helpers for local mode |
 | `repos/` | Where project repositories are cloned. Only its `.gitkeep` is tracked |
 | `.vscode/settings.json` | Workspace git-repo detection (nested clones) |
 | `docs/devcontainer.md` | Deep dive: setup flow, secrets, cdevcontainer contract |
+| `docs/environment-setup.md` | Ordered runbook: fresh machine to verified container, one verification per step |
 | `CLAUDE.md` | Engineering standards for AI-assisted work in this repo |
 
 ## Quick start, local
@@ -56,9 +58,11 @@ bind-mounted, so an edit is visible on both sides at once.
 **The make route, in the order they are run:**
 
 ```sh
-make init             # create the three gitignored config files from examples
+make init             # create the four gitignored config files from examples
+                      # (then fill their placeholders: First-time setup below)
+make creds-init       # store each keychain credential the hostcreds manifest names
 make local            # point docker and VS Code at the local engine
-make build            # build the container and run postCreate
+make build            # build the container, run postCreate, push every credential
 make exec             # a shell inside the container
 ```
 
@@ -67,23 +71,32 @@ each host tool and stating any command it cannot run itself, and
 `/devcontainer:launch` builds and opens the container. Both reach the same
 container the make targets produce.
 
-`cdevcontainer setup-devcontainer` generates the three gitignored files if you
-would rather not use `make init`. Start the host proxy if `HOST_PROXY=true`
-(see `nix-family-os/README.md`), then VS Code → **Reopen in Container**.
+`cdevcontainer setup-devcontainer` generates the three gitignored
+configuration files if you would rather not use `make init`; it does not
+create the hostcreds manifest, so copy that from its example (or run
+`make init`) and store its keychain items with `make creds-init`. Start the
+host proxy if `HOST_PROXY=true` (see `nix-family-os/README.md`), then VS Code
+→ **Reopen in Container**.
 
 ## First-time setup
 
-Three gitignored files configure the container; each has a committed example:
+Four gitignored files configure the container; each has a committed example,
+and `make init` copies all four in one go:
 
 ```sh
 cp shell.env.example shell.env
 cp .devcontainer/aws-profile-map.json.example .devcontainer/aws-profile-map.json
 cp devcontainer-environment-variables.json.example devcontainer-environment-variables.json
+cp .devcontainer/hostcreds.map.json.example .devcontainer/hostcreds.map.json
 ```
 
-Replace every `<PLACEHOLDER>`. What each value does, how to have Claude fill
-them out, and the differences between macOS, Linux and WSL are in
-[docs/environment-files.md](docs/environment-files.md).
+Replace every `<PLACEHOLDER>` in the first three, then name your credentials in
+the hostcreds manifest and store each keychain item it names with
+`make creds-init`. What each value does, how to have Claude fill them out, and
+the differences between macOS, Linux and WSL are in
+[docs/environment-files.md](docs/environment-files.md); the full ordered
+sequence, with a verification step after each stage, is
+[docs/environment-setup.md](docs/environment-setup.md).
 
 Then, once per machine rather than once per container:
 
@@ -152,8 +165,12 @@ copy in Parameter Store.
 
 Then VS Code → **Dev Containers: Attach to Running Container…**. Reconnect the
 same way after any disconnect, the container never stopped
-(`shutdownAction: "none"`). The container bootstraps its secrets from Parameter
-Store via the instance role, so there is no manual seeding.
+(`shutdownAction: "none"`). The container bootstraps its environment files
+from Parameter Store via the instance role, and its credentials arrive by the
+hostcreds push: `make build`'s last step resolves every manifest entry on the
+laptop and delivers it over the same docker context the build just used --
+`make push-creds` re-runs that push alone, and `make up` runs it too -- so
+there is no manual seeding on either half.
 
 | | |
 |---|---|
@@ -219,8 +236,12 @@ Every project gets its own container + volume on the shared engine.
 - `ccdr`, `claude --dangerously-skip-permissions --resume`
 - opencode, installed by postCreate (no devcontainer feature ships it),
   configured for the z.ai coding plan with GLM 5.3 flagship and GLM 5.3
-  Flash; its key is injected from `shell.env` through `{env:ZAI_API_KEY}`,
-  never committed.
+  Flash; its config still injects the key through `{env:ZAI_API_KEY}`, and the
+  variable itself is supplied by the hostcreds startup block from a
+  `ZAI_API_KEY` manifest entry -- never committed, never in `shell.env`.
+- `make verify-container` re-checks the pushed credentials inside the
+  container: fragment modes, the startup block, silent shell startup, and
+  git and aws reachability for whichever sources the manifest names.
 - Claude Code starts on the classic renderer and never offers the flicker-free
   fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen`
   still opts in for the current container.
@@ -237,6 +258,11 @@ Every project gets its own container + volume on the shared engine.
   `cdevcontainer setup-devcontainer` would clobber these changes, review the
   git diff and merge back. (Candidate for upstreaming to the catalog.)
 - `cdevcontainer` regenerates `shell.env` with an asdf `PATH` line; it is dead
-  but harmless. Re-run `push-secrets.sh` after regenerating or rotating tokens.
-- Secrets live only in the gitignored local files and SSM Parameter Store
-  (`/devcontainer/<project>/…`), never in git.
+  but harmless. Re-run `make push-secrets` after regenerating it; rotating a
+  credential is `make creds-init` plus `make push-creds`, never a `shell.env`
+  edit.
+- Credentials live only in the macOS keychain, git's own credential helper
+  and the AWS SSO session -- named in the gitignored hostcreds manifest --
+  plus the fragments `make push-creds` writes inside the container. Parameter
+  Store (`/devcontainer/<project>/…`) holds the credential-free `shell.env`
+  and profile map. None of it is ever in git.

@@ -5,7 +5,7 @@
 # `devcontainer_config.certs` owns every certificate operation; this script
 # adds no policy of its own. It resolves which instance is being acted on --
 # once, through the shared resolver, so the material is written under the same
-# directory `make connect` and `make instances` address -- and dispatches.
+# directory `make connect` and `make list-instances` address -- and dispatches.
 #
 # The three subcommands are deliberately separate rather than one idempotent
 # "ensure" target. Creating a CA, issuing a client certificate and publishing

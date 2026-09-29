@@ -84,7 +84,9 @@ def test_remote_recipes_exist_so_this_module_cannot_pass_vacuously() -> None:
 
 
 def test_every_remote_recipe_passes_instance_through() -> None:
-    missing = [line.strip() for line in _remote_recipe_lines() if 'INSTANCE="$(INSTANCE)"' not in line]
+    missing = [
+        line.strip() for line in _remote_recipe_lines() if 'INSTANCE="$(INSTANCE)"' not in line
+    ]
     assert not missing, (
         "these remote recipes do not pass INSTANCE, so `INSTANCE=<name> make <target>` would "
         f"silently act on whatever the resolver defaults to: {missing}"
@@ -193,12 +195,86 @@ def test_container_sh_consumes_the_resolved_block() -> None:
 def test_resolver_failure_is_reported_through_rd_fail_with_remedies() -> None:
     """A resolution failure must name both remedies, not print a traceback."""
     lib = _LIB_SH.read_text(encoding="utf-8")
-    body = lib[lib.index("rd_resolve_instance() {"):]
+    body = lib[lib.index("rd_resolve_instance() {") :]
     body = body[: body.index("\n}\n")]
     assert "rd_fail" in body, "failure must go through rd_fail, not a bare exit"
     assert "INSTANCE=<name>" in body, "the remedy must show naming an instance explicitly"
     assert "DEFAULT_REMOTE_INSTANCE" in body, "the remedy must show setting a default"
-    assert "make instances" in body, "the remedy should point at the listing"
+    assert "make list-instances" in body, "the remedy should point at the listing"
+
+
+def test_no_remote_script_still_points_at_the_removed_instances_target() -> None:
+    """`make instances` was renamed `make list-instances`; every remedy text moved too.
+
+    'make list-instances' does not carry the stale substring, so a plain
+    search over the three remote entry scripts is exact, not a false positive
+    on the new name.
+    """
+    for path in (_LIB_SH, _CONTAINER_SH, _PUSH_SECRETS_SH, _CERTS_SH):
+        text = path.read_text(encoding="utf-8")
+        assert "make instances" not in text, (
+            f"{path.name} still names the removed 'make instances' target; "
+            "the listing target is 'make list-instances'"
+        )
+
+
+def test_the_resolver_exports_the_recorded_id_from_the_per_instance_store() -> None:
+    """REMOTE_INSTANCE_ID must come from the id store, not a shell.env export.
+
+    `devcontainer_config.instance_ops.link_id` is the store's only writer
+    (`~/.docker/certs/<name>/instance-id`), and the resolver is the only
+    place a remote script may read it: it already owns CERTS_DIR from the
+    resolved block, so it exports the recorded id and clears the variable
+    when nothing is recorded -- a leftover shell.env export must never
+    misdirect an operation at a dead instance.
+    """
+    lib = _LIB_SH.read_text(encoding="utf-8")
+    quiet = lib[lib.index("rd_resolve_instance_quiet() {") : lib.index("rd_resolve_instance() {")]
+    assert 'id_store="${CERTS_DIR}/instance-id"' in quiet, (
+        "the resolver must read the id store under the resolved CERTS_DIR -- "
+        "instance_ops.link_id is its only writer and this is its only shell reader"
+    )
+    assert "export REMOTE_INSTANCE_ID" in quiet, (
+        "the recorded id must be exported as REMOTE_INSTANCE_ID for the remote consumers"
+    )
+    assert "unset REMOTE_INSTANCE_ID" in quiet, (
+        "a missing store must clear REMOTE_INSTANCE_ID so a stale shell.env "
+        "export cannot survive the resolution"
+    )
+
+
+def test_the_id_requirement_names_the_link_command_as_its_remedy() -> None:
+    """A missing recorded id must tell the operator the command that records one."""
+    lib = _LIB_SH.read_text(encoding="utf-8")
+    require = lib[lib.index("rd_require_remote_config() {") :]
+    require = require[: require.index("\n}") :]
+    die_lines = [line for line in require.splitlines() if "rd_die" in line]
+    assert len(die_lines) == 1, "the missing-id check must be one die line"
+    remedy = die_lines[0]
+    assert "make instance-link" in remedy, (
+        "rd_require_remote_config's missing-id remedy must name "
+        "'make instance-link INSTANCE=<name>', the command that records the id"
+    )
+    assert "shell.env" not in remedy, (
+        "the id no longer comes from shell.env; the remedy must not send the "
+        "operator back to setting it there"
+    )
+
+
+def test_push_secrets_resolves_before_demanding_the_remote_config() -> None:
+    """The id requirement is only meaningful after the resolver has sourced it.
+
+    rd_require_remote_config demands the id the resolver exports from the
+    per-instance id store, so demanding it before resolving would read a
+    value the resolution chain never produced.
+    """
+    text = _PUSH_SECRETS_SH.read_text(encoding="utf-8")
+    resolve_at = text.index("rd_resolve_instance")
+    require_at = text.index("rd_require_remote_config")
+    assert resolve_at < require_at, (
+        "push-secrets.sh must resolve the instance before rd_require_remote_config, "
+        "or the id requirement reads a value the resolver never exported"
+    )
 
 
 def test_the_backend_is_classified_only_after_the_instance_is_resolved() -> None:

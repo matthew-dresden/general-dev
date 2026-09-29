@@ -71,3 +71,6 @@ __pycache__/
 # `terraform init` followed by `git add -A` stages those binaries, and the
 # only thing that catches it is the secret scanner refusing to decode them.
 .terraform/
+
+# Terragrunt download and module caches under per-instance directories.
+remote-instances/*/.terragrunt-cache/

@@ -33,6 +33,8 @@ REMOTE_SHELL_ENV=$(sed \
   -e '/^export no_proxy=/d' \
   -e '/^export PATH=.*\.asdf/d' \
   -e '/^export PATH=.*\.localscripts/d' \
+  -e '/^[[:space:]]*#/d' \
+  -e '/^[[:space:]]*$/d' \
   "$SHELL_ENV_SOURCE")
 [ -n "$REMOTE_SHELL_ENV" ] || rd_die "transformed shell.env is empty"
 

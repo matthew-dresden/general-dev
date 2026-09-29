@@ -975,7 +975,7 @@ def _parse_parameter_names(stdout: str) -> list[str]:
 # versions). Any other nonzero inspect -- a stopped or unreachable daemon,
 # say -- is a failure, not evidence the context is gone.
 _CONTEXT_ABSENT_PATTERN = re.compile(
-    r"no such context|context\s+\S+\s+not found",
+    r"no such context|context\s+not found|context\s+\"[^\"]+\"\s*:\s*context not found",
     re.IGNORECASE,
 )
 

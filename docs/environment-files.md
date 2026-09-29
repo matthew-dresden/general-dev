@@ -153,6 +153,12 @@ differs by host. Set `LOCAL_DOCKER_CONTEXT` in
 `make disconnect` lists the contexts that actually exist if the configured one
 does not.
 
+`make disconnect` and `make local` switch the machine-wide context, which
+every terminal shares. To address the local engine from one terminal
+without switching anything, prefix `ENGINE=local` instead; see
+[environment-setup.md](environment-setup.md)'s "Working with several
+engines at once".
+
 ### Prerequisites for `make build`
 
 | Tool | macOS | Linux / WSL |
@@ -515,8 +521,9 @@ value by name rather than silently falling back to the default.
 the single module that turns an instance name into every artifact spec
 Section 9's addressing table names -- the Terragrunt directory, the state
 key, the docker context, the Parameter Store prefix, the certificate
-directory, and the recorded forwarded port -- and the single module that
-decides which instance a command means. `resolve-instance` is its entry
+directory, the recorded EC2 instance id, and the recorded forwarded port --
+and the single module that decides which instance a command means.
+`resolve-instance` is its entry
 point (`PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m
 devcontainer_config.cli resolve-instance`): it prints the resolved name
 and the statically derivable half of the addressing block -- everything
@@ -535,14 +542,16 @@ moved location:
 | `DOCKER_CONFIG` | Unset (`~/.docker`) | `instances.certs_dir`'s (and `certs.DEFAULT_CERTS_ROOT`'s) certificate-directory root: an absolute directory path. When set, certificates are addressed and written under `$DOCKER_CONFIG/certs/<name>/` instead of `~/.docker/certs/<name>/`. Read only; never set by this repository. |
 | `INSTANCE` | Unset | `instances.resolve`'s first resolution step: the instance name to select this call, read directly from the process environment. Optional. When set, must pass `instances.validate_name` -- a non-empty path segment of letters, digits, hyphens and underscores only, at most `instances.MAX_INSTANCE_NAME_LENGTH` (63) characters -- or resolution fails naming the value and the rule it broke. |
 | `DEFAULT_REMOTE_INSTANCE` | Unset | `instances.resolve`'s second resolution step, read directly from the process environment when `INSTANCE` is unset. Optional; has no entry in `shell.env.example`. Same format as `INSTANCE`: a non-empty path segment of at most `instances.MAX_INSTANCE_NAME_LENGTH` (63) characters. |
+| `ENGINE` | Unset | Addresses one engine explicitly instead of following the machine-wide active docker context: `local` names this machine's engine (`LOCAL_DOCKER_CONTEXT`), any other value must name an instance directory under `remote-instances/`, and every docker call the run makes is aimed at that engine's context without any `docker context use`. Read by the Makefile (exported to its recipes when set) and by `lib.sh`'s `rd_engine_context`, which derives the context through `instances.docker_context` and fails fast when the value names nothing this repository can address. Both `ENGINE=x make <target>` and `make <target> ENGINE=x` reach it. The three context switchers (`make local`, `make disconnect`, `make remote`) refuse under it. See `docs/environment-setup.md`'s "Working with several engines at once". |
 
 `DEFAULT_REMOTE_INSTANCE` is the second step of the instance-resolution
 order spec Section 4.1.1 fixes, evaluated once per resolution by
 `instances.resolve`:
 
-1. `INSTANCE` in the process environment. No Makefile target accepts or
-   forwards `INSTANCE` yet (`E8-F2-S1-T1` wires `make <target>
-   INSTANCE=<name>` in); today, set it directly:
+1. `INSTANCE` in the process environment. Every remote make target accepts
+   it (`make <target> INSTANCE=<name>`, or `INSTANCE=<name> make <target>`,
+   both spellings travel to the recipes); outside make, set it directly in
+   the environment the resolver runs in:
    `INSTANCE=<name> PYTHONPATH=.claude/plugins/devcontainer/scripts
    python3 -m devcontainer_config.cli resolve-instance`.
 2. `DEFAULT_REMOTE_INSTANCE` from `shell.env`.
@@ -584,6 +593,19 @@ before any docker or AWS call.
 producing nothing, and resolution proceeds to the third. A developer who
 wants one instance to be their implicit default sets it in their own
 `shell.env`.
+
+The one artifact in this section that is a *state* file rather than a
+pure derivation is the recorded EC2 instance id: an `instance-id` file
+inside the instance's certificate directory (`instances.certs_dir(name)`,
+so `$DOCKER_CONFIG/certs/<name>/instance-id`, or
+`~/.docker/certs/<name>/instance-id` when `DOCKER_CONFIG` is unset).
+`make instance-link INSTANCE=<name> INSTANCE_ID=<id>` writes it -- the
+only deliberate writer, and `make instance-deploy` records the applied id
+there automatically at apply time -- and every remote target's resolver
+reads it, so the id travels with the instance it names instead of in a
+variable set by hand. `make instance-destroy` removes the whole
+certificate directory, id file included, so a retired instance cannot
+leave a stale id behind to misdirect a power or status operation.
 
 ### What did not change
 

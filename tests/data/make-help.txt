@@ -83,7 +83,7 @@ OPTIONS
 
 PREREQUISITES
   container targets       docker
-  remote engine           aws, session-manager-plugin, and REMOTE_INSTANCE_ID in shell.env
+  remote engine           aws, session-manager-plugin, and the instance id recorded by instance-deploy (make instance-link)
   build and rebuild       devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli
   lint                    uv                                      brew install uv
   test                    uv, zsh                                 uv: brew install uv   zsh: brew install zsh (macOS) or sudo apt-get install -y zsh (Linux, WSL)

@@ -286,14 +286,149 @@ At this point the environment is complete. Day to day:
 
 Steps 1 through 6 are unchanged: the manifest, the keychain items and the
 keybinding are properties of this machine, not of either engine. From step
-7 on, the remote route is a different sequence -- certificates, Parameter
-Store publication, the SSM port forward -- and it is documented once, in
-the README's "Quick start, remote" section, with the certificate lifecycle
-in [devcontainer.md](devcontainer.md)'s "Certificate lifecycle" section
-and `make cert-status` reporting expiry. The credential push needs no
-remote variant at all: it rides the active docker context, so after
-`make remote` the very same `make push-creds` and `make build` steps
+7 on, the remote route has a lifecycle of its own, described below; the
+certificate material's reference half is
+[devcontainer.md](devcontainer.md)'s "Certificate lifecycle" section, and
+the per-instance deployment file's contract is
+[remote-instances/README.md](../remote-instances/README.md). The credential
+push needs no remote variant at all: it rides whichever docker context the
+run addresses, so the very same `make push-creds` and `make build` steps
 deliver the same fragments to the EC2 engine's container.
+
+### The lifecycle at a glance
+
+One remote engine per project under `remote-instances/`; the instance name
+is the project name (e.g. `brimbooks`), never a geography or a stage. The
+`make help` INSTANCES group drives every stage:
+
+| Stage | Command | What it does |
+|---|---|---|
+| Scaffold (no EC2 exists yet) | `make instance-init INSTANCE=<project>` | Writes `remote-instances/<project>/terragrunt.hcl`; never deploys |
+| Edit the deployment | edit the file `instance-init` wrote | Instance type, volume sizes, availability zone, tags, AMI |
+| Provision and converge | `make instance-deploy INSTANCE=<project>` | Terragrunt apply, id link, trust chain where missing, secret push |
+| Open the forward | `make remote INSTANCE=<project>` | Refreshes the SSM port forward, points docker at the engine; blocks until interrupted |
+| Build and open | `make build INSTANCE=<project>`, then `make reopen INSTANCE=<project>` | Clone into a volume on the engine, build, run postCreate, attach VS Code |
+| Day to day | `make status`, `stop`, `start`, `exec` with `INSTANCE=<project>` | Container lifecycle; the checkout survives all of it |
+| Pause to save cost | `make instance-stop INSTANCE=<project>`, later `make instance-start INSTANCE=<project>` | Stops and starts the EC2 instance; containers, volumes and checkouts survive |
+| Retire | `make instance-destroy INSTANCE=<project>` | Terragrunt destroy plus cleanup of parameters, certificates, context and id |
+
+`make list-instances` reports every configured instance's live state at any
+point: EC2 state, recorded id, Parameter Store and certificate material,
+forwarded port, docker context. `make instance-status INSTANCE=<name>`
+narrows it to one instance; the targets that accept it also take `ALL=1`
+for every configured instance at once.
+
+### What scaffold and deploy do
+
+`make instance-init INSTANCE=<name>` writes the one file a new instance
+requires, `remote-instances/<name>/terragrunt.hcl`, from a template
+carrying the default sizing and a freshly allocated CIDR block, then prints
+the commonly edited inputs. It never runs Terragrunt. Its `REGION=` option
+selects only where the default AMI and availability zone are looked up; the
+deployment region is `REMOTE_AWS_REGION`, which every Terragrunt-running
+target requires with no default.
+
+`make instance-deploy INSTANCE=<name>` converges the instance: terragrunt
+init (bootstrapping the fleet's shared state bucket on the very first
+run), validate, a plan guarded against accidental replacement, apply of
+exactly the guarded plan, then follow-ups that run only when a status probe
+reports the corresponding piece missing -- recording the applied EC2 id,
+issuing and publishing the certificate material, and pushing secrets. When
+the material is already present, the steps are skipped entirely, so a
+deploy never restarts a live daemon; renewals are manual, via
+`make cert-status`. The replacement guard is the safety net worth knowing:
+a plan that would replace or destroy resources is refused unless
+`CONFIRM=replace` is set, naming the offending plan lines (see
+Troubleshooting).
+
+### Why mutual TLS, and what the certificates are for
+
+Two independent factors stack up between this machine and the docker
+daemon, each answering a different question. IAM authorizes the SSM
+session: the `ssm:StartSession` grant decides who may open the port forward
+at all, and removing it is the only revocation mechanism the platform has.
+The certificates then authenticate the docker API itself, in both
+directions, on top of that forward: the daemon presents a server
+certificate the client verifies, and the client presents a certificate the
+daemon verifies against the CA it holds. Neither factor substitutes for the
+other -- a valid SSO session alone commands nothing, and a copied client
+certificate is inert without a tunnel IAM authorizes.
+
+Certificate material lives per instance under `~/.docker/certs/<name>/`
+(or `$DOCKER_CONFIG/certs/<name>/`), and the same directory holds the
+instance's recorded EC2 id: an `instance-id` file written by
+`make instance-link` and, automatically, by `make instance-deploy`, read by
+every remote target's resolver -- so no id variable is ever set by hand,
+and an id dies with its instance. `make cert-status` reports client and CA
+expiry per instance; a renewal is a deliberate, manual step and touches
+nothing on the running instance, because the daemon accepts any client
+certificate that chains to its CA.
+
+### Stop, start and destroy
+
+`make instance-stop INSTANCE=<name>` stops the EC2 instance and waits until
+it reports stopped; `make instance-start INSTANCE=<name>` starts it again
+and waits for its SSM agent to report ready. Everything on the instance
+survives the cycle: containers, images, volumes, the cloned checkouts.
+The port forward does not -- open it again after a start with
+`make remote INSTANCE=<name>`; if connecting then still fails, reinstall
+the daemon's TLS material with `make cert-install INSTANCE=<name>`.
+
+`make instance-destroy INSTANCE=<name>` runs terragrunt destroy for that
+instance, then cleans up everything Terragrunt does not know about: its
+Parameter Store parameters, its docker context, its certificate directory
+(the recorded id file included). `ALL=1` destroys every configured
+instance, and only that form requires `CONFIRM=destroy`, because a typo'd
+ALL should never be all it takes to end the fleet.
+
+The remote-state bucket is shared by the whole fleet and stands outside
+every instance's lifecycle: one bucket per AWS account, region and
+repository (`tg-state-<account-id>-<region>-<repo-slug>-<suffix>`, derived
+in `remote-instances/root.hcl`), holding one state key per instance
+(`<name>/terraform.tfstate`). No destroy target deletes it; after the last
+instance of a fleet is gone, deleting the bucket by hand is a separate,
+deliberate step.
+
+### Working with several engines at once
+
+Every instance's port forward is its own: each instance's docker context
+records an allocated local port, so forwards for several instances coexist
+alongside the laptop's own engine without colliding. That is what makes the
+`ENGINE` variable work. It addresses one engine explicitly instead of
+following the machine-wide active docker context, so parallel terminals can
+drive different engines concurrently without any of them switching the
+context the others share.
+
+`ENGINE=local` names this machine's engine; any other value names an
+instance under `remote-instances/`. Both spellings below are the same
+command:
+
+```sh
+make status ENGINE=brimbooks
+ENGINE=brimbooks make status
+```
+
+Unset, every target behaves as before and follows the active context. Set,
+every docker call the target makes is aimed at the engine it names: one
+terminal can run `make build ENGINE=local` while another runs
+`make build ENGINE=brimbooks`, and a third drives a second instance. Each
+remote engine needs its forward open first: `make remote INSTANCE=<name>`
+opens it (in its own terminal -- it blocks), and later
+`make connect ENGINE=<name>` re-opens a single forward without touching
+what other terminals see. `make list-instances` shows the forward port each
+instance's context records.
+
+VS Code is per engine by attachment, not by switching: a window attaches to
+the container it was opened against, wherever that container lives. Run one
+window per engine and attach each to the container on that engine; `ENGINE`
+changes what `make` addresses, never what an open window talks to.
+
+Three targets refuse under `ENGINE` with exit code 2: `make local`,
+`make disconnect` and `make remote` switch the machine-wide docker context,
+which is exactly what `ENGINE` exists to avoid -- under it, every call is
+already aimed at the named engine and nothing needs switching. For the same
+reason, a run that names two different engines (`INSTANCE=a ENGINE=b`) is
+refused before any work happens.
 
 ## Troubleshooting
 
@@ -334,3 +469,38 @@ what is being committed; it already lives in the keychain and travels by
 push, so nothing needs it in git. There is no ignore list and no
 suppression annotation: a finding is either real, and fixed, or a
 suspected false positive requiring human review.
+
+**A deploy refuses with "this plan replaces or destroys resources".**
+Symptom: `make instance-deploy INSTANCE=<name>` stops before applying and
+prints the offending plan lines (`must be replaced`, or a `Plan:` line
+counting resources to destroy). Cause: an edit to the per-instance file
+forces Terraform to replace a resource that exists. What dies if you
+proceed: the current EC2 instance and its volumes, and with them every
+container on that engine and the cloned checkout in its volume -- unpushed
+work goes with it. Deploy converges the fresh instance it creates, but it
+cannot bring data back. Fix: push anything worth keeping from the container
+first (`make exec`), then re-run deliberately with
+`make instance-deploy INSTANCE=<name> CONFIRM=replace`. A plan that only
+changes resources in place never reaches this guard.
+
+**`make instance-destroy ALL=1` refuses.** Symptom: exit 1 with
+"ALL=1 destroys every configured instance; confirm it". Cause: the
+fleet-wide form destroys every instance under `remote-instances/` and
+demands an explicit confirmation for exactly that reason. Fix: if a fleet
+teardown is meant, `make instance-destroy ALL=1 CONFIRM=destroy`; to end
+one instance, `make instance-destroy INSTANCE=<name>`, which needs no
+confirmation.
+
+**A remote target reports the engine unreachable, or no recorded id.**
+Symptom: `make connect` or any docker call against the remote context fails
+with a connection diagnosis, or names a missing recorded id. Cause: the SSM
+port forward is not open -- it lives in the terminal that ran
+`make remote INSTANCE=<name>` and dies when that terminal is interrupted,
+when the laptop sleeps, or when the SSO session lapses. Fix: open or
+refresh the forward for that instance (`make remote INSTANCE=<name>`, after
+`aws sso login --profile <profile>` if the session expired), then retry.
+If the failure instead names a missing recorded id, record it with
+`make instance-link INSTANCE=<name> INSTANCE_ID=<id>` -- or re-run
+`make instance-deploy INSTANCE=<name>`, which records the id
+automatically. `make list-instances` shows the forward port each
+instance's context records.

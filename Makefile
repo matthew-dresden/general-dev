@@ -263,7 +263,7 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "NO_CACHE=1"            ""       "What the no-cache targets set. Works with build and rebuild directly."
 	@printf '\n\033[1mPREREQUISITES\033[0m\n'
 	@printf '  %-23s %s\n' "container targets"     "docker"
-	@printf '  %-23s %s\n' "remote engine"         "aws, session-manager-plugin, and REMOTE_INSTANCE_ID in shell.env"
+	@printf '  %-23s %s\n' "remote engine"         "aws, session-manager-plugin, and the instance id recorded by instance-deploy (make instance-link)"
 	@printf '  %-23s %s\n' "build and rebuild"     "devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli"
 	@printf '  %-23s %s\n' "lint"                  "uv                                      brew install uv"
 	@printf '  %-23s %s\n' "test"                  "uv, zsh                                 uv: $(TEST_INSTALL_HINT_uv)   zsh: $(TEST_INSTALL_HINT_zsh)"

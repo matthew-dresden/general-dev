@@ -1,27 +1,40 @@
 # remote-instances
 
-Terragrunt deployment layer for the remote devcontainer instance. This
+Terragrunt deployment layer for the remote devcontainer instances. This
 directory has no deployment of its own: it is the shared configuration every
-deployment includes, plus a document for a developer or agent to write a new
-one. The Terraform module this layer deploys, and the full input surface it
+deployment includes, plus one directory per instance. The `make help`
+INSTANCES group drives an instance's whole lifecycle against these
+directories -- `make instance-init` scaffolds the one file a new instance
+needs, `make instance-plan` and `make instance-deploy` run the underlying
+Terragrunt against it, `make instance-stop`/`instance-start` power the EC2
+instance, and `make instance-destroy` tears it down and cleans up. The
+Terraform module this layer deploys, and the full input surface it
 accepts, is documented in
 [`provider/aws/README.md`](../provider/aws/README.md). The operations-facing
 checklist for a team that provisions the instance on the requester's behalf,
 generated from the same variable surface, is
 [`docs/ec2-requirements.md`](../docs/ec2-requirements.md). This document
 covers neither: it is the reference for the directory layout under
-`remote-instances/` itself, and for the one file a new instance requires.
+`remote-instances/` itself, for the one file a new instance requires, and
+for the sizing and state-model decisions the defaults encode.
 
 ## What a per-instance directory contains
 
 Decision D6 (spec `devcontainer-platform.md` Section 13) separates the
 module from its deployments: an instance is configured by writing an
-`inputs` block, never by editing the module. Adding an instance is adding a
-directory under `remote-instances/` and nothing else (Section 9); nothing
-outside the new directory changes.
+`inputs` block, never by editing the module. Adding an instance is
+`make instance-init INSTANCE=<name>`, which creates a directory under
+`remote-instances/` holding exactly one scaffolded file, `terragrunt.hcl`,
+and nothing else (Section 9); nothing outside the new directory changes.
+The scaffold never deploys and never runs Terragrunt; it only pins a
+default AMI (Canonical's current Ubuntu 24.04 arm64, resolved from SSM
+unless `AMI=` names one), allocates a free CIDR block, and writes the
+file below for you to edit. Re-running the target on an existing directory
+is refused, so scaffolding can never silently replace edits already made.
 
 A per-instance directory holds exactly one file, `terragrunt.hcl`, with three
-parts:
+parts -- this file is the contract `make instance-init` scaffolds and what a
+user edits to change the deployment:
 
 - **`include "root"`**, resolving [`root.hcl`](./root.hcl). It supplies the
   remote state backend, the derived, reproducible state bucket name, the
@@ -138,6 +151,7 @@ layer enforces that agreement:
 | Docker context | `<repo-slug>-<name>` (`general-dev-<name>` in this repository) | `E6` |
 | Parameter prefix | `/devcontainer/<name>/` | The security submodule's inline IAM policy (`provider/aws`), scoped from `var.instance_name` |
 | Certificates | `$DOCKER_CONFIG/certs/<name>/`, or `~/.docker/certs/<name>/` when `DOCKER_CONFIG` is unset | `E6` |
+| Recorded EC2 id | `<certs-root>/<name>/instance-id`, the same directory the certificates live in | `E6` (`make instance-link` writes it; `make instance-deploy` records the applied id automatically) |
 | Local forwarded port | Allocated per instance, recorded, never a fixed number | `E6` |
 
 The docker context row's Pattern is `<repo-slug>-<name>`, `repo.repo_slug`
@@ -155,7 +169,7 @@ one directory while this table points at another.
 "Owned by" above names what creates or manages each artifact at runtime
 (Terragrunt, the security submodule's inline IAM policy, `E6`'s transport
 and certificate modules). Deriving the value programmatically -- turning
-an instance name into any one of these six strings or paths -- is a
+an instance name into any one of these seven strings or paths -- is a
 separate concern spec Section 4.5 assigns to exactly one Python module:
 `.claude/plugins/devcontainer/scripts/devcontainer_config/instances.py`.
 A script or skill that needs one of these values calls into that module
@@ -190,26 +204,84 @@ INSTANCE=<name> make <target>          # name one for this command
 export DEFAULT_REMOTE_INSTANCE=<name>  # or set a default for the shell
 ```
 
-`make instances` shows what is available.
+`make list-instances` shows what is available.
 
 ## Seeing what is configured
 
-`make instances` lists every instance under `remote-instances/`, with the AWS
-region its deployment declares and the docker context it addresses, and marks
-the one the active context currently points at.
+`make list-instances` lists every instance under `remote-instances/` with
+its live state, one row per instance:
 
 ```text
-INSTANCE  REGION     ACTIVE  DOCKER CONTEXT
-sandbox   us-east-1          <repo-slug>-sandbox
-personal  eu-west-2    *     <repo-slug>-personal
+INSTANCE  STATE    ID               PARAMS  CERTS  FORWARD  CONTEXT
+brimbooks running  i-0abc123def456  yes     yes    49231    general-dev-brimbooks
+sandbox   stopped  -                no      no     -        absent
 ```
 
-Two "unknown" cases are reported rather than guessed. An instance whose
-deployment records no region prints `-`, instead of the region the caller
-happens to be using, because two instances may live in different regions and
-printing one against both would be confidently wrong. And when the active
-docker context cannot be determined at all, no row is marked, instead of
-assuming the first one is current.
+A dash means the probe could not answer -- no recorded id yet, no
+certificate material yet, or an AWS or docker surface that did not reply --
+rather than a confirmed no; a failed probe is also reported on stderr, one
+line per row, and the command exits non-zero when any row's probes failed.
+`PARAMS` and `CERTS` are the same status probes `make instance-deploy`
+consults before it decides which trust-chain steps still need to run.
+`FORWARD` is the local port the instance's docker context records, so one
+listing shows at a glance which engines have forwards open.
+`make instance-status INSTANCE=<name>` renders the same row for one
+instance; `ALL=1` covers every instance; the underlying cli subcommands
+(`python3 -m devcontainer_config.cli instance-list` / `instance-status`)
+accept `--json` for one single-line JSON object per instance.
+
+## Sizing: the default instance type
+
+`make instance-init` scaffolds `instance_type = "c8g.xlarge"`: 4 vCPU and
+8 GiB on Graviton4, the cheapest 4 vCPU / 8 GiB ARM instance in us-east-1,
+priced at roughly $0.12 per hour. That is the default for a real engine --
+the size a project's day-to-day container, image builds and test runs fit
+in without tuning. For a throwaway engine that only proves a pipeline
+works, the scaffold's comment names `t4g.medium` as the proven cheapest
+size; sizes below it (2 GiB, `t4g.small`) OOM during devcontainer image
+builds, which is why the floor sits where it does. The input is an
+ordinary `inputs` entry: edit it in the instance's own `terragrunt.hcl`
+and apply the edit with `make instance-deploy INSTANCE=<name>`.
+
+## Remote state: one bucket per fleet
+
+All instances of a repository, in one account and region, share one
+remote-state bucket. `root.hcl` derives its name
+(`tg-state-<account-id>-<region>-<repo-slug>-<suffix>`) from the account,
+the region in `REMOTE_AWS_REGION`, the repository's git remote slug and a
+committed suffix, so every instance computes the same name without any
+per-instance file naming it. What is per instance is the state *key*:
+`<name>/terraform.tfstate`, derived from the instance directory's own
+path, so two instances never share state even though they share a bucket.
+
+Terragrunt bootstraps the bucket itself -- versioning, encryption and
+TLS enforcement included -- the first time any instance runs a command
+with backend bootstrapping, which every Terragrunt-running make target
+does on your behalf (`make instance-plan`'s help line names this). Because
+the bucket is fleet-wide, it stands outside the instance lifecycle:
+`make instance-destroy` removes the instance's Parameter Store parameters,
+docker context, certificates and recorded id; its state *key* survives the
+destroy (the record of what existed), and the bucket is never touched.
+After the last instance of a fleet is destroyed, deleting the bucket is a
+separate, manual step -- and one worth pausing over, since it takes every
+instance's state history with it.
+
+## The make targets, and the Terragrunt underneath them
+
+Every instance-* target acts on one instance (`INSTANCE=`) or, with
+`ALL=1`, every configured instance, running the underlying tooling in that
+instance's own directory. `make instance-plan` runs `terragrunt plan` and
+never applies; `make instance-deploy` runs validate, a guarded plan, apply
+and the follow-up converge steps; `make instance-destroy` runs
+`terragrunt destroy` and then cleans up everything Terragrunt does not
+know about. The underlying mechanism, should you need it directly, is
+ordinary Terragrunt in the instance's directory: `cd
+remote-instances/<name>`, export `REMOTE_AWS_REGION` (the same
+hard-required variable every make target demands), then `terragrunt init`,
+`plan`, `apply` or `destroy`. The make targets exist so the sequence, its
+guards (the replacement refusal in deploy, the `ALL=1` destroy
+confirmation) and the cleanup that must follow a destroy are not re-typed
+from memory.
 
 ## Reusing an existing network: `create_network = false`
 
@@ -263,9 +335,11 @@ target once `INSTANCE` and `DEFAULT_REMOTE_INSTANCE` are both unset;
 committing one here would hand every fresh clone a default instance
 belonging to somebody else, with a name they did not choose and a region
 they may not use. An empty `remote-instances/` directory on a remote backend
-fails too, with a non-zero exit: Section 4.1.1 directs the operator to
-`/devcontainer:setup-remote`, which is also where the file above comes
-from. The skill collects an instance's identity, its network and
-security choices and its sizing through an interview and writes the
-per-instance file from the answers, rather than a developer copying and
-hand-editing the example above.
+fails too, with a non-zero exit. The file above is not copied from this
+document, either: `make instance-init INSTANCE=<name>` scaffolds it,
+honoring the contract described here (the two includes, and an `inputs`
+block carrying only what genuinely differs for the one deployment), and
+`/devcontainer:setup-remote` performs the same provisioning and certificate
+steps while verifying each one. A developer edits the scaffolded file
+afterwards; nobody types the
+whole file from the example.

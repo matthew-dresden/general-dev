@@ -43,6 +43,7 @@ does now. The identifiers match Section 0 of the platform specification.
 | `.devcontainer/` | Devcontainer definition (image + features), postcreate setup, shared shell functions |
 | `.devcontainer/hostcreds.map.json` (+ committed `.example`) | Hostcreds manifest, gitignored: every credential this machine pushes into the container, named with its source |
 | `.devcontainer/remote-docker/` | Remote EC2 engine: transport, certificate and secret entry points, instance config, see its [README](.devcontainer/remote-docker/README.md) |
+| `remote-instances/` | One Terragrunt deployment per remote engine, scaffolded by `make instance-init`; see its [README](remote-instances/README.md) |
 | `.devcontainer/nix-family-os/`, `wsl-family-os/` | Host-side proxy (tinyproxy) helpers for local mode |
 | `repos/` | Where project repositories are cloned. Only its `.gitkeep` is tracked |
 | `.vscode/settings.json` | Workspace git-repo detection (nested clones) |
@@ -137,15 +138,22 @@ Missing tools fail fast with the install command.
 **The make route, in the order they are run:**
 
 ```sh
-make cert-ca          # once per instance: create its certificate authority
-make cert-client      # the client certificate make connect presents
-make cert-publish     # issue server material and publish it to Parameter Store
-make cert-install     # the instance fetches it and starts its daemon
-make push-secrets     # publish this project's shell.env and profile map
-make connect          # open the SSM port forward, point docker at the instance
-make build            # clone into a volume on the engine, build, run postCreate
-make exec             # a shell inside the container
+make instance-init INSTANCE=<project>    # scaffold remote-instances/<project>/terragrunt.hcl
+                                         # then edit its inputs: instance type, volume
+                                         # sizes, availability zone, tags
+make instance-deploy INSTANCE=<project>  # converge: provision, record the EC2 id, trust
+                                         # chain where missing, push secrets
+make remote INSTANCE=<project>           # open the SSM port forward, point docker at the
+                                         # instance (blocks until interrupted)
+make build INSTANCE=<project>            # clone into a volume on the engine, build, run postCreate
+make exec INSTANCE=<project>             # a shell inside the container
 ```
+
+`make instance-init` writes the one file a new instance needs and never
+deploys; `make instance-deploy` applies it and is safe to re-run. A deploy
+prints the follow-on chain above when it finishes. `make list-instances`
+lists every configured instance with its live status: EC2 state, recorded
+id, Parameter Store and certificate material, forward port, docker context.
 
 **The skill route:** `/devcontainer:setup-remote` performs the same
 provisioning and certificate steps and verifies each one before continuing;
@@ -153,9 +161,14 @@ provisioning and certificate steps and verifies each one before continuing;
 renewal; `/devcontainer:engine` switches which engine is active; and
 `/devcontainer:launch` builds and opens the container.
 
-Add `INSTANCE=<name>` to any of the targets above to act on a specific
-instance, or set `DEFAULT_REMOTE_INSTANCE`. `make list-instances` lists
-every configured instance with its live status.
+Anywhere the targets above omit `INSTANCE`, the resolver's order applies:
+an explicit `INSTANCE=` wins, then `DEFAULT_REMOTE_INSTANCE`, then a sole
+configured instance; with several configured and no selector, the command
+stops and names them instead of picking one. To address an engine without
+switching the context other terminals share, prefix `ENGINE=local` or
+`ENGINE=<instance-name>` -- see
+[docs/environment-setup.md](docs/environment-setup.md)'s "Working with
+several engines at once".
 
 `make build` blocks until the container is actually up and exits non-zero if
 the build or postCreate fails. It clones from **origin**, not from this
@@ -242,6 +255,13 @@ Every project gets its own container + volume on the shared engine.
 - `make verify-container` re-checks the pushed credentials inside the
   container: fragment modes, the startup block, silent shell startup, and
   git and aws reachability for whichever sources the manifest names.
+- One remote engine per project under `remote-instances/`: the `make help`
+  INSTANCES group scaffolds, converges, powers and retires them
+  (`make list-instances` shows every instance's live state), and
+  `ENGINE=local|<name>` addresses any engine from any terminal without
+  switching contexts -- see
+  [docs/environment-setup.md](docs/environment-setup.md)'s "Working with
+  several engines at once".
 - Claude Code starts on the classic renderer and never offers the flicker-free
   fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen`
   still opts in for the current container.

@@ -339,7 +339,7 @@ fails too, with a non-zero exit. The file above is not copied from this
 document, either: `make instance-init INSTANCE=<name>` scaffolds it,
 honoring the contract described here (the two includes, and an `inputs`
 block carrying only what genuinely differs for the one deployment), and
-`/devcontainer:setup-remote` performs the same provisioning and certificate
+`gd-env-setup-remote` performs the same provisioning and certificate
 steps while verifying each one. A developer edits the scaffolded file
 afterwards; nobody types the
 whole file from the example.

@@ -337,7 +337,7 @@ follow.
 
 `make cert-status`'s exit code is deliberately three-valued: `0` when every
 certificate is outside the warning window, `0` with a `RENEW` row naming the
-`/devcontainer:certs INSTANCE=<name>` invocation that reissues it when a
+`gd-cert-lifecycle INSTANCE=<name>` invocation that reissues it when a
 certificate is inside the window but not yet expired, and `1` when any
 certificate has already expired. A `RENEW` that failed the build would train
 the operator to ignore it, and a certificate with days left on it still
@@ -367,7 +367,7 @@ Homebrew does not guarantee `openssl@3` is symlinked into that shared
 prefix on every install -- then confirm `openssl version` reports `OpenSSL
 3.x`, not `LibreSSL`; on Linux/WSL, most current distributions'
 `apt-get install openssl` already satisfies the floor.
-The `/devcontainer:setup-local` skill checks this alongside the other host
+The `gd-env-setup-local` skill checks this alongside the other host
 tools, and `certs/SKILL.md`'s `## Failure semantics` documents the failure
 this produces when the requirement is unmet.
 
@@ -404,8 +404,8 @@ handshake failure into the SAN requirement or a connection diagnosis
 (`transport.diagnose_handshake_failure`) rather than a bare, opaque TLS
 error -- see `docs/devcontainer.md`'s "Transport" section.
 `.claude/plugins/devcontainer/scripts/devcontainer_config/hostprobe.py`
-(E1-F3-S1-T1) is the docker-handshake probe `engine`, `setup-local` and
-`setup-remote` share for their own, simpler "does the engine answer" check.
+(E1-F3-S1-T1) is the docker-handshake probe `gd-instance-list`, `gd-env-setup-local` and
+`gd-env-setup-remote` share for their own, simpler "does the engine answer" check.
 
 `DEVCONTAINER_TRANSPORT` selects the transport for the `make connect` entry
 point. Since the cutover there is one transport, so the selector has one
@@ -580,7 +580,7 @@ failure:
   Makefile, per spec Section 1.1) passes `local_backend_active=True` to
   `instances.resolve` directly instead of through this flag.
 - An empty (or absent) `remote-instances/` directory on a remote backend
-  fails, directing the operator to `/devcontainer:setup-remote`.
+  fails, directing the operator to `gd-env-setup-remote`.
 
 Ambiguity -- more than one instance configured and neither selector chose
 one -- fails naming every configured instance and both remedies,

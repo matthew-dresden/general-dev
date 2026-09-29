@@ -1,11 +1,11 @@
 ---
-name: setup-local
+name: gd-env-setup-local
 description: Configures this machine for the local docker engine by writing shell.env, devcontainer-environment-variables.json and aws-profile-map.json from an interview, then verifying them.
 ---
 
-# setup-local
+# gd-env-setup-local
 
-`/devcontainer:setup-local` is the worked example in spec Section 2, G1: a
+`gd-env-setup-local` is the worked example in spec Section 2, G1: a
 fresh clone reaches a working local container without reading documentation.
 This skill decides nothing about what a valid answer looks like, what a
 rendered file contains, or what "complete" means -- `answers`, `render` and
@@ -18,7 +18,7 @@ Where this skill cannot act itself -- installing an absent prerequisite,
 starting a stopped engine -- it states the exact command, waits for the
 operator to run it, then re-probes with `hostprobe` itself before
 continuing. It never assumes the action succeeded, and it never asks the
-operator to re-invoke `/devcontainer:setup-local` to force a re-check.
+operator to re-invoke `gd-env-setup-local` to force a re-check.
 
 Interview backend: local
 
@@ -45,13 +45,13 @@ Every row below whose remedy names an operator action follows the Section
 4.2 interaction contract: this skill states the exact command, waits for the
 operator to run it, then re-probes with `hostprobe` itself (`probe_tools` for
 a tool, `probe_docker` for a context or the engine) before continuing,
-rather than asking the operator to re-invoke `/devcontainer:setup-local`.
+rather than asking the operator to re-invoke `gd-env-setup-local`.
 
 This list is the local subset of Section 4.2.1's check list that this skill
 itself owns. Disk headroom and `HOST_PROXY` agreeing with a reachable proxy
 are also named by Section 4.2.1's local list; this skill collects
 `host_proxy` and `host_proxy_url` in its own interview but does not probe
-either one, because the `engine` skill (E4-F2-S2-T1) owns the full Section
+either one, because the `gd-instance-list` skill (E4-F2-S2-T1) owns the full Section
 4.2.1 validation contract and runs both checks. An unreachable proxy written
 here surfaces there, or at `make build` time, rather than during this
 interview.
@@ -66,11 +66,11 @@ interview.
 | docker context list obtained | every later docker check, since none can run against an unknown context set | docker context ls failed, or docker is not on PATH | If docker is absent, install it with the command the docker CLI row above names. If `docker context ls --format {{.Name}}` ran and failed, run that exact command manually, investigate why it failed, then this skill waits and re-probes with `hostprobe.probe_docker`. |
 | local_docker_context exists | `make build` selecting a context that was never created | the answered local_docker_context is not among the configured docker contexts | Create it (`docker context create`), or re-answer `local_docker_context` with one of the contexts `hostprobe` lists. This skill never creates a context itself; it re-probes with `hostprobe.probe_docker(runner, requested_context=<answer>)` and re-asks the field rather than accepting an unconfirmed context. |
 | docker engine answers | `make build`, and every command that needs the daemon reachable | the docker daemon behind the active context did not answer `docker version` in time | Start the engine behind the active context: open OrbStack or Docker Desktop, or start `dockerd`, whichever is installed. Then this skill waits and re-probes with `hostprobe.probe_docker`. |
-| three private files complete | the container's postCreate step, which reads all three | one of shell.env, devcontainer-environment-variables.json or aws-profile-map.json could not be read or parsed | Move the three private files aside -- `render.write_all` is always called with `overwrite=False`, so it never replaces a file already on disk -- then re-run `/devcontainer:setup-local` against the clean tree; see the existing-file row in `## Failure semantics`. |
-| no placeholders remain | a value the operator never supplied reaching the running container as literal text | an active configuration line still contains an unreplaced `<placeholder>` | Move the three private files aside -- `render.write_all` is always called with `overwrite=False`, so it never replaces a file already on disk -- then re-run `/devcontainer:setup-local` against the clean tree; see the existing-file row in `## Failure semantics`. |
-| BASH_ENV matches the workspace path | every non-interactive shell in the container sourcing nothing | shell.env's BASH_ENV does not match the in-container workspace path | Move the three private files aside -- `render.write_all` is always called with `overwrite=False`, so it never replaces a file already on disk -- then re-run `/devcontainer:setup-local` against the clean tree; see the existing-file row in `## Failure semantics`. |
-| identity variables agree across files | the container's actual environment disagreeing with the file every shell sources | an identity variable disagrees between shell.env and devcontainer-environment-variables.json | Move the three private files aside -- `render.write_all` is always called with `overwrite=False`, so it never replaces a file already on disk -- then re-run `/devcontainer:setup-local` against the clean tree; see the existing-file row in `## Failure semantics`. |
-| aws-profile-map.json agrees with AWS_CONFIG_ENABLED | the container's AWS profile setup rendering nothing, or silently ignoring a populated map | aws-profile-map.json's populated-or-empty state disagrees with AWS_CONFIG_ENABLED | Move the three private files aside -- `render.write_all` is always called with `overwrite=False`, so it never replaces a file already on disk -- then re-run `/devcontainer:setup-local` against the clean tree; see the existing-file row in `## Failure semantics`. |
+| three private files complete | the container's postCreate step, which reads all three | one of shell.env, devcontainer-environment-variables.json or aws-profile-map.json could not be read or parsed | Move the three private files aside -- `render.write_all` is always called with `overwrite=False`, so it never replaces a file already on disk -- then re-run `gd-env-setup-local` against the clean tree; see the existing-file row in `## Failure semantics`. |
+| no placeholders remain | a value the operator never supplied reaching the running container as literal text | an active configuration line still contains an unreplaced `<placeholder>` | Move the three private files aside -- `render.write_all` is always called with `overwrite=False`, so it never replaces a file already on disk -- then re-run `gd-env-setup-local` against the clean tree; see the existing-file row in `## Failure semantics`. |
+| BASH_ENV matches the workspace path | every non-interactive shell in the container sourcing nothing | shell.env's BASH_ENV does not match the in-container workspace path | Move the three private files aside -- `render.write_all` is always called with `overwrite=False`, so it never replaces a file already on disk -- then re-run `gd-env-setup-local` against the clean tree; see the existing-file row in `## Failure semantics`. |
+| identity variables agree across files | the container's actual environment disagreeing with the file every shell sources | an identity variable disagrees between shell.env and devcontainer-environment-variables.json | Move the three private files aside -- `render.write_all` is always called with `overwrite=False`, so it never replaces a file already on disk -- then re-run `gd-env-setup-local` against the clean tree; see the existing-file row in `## Failure semantics`. |
+| aws-profile-map.json agrees with AWS_CONFIG_ENABLED | the container's AWS profile setup rendering nothing, or silently ignoring a populated map | aws-profile-map.json's populated-or-empty state disagrees with AWS_CONFIG_ENABLED | Move the three private files aside -- `render.write_all` is always called with `overwrite=False`, so it never replaces a file already on disk -- then re-run `gd-env-setup-local` against the clean tree; see the existing-file row in `## Failure semantics`. |
 
 ## Procedure
 

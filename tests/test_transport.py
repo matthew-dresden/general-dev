@@ -1800,7 +1800,7 @@ def test_diagnose_handshake_failure_states_the_san_requirement(stderr: str) -> N
 
     assert "IP:127.0.0.1" in message
     assert "DNS:localhost" in message
-    assert "/devcontainer:certs INSTANCE=sandbox" in message
+    assert "gd-cert-lifecycle INSTANCE=sandbox" in message
 
 
 def test_diagnose_handshake_failure_produces_the_forward_diagnosis_for_a_connection_failure() -> (
@@ -2211,7 +2211,7 @@ def test_handshake_san_diagnosis_names_the_reissue_invocation_for_the_created_in
     message = str(excinfo.value)
     assert "IP:127.0.0.1" in message
     assert "DNS:localhost" in message
-    assert "/devcontainer:certs INSTANCE=sandbox" in message
+    assert "gd-cert-lifecycle INSTANCE=sandbox" in message
 
 
 # ---------------------------------------------------------------------------

@@ -627,7 +627,7 @@ def test_resolve_empty_remote_instances_on_remote_backend_names_setup_remote(
     (root / instances.INSTANCES_DIR_NAME).mkdir()
     _clear_resolution_env(monkeypatch)
 
-    with pytest.raises(instances.NoInstancesConfiguredError, match=r"/devcontainer:setup-remote"):
+    with pytest.raises(instances.NoInstancesConfiguredError, match=r"gd-env-setup-remote"):
         instances.resolve(root, local_backend_active=False)
 
 
@@ -638,7 +638,7 @@ def test_resolve_no_remote_instances_directory_at_all_names_setup_remote(
     root = generated_root(tmp_path)
     _clear_resolution_env(monkeypatch)
 
-    with pytest.raises(instances.NoInstancesConfiguredError, match=r"/devcontainer:setup-remote"):
+    with pytest.raises(instances.NoInstancesConfiguredError, match=r"gd-env-setup-remote"):
         instances.resolve(root, local_backend_active=False)
 
 
@@ -740,7 +740,7 @@ def test_resolve_instance_cli_prints_nothing_and_exits_one_on_no_instances_confi
     captured = capsys.readouterr()
     assert exit_code == 1
     assert captured.out == ""
-    assert "/devcontainer:setup-remote" in captured.err
+    assert "gd-env-setup-remote" in captured.err
 
 
 def test_module_help_lists_resolve_instance(

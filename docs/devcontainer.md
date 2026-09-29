@@ -302,7 +302,7 @@ EC2 reference, troubleshooting) live in
    | `~/.vscode-server` handed to the container user | the `mounts` volume, required |
    | `shell.env` sourcing into `.bashrc` / `.zshenv`, plus the hostcreds credential-startup block appended to both | `python3` + `devcontainer_config` on `PYTHONPATH`, required |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
-   | `claude-settings.json` merged into `~/.claude/settings.json` | `claude-code` feature + `jq` |
+   | `claude-settings.json` merged into `~/.claude/settings.json` (GLM endpoint, model tiers, `apiKeyHelper` reading `ZAI_API_KEY`) | `claude-code` feature + `jq` + a `ZAI_API_KEY` manifest entry |
    | opencode installed globally, `~/.config/opencode/opencode.json` written from `.devcontainer/opencode.json` (GLM 5.3 flagship + GLM 5.3 Flash; the z.ai key is injected at run time through `{env:ZAI_API_KEY}`, supplied by the hostcreds startup block from a `ZAI_API_KEY` manifest entry) | the node feature + `jq` |
    | `tm-*` commands sourced into both shells | `tmux` |
    | `resmon-disks.py` linked into `~/.local/bin` for postAttach | `python3`, required |
@@ -338,16 +338,30 @@ EC2 reference, troubleshooting) live in
      root-owned, which reported a successful build and left the update broken
      until someone ran `claude update` by hand.
 
-   `.devcontainer/claude-settings.json` is the desired state for Claude Code's
-   own `~/.claude/settings.json`, merged in rather than written over so
-   anything the CLI has already stored there survives. `$HOME` is not a volume,
-   so a rebuild starts from an empty `~/.claude` and the merge is what makes
-   the choice repeatable. It currently sets `tui` to `default`, the classic
-   main-screen renderer. The value matters less than the key being present:
-   Claude Code offers the flicker-free fullscreen renderer on startup only
-   while `tui` is unset, so declaring it both picks the renderer and retires
-   the prompt and the tip that advertises it. `/tui fullscreen` still switches
-   the running container, and postCreate puts it back on the next rebuild.
+    `.devcontainer/claude-settings.json` is the desired state for Claude Code's
+    own `~/.claude/settings.json`, merged in rather than written over so
+    anything the CLI has already stored there survives. `$HOME` is not a volume,
+    so a rebuild starts from an empty `~/.claude` and the merge is what makes
+    the choice repeatable. It currently sets `tui` to `default`, the classic
+    main-screen renderer. The value matters less than the key being present:
+    Claude Code offers the flicker-free fullscreen renderer on startup only
+    while `tui` is unset, so declaring it both picks the renderer and retires
+    the prompt and the tip that advertises it. `/tui fullscreen` still switches
+    the running container, and postCreate puts it back on the next rebuild.
+
+    The same file also points Claude Code at the z.ai GLM Coding Plan, the same
+    provider opencode uses. `ANTHROPIC_BASE_URL` selects the
+    Anthropic-compatible endpoint, and the `ANTHROPIC_DEFAULT_*_MODEL` entries
+    map Claude Code's model tiers onto GLM models: the Opus tier resolves to
+    `glm-5.3` (flagship) and the Sonnet and Haiku tiers to `glm-5.3-flash`.
+    The `[1m]` suffix opts each model into the 1M-token context window, which
+    `CLAUDE_CODE_AUTO_COMPACT_WINDOW` sizes to match. Choosing a model inside
+    Claude Code therefore chooses a GLM model: `/model opus` (or
+    `claude --model opus`) runs the flagship, `/model sonnet` runs Flash, and
+    `/status` shows which one is active. The key itself is never stored in the
+    file: `apiKeyHelper` runs `printenv ZAI_API_KEY`, so each request pulls the
+    credential from the environment variable the hostcreds startup block
+    exports, and an unset variable fails the request instead of falling back.
 
 ## Git credentials
 
@@ -562,10 +576,10 @@ section, `DOCKER_CONFIG` row, the single place that default is defined);
 The client certificate's ninety-day lifetime is the one an operator actually
 lives with day to day, and it is sustainable only because rotating it is
 cheap: `make cert-status` reports a `RENEW` row, naming the exact
-`/devcontainer:certs INSTANCE=<name>` invocation that clears it, once a
+`gd-cert-lifecycle INSTANCE=<name>` invocation that clears it, once a
 client certificate is inside its warning window (`CERT_WARN_DAYS`, default
 14 days); running that invocation's "Rotate client certificate" operation
-(`.claude/plugins/devcontainer/skills/certs/SKILL.md`) issues a fresh
+(`.agents/skills/gd-cert-lifecycle/SKILL.md`) issues a fresh
 client key and certificate from the same CA and installs them atomically.
 
 **Rotating a client certificate touches nothing on the instance.** The daemon
@@ -698,7 +712,7 @@ or daemon problem before it reads like a certificate one.
 `transport.diagnose_handshake_failure` exists to close that gap: it
 recognizes that shape (and the related `x509: cannot validate certificate
 for 127.0.0.1 because it doesn't contain any IP SANs`) and states the SAN
-requirement, both required values, and the `/devcontainer:certs
+requirement, both required values, and the `gd-cert-lifecycle
 INSTANCE=<name>` invocation that reissues the server certificate, instead
 of surfacing the bare TLS error. A connection failure -- the forward not
 established, the daemon not listening -- is translated into a distinct
@@ -821,20 +835,21 @@ the `PreToolUse` bypass-denial hook registration the previous section describes;
 both keys coexist in the same file.
 
 With the marketplace registered and the plugin enabled, Claude Code resolves
-each skill directory under `.claude/plugins/devcontainer/skills/<name>/` as the
-slash command `/devcontainer:<name>`. Section 4.2 of
-`repos/spec/devcontainer-platform.md` names nine skills that will populate that
-directory: `setup-local`, `setup-remote`, `engine`, `launch`, `doctor`,
-`secrets`, `certs`, `teardown`, `quality`. Each lands in its own work unit as a
-Markdown-only change, because this plugin container already exists;
-`tests/test_skill_lint.py` is the skill lint suite that checks it.
+each skill directory under `.claude/plugins/devcontainer/skills/` as the
+slash command `/devcontainer:gd-<name>`. That directory is not a real
+directory: it is a relative symlink to `../../../.agents/skills`, the
+canonical, agent-agnostic skills home, where every skill lives at
+`.agents/skills/<name>/SKILL.md` under a `gd-`-prefixed name and
+cross-references between skills use the bare `gd-<name>` form. Other agents
+read `.agents/skills/` directly; nothing copies skill bodies anywhere, so no
+surface can drift from the canonical roster.
 
-The table below is the skill roster: one row per skill directory under
-`.claude/plugins/devcontainer/skills/`, added by that skill's own work unit.
-`tests/test_skill_lint.py`'s `check_plugin` asserts the row set and the
-directory set are equal, so the table cannot drift from what is actually
-installed, and enforces the rest of the plugin's structural contract in the
-same run:
+The canonical roster table lives in `docs/skills.md`: one row per skill
+directory under `.agents/skills/`, with the per-skill summaries.
+`tests/test_skill_lint.py`'s `check_plugin` asserts that table's row set and
+the directory set are equal, so the table cannot drift from what is actually
+installed, and enforces the rest of the structural contract in the same
+run:
 
 - `plugin.json`'s `name` equals the plugin directory name, and
   `marketplace.json` has exactly one `plugins` entry whose `source` resolves
@@ -842,7 +857,9 @@ same run:
 - `.claude/settings.json` registers the plugin directory as a `directory`
   marketplace and enables it in `enabledPlugins`.
 - Every `SKILL.md` opens with a `---`-delimited frontmatter block holding a
-  non-empty `description` and a `name` matching its directory.
+  non-empty `description` no longer than 500 characters (opencode caps
+  descriptions at 1024; the lint enforces both limits), and a `name`
+  matching its directory and the `^gd-[a-z0-9]+(-[a-z0-9]+)*$` pattern.
 - Every skill that declares `Interview backend: <backend>` restricts
   `<backend>` to one of `answers.BACKENDS`, and gives a `## Questions` table
   with header `| Field | Prompt |` whose `Field` column, as a set, equals
@@ -861,17 +878,18 @@ same run:
   every row. A `SKILL.md` with no `## Checks` table, or one whose header is
   misspelled or reordered, is treated as having no such table and produces
   no finding; the `Prevents` column's content is never validated.
-- Every `/devcontainer:<name>` reference, in any `SKILL.md` or in this
-  document, names a skill present in the roster below.
+- Every bare `gd-<name>` reference, in any `SKILL.md`, in `docs/skills.md`,
+  or in this document, names a skill present in the roster.
 
-| Skill | Invocation |
+The roster, grouped into the seven families `gd-help` maps in prose:
+
+| Family | Skills |
 |---|---|
-| setup-local | `/devcontainer:setup-local` -- asks the local backend's required answers (Section 5.1), writes and verifies the three private files, checks prerequisites, and ends by naming `make build` |
-| setup-remote | `/devcontainer:setup-remote` -- asks the local backend's required answers plus instance name, id, region and profile (Section 5.1), verifies the SSO session and instance state, gates any Terragrunt apply behind PRECHECK-APPLY, issues certificates, creates the docker context and port forward, and ends by naming `make build INSTANCE=<name>` |
-| engine | `/devcontainer:engine` -- defines the validation contract the other skills reuse: the thirteen checks of Section 4.2.1 (six local, seven remote), asking which instance only when Section 4.1.1 resolution is ambiguous, fixing only what is reversible and needs no operator credential (selecting an existing context, re-establishing a port forward), and ending in a per-check verdict table |
-| launch | `/devcontainer:launch` -- asks nothing, delegates engine reachability (and with it the `rdc_backend` local-against-remote selection) to `/devcontainer:engine`, then resolves the container itself through `rdc_container_ids` and `rdc_require_container` and picks `make build`, `make start`, `make restart` or `make reopen`, verifying by re-reading state after every action; it never destroys anything and ends with a running container |
-| doctor | `/devcontainer:doctor` -- asks nothing, delegates the thirteen `/devcontainer:engine` checks by reference rather than restating them, and reports every configuration, secrets, container-state and drift finding engine does not cover, each with an exact remedy; it only reports, it never repairs anything itself |
-| secrets | `/devcontainer:secrets` -- asks which credential, manages the hostcreds manifest and the keychain items it names entirely through `make creds-init` and `make push-creds` (never a value on a command line, never a value rendered into the conversation), verifies every store by re-reading the keychain rather than trusting the command's own exit code, and ends by naming every credential affected and what now holds it |
-| certs | `/devcontainer:certs` -- asks which instance, creates the CA and issues the server and client certificates on first use, rotates the client certificate with the instance left running, reports expiry (the `make cert-status` view), states that certificate revocation does not exist and that removing the principal's `ssm:StartSession` grant is the mechanism, and ends every material-changing operation by rewriting the docker context and completing a handshake before reporting success |
-| teardown | `/devcontainer:teardown` -- asks for confirmation, always, taken against an inventory of what `make clean` or `make rebuild` will destroy (the container, its private volumes, its image) and what will survive (shared volumes, the base image); explains the unpushed-work and uncommitted-config guards rather than only enforcing them, never sets `FORCE` itself, destroys container state only (never an instance, which stays behind `GATE-DESTROY`), and ends by reporting what was destroyed and what survived from a fresh post-operation read, never from the target's own exit code |
-| quality | `/devcontainer:quality` -- asks nothing, reads the sub-target set `make validate` invokes from the Makefile itself rather than a copy embedded in the skill, interprets each failing sub-target's root cause and fixes it, never suppresses a finding (no bypass annotation, no linter-ignore entry, no raised threshold, no narrowed `LINT_EXCLUDES` or `SPELL_FILES`), stops and asks for human approval on a suspected false positive, hands anything else it cannot fix to `/devcontainer:doctor` or the operator, and ends by reporting the exit code of a fresh `make validate` run |
+| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-doctor` |
+| project- | `gd-project-onboard` |
+| instance- | `gd-instance-create`, `gd-instance-fleet`, `gd-instance-list`, `gd-instance-destroy` |
+| container- | `gd-container-local`, `gd-container-remote`, `gd-container-verify`, `gd-container-lifecycle` |
+| creds- | `gd-creds-setup`, `gd-creds-rotate`, `gd-creds-doctor` |
+| cert- | `gd-cert-lifecycle` |
+| skills- | `gd-skills-install`, `gd-skills-remove`, `gd-skills-scope` |
+| cross-cutting | `gd-quality`, `gd-help` |

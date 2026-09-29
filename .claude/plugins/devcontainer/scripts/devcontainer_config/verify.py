@@ -1,6 +1,6 @@
 """Whether the private configuration on disk is usable (spec Section 4.5).
 
-`/devcontainer:setup-local`'s G1 worked example (spec Section 2) ends its
+`gd-env-setup-local`'s G1 worked example (spec Section 2) ends its
 happy path with one line this module produces:
 `Verified: no placeholders, BASH_ENV matches /workspaces/general-dev/shell.env`.
 Without it, `render` can write three files, report success, and leave the
@@ -149,7 +149,7 @@ def _completeness_finding(relative: str, exc: OSError | UnicodeDecodeError) -> F
             "startup step that needs it"
         ),
         remedy=(
-            f"Run /devcontainer:setup-local (or /devcontainer:setup-remote) to "
+            f"Run gd-env-setup-local (or gd-env-setup-remote) to "
             f"write {relative}, or make init to see what remains."
         ),
     )
@@ -172,7 +172,7 @@ def _json_parse_finding(relative: str, exc: json.JSONDecodeError) -> Finding:
         ),
         remedy=(
             f"Fix the JSON syntax in {relative} at {exc}, or re-render it "
-            "via /devcontainer:setup-local."
+            "via gd-env-setup-local."
         ),
     )
 
@@ -197,7 +197,7 @@ def _json_type_finding(relative: str, document: Any) -> Finding:
         ),
         remedy=(
             f"Replace {relative}'s contents with a JSON object, or re-render "
-            "it via /devcontainer:setup-local."
+            "it via gd-env-setup-local."
         ),
     )
 
@@ -247,7 +247,7 @@ def _bash_env_finding(shell_env_text: str, root: Path) -> list[Finding]:
                 prevents="every non-interactive shell in the container sources nothing",
                 remedy=(
                     f"Set BASH_ENV to {expected_value!r} in shell.env, or "
-                    "re-render via /devcontainer:setup-local."
+                    "re-render via gd-env-setup-local."
                 ),
             )
         ]
@@ -261,7 +261,7 @@ def _bash_env_finding(shell_env_text: str, root: Path) -> list[Finding]:
             prevents="every non-interactive shell in the container sources nothing",
             remedy=(
                 f"Set BASH_ENV to {expected_value!r} in shell.env, or "
-                "re-render via /devcontainer:setup-local."
+                "re-render via gd-env-setup-local."
             ),
         )
     ]
@@ -306,7 +306,7 @@ def _identity_findings(
                     "the container's environment from being populated at all"
                 ),
                 remedy=(
-                    f"Re-render {repo.DEVCONTAINER_ENV_JSON} via /devcontainer:setup-local, "
+                    f"Re-render {repo.DEVCONTAINER_ENV_JSON} via gd-env-setup-local, "
                     "which refuses to produce one with no 'containerEnv' object."
                 ),
             )
@@ -326,7 +326,7 @@ def _identity_findings(
                 ),
                 remedy=(
                     f"Replace {repo.DEVCONTAINER_ENV_JSON}'s containerEnv with a JSON object, "
-                    "or re-render it via /devcontainer:setup-local."
+                    "or re-render it via gd-env-setup-local."
                 ),
             )
         ]
@@ -349,7 +349,7 @@ def _identity_findings(
                     remedy=(
                         f"Add an export {variable}=... line to shell.env reconciled with "
                         f"{repo.DEVCONTAINER_ENV_JSON}, or re-render via "
-                        "/devcontainer:setup-local."
+                        "gd-env-setup-local."
                     ),
                 )
             )
@@ -372,7 +372,7 @@ def _identity_findings(
                 ),
                 remedy=(
                     f"Reconcile {variable} between shell.env and {repo.DEVCONTAINER_ENV_JSON}, "
-                    "or re-render via /devcontainer:setup-local."
+                    "or re-render via gd-env-setup-local."
                 ),
             )
         )
@@ -411,7 +411,7 @@ def _aws_profile_map_findings(
                 ),
                 remedy=(
                     "Set AWS_CONFIG_ENABLED to 'true' or 'false' in shell.env, or "
-                    "re-render it via /devcontainer:setup-local."
+                    "re-render it via gd-env-setup-local."
                 ),
             )
         ]
@@ -427,7 +427,7 @@ def _aws_profile_map_findings(
                 ),
                 remedy=(
                     "Set AWS_CONFIG_ENABLED to 'true' or 'false' in shell.env, or "
-                    "re-render it via /devcontainer:setup-local."
+                    "re-render it via gd-env-setup-local."
                 ),
             )
         ]
@@ -448,7 +448,7 @@ def _aws_profile_map_findings(
             prevents=prevents,
             remedy=(
                 f"Set AWS_CONFIG_ENABLED to match {repo.AWS_PROFILE_MAP}'s contents in "
-                "shell.env, or re-render via /devcontainer:setup-local."
+                "shell.env, or re-render via gd-env-setup-local."
             ),
         )
     ]

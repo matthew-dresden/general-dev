@@ -1,12 +1,13 @@
-"""Contract tests for five roots the `.gitignore` allowlist re-includes.
+"""Contract tests for six roots the `.gitignore` allowlist re-includes.
 
 `.gitignore` line 12 is `/*`, an allowlist root (spec Section 1.8): every
 path is ignored unless re-included by name below it. The allowlist
-re-includes more paths than these; this module pins five of them --
-`.claude/`, `provider/`, `remote-instances/`, `pyproject.toml` and `tests/`
--- as genuinely trackable, and pins the negative case a broader allowlist
-entry must never accidentally trip: `.claude/settings.local.json` and every
-entry of `repo.PRIVATE_FILES` must stay ignored.
+re-includes more paths than these; this module pins six of them --
+`.agents/`, `.claude/`, `provider/`, `remote-instances/`, `pyproject.toml`
+and `tests/` -- as genuinely trackable, and pins the negative case a
+broader allowlist entry must never accidentally trip:
+`.claude/settings.local.json` and every entry of `repo.PRIVATE_FILES` must
+stay ignored.
 
 Every assertion goes through `git check-ignore` and the pattern (or exit
 code, for a root queried in directory form) it reports, never a text match
@@ -51,6 +52,7 @@ from gitfixtures import generated_root, init_repo, stage_text
 from gitignore_check import GitIgnoreQueryError, check_ignore
 
 NOT_IGNORED_PATHS: tuple[str, ...] = (
+    ".agents",
     ".claude",
     "provider",
     "remote-instances",
@@ -102,7 +104,7 @@ def _directory_only_reinclude_roots() -> tuple[str, ...]:
 
 @pytest.mark.parametrize("path", NOT_IGNORED_PATHS)
 def test_allowlisted_root_is_not_ignored(path: str) -> None:
-    """Each of the five tracked roots is re-included, so check-ignore reports it not ignored.
+    """Each of the six tracked roots is re-included, so check-ignore reports it not ignored.
 
     `directory_form_required` decides the query form per call from `path`'s
     live presence in the checkout, so this assertion is true regardless of

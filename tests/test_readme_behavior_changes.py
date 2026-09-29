@@ -25,7 +25,13 @@ from conftest import _makefile_text
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _README = _REPO_ROOT / "README.md"
-_SKILLS_DIR = _REPO_ROOT / ".claude" / "plugins" / "devcontainer" / "skills"
+# The canonical, agent-agnostic skills home; every skill name is `gd-`-prefixed.
+_SKILLS_DIR = _REPO_ROOT / ".agents" / "skills"
+
+# A bare cross-reference: `gd-` plus at least one name segment, not part of a
+# longer word. The README names skills in this bare form, the same form every
+# SKILL.md cross-reference uses.
+_SKILL_NAME_IN_TEXT = re.compile(r"(?<![\w-])gd-[a-z0-9]+(?:-[a-z0-9]+)*(?![\w-])")
 
 _BEHAVIOR_IDS = tuple(f"B{n}" for n in range(1, 11))
 _WHAT_CHANGED_HEADING = "## What changed"
@@ -89,7 +95,7 @@ def test_every_make_target_named_in_the_readme_exists() -> None:
 
 def test_every_skill_named_in_the_readme_exists() -> None:
     """AC-TEST-003: a documented skill must resolve to a SKILL.md (ref)."""
-    named = sorted(set(re.findall(r"/devcontainer:([a-z][a-z0-9-]*)", _readme())))
+    named = sorted(set(_SKILL_NAME_IN_TEXT.findall(_readme())))
     assert named, "the README names no skills; the skill route would be undocumented"
     missing = [
         f"{name} (expected {_SKILLS_DIR.relative_to(_REPO_ROOT)}/{name}/SKILL.md)"
@@ -109,7 +115,7 @@ def test_each_mode_has_its_own_section_naming_both_routes(mode: str) -> None:
     end = text.index("\n## ", start + len(heading))
     section = text[start:end]
     assert re.search(r"`make [a-z]", section), f"the {mode} section names no make command"
-    assert "/devcontainer:" in section, f"the {mode} section names no skill"
+    assert _SKILL_NAME_IN_TEXT.search(section), f"the {mode} section names no skill"
 
 
 def test_the_remote_section_describes_the_transport_and_host_access() -> None:
@@ -120,7 +126,9 @@ def test_the_remote_section_describes_the_transport_and_host_access() -> None:
     lowered = section.lower()
     assert "port forward" in lowered, "the remote section must name the SSM port forward"
     assert "mutual tls" in lowered or "mtls" in lowered, "the remote section must name mutual TLS"
-    assert "make exec" in section, "the remote section must name make exec as the way into a container"
+    assert "make exec" in section, (
+        "the remote section must name make exec as the way into a container"
+    )
 
 
 @pytest.mark.parametrize("token", ["make shell", "ssh", "tunnel"])

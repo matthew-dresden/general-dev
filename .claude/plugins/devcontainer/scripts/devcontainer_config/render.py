@@ -44,7 +44,7 @@ RENDERED_HEADER = """\
 # every credential is named in the hostcreds manifest and resolved from this
 # machine by `make creds-init` and `make push-creds`, not stored in this file.
 #
-# Re-run /devcontainer:setup-local (or /devcontainer:setup-remote for a
+# Re-run gd-env-setup-local (or gd-env-setup-remote for a
 # remote backend) to change any of it, or edit in place: the file is read
 # as-is, nothing regenerates it behind your back.
 # What each value does: docs/environment-files.md

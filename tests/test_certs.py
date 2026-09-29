@@ -34,9 +34,9 @@ from __future__ import annotations
 
 import ast
 import datetime
-import json
 import hashlib
 import importlib
+import json
 import shutil
 import socket
 import stat
@@ -1018,7 +1018,7 @@ def test_rotate_client_refuses_when_no_ca_exists_and_creates_nothing(tmp_path: P
 
     message = str(excinfo.value)
     assert "no certificate authority" in message
-    assert f"/devcontainer:certs INSTANCE={instance}" in message
+    assert f"gd-cert-lifecycle INSTANCE={instance}" in message
     assert not paths.ca_key.exists()
     assert not paths.ca_cert.exists()
     assert not paths.client_key.exists()
@@ -1405,7 +1405,7 @@ def test_render_report_renew_row_names_the_reissue_invocation() -> None:
     )
     lines = certs.render_report([row]).splitlines()
     assert lines[1] == (
-        "personal   client   2026-08-29      11  RENEW   /devcontainer:certs INSTANCE=personal"
+        "personal   client   2026-08-29      11  RENEW   gd-cert-lifecycle INSTANCE=personal"
     )
 
 
@@ -1414,7 +1414,7 @@ def test_renew_invocation_template_is_public_and_matches_every_reissue_site(
 ) -> None:
     """`RENEW_INVOCATION_TEMPLATE` (E6-F2-S1-T2's code_review round 1 fix) is
     public -- not `_RENEW_INVOCATION_TEMPLATE` -- because `devcontainer_config
-    .transport` formats the identical `/devcontainer:certs INSTANCE={instance}`
+    .transport` formats the identical `gd-cert-lifecycle INSTANCE={instance}`
     template in its own certificate-not-ready and SAN-mismatch remedies and
     must not carry a second, independently drifting copy of this module's own
     reissue invocation. Both real call sites -- the missing-CA remedy
@@ -1425,12 +1425,12 @@ def test_renew_invocation_template_is_public_and_matches_every_reissue_site(
     """
     certs = _import_certs()
 
-    assert certs.RENEW_INVOCATION_TEMPLATE == "/devcontainer:certs INSTANCE={instance}"
+    assert certs.RENEW_INVOCATION_TEMPLATE == "gd-cert-lifecycle INSTANCE={instance}"
     assert not hasattr(certs, "_RENEW_INVOCATION_TEMPLATE")
 
     instance = f"no-ca-{uuid.uuid4().hex[:8]}"
     expected_invocation = certs.RENEW_INVOCATION_TEMPLATE.format(instance=instance)
-    assert expected_invocation == f"/devcontainer:certs INSTANCE={instance}"
+    assert expected_invocation == f"gd-cert-lifecycle INSTANCE={instance}"
 
     paths = certs.CertPaths(instance=instance, root=tmp_path)
     with pytest.raises(certs.CertsError) as excinfo:
@@ -1453,7 +1453,7 @@ def test_render_report_with_no_rows_prints_header_and_setup_remote_line() -> Non
     report = certs.render_report([])
     lines = report.splitlines()
     assert lines[0] == "INSTANCE   ROLE     EXPIRES       DAYS  STATUS"
-    assert "/devcontainer:setup-remote" in report
+    assert "gd-env-setup-remote" in report
 
 
 # ---------------------------------------------------------------------------
@@ -1506,7 +1506,7 @@ def test_main_status_exits_zero_with_a_renew_row_present(
     assert exit_code == 0
     captured = capsys.readouterr()
     assert "RENEW" in captured.out
-    assert f"/devcontainer:certs INSTANCE={instance}" in captured.out
+    assert f"gd-cert-lifecycle INSTANCE={instance}" in captured.out
 
 
 def test_main_status_exits_one_when_a_certificate_has_expired(
@@ -1536,7 +1536,7 @@ def test_main_status_no_certificates_exits_zero_and_directs_to_setup_remote(
     exit_code = certs.main(["status", "--root", str(tmp_path)])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "/devcontainer:setup-remote" in captured.out
+    assert "gd-env-setup-remote" in captured.out
 
 
 def test_main_status_unreadable_certificate_exits_nonzero_naming_path(

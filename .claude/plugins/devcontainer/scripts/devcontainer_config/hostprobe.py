@@ -1,7 +1,8 @@
 """What the host a skill is running on actually looks like (spec Section 4.5).
 
-`engine` (spec Section 4.2.1) defines the validation contract `setup-local`,
-`setup-remote`, `launch` and `doctor` all reuse. Its local check list is made
+`gd-instance-list` (spec Section 4.2.1) defines the validation contract
+`gd-env-setup-local`, `gd-env-setup-remote`, `gd-container-local` and
+`gd-env-doctor` all reuse. Its local check list is made
 of host facts: docker CLI present and a context selected; whether a named
 context exists; the engine answering; disk headroom; the three files
 complete and consistent; `HOST_PROXY` agreeing with a reachable proxy; and,
@@ -14,8 +15,8 @@ answered by `verify` either: no E1 unit owns them yet. None of the checks
 this module does answer are judgments -- they are questions with one
 correct, mechanically-derived answer -- so this module answers them in
 tested Python instead of a skill's prose, returning a `ProbeResult` per
-check that a caller renders into the `engine` verdict table, the `doctor`
-findings list, or the `setup-local` prerequisite report, all from the same
+check that a caller renders into the `gd-instance-list` verdict table, the `gd-env-doctor`
+findings list, or the `gd-env-setup-local` prerequisite report, all from the same
 data rather than each deriving its own.
 
 Every external command a probe needs is issued through a `CommandRunner`
@@ -329,15 +330,18 @@ def _probe_one_tool(runner: CommandRunner, spec: _ToolSpec) -> ProbeResult:
     """Presence and version of one prerequisite tool named by `spec`.
 
     A failure here -- absent, present but failing, or present but
-    unparsable -- prevents every step of `setup-local`, `setup-remote` and
-    `doctor` that needs `spec.name`. An absent tool is reported with its
+    unparsable -- prevents every step of `gd-env-setup-local`, `gd-env-setup-remote` and
+    `gd-env-doctor` that needs `spec.name`. An absent tool is reported with its
     install command (see `_TOOL_SPECS` for each tool's provenance); a tool
     that ran and exited non-zero, or produced version output this probe
     cannot parse, is reported with the command to run manually and
     investigate instead, since there is nothing to install.
     """
     check = f"tool: {spec.name}"
-    prevents = f"every step of setup-local, setup-remote and doctor that needs {spec.name}"
+    prevents = (
+        "every step of gd-env-setup-local, gd-env-setup-remote "
+        f"and gd-env-doctor that needs {spec.name}"
+    )
     result = runner(spec.command, None)
     if result.binary_missing:
         return ProbeResult(
@@ -375,8 +379,8 @@ def _probe_one_tool(runner: CommandRunner, spec: _ToolSpec) -> ProbeResult:
 def probe_tools(runner: CommandRunner) -> list[ProbeResult]:
     """Presence and version of every prerequisite tool (G1's worked example).
 
-    A tool this probe finds absent prevents every step of `setup-local`,
-    `setup-remote` and `doctor` that needs it, so each result names an
+    A tool this probe finds absent prevents every step of `gd-env-setup-local`,
+    `gd-env-setup-remote` and `gd-env-doctor` that needs it, so each result names an
     install command: this repository's own documented command where one
     exists, plus a Linux/WSL equivalent for the two tools (jq, uv) whose
     only repo-documented command is Homebrew-only, and each tool's own
@@ -597,7 +601,7 @@ def _probe_selected_context(runner: CommandRunner) -> ProbeResult:
 def _probe_named_context(requested_context: str, contexts: list[str]) -> ProbeResult:
     """Whether `requested_context` is among the docker contexts this host actually has configured.
 
-    A failure here prevents `setup-local`/`setup-remote` from selecting the
+    A failure here prevents `gd-env-setup-local`/`gd-env-setup-remote` from selecting the
     engine `LOCAL_DOCKER_CONTEXT` or `REMOTE_DOCKER_CONTEXT` names to. Both
     variables live in `.devcontainer/remote-docker/config.env`
     (`docs/environment-files.md`'s "The local docker context" section, and
@@ -607,7 +611,7 @@ def _probe_named_context(requested_context: str, contexts: list[str]) -> ProbeRe
     """
     check = f"docker: context '{requested_context}' exists"
     prevents = (
-        "setup-local/setup-remote from selecting the engine LOCAL_DOCKER_CONTEXT or "
+        "gd-env-setup-local/gd-env-setup-remote from selecting the engine LOCAL_DOCKER_CONTEXT or "
         "REMOTE_DOCKER_CONTEXT names"
     )
     if requested_context in contexts:

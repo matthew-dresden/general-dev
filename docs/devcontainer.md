@@ -303,7 +303,7 @@ EC2 reference, troubleshooting) live in
    | `shell.env` sourcing into `.bashrc` / `.zshenv`, plus the hostcreds credential-startup block appended to both | `python3` + `devcontainer_config` on `PYTHONPATH`, required |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
    | `claude-settings.json` merged into `~/.claude/settings.json` | `claude-code` feature + `jq` |
-   | opencode installed globally, `~/.config/opencode/opencode.json` written from `.devcontainer/opencode.json` (GLM 5.3 flagship + GLM 5.3 Flash; the z.ai key is injected at run time through `{env:ZAI_API_KEY}`, exported by shell.env) | the node feature + `jq` |
+   | opencode installed globally, `~/.config/opencode/opencode.json` written from `.devcontainer/opencode.json` (GLM 5.3 flagship + GLM 5.3 Flash; the z.ai key is injected at run time through `{env:ZAI_API_KEY}`, supplied by the hostcreds startup block from a `ZAI_API_KEY` manifest entry) | the node feature + `jq` |
    | `tm-*` commands sourced into both shells | `tmux` |
    | `resmon-disks.py` linked into `~/.local/bin` for postAttach | `python3`, required |
    | `vscode-settings-sync.py` linked into `~/.local/bin` for postAttach | `python3`, required |
@@ -353,16 +353,23 @@ EC2 reference, troubleshooting) live in
 
 The container holds no credential of its own until one is pushed to it.
 postCreate only sets `credential.helper store` and the SSH→HTTPS URL rewrite;
-`make push-creds`, which `make build` runs as its last step, copies in
-the credential that already works on the developer's machine, obtained through
+pushing is `make push-creds`'s job, and `make build` runs it as its last
+step. The push resolves every entry the hostcreds manifest names; the git
+half is gated by the manifest itself and runs only when an entry carries
+`"source": "git"`. It copies in the credential that already works on the
+developer's machine for origin's host, obtained through
 `git credential fill` so it works with any configured helper (osxkeychain,
-libsecret, gh, store). The step resets `credential.helper` with
+libsecret, gh, store), written to `~/.git-credentials` at mode 600 inside
+the container. The step resets `credential.helper` with
 `git config --replace-all`, because the Dev Containers extension copies the
 host's `~/.gitconfig` into the container when a window attaches -- which a
 rebuild usually has one already attached to the previous container -- and that
 copy leaves several helper values in place, against which a plain
 `git config` set fails with "cannot overwrite multiple values" after the
-container is otherwise complete. One helper, `store`, is the intended state.
+container is otherwise complete. One helper, `store`, is the intended state,
+and the push proves the credential answers by running `git ls-remote origin`
+inside the container before reporting success. `make verify-container`
+re-checks that state on demand, on either engine.
 
 This replaced `GIT_AUTH_METHOD` / `GIT_TOKEN` / ssh-key handling driven by
 `shell.env`, which had two problems: the token had to be rotated by hand, and
@@ -519,6 +526,13 @@ blocking and scriptable:
 The config is read from the laptop while the checkout comes from origin, so the
 build refuses to run when `.devcontainer` has uncommitted changes, otherwise
 the container would not contain the config that built it. `FORCE=1` overrides.
+
+The build's last act is the hostcreds push the Secrets model section below
+describes, and because it is last, a credential that fails to resolve aborts
+the build with the container otherwise complete: fix the credential
+(`make creds-init` names what is missing), re-run `make push-creds` alone, and
+no rebuild is needed. `make verify-container` re-checks the pushed state
+inside the container at any time, on either engine.
 
 asdf was removed entirely (it managed zero tools; Python/Node come from
 features). If a future project needs asdf, that support must be reintroduced
@@ -690,6 +704,16 @@ conflated.
 
 ## Secrets model
 
+Two halves, deliberately separate. Configuration -- `shell.env` and the
+AWS profile map -- is per-developer setup with no credential in it,
+published to Parameter Store so a fresh remote clone-in-volume can
+bootstrap itself. Credentials never touch Parameter Store at all: each one
+is resolved on the developer's machine, from a source only that machine
+holds, and pushed over the active docker context straight into the
+container.
+
+The configuration half (unchanged):
+
 ```text
 cdevcontainer setup-devcontainer          push-secrets.sh                postCreate (remote)
         │                                       │                              │
@@ -711,6 +735,56 @@ aws-profile-map.json                           /devcontainer/<project>/…      
   remote workspace path, stale PATH prepends dropped.
 - The instance role can only **read** `/devcontainer/*` parameters; writes
   happen from the laptop with SSO credentials.
+
+The credential half (hostcreds):
+
+```text
+hostcreds.map.json (host)         make push-creds (host)                container
+        │                                │                                  │
+        ▼                                ▼                                  ▼
+keychain / git credential fill /    one <NAME>.env fragment per        ~/.hostcreds/ (mode 700),
+aws configure export-credentials    credential at mode 0600, piped     fragments at mode 600; a
+resolved only on the host           over docker exec stdin,            git entry also seeds
+                                   never on an argument                ~/.git-credentials; the
+                                                                       startup block sources
+                                                                       every fragment
+```
+
+- `.devcontainer/hostcreds.map.json` names each credential and its source;
+  the values themselves live only in the macOS keychain, git's own
+  credential helper and the developer's AWS SSO session. The container
+  resolves nothing: `make push-creds`, which `make build` and `make up`
+  run, resolves every entry on the host and writes one `<NAME>.env`
+  fragment per credential into the container's `~/.hostcreds/`. Any entry
+  that cannot be resolved aborts the push, so a container never ships a
+  subset of the manifest.
+- The push rides the active docker context, so it is identical on either
+  engine: local and remote differ only in which context is active, and the
+  fragments, the mode checks and the git seeding are byte-for-byte the
+  same either way. The remote engine needs no extra credential path of
+  its own.
+- postCreate appends the hostcreds startup block to `~/.bashrc` and
+  `~/.zshenv` (rendered by `devcontainer_config.cli shell-block`,
+  marker-guarded, required -- the provisioning-flow table above marks it
+  so). Every shell afterwards sources each fragment in sorted order,
+  exporting the credential under its manifest name; an `aws-export` entry
+  exports the three standard AWS variables plus the raw document under the
+  entry's own name (see environment-files.md), and past its expiry
+  prints one notice line on stderr naming `make push-creds` and exports
+  nothing.
+- A rebuild wipes the credentials by design: `~/.hostcreds` lives in the
+  container's own filesystem, not a volume, so a rebuilt container starts
+  with none -- and the build that created it has already pushed a fresh
+  set as its last step. `make verify-container` re-checks the whole state
+  inside the container (store and fragment modes, the startup block in
+  both rc files, silent shell startup, and `git ls-remote` /
+  `aws sts get-caller-identity` for whichever sources the manifest names),
+  on either engine.
+
+The full manifest reference -- sources, labels, defaults, reserved names,
+the scanner integration -- is `docs/environment-files.md`'s "Host
+credentials (hostcreds)" section; the ordered setup sequence, with a
+verification step after each stage, is `docs/environment-setup.md`.
 
 ## cdevcontainer contract
 

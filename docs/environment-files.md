@@ -1,24 +1,31 @@
 # Environment files
 
-Three files configure this devcontainer. All three are gitignored because they
-carry per-developer identity and configuration that must not reach git -- SSO
+Four files configure this devcontainer. All four are gitignored: three carry
+per-developer identity and configuration that must not reach git -- SSO
 profile selection, git identity, proxy settings and feature toggles -- and
-each has a committed `.example` alongside it.
+the fourth, the hostcreds manifest, names every credential this machine
+pushes into the container without ever holding a value itself. Each has a
+committed `.example` alongside it.
 
 | File | Example | What it is |
 |---|---|---|
 | `shell.env` | `shell.env.example` | Environment sourced by every shell in the container |
 | `.devcontainer/aws-profile-map.json` | `.devcontainer/aws-profile-map.json.example` | AWS SSO profiles, rendered into `~/.aws/config` |
 | `devcontainer-environment-variables.json` | `devcontainer-environment-variables.json.example` | `cdevcontainer` template input that regenerates the other two |
+| `.devcontainer/hostcreds.map.json` | `.devcontainer/hostcreds.map.json.example` | The hostcreds manifest: one entry per credential, naming its source |
 
 ```bash
 cp shell.env.example shell.env
 cp .devcontainer/aws-profile-map.json.example .devcontainer/aws-profile-map.json
 cp devcontainer-environment-variables.json.example devcontainer-environment-variables.json
+cp .devcontainer/hostcreds.map.json.example .devcontainer/hostcreds.map.json
 ```
 
-Then replace every `<PLACEHOLDER>`. Nothing else is required, placeholders are
-the only thing standing between a fresh clone and a working container.
+`make init` performs exactly these copies and never overwrites an existing
+file. Then replace every `<PLACEHOLDER>` in the first three files (the
+manifest has none: you edit it by naming real credentials, per the Secrets
+section below). Nothing else is required, placeholders are the only thing
+standing between a fresh clone and a working container.
 
 ## Filling them out with Claude
 
@@ -198,6 +205,82 @@ inside the container.
 An `aws-export` entry resolves through `aws configure export-credentials`
 on the host, using the developer's already-valid AWS SSO session -- the
 container itself holds no AWS credential for this path.
+
+#### The manifest schema
+
+The manifest is a JSON object mapping a credential name to an entry with a
+`source` key and optional per-source labels. An empty object is valid and
+pushes nothing (distinct from the file being absent, which is an error).
+Validation is fail-fast and complete: one run lists every problem in the
+file, each naming its entry, rather than stopping at the first.
+
+A credential name matches `[A-Z][A-Z0-9_]*`: an uppercase letter, then
+uppercase letters, digits or underscores. The name becomes both a shell
+variable the startup block exports and a `<NAME>.env` fragment filename,
+and the store directory is case-insensitive on macOS, where differently
+cased names would collide as filenames. Reserved names are refused however
+well-formed: `PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`,
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` -- a
+manifest name becomes a shell variable at startup, and one of these would
+silently shadow the real thing. `<project>` below is the checkout
+directory's name.
+
+| Source | Labels | Defaults | Resolves on the host through | Reaches the container as |
+|---|---|---|---|---|
+| `keychain` | `service`, `account` (both optional) | `service` `devcontainer/<project>/<NAME>`; `account` unset | `security find-generic-password -w -s <service>` (`-a <account>` only when the manifest set one) | `export <NAME>=…` |
+| `git` | `host` (required: a bare hostname, no scheme, path, port or user part) | none | `git credential fill`, fed the host on stdin | a line in `~/.git-credentials`; no environment variable |
+| `aws-export` | `profile` (optional) | `profile` `default` | `aws configure export-credentials --profile <profile>` | the three standard AWS variables, plus the raw JSON document under `<NAME>` |
+
+The default keychain service names this project and this credential, so
+one checkout's items cannot collide with another's without the operator
+choosing an explicit `service` label. The account is asymmetric on purpose:
+storing (creds-init) always writes one -- the manifest's, or the
+credential's own `NAME` when it set none, because `add-generic-password`
+without `-a` fails on current macOS -- while the read and the probe omit
+`-a` entirely when the manifest sets none, since an empty account
+constraint matches a different item than no account constraint at all.
+
+The one entry this repository's committed configuration expects:
+`ZAI_API_KEY` from the keychain, because `.devcontainer/opencode.json`
+interpolates `{env:ZAI_API_KEY}` and opencode authenticates with nothing
+when the variable is absent.
+
+#### What a push does
+
+`make push-creds` resolves every entry through the
+`devcontainer_config.cli creds-fragments` subcommand on the host and
+aborts -- exit 1, the failed credential named on stderr -- when ANY entry
+is unresolvable: a container silently shipping a subset of the manifest is
+the one failure the command must make impossible. Each resolved credential
+becomes one `<NAME>.env` fragment, written at mode 0600 into a fresh
+temporary directory, then piped into the container over `docker exec`
+stdin (never on an argument, where the host's process table would carry
+it) under umask 077. The store directory `~/.hostcreds` is enforced at
+mode 700 on every push, and each fragment's 0600 mode is verified after it
+lands rather than trusted from the exec's exit status.
+
+An `aws-export` fragment carries the session's `Expiration`, so its
+exports are wrapped in a guard comparing that expiry against the wall
+clock: while the session is live the variables export normally, and past
+it nothing exports and one notice line goes to stderr when a shell opens,
+`notice: <NAME> expired; refresh with: make push-creds`, naming the
+refresh command. A git entry's fragment is comment-only: the credential
+lives in `~/.git-credentials` (seeded by the same push, with
+`credential.helper` reset to exactly `store` and the result proven with
+`git ls-remote origin`) and git reads it through its own helper; copying
+it into an environment variable would widen its exposure to every process
+in the container without giving git anything it does not already have.
+
+#### The secrets scanner
+
+`make lint-secrets` -- staged content by default, `RANGE=<a>..<b>` for a
+commit range -- additionally compares every scanned line against the
+hostcreds values resolved live from this machine's manifest, so a real
+credential value is caught even when it matches no generic pattern. A
+credential whose source command fails is reported by name as unavailable
+rather than failing the scan, and a resolved value never reaches stdout,
+stderr or the report: the finding names the credential, never the value.
+There is no ignore list and no suppression annotation.
 
 `AWS_PROFILE` selects the profile the aws CLI resolves credentials through
 on the host-side cert publishing path: `certs.py`'s Parameter Store client
@@ -509,5 +592,6 @@ wants one instance to be their implicit default sets it in their own
 - `build` and `rebuild` publish `shell.env` themselves when it is newer than
   the stored copy, so editing it is enough, no separate step to remember.
 - The container's **git credential** does not come from `shell.env`. It is
-  copied from the credential helper already working on your machine by
-  `make push-creds`, which `make build` runs automatically.
+  copied from the credential helper already working on your machine by the
+  git half of `make push-creds`, which `make build` runs automatically,
+  whenever the manifest names a git-source entry.

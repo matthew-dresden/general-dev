@@ -70,7 +70,7 @@ PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
 
 .DEFAULT_GOAL := help
 .PHONY: help connect disconnect status exec shell instances start stop restart rename check build push-creds creds-init verify-container record-instance clean rebuild push-secrets \
-        lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
+        lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-workspace lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test cert-status
 
@@ -122,7 +122,7 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-restart"    "local"  "Stop then start, picking up changed settings."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make proxy-stop"       "local"  "Stop it. Settings come from $(CONFIG); set HOST_PROXY=true in shell.env to make the container use it."
 	@printf '\n\033[1mQUALITY\033[0m\n'
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint"             "host"   "Private files untracked, no nested repos, JSON parses, shellcheck, markdown, US English, staged secrets. Non-zero on any finding."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint"             "host"   "Private files untracked, no nested repos, no host venv in the workspace, JSON parses, shellcheck, markdown, US English, staged secrets. Non-zero on any finding."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint-secrets"     "host"   "Scan staged content for secrets, or RANGE=<a>..<b> for a commit range. Exit 1 on any finding; there is no ignore list."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make format"           "host"   "Auto-fix what the markdown tooling can fix, then report what is left."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make lint-spell"       "host"   "US English spelling over this repo's markdown. SPELL_FILES overrides the set."
@@ -349,7 +349,7 @@ proxy-restart:
 proxy-status:
 	@$(PROXY_ENV) $(PROXY_SH) status
 
-lint: lint-private lint-nested lint-json lint-sh lint-dispatch lint-md lint-spell lint-secrets
+lint: lint-private lint-nested lint-workspace lint-json lint-sh lint-dispatch lint-md lint-spell lint-secrets
 	@printf '\033[0;32m[DONE]\033[0m all checks passed\n'
 
 # The single entry point external automation calls to decide whether this
@@ -388,6 +388,19 @@ lint-nested:
 		exit 1; \
 	fi
 	@printf '  none tracked\n'
+
+lint-workspace:
+	@if [ -e .venv ]; then \
+		printf '\033[0;31m[ERROR]\033[0m .venv exists at the repository root\n' >&2; \
+		printf '        A host-OS virtual environment here is bind-mounted into the devcontainer\n' >&2; \
+		printf '        as-is, whose Python tooling resolves it as the workspace interpreter\n' >&2; \
+		printf '        and fails to spawn it (ENOENT in the Ruff and Python logs).\n' >&2; \
+		printf '        Delete it, then use the make targets, which keep every uv environment\n' >&2; \
+		printf '        outside the workspace (UV_PROJECT_ENVIRONMENT):\n' >&2; \
+		printf '            rm -rf .venv\n' >&2; \
+		exit 1; \
+	fi
+	@printf '\033[0;36m[LINT]\033[0m workspace carries no virtual environment\n'
 
 lint-md:
 	@printf '\033[0;36m[LINT]\033[0m markdown (%s files)\n' "$(words $(MD_FILES))"

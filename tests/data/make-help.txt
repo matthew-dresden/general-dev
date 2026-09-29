@@ -54,7 +54,7 @@ HOST PROXY  only needed behind a corporate proxy; remote builds force HOST_PROXY
   make proxy-stop         local   Stop it. Settings come from .devcontainer/remote-docker/config.env; set HOST_PROXY=true in shell.env to make the container use it.
 
 QUALITY
-  make lint               host    Private files untracked, no nested repos, JSON parses, shellcheck, markdown, US English, staged secrets. Non-zero on any finding.
+  make lint               host    Private files untracked, no nested repos, no host venv in the workspace, JSON parses, shellcheck, markdown, US English, staged secrets. Non-zero on any finding.
   make lint-secrets       host    Scan staged content for secrets, or RANGE=<a>..<b> for a commit range. Exit 1 on any finding; there is no ignore list.
   make format             host    Auto-fix what the markdown tooling can fix, then report what is left.
   make lint-spell         host    US English spelling over this repo's markdown. SPELL_FILES overrides the set.

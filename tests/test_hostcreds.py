@@ -54,7 +54,7 @@ import re
 import shutil
 import subprocess
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
@@ -115,17 +115,28 @@ def _err(stderr: str, *, returncode: int = 1, stdout: str = "") -> subprocess.Co
 
 
 class _FakeRunner:
-    """A Runner double: records every call, answers from a queue, spawns nothing."""
+    """A Runner double: records every call, answers from a queue, spawns nothing.
+
+    `calls` holds the (argv, stdin) pairs exactly as before; the optional
+    keyword-only `env` the production runner now accepts is recorded in
+    the parallel `envs` list, one entry per call, so a test can pin what
+    environment a resolver handed the child without disturbing the
+    established call-shape assertions.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
+        self.envs: list[Mapping[str, str] | None] = []
         self._queue: list[subprocess.CompletedProcess[str]] = []
 
     def queue(self, result: subprocess.CompletedProcess[str]) -> None:
         self._queue.append(result)
 
-    def __call__(self, argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, argv: Sequence[str], stdin: str | None, *, env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         self.calls.append((tuple(argv), stdin))
+        self.envs.append(env)
         assert self._queue, "_FakeRunner was invoked with no queued response"
         return self._queue.pop(0)
 
@@ -136,7 +147,9 @@ class _RaisingRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
 
-    def __call__(self, argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, argv: Sequence[str], stdin: str | None, *, env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         self.calls.append((tuple(argv), stdin))
         raise FileNotFoundError(f"no such file or directory: {argv[0]}")
 
@@ -184,6 +197,25 @@ def test_subprocess_runner_feeds_stdin_to_a_real_child_and_captures_stdout() -> 
 
     assert result.returncode == 0
     assert result.stdout == payload
+
+
+def test_subprocess_runner_forwards_env_to_a_real_child() -> None:
+    """The env half of the seam, proven against a real child the way the
+    stdin half above is: a resolver that must constrain a child's
+    environment (resolve_git's GIT_TERMINAL_PROMPT=0) only works if the
+    production runner actually delivers the mapping to the subprocess.
+    """
+    hc = _import_hostcreds()
+    value = _seeded_value("env-payload")
+
+    result = hc.subprocess_runner(
+        ["sh", "-c", 'printf %s "$HOSTCREDS_RUNNER_TEST_VAR"'],
+        None,
+        env={**os.environ, "HOSTCREDS_RUNNER_TEST_VAR": value},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == value
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +678,15 @@ def test_resolve_git_feeds_the_host_on_stdin_not_argv() -> None:
     assert stdin == "protocol=https\nhost=charts.example.com\n\n"
     # The host never reaches the process table.
     assert "charts.example.com" not in " ".join(argv)
+    # The child runs with GIT_TERMINAL_PROMPT forced to 0, merged over the
+    # inherited environment: a tty-less host with no stored credential must
+    # fail fast instead of blocking forever on a prompt no one can answer.
+    env = runner.envs[0]
+    assert env is not None
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    # Merged over os.environ, not a bare one-variable map: the child keeps
+    # the host's environment so the credential-helper chain still resolves.
+    assert env.get("PATH") == os.environ.get("PATH")
 
 
 def test_resolve_git_without_a_username_line_returns_none() -> None:

@@ -43,7 +43,7 @@ import shlex
 import stat
 import subprocess
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
 
@@ -353,7 +353,9 @@ class _FakeKeychain:
     readable by the next probe, like the real keychain. A probe carrying
     no '-a' matches any account for the service, like the real
     find-generic-password. Records every (argv, stdin) pair so argv
-    discipline is assertable per call.
+    discipline is assertable per call. Accepts (and ignores) the optional
+    keyword-only `env` resolve_git forwards to its runner, so a git-source
+    manifest entry resolves through the same double.
     """
 
     def __init__(self) -> None:
@@ -365,7 +367,11 @@ class _FakeKeychain:
         self.persist = True
 
     def __call__(
-        self, argv: list[str] | tuple[str, ...], stdin: str | None
+        self,
+        argv: list[str] | tuple[str, ...],
+        stdin: str | None,
+        *,
+        env: Mapping[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         argv = tuple(argv)
         self.calls.append((argv, stdin))

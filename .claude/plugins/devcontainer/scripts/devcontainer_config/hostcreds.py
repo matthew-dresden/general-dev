@@ -27,7 +27,11 @@ subprocess's stdout, never in its argv, so it never appears in the process
 table. The git resolver is the strictest case -- the hostname is fed to
 'git credential fill' on stdin, not passed as an argument. Only labels
 appear on argv: the keychain service and account, and the aws profile,
-none of which is a secret. Conversely, a failing command's diagnostic is
+none of which is a secret. The one environment change any resolver makes
+is the git resolver's: its subprocess runs with GIT_TERMINAL_PROMPT
+forced to 0 so a tty-less host with no stored credential fails fast
+instead of blocking forever on a prompt no one can answer. Conversely, a
+failing command's diagnostic is
 its stderr, so `ResolutionError` quotes stderr and never stdout: an error
 message that repeated stdout would quote the very secret the call was made
 to fetch.
@@ -109,6 +113,14 @@ DEFAULT_AWS_PROFILE = "default"
 SECURITY_EXECUTABLE = "security"
 GIT_EXECUTABLE = "git"
 AWS_EXECUTABLE = "aws"
+
+# The environment variable the git resolver forces to "0" on its subprocess.
+# Declared once so the resolver and the tests quote the identical spelling:
+# with prompting enabled and no stored credential, 'git credential fill'
+# stops at git's terminal username/password prompt and hangs the push-creds
+# run; with it disabled, a tty-less host (or an unanswered prompt) fails the
+# command immediately, which becomes a ResolutionError with a remedy.
+GIT_TERMINAL_PROMPT_VAR = "GIT_TERMINAL_PROMPT"
 
 # The environment variables an aws-export fragment exports. Declared here
 # once because two decisions share the set: an aws-export credential whose
@@ -252,25 +264,42 @@ class ResolvedCredential:
     expires_at: str | None
 
 
-# The Runner every resolver is handed: given the full argv and an optional
-# stdin document, return a completed process. Injected rather than called
+# The Runner every resolver is handed: given the full argv, an optional
+# stdin document and, when a resolver must constrain the child's
+# environment, an optional keyword-only `env` mapping, return a completed
+# process. `env` is keyword-only with a default of None (inherit this
+# process's environment), so a runner of the original two-argument shape
+# keeps working for every call that carries no environment. Spelled with an
+# ellipsis because Callable cannot express the optional keyword: the
+# contract above is the alias's documentation. Injected rather than called
 # internally via `subprocess.run` directly, so every test substitutes a
 # fake runner instead of patching this module.
-Runner = Callable[[Sequence[str], "str | None"], subprocess.CompletedProcess[str]]
+Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
-def subprocess_runner(argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+def subprocess_runner(
+    argv: Sequence[str], stdin: str | None, *, env: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """The production Runner: a real subprocess, fed `stdin` on its stdin.
 
     This is what a caller outside the test suite passes a resolver. The
     resolvers themselves never import or call `subprocess.run`, so nothing
-    here needs patching to be tested hermetically. Decoding is pinned to
+    here needs patching to be tested hermetically. `env`, when given, is
+    the child's whole environment -- the caller merges whatever it wants
+    inherited into it; the default of None inherits this process's
+    environment unchanged. Decoding is pinned to
     UTF-8, errors left strict: a secret must not fail through a
     locale-dependent UnicodeDecodeError path, so the child's bytes decode
     the same way on every host regardless of the ambient locale.
     """
     return subprocess.run(
-        list(argv), input=stdin, capture_output=True, text=True, encoding="utf-8", check=False
+        list(argv),
+        input=stdin,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        env=env,
     )
 
 
@@ -586,17 +615,25 @@ def _malformed_output_message(name: str, source: str, argv: Sequence[str], reaso
 
 
 def _invoke(
-    name: str, source: str, argv: Sequence[str], stdin: str | None, runner: Runner
+    name: str,
+    source: str,
+    argv: Sequence[str],
+    stdin: str | None,
+    runner: Runner,
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run `argv` through the injected runner and translate any failure.
 
     The one place every resolver's subprocess handling passes through, so
     the translation from a missing binary or a non-zero exit to a
     `ResolutionError` quoting stderr (never stdout) exists once, not once
-    per resolver.
+    per resolver. `env` is forwarded to the runner only when given, so a
+    runner of the original two-argument shape keeps working for every
+    resolver that needs no custom environment.
     """
     try:
-        result = runner(argv, stdin)
+        result = runner(argv, stdin) if env is None else runner(argv, stdin, env=env)
     except FileNotFoundError as exc:
         raise ResolutionError(_missing_binary_message(name, source, argv[0])) from exc
     if result.returncode != 0:
@@ -730,9 +767,14 @@ def resolve_git(spec: CredentialSpec, runner: Runner) -> ResolvedCredential:
     The host never appears on the argv: it is fed to `git credential fill`
     on stdin as the credential description (`protocol=https`, the host,
     then the blank line that ends the query), so the process table never
-    names which host a developer has credentials for either. The answer
-    arrives on stdout as `key=value` lines; the password becomes `value`
-    and the username, when git returned one, becomes `username` (git
+    names which host a developer has credentials for either. The child
+    runs with GIT_TERMINAL_PROMPT forced to 0, merged over the inherited
+    environment: a host with no stored credential and no terminal to
+    prompt on would otherwise block forever on git's username/password
+    prompt, where with prompting off the command fails at once and the
+    failure becomes the ResolutionError below. The answer arrives on
+    stdout as `key=value` lines; the password becomes `value` and the
+    username, when git returned one, becomes `username` (git
     needs both to match a stored credential; an environment variable
     needs only the password).
 
@@ -747,7 +789,8 @@ def resolve_git(spec: CredentialSpec, runner: Runner) -> ResolvedCredential:
     host = _require_label(spec, GIT_HOST_LABEL)
     argv = [GIT_EXECUTABLE, "credential", "fill"]
     stdin = f"protocol=https\nhost={host}\n\n"
-    result = _invoke(spec.name, spec.source, argv, stdin, runner)
+    env = {**os.environ, GIT_TERMINAL_PROMPT_VAR: "0"}
+    result = _invoke(spec.name, spec.source, argv, stdin, runner, env=env)
     fields = _parse_git_fill_output(spec.name, argv, result.stdout)
     password = fields.get("password")
     if password is None or not password:

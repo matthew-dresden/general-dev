@@ -4,6 +4,13 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 rd_load_config
+# Resolved, not derived -- and resolved before the remote requirements below,
+# so the EC2 id they demand is the one exported from the per-instance id
+# store by the resolver, never a stale environment value. This script
+# publishes secrets, so addressing the wrong instance writes them where
+# another instance will read them; the resolver runs before any AWS call for
+# that reason.
+rd_resolve_instance
 rd_require_remote_config
 rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
 rd_check_aws_auth
@@ -12,10 +19,6 @@ REPO_ROOT="$(cd "${RD_DIR}/../.." && pwd)"
 PROJECT_NAME="${PROJECT_NAME:-$(basename "$REPO_ROOT")}"
 SHELL_ENV_SOURCE="${SHELL_ENV_SOURCE:-${REPO_ROOT}/shell.env}"
 PROFILE_MAP_SOURCE="${PROFILE_MAP_SOURCE:-${REPO_ROOT}/.devcontainer/aws-profile-map.json}"
-# Resolved, not derived. This script publishes secrets, so addressing the
-# wrong instance writes them where another instance will read them. The
-# resolver runs before any AWS call for that reason.
-rd_resolve_instance
 SSM_PREFIX="${PARAMETER_PREFIX%/}"
 
 [ -f "$SHELL_ENV_SOURCE" ] || rd_die "shell.env not found at ${SHELL_ENV_SOURCE} (run 'cdevcontainer setup-devcontainer' first)"

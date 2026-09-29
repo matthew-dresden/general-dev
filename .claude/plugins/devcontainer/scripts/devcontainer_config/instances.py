@@ -445,61 +445,38 @@ def resolve(root: Path, *, local_backend_active: bool) -> Resolution:
     raise _ambiguous_instance_error(candidates)
 
 
-@dataclass(frozen=True)
-class InstanceListing:
-    """One row of `make instances`: what an instance is called and where it is.
-
-    `region` is `None` when the deployment does not record one, and `active`
-    is True for the instance the current docker context points at. Both are
-    reported rather than inferred, so a row never claims more than was found.
-    """
-
-    name: str
-    region: str | None
-    docker_context: str
-    active: bool
+# The filename of the per-instance id store inside `certs_dir(name)`.
+# `devcontainer_config.instance_ops` (which declares the identical
+# `INSTANCE_ID_FILENAME` constant) is the SINGLE WRITER of this file --
+# `instance_ops.link_id` records, `instance_ops.unlink_id`/`cleanup` remove
+# -- and this module cannot import `instance_ops` to source the name from
+# it, because `instance_ops` already imports this module. The literal is
+# therefore restated here for the read side only, and
+# `tests/test_instances.py` pins the two constants equal so a rename on the
+# write side fails loudly instead of silently splitting the store in two.
+INSTANCE_ID_FILENAME = "instance-id"
 
 
-_REGION_INPUT_PATTERN = re.compile(r'^\s*(?:aws_region|region)\s*=\s*"([^"]+)"', re.MULTILINE)
+def recorded_instance_id(root: Path, name: str) -> str | None:
+    """The EC2 instance id recorded for `name`, or None when none is.
 
+    The read half of the per-instance id store whose only writer is
+    `devcontainer_config.instance_ops` (`link_id`, see INSTANCE_ID_FILENAME
+    above for why the write side cannot be imported here). `root` is
+    accepted for call-site uniformity with the rest of the resolution
+    surface and is deliberately unused, exactly as `instance_ops.link_id`
+    documents for its own `root`: the store addresses the operator's
+    certificate-material directory, not the repository.
 
-def region_of(root: Path, name: str) -> str | None:
-    """The AWS region a deployment declares, or None when it declares none.
-
-    Read from the per-instance Terragrunt file rather than assumed from the
-    ambient environment: two instances may live in different regions, and a
-    listing that printed the caller's current region against both would be
-    confidently wrong.
+    A missing store file -- or a missing certificate-material directory
+    around it -- is the ordinary not-yet-linked state and returns None
+    rather than raising; only a real read error (permissions, for example)
+    propagates.
     """
     validate_name(name)
-    hcl = terragrunt_dir(root, name) / "terragrunt.hcl"
+    path = certs_dir(name) / INSTANCE_ID_FILENAME
     try:
-        text = hcl.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
-    match = _REGION_INPUT_PATTERN.search(text)
-    return match.group(1) if match else None
-
-
-def listing(
-    root: Path,
-    *,
-    active_context: str | None,
-) -> tuple[InstanceListing, ...]:
-    """Every configured instance, in discovery order, marking the active one.
-
-    `active_context` is the docker context the caller found active, passed in
-    rather than probed here so this stays a pure function of the repository
-    and one string. A caller that cannot determine the active context passes
-    None, and no row is marked active -- which is honest, rather than
-    guessing that the first row is current.
-    """
-    return tuple(
-        InstanceListing(
-            name=name,
-            region=region_of(root, name),
-            docker_context=docker_context(root, name),
-            active=(active_context is not None and docker_context(root, name) == active_context),
-        )
-        for name in discover(root)
-    )
+    return text.strip() or None

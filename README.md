@@ -154,8 +154,8 @@ renewal; `/devcontainer:engine` switches which engine is active; and
 `/devcontainer:launch` builds and opens the container.
 
 Add `INSTANCE=<name>` to any of the targets above to act on a specific
-instance, or set `DEFAULT_REMOTE_INSTANCE`. `make instances` lists what is
-configured and marks the active one.
+instance, or set `DEFAULT_REMOTE_INSTANCE`. `make list-instances` lists
+every configured instance with its live status.
 
 `make build` blocks until the container is actually up and exits non-zero if
 the build or postCreate fails. It clones from **origin**, not from this

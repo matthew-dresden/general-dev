@@ -442,6 +442,70 @@ def test_forwarded_port_raises_on_non_tcp_endpoint(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# recorded_instance_id (the per-instance id store, read side)
+# ---------------------------------------------------------------------------
+
+
+def _import_instance_ops() -> ModuleType:
+    """Import devcontainer_config.instance_ops from inside a function body.
+
+    Same deferred-import convention as `_import_instances`; instance_ops is
+    the id store's single writer and these tests exercise the read/write
+    halves together.
+    """
+    return importlib.import_module("devcontainer_config.instance_ops")
+
+
+def test_recorded_instance_id_reads_what_instance_ops_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`instances.recorded_instance_id` is the read half of the store
+    `instance_ops.link_id` writes: the same value, from the same file."""
+    instances = _import_instances()
+    instance_ops = _import_instance_ops()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+    instance_id = "i-" + "0123456789abcdef0"
+
+    assert instances.recorded_instance_id(root, "sandbox") is None
+    instance_ops.link_id(root, "sandbox", instance_id)
+
+    assert instances.recorded_instance_id(root, "sandbox") == instance_id
+
+
+def test_recorded_instance_id_returns_none_when_the_store_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing store file -- or directory around it -- is the ordinary
+    not-yet-linked state: None, never an error."""
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+
+    assert instances.recorded_instance_id(root, "sandbox") is None
+
+
+def test_recorded_instance_id_rejects_an_invalid_name(tmp_path: Path) -> None:
+    instances = _import_instances()
+    root = generated_root(tmp_path)
+
+    with pytest.raises(instances.InvalidInstanceNameError):
+        instances.recorded_instance_id(root, "../escape")
+
+
+def test_instance_id_filename_constant_matches_the_single_writer() -> None:
+    """`instances.INSTANCE_ID_FILENAME` restates `instance_ops`'s constant
+    because the two modules cannot import each other (instance_ops imports
+    instances). This pin is what keeps that restatement honest: a rename on
+    the write side fails here instead of silently splitting the store in
+    two (see the constant's own comment in instances.py)."""
+    instances = _import_instances()
+    instance_ops = _import_instance_ops()
+
+    assert instances.INSTANCE_ID_FILENAME == instance_ops.INSTANCE_ID_FILENAME
+
+
+# ---------------------------------------------------------------------------
 # resolve (spec Section 4.1.1, AC-FUNC-005, AC-FUNC-006, AC-FUNC-007, AC-TEST-002)
 # ---------------------------------------------------------------------------
 

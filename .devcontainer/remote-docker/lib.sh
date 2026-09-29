@@ -71,11 +71,13 @@ rd_require_aws_config() {
 }
 
 rd_require_remote_config() {
-  case "${REMOTE_INSTANCE_ID:-}" in
-    "<"*">") rd_die "REMOTE_INSTANCE_ID is still the placeholder ${REMOTE_INSTANCE_ID}. Set it in shell.env (see shell.env.example) or export it." ;;
-  esac
-
-  : "${REMOTE_INSTANCE_ID:?REMOTE_INSTANCE_ID must be set}"
+  # The id comes from the per-instance id store
+  # (~/.docker/certs/<name>/instance-id), exported by rd_resolve_instance;
+  # devcontainer_config.instance_ops.link_id is that store's only writer.
+  # No environment variable is read as a fallback: an empty value here is
+  # the not-yet-linked state, and the remedy is the command that records
+  # the id, not a variable to set.
+  [ -n "${REMOTE_INSTANCE_ID:-}" ] || rd_die "no EC2 instance id is recorded for instance '${INSTANCE:-<unresolved>}'. Link it first: make instance-link INSTANCE=<name>"
   rd_require_aws_config
   : "${REMOTE_DOCKER_CONTEXT:?REMOTE_DOCKER_CONTEXT must be set}"
 }
@@ -128,6 +130,22 @@ EOF_BLOCK
 
   [ -n "${INSTANCE:-}" ] || { RD_RESOLVE_DIAGNOSIS=""; return 1; }
 
+  # The per-instance id store (~/.docker/certs/<name>/instance-id) is the
+  # only id writer (devcontainer_config.instance_ops.link_id), and CERTS_DIR
+  # in the resolved block is exactly the directory it lives under. Export the
+  # recorded id as REMOTE_INSTANCE_ID so every remote consumer reads the
+  # store rather than a stale shell.env value -- and clear the variable when
+  # nothing is recorded, so a leftover shell.env export can never misdirect
+  # an operation at a dead instance; rd_require_remote_config is what turns
+  # that absence into the make instance-link remedy.
+  local id_store="${CERTS_DIR}/instance-id"
+  if [ -f "$id_store" ]; then
+    REMOTE_INSTANCE_ID="$(tr -d '[:space:]' < "$id_store")"
+    export REMOTE_INSTANCE_ID
+  else
+    unset REMOTE_INSTANCE_ID
+  fi
+
   RD_INSTANCE_RESOLVED=1
   export RD_INSTANCE_RESOLVED
 }
@@ -138,7 +156,7 @@ rd_resolve_instance() {
   [ -n "${RD_RESOLVE_DIAGNOSIS:-}" ] || rd_fail "The resolver returned no instance" \
     "It exited successfully but printed no INSTANCE line, so there is nothing to act on." \
     "" \
-    "What is configured:       ${RD_BOLD}make instances${RD_RESET}"
+    "What is configured:       ${RD_BOLD}make list-instances${RD_RESET}"
 
   rd_fail "Could not resolve which instance to act on" \
     "$(printf '%s' "$RD_RESOLVE_DIAGNOSIS" | sed -n '1,6p')" \
@@ -146,7 +164,7 @@ rd_resolve_instance() {
     "Name one explicitly:      ${RD_BOLD}INSTANCE=<name> make <target>${RD_RESET}" \
     "Or set a default:         ${RD_BOLD}export DEFAULT_REMOTE_INSTANCE=<name>${RD_RESET}" \
     "" \
-    "What is configured:       ${RD_BOLD}make instances${RD_RESET}"
+    "What is configured:       ${RD_BOLD}make list-instances${RD_RESET}"
 }
 
 rd_check_aws_auth() {

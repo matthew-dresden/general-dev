@@ -989,3 +989,342 @@ def test_shell_block_module_invocation_prints_the_block_via_subprocess() -> None
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines()[0] == "# hostcreds-credential-startup-block"
+
+
+# ---------------------------------------------------------------------------
+# instance subcommands (spec Section 4.5, U2) -- the thin handlers over
+# devcontainer_config.instance_ops that `make list-instances` and the
+# instance-* make targets drive. The engine's own behavior is covered in
+# tests/test_instance_ops.py; what this section pins is the wiring: argparse
+# (a missing NAME exits 2 with usage), the subprocess_runner seam (read from
+# the instance_ops module at call time so a queued fake substitutes
+# cleanly), the instance-id shape refusal, and --json's single-object shape.
+# No test here touches AWS, docker, a keychain or the network.
+# ---------------------------------------------------------------------------
+
+
+def _import_instance_ops() -> ModuleType:
+    """Import devcontainer_config.instance_ops from inside a function body."""
+    return importlib.import_module("devcontainer_config.instance_ops")
+
+
+# The region the power and cleanup tests pass; a fixture value, not
+# configuration (the functions under test take their region explicitly).
+_INSTANCE_REGION = "us-east-1"
+
+
+def _instance_ok(stdout: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+def _instance_err(stderr: str, *, returncode: int = 1) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr=stderr)
+
+
+class _InstanceFakeRunner:
+    """A queued Runner double in the instance_ops shape: records, then pops.
+
+    The same strict-queue discipline `tests/test_instance_ops.py`'s double
+    applies: an invocation with no queued response fails the test instead of
+    being answered with a default that would let an unexpected aws/docker
+    call pass silently.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self._queue: list[subprocess.CompletedProcess[str]] = []
+
+    def queue(self, *results: subprocess.CompletedProcess[str]) -> None:
+        self._queue.extend(results)
+
+    def __call__(
+        self, argv: Sequence[str], stdin: str | None, *, env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append(tuple(argv))
+        assert self._queue, (
+            f"_InstanceFakeRunner was invoked with no queued response: {tuple(argv)!r}"
+        )
+        return self._queue.pop(0)
+
+
+@pytest.fixture()
+def _instance_docker_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point DOCKER_CONFIG at a per-test directory.
+
+    The id store and the certificate material both live under
+    `instances.certs_dir(name)`, which honors DOCKER_CONFIG; keeping that on
+    `tmp_path` away from the operator's real `~/.docker/certs`. A named
+    fixture rather than autouse: the pre-existing suites in this file never
+    read certificate paths, and they should not inherit an environment
+    change they had no say in.
+    """
+    docker_config_dir = tmp_path / "docker-config"
+    docker_config_dir.mkdir()
+    monkeypatch.setenv("DOCKER_CONFIG", str(docker_config_dir))
+    return docker_config_dir
+
+
+def _instance_name(prefix: str = "inst") -> str:
+    """A valid instance name unique per call."""
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+def _instance_id() -> str:
+    """An i-prefixed, 17-hex instance-id-shaped value, generated per call."""
+    return "i-" + uuid.uuid4().hex[:17]
+
+
+def _git_root_with_origin(tmp_path: Path) -> Path:
+    """A disposable git checkout whose origin slug `repo.repo_slug` can read.
+
+    Every derivation in `instances` that names a docker context goes through
+    `repo.repo_slug`, which reads `remote.origin.url`, so a bare repo is not
+    enough for the handlers that touch one.
+    """
+    root = generated_root(tmp_path)
+    init_repo(root)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/org/general-dev.git",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return root
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("instance-status",),
+        ("instance-stop",),
+        ("instance-start",),
+        ("instance-cleanup",),
+        ("instance-link",),
+    ],
+)
+def test_instance_commands_without_a_name_exit_two_with_usage(
+    argv: list[str] | tuple[str, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Missing NAME is a usage error: argparse prints usage and exits 2."""
+    cli = import_cli()
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(list(argv))
+
+    assert exc_info.value.code == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_instance_link_requires_an_instance_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = import_cli()
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["instance-link", _instance_name()])
+
+    assert exc_info.value.code == 2
+    assert "usage" in capsys.readouterr().err.lower()
+
+
+def test_instance_link_rejects_a_malformed_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A typo'd id would misdirect every power operation at once; refuse at exit 2."""
+    cli = import_cli()
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["instance-link", _instance_name(), "--instance-id", "not-an-instance-id"])
+
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "ERROR" in err
+    assert "i-" in err, "the refusal must show the expected shape"
+
+
+def test_instance_link_records_the_id_in_the_per_instance_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    _instance_docker_config: Path,
+) -> None:
+    root = _git_root_with_origin(tmp_path)
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    instance_id = _instance_id()
+
+    exit_code = run_cli(monkeypatch, root, ["instance-link", name, "--instance-id", instance_id])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert instance_id in out
+    assert instance_ops.recorded_id(root, name) == instance_id
+
+
+def test_instance_init_delegates_to_scaffold_and_prints_its_guidance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The handler prints scaffold's messages verbatim and never calls Terragrunt."""
+    root = _git_root_with_origin(tmp_path)
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    ami_id = "ami-" + uuid.uuid4().hex
+    runner = _InstanceFakeRunner()
+    runner.queue(_instance_ok(f"{ami_id}\n"))  # the one SSM read scaffold makes
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(monkeypatch, root, ["instance-init", name])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    scaffolded = root / "remote-instances" / name / "terragrunt.hcl"
+    assert scaffolded.is_file()
+    assert ami_id in scaffolded.read_text(encoding="utf-8")
+    assert f"Deploy with: make instance-deploy INSTANCE={name}" in out
+    assert len(runner.calls) == 1, "scaffold's only external call is the SSM AMI read"
+    assert runner.calls[0][0] == "aws"
+
+
+def test_instance_stop_delegates_with_the_recorded_id_and_region(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    _instance_docker_config: Path,
+) -> None:
+    root = _git_root_with_origin(tmp_path)
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    instance_id = _instance_id()
+    instance_ops.link_id(root, name, instance_id)
+    runner = _InstanceFakeRunner()
+    runner.queue(_instance_ok("{}\n"))  # stop-instances
+    runner.queue(_instance_ok("stopped\n"))  # first poll observes the target state
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(monkeypatch, root, ["instance-stop", name, "--region", _INSTANCE_REGION])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "is stopped" in out
+    assert runner.calls[0] == (
+        "aws",
+        "ec2",
+        "stop-instances",
+        "--instance-ids",
+        instance_id,
+        "--region",
+        _INSTANCE_REGION,
+    )
+
+
+def test_instance_status_json_prints_one_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    _instance_docker_config: Path,
+) -> None:
+    """--json prints exactly one single-line object with the documented fields."""
+    root = _git_root_with_origin(tmp_path)
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    directory = root / "remote-instances" / name
+    directory.mkdir(parents=True)
+    (directory / "terragrunt.hcl").write_text("# seeded\n", encoding="utf-8")
+    runner = _InstanceFakeRunner()
+    runner.queue(_instance_ok('{"Parameters": []}\n'))  # describe-parameters
+    runner.queue(_instance_err("no such context: anything"))  # docker context inspect
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(monkeypatch, root, ["instance-status", name, "--json"])
+
+    out_lines = capsys.readouterr().out.splitlines()
+    assert exit_code == 0
+    assert len(out_lines) == 1
+    row = json.loads(out_lines[0])
+    assert row["name"] == name
+    assert row["directory"] is True
+    assert row["params_present"] is False
+    assert row["certs_present"] is False
+    assert row["context_exists"] is False
+    assert row["lookup_error"] is None
+
+
+def test_instance_cleanup_delegates_and_prints_each_surface(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    _instance_docker_config: Path,
+) -> None:
+    root = _git_root_with_origin(tmp_path)
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    parameter_name = f"/devcontainer/{name}/shell.env"
+    context = instance_ops.instances.docker_context(root, name)
+    # Seed the certificate-material directory so its removal (the recorded
+    # instance-id file included) is exercised, not just the absent case.
+    certs_dir = instance_ops.instances.certs_dir(name)
+    certs_dir.mkdir(parents=True)
+    (certs_dir / "client-cert.pem").write_text("# seeded\n", encoding="utf-8")
+    runner = _InstanceFakeRunner()
+    runner.queue(_instance_ok(json.dumps({"Parameters": [{"Name": parameter_name}]})))
+    runner.queue(_instance_ok("{}\n"))  # delete-parameter
+    runner.queue(_instance_ok("{}\n"))  # docker context inspect: exists
+    runner.queue(_instance_ok("{}\n"))  # docker context rm
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(monkeypatch, root, ["instance-cleanup", name, "--region", _INSTANCE_REGION])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert parameter_name in out
+    assert context in out
+    assert "removed certificate directory" in out
+    assert not certs_dir.exists()
+    assert runner.calls[1] == (
+        "aws",
+        "ssm",
+        "delete-parameter",
+        "--name",
+        parameter_name,
+        "--region",
+        _INSTANCE_REGION,
+    )
+
+
+def test_instance_cleanup_failure_exits_nonzero_with_the_cli_error_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    _instance_docker_config: Path,
+) -> None:
+    """CleanupError reaches main's dispatch: ERROR text on stderr, exit 1, no traceback."""
+    root = _git_root_with_origin(tmp_path)
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    runner = _InstanceFakeRunner()
+    runner.queue(_instance_err("simulated SSM outage"))  # describe-parameters
+    runner.queue(_instance_err("simulated docker outage"))  # docker context inspect
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(monkeypatch, root, ["instance-cleanup", name, "--region", _INSTANCE_REGION])
+
+    err = capsys.readouterr().err
+    assert exit_code == 1
+    assert "ERROR" in err
+    assert name in err
+    assert "Traceback" not in err

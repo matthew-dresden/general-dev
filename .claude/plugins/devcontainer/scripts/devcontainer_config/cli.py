@@ -64,6 +64,20 @@ own pre-push stdin contract, derives the pushed range for every ref with
 `devcontainer_config.githooks.ranges_from_push_refs`, and scans each range
 with `scan_range`, exiting 1 if any of them found something.
 
+`instance-init`, `instance-list`, `instance-status`, `instance-stop`,
+`instance-start`, `instance-link` and `instance-cleanup` are thin handlers
+over `devcontainer_config.instance_ops` (spec Section 4.5), the engine the
+`make instance-*` targets and `make list-instances` also drive. Each handler
+resolves the repository root, reads `instance_ops.subprocess_runner` from the
+module at call time (so a hermetic test substitutes a fake there, the same
+seam the creds commands use), and prints the engine's messages verbatim;
+`instance-list` and `instance-status` carry `--json`, which prints exactly
+one single-line JSON object per instance (or for the one instance) and no
+summary line, for machine consumption. `instance-link` is the one handler
+with a check of its own: it refuses an id outside the `i-`-plus-lowercase-hex
+shape as a usage error before the store is written, because a typo'd id would
+misdirect every power and status operation at once.
+
 This module exposes no console script and installs none: its CLI entry is
 `python3 -m devcontainer_config.cli` (the form `make creds-init`,
 `make lint-secrets` and the postCreate startup-block render all invoke),
@@ -74,12 +88,15 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import asdict
 from pathlib import Path
 
-from devcontainer_config import hostcreds, instances, repo
+from devcontainer_config import hostcreds, instance_ops, instances, repo
 from devcontainer_config.githooks import (
     HOOK_NAMES,
     GitHooksError,
@@ -324,12 +341,72 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     resolve_instance_parser.set_defaults(handler=_run_resolve_instance)
 
-    instances_parser = subparsers.add_parser(
-        "instances",
-        help="List every configured instance and mark the active one (spec Section 9).",
-        description=_INSTANCES_DESCRIPTION,
+    instance_init_parser = subparsers.add_parser(
+        "instance-init",
+        help="Scaffold remote-instances/<name>/terragrunt.hcl for a new instance; never deploys.",
+        description=_INSTANCE_INIT_DESCRIPTION,
     )
-    instances_parser.set_defaults(handler=_run_instances)
+    instance_init_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    instance_init_parser.add_argument(
+        "--region", default=_DEFAULT_REGION, help=_INSTANCE_INIT_REGION_HELP
+    )
+    instance_init_parser.add_argument("--ami", metavar="AMI_ID", help=_AMI_HELP)
+    instance_init_parser.set_defaults(handler=_run_instance_init)
+
+    instance_list_parser = subparsers.add_parser(
+        "instance-list",
+        help="List every configured instance with its live state (spec Section 4.5).",
+        description=_INSTANCE_LIST_DESCRIPTION,
+    )
+    instance_list_parser.add_argument("--json", action="store_true", help=_INSTANCE_JSON_HELP)
+    instance_list_parser.set_defaults(handler=_run_instance_list)
+
+    instance_status_parser = subparsers.add_parser(
+        "instance-status",
+        help="Report one instance's live state (spec Section 4.5).",
+        description=_INSTANCE_STATUS_DESCRIPTION,
+    )
+    instance_status_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    instance_status_parser.add_argument("--json", action="store_true", help=_INSTANCE_JSON_HELP)
+    instance_status_parser.set_defaults(handler=_run_instance_status)
+
+    instance_stop_parser = subparsers.add_parser(
+        "instance-stop",
+        help="Stop one instance's EC2 instance and wait until it reports stopped.",
+        description=_INSTANCE_STOP_DESCRIPTION,
+    )
+    instance_stop_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    instance_stop_parser.add_argument("--region", default=_DEFAULT_REGION, help=_REGION_HELP)
+    instance_stop_parser.set_defaults(handler=_run_instance_stop)
+
+    instance_start_parser = subparsers.add_parser(
+        "instance-start",
+        help="Start one instance's EC2 instance and wait for its SSM agent to report ready.",
+        description=_INSTANCE_START_DESCRIPTION,
+    )
+    instance_start_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    instance_start_parser.add_argument("--region", default=_DEFAULT_REGION, help=_REGION_HELP)
+    instance_start_parser.set_defaults(handler=_run_instance_start)
+
+    instance_link_parser = subparsers.add_parser(
+        "instance-link",
+        help="Record one instance's EC2 id in the per-instance id store.",
+        description=_INSTANCE_LINK_DESCRIPTION,
+    )
+    instance_link_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    instance_link_parser.add_argument(
+        "--instance-id", metavar="INSTANCE_ID", required=True, help=_INSTANCE_ID_HELP
+    )
+    instance_link_parser.set_defaults(handler=_run_instance_link)
+
+    instance_cleanup_parser = subparsers.add_parser(
+        "instance-cleanup",
+        help="Tear down everything one instance scattered outside its Terragrunt directory.",
+        description=_INSTANCE_CLEANUP_DESCRIPTION,
+    )
+    instance_cleanup_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    instance_cleanup_parser.add_argument("--region", default=_DEFAULT_REGION, help=_REGION_HELP)
+    instance_cleanup_parser.set_defaults(handler=_run_instance_cleanup)
 
     creds_init_parser = subparsers.add_parser(
         "creds-init",
@@ -362,53 +439,283 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-_INSTANCES_DESCRIPTION = """List every instance configured under remote-instances/.
+_INSTANCE_INIT_DESCRIPTION = """Scaffold remote-instances/<name>/terragrunt.hcl for a new instance.
 
-Prints one row per instance with its region and docker context, marking the
-one the active docker context points at. Reports what it finds rather than
-inferring: an instance whose deployment records no region prints a dash, and
-when the active context cannot be determined no row is marked, since guessing
-which instance is current is worse than saying nothing.
+Writes the one file a new instance requires, from the embedded template the
+contract remote-instances/README.md fixes. Never runs Terragrunt: applying
+the file is `make instance-deploy`'s job. The default AMI is Canonical's
+current Ubuntu 24.04 arm64 image, resolved through SSM in the --region
+value -- which is used ONLY for that AMI lookup and the scaffolded
+availability zone, never as the deployment region; the deployment region is
+REMOTE_AWS_REGION, which has no default. Pass --ami to pin one by hand
+instead.
 """
 
+_INSTANCE_LIST_DESCRIPTION = """List every configured instance with its live state.
 
-def _run_instances(args: argparse.Namespace) -> int:
-    """Render the instance listing as a table.
+Prints one aligned row per instance -- EC2 power state, recorded id,
+Parameter Store material, client certificate, forwarded port and docker
+context -- then a summary line. A probe that could not answer prints a dash
+in its column; the first failure's reason is reported on stderr and the
+command exits 1, so one unreachable surface degrades its own row instead of
+suppressing the listing. With --json, prints exactly one single-line JSON
+object per instance (the same fields, lookup_error included) and no summary
+line, so scripts consume one object per line.
+"""
 
-    The active-context probe is `docker context show`, run here rather than
-    inside `instances.listing` so the listing itself stays a pure function and
-    a test can drive it without docker present. A probe failure is not fatal:
-    the listing still prints, with nothing marked active.
+_INSTANCE_STATUS_DESCRIPTION = """One instance's live state, in the columns instance-list renders.
+
+With --json, prints exactly one single-line JSON object (the same fields
+instance-list --json prints per row, lookup_error included). Exits 1 when
+any probe failed; the object still prints.
+"""
+_INSTANCE_STOP_DESCRIPTION = (
+    "Stop one instance's EC2 instance and poll until EC2 reports it stopped. "
+    "Idempotent: an already-stopped instance returns immediately. Requires the "
+    "id `make instance-link` (or instance-deploy) recorded."
+)
+
+_INSTANCE_START_DESCRIPTION = (
+    "Start one instance's EC2 instance, then poll until its SSM agent reports "
+    "ready. Requires the id `make instance-link` (or instance-deploy) recorded."
+)
+
+_INSTANCE_LINK_DESCRIPTION = (
+    "Record an EC2 instance id in the instance's per-instance id store, the "
+    "place the power and status operations read it from. instance-deploy does "
+    "this automatically; run it by hand only after re-provisioning outside make."
+)
+
+_INSTANCE_CLEANUP_DESCRIPTION = """Tear down one instance's out-of-band state.
+
+Deletes every SSM parameter under the instance's prefix, removes its docker
+context, and deletes its certificate-material directory (the recorded
+instance-id file included). Every operation is attempted even after an
+earlier one failed; all failures are raised together at the end. The
+remote-state bucket is deliberately out of scope: the fleet shares one
+bucket, so its lifecycle is a Terragrunt/backend concern.
+"""
+
+# The region default every aws-touching instance subcommand applies, the same
+# default the make instance-* targets apply (spec Section 4.5's worked
+# example). Declared once so the four parsers that use it cannot drift.
+_DEFAULT_REGION = "us-east-1"
+
+_INSTANCE_NAME_HELP = "The instance name (a project name, e.g. brimbooks)."
+
+_REGION_HELP = (
+    "AWS region the operation targets (default: us-east-1, the same default "
+    "the make instance-* targets apply)."
+)
+
+# instance-init's --region deliberately carries its own help text, distinct
+# from _REGION_HELP: the scaffold uses the value only to resolve the default
+# AMI from SSM and to derive the availability_zone it writes, while the
+# deployment itself runs in whatever REMOTE_AWS_REGION names at make
+# instance-deploy time. Sharing the generic wording would let a scaffold-time
+# flag read as the deployment region, which it is not.
+_INSTANCE_INIT_REGION_HELP = (
+    "Region for the scaffold-time AMI lookup and the written availability "
+    "zone ONLY (default: us-east-1). Not the deployment region: the "
+    "deployment runs in REMOTE_AWS_REGION, which has no default."
+)
+
+_AMI_HELP = (
+    "Pin this AMI id instead of resolving Canonical's current Ubuntu 24.04 arm64 image from SSM."
+)
+
+_INSTANCE_JSON_HELP = (
+    "Print machine-readable output instead of the table: exactly one "
+    "single-line JSON object per instance (instance-list) or for the one "
+    "instance (instance-status), lookup_error included, and no summary line."
+)
+
+_INSTANCE_ID_HELP = (
+    "The EC2 instance id to record, shaped i- followed by lowercase hex "
+    "(what Terragrunt's instance_id output carries)."
+)
+
+# The EC2 instance-id shape `instance-link` accepts: `i-` followed by one or
+# more lowercase hex characters. The store itself (`instance_ops.link_id`)
+# only refuses an empty value, so this is the one place the shape is checked,
+# before a typo'd id becomes the thing every power operation addresses.
+_INSTANCE_ID_PATTERN = re.compile(r"i-[0-9a-f]+")
+
+_INSTANCE_ID_MALFORMED_MESSAGE = (
+    "ERROR: --instance-id must look like i-0123456789abcdefg (i- followed by "
+    "lowercase hex)\n"
+    "The recorded id is what every power and status operation addresses, so a "
+    "typo here misdirects them all at once.\n"
+    "Copy the id from Terragrunt's instance_id output, then retry."
+)
+
+# The columns the instance-list table (and the single-row instance-status
+# table) renders, in order. A probe that could not answer renders as a dash
+# via the `_tri_state`/dash conventions in `_instance_row_values`.
+_INSTANCE_TABLE_HEADER = ("INSTANCE", "STATE", "ID", "PARAMS", "CERTS", "FORWARD", "CONTEXT")
+
+# The note printed when `remote-instances/` configures no instance at all:
+# a listing of zero instances is an ordinary state, not an error.
+_NO_INSTANCES_MESSAGE = "No instances configured under remote-instances/."
+
+
+def _tri_state(value: bool | None) -> str:
+    """`yes`/`no` for a probe that answered, `-` for one that could not."""
+    return {True: "yes", False: "no"}.get(value, "-")
+
+
+def _instance_row_values(row: instance_ops.InstanceState, root: Path) -> tuple[str, ...]:
+    """One table row for `row`, every unanswerable probe rendered as a dash."""
+    if row.context_exists is True:
+        context = instances.docker_context(root, row.name)
+    elif row.context_exists is False:
+        context = "absent"
+    else:
+        context = "-"
+    return (
+        row.name,
+        row.ec2_state or "-",
+        row.recorded_id or "-",
+        _tri_state(row.params_present),
+        _tri_state(row.certs_present),
+        str(row.forward_port) if row.forward_port is not None else "-",
+        context,
+    )
+
+
+def _print_instance_table(rows: Sequence[instance_ops.InstanceState], root: Path) -> None:
+    """The aligned table: one header row, then one row per `InstanceState`.
+
+    Every column is padded to the widest value it carries, so the table
+    reads as columns regardless of name or context length.
+    """
+    values = [_instance_row_values(row, root) for row in rows]
+    widths = [
+        max(len(header), *(len(row[column]) for row in values))
+        for column, header in enumerate(_INSTANCE_TABLE_HEADER)
+    ]
+    header = "  ".join(
+        column.ljust(width) for column, width in zip(_INSTANCE_TABLE_HEADER, widths, strict=True)
+    ).rstrip()
+    print(header)
+    for row in values:
+        print(
+            "  ".join(value.ljust(width) for value, width in zip(row, widths, strict=True)).rstrip()
+        )
+
+
+def _report_probe_failures(rows: Sequence[instance_ops.InstanceState]) -> int:
+    """Print one stderr line per row whose probes failed; exit 1 if any did.
+
+    The listing itself always prints first; this is the per-row degradation
+    the module docstring promises, so one unreachable surface names itself
+    on stderr without suppressing what the other instances answered.
+    """
+    failed = [row for row in rows if row.lookup_error is not None]
+    for row in failed:
+        assert row.lookup_error is not None  # filtered above
+        print(f"ERROR: {row.name}: {row.lookup_error}", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def _run_instance_init(args: argparse.Namespace) -> int:
+    """Scaffold the one file a new instance requires; print the guidance verbatim.
+
+    `instance_ops.scaffold` raises `ScaffoldError` on any refusal, which
+    `main` converts into exit 1 -- there is no failure this handler reports
+    as anything but that exception.
     """
     root = repo.find_root(Path.cwd())
-    try:
-        completed = subprocess.run(
-            ["docker", "context", "show"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        active = completed.stdout.strip() if completed.returncode == 0 else None
-    except (OSError, subprocess.SubprocessError):
-        active = None
+    result = instance_ops.scaffold(
+        root, args.name, region=args.region, ami=args.ami, runner=instance_ops.subprocess_runner
+    )
+    for message in result.messages:
+        print(message)
+    return 0
 
-    rows = instances.listing(root, active_context=active)
+
+def _run_instance_list(args: argparse.Namespace) -> int:
+    """List every configured instance's live state, or one JSON object per row.
+
+    The runner is `instance_ops.subprocess_runner`, read from the module at
+    call time so a hermetic test substitutes a fake there. --json keeps
+    stdout to exactly one single-line JSON object per row (no summary), so a
+    consumer can stream it; the summary line and the aligned table are the
+    human modes' output only.
+    """
+    root = repo.find_root(Path.cwd())
+    rows = instance_ops.list_state(root, runner=instance_ops.subprocess_runner)
     if not rows:
-        print(
-            "No instances configured. Run /devcontainer:setup-remote to add one.",
-            file=sys.stderr,
-        )
+        print(_NO_INSTANCES_MESSAGE, file=sys.stderr)
         return 0
+    if args.json:
+        for row in rows:
+            print(json.dumps(asdict(row)))
+    else:
+        _print_instance_table(rows, root)
+        failed_count = sum(1 for row in rows if row.lookup_error is not None)
+        summary = f"{len(rows)} instance(s) listed"
+        if failed_count:
+            summary += f", {failed_count} with probe errors"
+        print(summary)
+    return _report_probe_failures(rows)
 
-    name_width = max(len("INSTANCE"), max(len(r.name) for r in rows))
-    region_width = max(len("REGION"), max(len(r.region or "-") for r in rows))
-    print(f"{'INSTANCE':<{name_width}}  {'REGION':<{region_width}}  ACTIVE  DOCKER CONTEXT")
-    for row in rows:
-        marker = "  *   " if row.active else "      "
-        print(
-            f"{row.name:<{name_width}}  {(row.region or '-'):<{region_width}}  "
-            f"{marker}  {row.docker_context}"
+
+def _run_instance_status(args: argparse.Namespace) -> int:
+    """Print one instance's live state as a one-row table, or one JSON object."""
+    root = repo.find_root(Path.cwd())
+    row = instance_ops.state(root, args.name, runner=instance_ops.subprocess_runner)
+    if args.json:
+        print(json.dumps(asdict(row)))
+    else:
+        _print_instance_table([row], root)
+    return _report_probe_failures([row])
+
+
+def _run_instance_stop(args: argparse.Namespace) -> int:
+    """Stop the instance and print `instance_ops.stop`'s completion message."""
+    root = repo.find_root(Path.cwd())
+    print(
+        instance_ops.stop(
+            root, args.name, region=args.region, runner=instance_ops.subprocess_runner
         )
+    )
+    return 0
+
+
+def _run_instance_start(args: argparse.Namespace) -> int:
+    """Start the instance and print `instance_ops.start`'s completion message."""
+    root = repo.find_root(Path.cwd())
+    print(
+        instance_ops.start(
+            root, args.name, region=args.region, runner=instance_ops.subprocess_runner
+        )
+    )
+    return 0
+
+
+def _run_instance_link(args: argparse.Namespace) -> int:
+    """Record the instance id, refusing a malformed one before anything is written.
+
+    The shape check is a usage error (exit code 2, this module's own
+    `EXIT_USAGE_ERROR`): a malformed id names no instance AWS can address,
+    so it is a malformed command, not a failed operation.
+    """
+    if _INSTANCE_ID_PATTERN.fullmatch(args.instance_id) is None:
+        print(_INSTANCE_ID_MALFORMED_MESSAGE, file=sys.stderr)
+        return EXIT_USAGE_ERROR
+    root = repo.find_root(Path.cwd())
+    print(instance_ops.link_id(root, args.name, args.instance_id))
+    return 0
+
+
+def _run_instance_cleanup(args: argparse.Namespace) -> int:
+    """Tear down the instance's out-of-band state, printing each message."""
+    root = repo.find_root(Path.cwd())
+    for message in instance_ops.cleanup(
+        root, args.name, region=args.region, runner=instance_ops.subprocess_runner
+    ):
+        print(message)
     return 0
 
 
@@ -795,10 +1102,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     This module's one public console entry point (AC-FUNC-006), and
     the only `sys.exit` site on the `devcontainer_config` command path: every
     command handler raises `SecretScanError`, `repo.RepoError`,
-    `GitHooksError`, `instances.InstancesError` or `hostcreds.HostCredsError`
-    on a real failure instead of exiting itself, and this is where that
-    exception becomes an exit code -- printed with an `ERROR:` prefix to
-    stderr, never a stack trace.
+    `GitHooksError`, `instances.InstancesError`, `instance_ops.InstanceOpsError`
+    or `hostcreds.HostCredsError` on a real failure instead of exiting itself,
+    and this is where that exception becomes an exit code -- printed with an
+    `ERROR:` prefix to stderr, never a stack trace.
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -809,6 +1116,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         repo.RepoError,
         GitHooksError,
         instances.InstancesError,
+        instance_ops.InstanceOpsError,
         hostcreds.HostCredsError,
     ) as exc:
         print(str(exc), file=sys.stderr)

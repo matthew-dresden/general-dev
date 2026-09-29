@@ -1,4 +1,4 @@
-"""Skill lint: frontmatter, JSON, and answers-field correspondence.
+"""Skill lint: frontmatter, roster, and bare-name reference correspondence.
 
 Section 10.2 of `spec/devcontainer-platform.md` names the "Skill lint" suite:
 "Frontmatter valid; plugin and marketplace JSON well formed; every `answers`
@@ -13,11 +13,17 @@ machine-checkable at the document level. Section 11's integrations matrix
 records the plugin as an inbound integration whose failure mode is "A
 malformed manifest fails skill lint" -- this module is that check.
 
-`check_plugin` is the checker. It takes a plugin root, a documentation path
-and the `answers` module, and returns a list of findings rather than raising,
-the same "report everything at once" contract `answers.validate` already
-uses (Section 4.2.2's "report every failing field at once"). It runs eight
-rules, each named below with the spec section it enforces:
+The canonical skills home is `.agents/skills/<name>/SKILL.md` (every name
+`gd-`-prefixed); the plugin's `skills/` entry is a relative symlink to it,
+so this module lints the canonical directory and the plugin manifests side
+by side. The roster table lives in `docs/skills.md`.
+
+`check_plugin` is the checker. It takes the plugin root, the canonical
+skills root, the two documentation paths and the `answers` module, and
+returns a list of findings rather than raising, the same "report everything
+at once" contract `answers.validate` already uses (Section 4.2.2's "report
+every failing field at once"). It runs eight rules, each named below with
+the spec section it enforces:
 
 1. `plugin.json` parses and its `name` equals the plugin directory name
    (Section 11).
@@ -25,11 +31,15 @@ rules, each named below with the spec section it enforces:
    `source` resolves to the plugin root (Section 11).
 3. `.claude/settings.json` parses and registers the plugin root as a
    `directory` marketplace with the plugin enabled (Section 11).
-4. Every `SKILL.md` has a delimited frontmatter block with a non-empty
-   `name` (matching its directory) and a non-empty `description`
-   (Section 10.2's "Frontmatter valid").
-5. The skill roster table in `docs/devcontainer.md` and the directories
-   under `skills/` are the same set (Section 4.2's nine-skill roster).
+4. Every `SKILL.md` has a delimited frontmatter block with a `name` that is
+   non-empty, matches its directory, and matches the roster pattern
+   `^gd-[a-z0-9]+(-[a-z0-9]+)*$`, plus a non-empty `description` no longer
+   than 1024 characters (opencode's cap) and no longer than 500 characters
+   (house style; both limits produce their own finding) (Section 10.2's
+   "Frontmatter valid").
+5. The skill roster table in `docs/skills.md` and the directories under the
+   canonical skills root are the same set (the roster cannot drift from
+   what is installed).
 6. A skill declaring `Interview backend: <backend>` has a `## Questions`
    table whose `Field` column, as a set, equals
    `answers.required_fields({"backend": backend, "aws_config_enabled":
@@ -38,9 +48,11 @@ rules, each named below with the spec section it enforces:
 7. A `## Checks` table has unique `Check` names, unique `Failure message`
    values, and a non-empty `Remedy` cell in every row (Section 4.2.1,
    4.2.2, AC-4.1's distinctness requirement).
-8. Every `/devcontainer:<name>` reference in any `SKILL.md` or in
-   `docs/devcontainer.md` names a skill present in the roster
-   (Section 4.2).
+8. Every bare `gd-<name>` cross-reference, in any `SKILL.md`, in
+   `docs/skills.md`, or in `docs/devcontainer.md`, names a skill present in
+   the roster (the reference rule, repointed from the plugin-only
+   `/devcontainer:<name>` form to the agent-agnostic bare name; a dangling
+   reference is the same defect either way).
 
 Frontmatter is parsed by `_read_frontmatter`, restricted to scalar
 `key: value` lines inside the delimited block, and fails loudly (one finding
@@ -49,15 +61,11 @@ requires standard library only unless a dependency is justified in
 Section 6, and no dependency is justified for parsing this small a format,
 so no YAML package is used.
 
-The negative cases below build synthesized plugin+repo trees under
-`tmp_path`, using `_default_spec` and `_default_skill` as the single valid
-baseline and a `mutate` callable that breaks exactly one rule, and assert
-the exact finding text produced. The positive case (`test_real_...`) runs
-`check_plugin` over the real repository and asserts an empty list. At the
-point this suite lands, `docs/devcontainer.md`'s roster table has no data
-rows and `.claude/plugins/devcontainer/skills/` does not exist, so every
-skill-scoped rule holds vacuously over the real tree while each rule's own
-enforcement is proven by a synthesized tree built specifically to fail it.
+The negative cases below build synthesized repo trees under `tmp_path`,
+using `_default_spec` and `_default_skill` as the single valid baseline and
+a `mutate` callable that breaks exactly one rule, and assert the exact
+finding text produced. The positive case (`test_real_...`) runs
+`check_plugin` over the real repository and asserts an empty list.
 """
 
 from __future__ import annotations
@@ -79,17 +87,26 @@ from devcontainer_config import answers, repo
 _PLUGIN_MANIFEST_RELATIVE = Path(".claude-plugin") / "plugin.json"
 _MARKETPLACE_MANIFEST_RELATIVE = Path(".claude-plugin") / "marketplace.json"
 _SETTINGS_RELATIVE = Path(".claude") / "settings.json"
-_SKILLS_SUBDIRECTORY = "skills"
 
 _FRONTMATTER_DELIMITER = "---"
 _FRONTMATTER_LINE_PATTERN = re.compile(r"^([A-Za-z0-9_]+):\s*(.*)$")
+
+_SKILL_NAME_PATTERN = re.compile(r"^gd-[a-z0-9]+(-[a-z0-9]+)*$")
+# opencode caps skill descriptions at 1024 characters; house style keeps them
+# well under a tighter 500-character bound. Both limits are enforced, each
+# producing its own finding.
+_DESCRIPTION_LIMIT_OPENCODE = 1024
+_DESCRIPTION_LIMIT_HOUSE = 500
 
 _ROSTER_HEADER = "| Skill | Invocation |"
 _QUESTIONS_HEADER = "| Field | Prompt |"
 _CHECKS_HEADER = "| Check | Prevents | Failure message | Remedy |"
 
 _INTERVIEW_BACKEND_PATTERN = re.compile(r"^Interview backend:\s*(\S+)\s*$", re.MULTILINE)
-_REFERENCE_PATTERN = re.compile(r"/devcontainer:([A-Za-z0-9_-]+)")
+# A bare cross-reference: `gd-` plus at least one name segment, not preceded
+# or followed by a character that would make it a different word or a longer
+# name. `gd-<name>` placeholders and a bare `gd-` prefix never match.
+_REFERENCE_PATTERN = re.compile(r"(?<![\w-])gd-[a-z0-9]+(?:-[a-z0-9]+)*(?![\w-])")
 
 
 def _parse_markdown_table(
@@ -328,7 +345,10 @@ def _read_frontmatter(skill_md_path: Path, text: str) -> tuple[dict[str, str] | 
 
 
 def _check_frontmatter(skill_md_path: Path, text: str) -> list[str]:
-    """Rule 4: a valid frontmatter block with a non-empty `description` and a matching `name`."""
+    """Rule 4: a valid frontmatter block -- a `name` that is non-empty, matches the
+    directory and the roster pattern, and a `description` that is non-empty
+    and within both length limits.
+    """
     fields, findings = _read_frontmatter(skill_md_path, text)
     if fields is None:
         return findings
@@ -336,50 +356,69 @@ def _check_frontmatter(skill_md_path: Path, text: str) -> list[str]:
     name = fields.get("name", "")
     if not name:
         findings.append(f"{skill_md_path}: frontmatter 'name' must not be empty")
-    elif name != skill_md_path.parent.name:
-        findings.append(
-            f"{skill_md_path}: frontmatter 'name' is {name!r}, does not match "
-            f"the skill directory name {skill_md_path.parent.name!r}"
-        )
+    else:
+        if name != skill_md_path.parent.name:
+            findings.append(
+                f"{skill_md_path}: frontmatter 'name' is {name!r}, does not match "
+                f"the skill directory name {skill_md_path.parent.name!r}"
+            )
+        if not _SKILL_NAME_PATTERN.match(name):
+            findings.append(
+                f"{skill_md_path}: frontmatter 'name' is {name!r}, does not match "
+                f"the roster pattern {_SKILL_NAME_PATTERN.pattern!r}"
+            )
 
     description = fields.get("description", "")
     if not description:
         findings.append(f"{skill_md_path}: frontmatter 'description' must not be empty")
+    else:
+        if len(description) > _DESCRIPTION_LIMIT_OPENCODE:
+            findings.append(
+                f"{skill_md_path}: frontmatter 'description' is {len(description)} "
+                f"characters, over the {_DESCRIPTION_LIMIT_OPENCODE}-character limit"
+            )
+        if len(description) > _DESCRIPTION_LIMIT_HOUSE:
+            findings.append(
+                f"{skill_md_path}: frontmatter 'description' is {len(description)} "
+                f"characters, over the {_DESCRIPTION_LIMIT_HOUSE}-character house limit"
+            )
 
     return findings
 
 
-def _roster_names(docs_path: Path, text: str) -> tuple[set[str], list[str]]:
-    """`(names, findings)` for `docs_path`'s `| Skill | Invocation |` roster table.
+def _roster_names(docs_skills_path: Path, text: str) -> tuple[set[str], list[str]]:
+    """`(names, findings)` for `docs_skills_path`'s `| Skill | Invocation |` roster table.
 
-    `text` is `docs_path`'s already-read content: `check_plugin` reads
-    `docs_path` once (guarded by `_read_text`) and passes the result here
-    and to `_check_references`, rather than each caller re-reading the file
-    and risking its own copy of a decode-failure finding.
+    `text` is `docs_skills_path`'s already-read content: `check_plugin` reads
+    the roster document once (guarded by `_read_text`) and passes the result
+    here and to `_check_references`, rather than each caller re-reading the
+    file and risking its own copy of a decode-failure finding.
     """
-    rows, findings = _parse_markdown_table(docs_path, text, _ROSTER_HEADER)
+    rows, findings = _parse_markdown_table(docs_skills_path, text, _ROSTER_HEADER)
     return {row["Skill"] for row in rows if row.get("Skill")}, findings
 
 
-def _check_roster(plugin_root: Path, docs_path: Path, roster: set[str]) -> list[str]:
-    """Rule 5: the roster table's skill names and `skills/`'s directory names are
-    the same set.
+def _check_roster(skills_root: Path, docs_skills_path: Path, roster: set[str]) -> list[str]:
+    """Rule 5: the roster table's skill names and the canonical skills root's
+    directory names are the same set.
     """
-    if not docs_path.is_file():
-        return [f"{docs_path}: no such file"]
+    if not docs_skills_path.is_file():
+        return [f"{docs_skills_path}: no such file"]
 
-    skills_dir = plugin_root / _SKILLS_SUBDIRECTORY
     directories: set[str] = set()
-    if skills_dir.is_dir():
-        directories = {entry.name for entry in skills_dir.iterdir() if entry.is_dir()}
+    if skills_root.is_dir():
+        directories = {entry.name for entry in skills_root.iterdir() if entry.is_dir()}
 
     findings: list[str] = []
     for name in sorted(roster - directories):
         findings.append(
-            f"{docs_path}: roster names skill '{name}' with no directory at {skills_dir / name}"
+            f"{docs_skills_path}: roster names skill '{name}' with no directory at "
+            f"{skills_root / name}"
         )
     for name in sorted(directories - roster):
-        findings.append(f"{skills_dir / name}: skill directory has no roster row in {docs_path}")
+        findings.append(
+            f"{skills_root / name}: skill directory has no roster row in {docs_skills_path}"
+        )
     return findings
 
 
@@ -458,29 +497,51 @@ def _check_checks_table(skill_md_path: Path, text: str) -> list[str]:
     return findings
 
 
+def _strip_frontmatter(text: str) -> str:
+    """`text` with its `---`-delimited frontmatter block removed, for reference scanning.
+
+    Rule 8 polices cross-references, and a `SKILL.md`'s own `name:` in its
+    frontmatter is not one: a skill whose name is not yet in the roster (the
+    orphan-directory case) must fail the roster rule alone, not also be
+    reported as a dangling reference to itself. A file with no frontmatter
+    block is returned unchanged -- the frontmatter rule owns that finding.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != _FRONTMATTER_DELIMITER:
+        return text
+    for index in range(1, len(lines)):
+        if lines[index].strip() == _FRONTMATTER_DELIMITER:
+            return "\n".join(lines[index + 1 :])
+    return text
+
+
 def _check_references(source_path: Path, text: str, roster: set[str]) -> list[str]:
-    """Rule 8: every `/devcontainer:<name>` in `source_path`'s `text` names a skill in
-    `roster`.
+    """Rule 8: every bare `gd-<name>` reference in `source_path`'s `text` names a
+    skill in `roster`.
     """
     findings: list[str] = []
     for name in sorted(set(_REFERENCE_PATTERN.findall(text))):
         if name not in roster:
-            findings.append(
-                f"{source_path}: '/devcontainer:{name}' references a skill not in the roster"
-            )
+            findings.append(f"{source_path}: '{name}' references a skill not in the roster")
     return findings
 
 
-def check_plugin(plugin_root: Path, docs_path: Path, answers_module: Any) -> list[str]:
-    """Every skill-lint finding for the plugin at `plugin_root` (spec Section 10.2).
+def check_plugin(
+    plugin_root: Path,
+    skills_root: Path,
+    docs_skills_path: Path,
+    docs_devcontainer_path: Path,
+    answers_module: Any,
+) -> list[str]:
+    """Every skill-lint finding for the roster at `skills_root` (spec Section 10.2).
 
     Never raises on malformed input: every sub-check returns findings rather
     than propagating a parse error, so one call reports every problem found
     across all eight rules instead of stopping at the first (AC-FUNC-001).
-    No path or field name used to build this plugin's identity (its own
-    name, its skill names, its documentation content) is hardcoded in this
-    function's body; every one of those is read from `plugin_root`,
-    `docs_path` or `answers_module` (AC-FUNC-002).
+    No path or field name used to build this roster's identity (the plugin's
+    own name, the skill names, the documentation content) is hardcoded in
+    this function's body; every one of those is read from the five paths or
+    `answers_module` (AC-FUNC-002).
     """
     findings: list[str] = []
     findings.extend(_check_plugin_manifest(plugin_root))
@@ -491,8 +552,7 @@ def check_plugin(plugin_root: Path, docs_path: Path, answers_module: Any) -> lis
     # the resulting text threaded into every rule that inspects it, so a
     # decode failure produces exactly one finding naming the file instead of
     # one per rule that would otherwise re-read it.
-    skills_dir = plugin_root / _SKILLS_SUBDIRECTORY
-    skill_md_paths = sorted(skills_dir.glob("*/SKILL.md")) if skills_dir.is_dir() else []
+    skill_md_paths = sorted(skills_root.glob("*/SKILL.md")) if skills_root.is_dir() else []
     skill_texts: dict[Path, str] = {}
     for skill_md_path in skill_md_paths:
         text, read_findings = _read_text(skill_md_path)
@@ -505,19 +565,24 @@ def check_plugin(plugin_root: Path, docs_path: Path, answers_module: Any) -> lis
         findings.extend(_check_checks_table(skill_md_path, text))
 
     docs_text: str | None = None
-    if docs_path.is_file():
-        docs_text, docs_read_findings = _read_text(docs_path)
+    if docs_skills_path.is_file():
+        docs_text, docs_read_findings = _read_text(docs_skills_path)
         findings.extend(docs_read_findings)
 
     roster: set[str] = set()
     if docs_text is not None:
-        roster, roster_findings = _roster_names(docs_path, docs_text)
+        roster, roster_findings = _roster_names(docs_skills_path, docs_text)
         findings.extend(roster_findings)
-    findings.extend(_check_roster(plugin_root, docs_path, roster))
+    findings.extend(_check_roster(skills_root, docs_skills_path, roster))
 
-    reference_sources = list(skill_texts.items())
+    reference_sources = [(path, _strip_frontmatter(text)) for path, text in skill_texts.items()]
     if docs_text is not None:
-        reference_sources.append((docs_path, docs_text))
+        reference_sources.append((docs_skills_path, docs_text))
+    if docs_devcontainer_path.is_file():
+        devcontainer_text, devcontainer_read_findings = _read_text(docs_devcontainer_path)
+        findings.extend(devcontainer_read_findings)
+        if devcontainer_text is not None:
+            reference_sources.append((docs_devcontainer_path, devcontainer_text))
     for source_path, text in reference_sources:
         findings.extend(_check_references(source_path, text, roster))
 
@@ -533,12 +598,17 @@ def _default_skill(name: str, backend: str | None) -> dict[str, Any]:
     """A skill dict that passes every rule on its own, for `name` and interview `backend`.
 
     `backend=None` omits the `Interview backend:` line and the `##
-    Questions` table entirely, matching a skill (like `doctor` or
-    `teardown`) that asks nothing from `answers.FIELDS` (spec Section 4.2's
-    "Asks: Nothing").
+    Questions` table entirely, matching a skill (like `gd-env-doctor` or
+    `gd-container-lifecycle`) that asks nothing from `answers.FIELDS` (spec
+    Section 4.2's "Asks: Nothing").
     """
+    # The description embeds no `gd-` name: the reference rule (rule 8)
+    # treats every bare `gd-<name>` in the file as a cross-reference, and a
+    # default skill whose description echoed its own name would make the
+    # name-mutation cases below fail for a reference reason instead of the
+    # frontmatter reason each isolates.
     skill: dict[str, Any] = {
-        "frontmatter": {"name": name, "description": f"The {name} skill."},
+        "frontmatter": {"name": name, "description": "A skill that passes every rule."},
         "checks": [
             ("check-one", "prevents one bad thing", "failure message one", "remedy one"),
             ("check-two", "prevents another bad thing", "failure message two", "remedy two"),
@@ -593,6 +663,7 @@ def _default_spec(plugin_dir_name: str) -> dict[str, Any]:
         "roster": [],
         "docs_extra": "",
         "docs_raw": None,
+        "devcontainer_docs_extra": "",
     }
 
 
@@ -657,26 +728,31 @@ def _render_skill_md(skill: dict[str, Any]) -> str:
 
 def _render_docs(roster: list[str], extra: str) -> str:
     lines = [
-        "# Synthesized devcontainer internals",
+        "# Synthesized skills",
         "",
-        "## Plugin and skills",
+        "## Roster",
         "",
         _ROSTER_HEADER,
         "|---|---|",
     ]
     for name in roster:
-        lines.append(f"| {name} | /devcontainer:{name} |")
+        lines.append(f"| {name} | {name} |")
     lines.append("")
     if extra:
         lines.append(extra)
     return "\n".join(lines)
 
 
-def _write_tree(tmp_path: Path, plugin_dir_name: str, spec: dict[str, Any]) -> tuple[Path, Path]:
+def _write_tree(
+    tmp_path: Path, plugin_dir_name: str, spec: dict[str, Any]
+) -> tuple[Path, Path, Path, Path]:
     """Serialize `spec` (built from `_default_spec`, then mutated) under a fresh `tmp_path` root.
 
+    Returns `(plugin_root, skills_root, docs_skills_path,
+    docs_devcontainer_path)`.
+
     `spec["docs_raw"]`, when not `None`, is written verbatim as
-    `docs/devcontainer.md` instead of being built from `spec["roster"]` and
+    `docs/skills.md` instead of being built from `spec["roster"]` and
     `spec["docs_extra"]` via `_render_docs`, mirroring the per-skill `"raw"`
     escape hatch `_render_skill_md` already provides. This is what lets a
     negative case write a roster table row whose cell count cannot be
@@ -690,6 +766,7 @@ def _write_tree(tmp_path: Path, plugin_dir_name: str, spec: dict[str, Any]) -> t
     """
     root = _generated_dir(tmp_path, "checkout")
     plugin_root = root / ".claude" / "plugins" / plugin_dir_name
+    skills_root = root / ".agents" / "skills"
 
     if spec["plugin_json"] is not None:
         _write_json_or_raw(plugin_root / _PLUGIN_MANIFEST_RELATIVE, spec["plugin_json"])
@@ -699,7 +776,7 @@ def _write_tree(tmp_path: Path, plugin_dir_name: str, spec: dict[str, Any]) -> t
         _write_json_or_raw(root / _SETTINGS_RELATIVE, spec["settings_json"])
 
     for skill_name, skill in spec["skills"].items():
-        skill_dir = plugin_root / _SKILLS_SUBDIRECTORY / skill_name
+        skill_dir = skills_root / skill_name
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_md_path = skill_dir / "SKILL.md"
         if "raw_bytes" in skill:
@@ -707,16 +784,24 @@ def _write_tree(tmp_path: Path, plugin_dir_name: str, spec: dict[str, Any]) -> t
         else:
             skill_md_path.write_text(_render_skill_md(skill), encoding="utf-8")
 
-    docs_path = root / "docs" / "devcontainer.md"
-    docs_path.parent.mkdir(parents=True, exist_ok=True)
+    docs_skills_path = root / "docs" / "skills.md"
+    docs_skills_path.parent.mkdir(parents=True, exist_ok=True)
     docs_text = (
         spec["docs_raw"]
         if spec.get("docs_raw") is not None
         else _render_docs(spec["roster"], spec["docs_extra"])
     )
-    docs_path.write_text(docs_text, encoding="utf-8")
+    docs_skills_path.write_text(docs_text, encoding="utf-8")
 
-    return plugin_root, docs_path
+    docs_devcontainer_path = root / "docs" / "devcontainer.md"
+    devcontainer_extra = spec["devcontainer_docs_extra"]
+    docs_devcontainer_path.write_text(
+        "# Synthesized devcontainer internals\n"
+        + (f"\n{devcontainer_extra}" if devcontainer_extra else ""),
+        encoding="utf-8",
+    )
+
+    return plugin_root, skills_root, docs_skills_path, docs_devcontainer_path
 
 
 def _lint(
@@ -727,8 +812,10 @@ def _lint(
     """Build the default spec, apply `mutate` in place, write it, and return the findings."""
     spec = _default_spec(plugin_dir_name)
     mutate(spec)
-    plugin_root, docs_path = _write_tree(tmp_path, plugin_dir_name, spec)
-    return check_plugin(plugin_root, docs_path, answers)
+    plugin_root, skills_root, docs_skills_path, docs_devcontainer_path = _write_tree(
+        tmp_path, plugin_dir_name, spec
+    )
+    return check_plugin(plugin_root, skills_root, docs_skills_path, docs_devcontainer_path, answers)
 
 
 # ---------------------------------------------------------------------------
@@ -902,11 +989,15 @@ def test_settings_registration_check_with_no_claude_ancestor_is_a_finding(tmp_pa
             "plugins": [{"name": "sample", "source": "./", "description": "A synthesized plugin."}],
         },
     )
-    docs_path = root / "docs" / "devcontainer.md"
-    docs_path.parent.mkdir(parents=True, exist_ok=True)
-    docs_path.write_text(_render_docs([], ""), encoding="utf-8")
+    docs_skills_path = root / "docs" / "skills.md"
+    docs_skills_path.parent.mkdir(parents=True, exist_ok=True)
+    docs_skills_path.write_text(_render_docs([], ""), encoding="utf-8")
+    docs_devcontainer_path = root / "docs" / "devcontainer.md"
+    docs_devcontainer_path.write_text("# Synthesized devcontainer internals\n", encoding="utf-8")
 
-    findings = check_plugin(plugin_root, docs_path, answers)
+    findings = check_plugin(
+        plugin_root, root / ".agents" / "skills", docs_skills_path, docs_devcontainer_path, answers
+    )
 
     assert len(findings) == 1
     assert str(plugin_root) in findings[0]
@@ -973,12 +1064,16 @@ def test_plugin_manifest_unreadable_is_a_finding(tmp_path: Path) -> None:
     from a decode failure) produces one finding naming the path, exercising
     `_read_text`'s `except OSError` arm rather than its `UnicodeDecodeError` arm.
     """
-    plugin_root, docs_path = _write_tree(tmp_path, "sample", _default_spec("sample"))
+    plugin_root, skills_root, docs_skills_path, docs_devcontainer_path = _write_tree(
+        tmp_path, "sample", _default_spec("sample")
+    )
     manifest_path = plugin_root / _PLUGIN_MANIFEST_RELATIVE
     manifest_path.chmod(0o000)
 
     try:
-        findings = check_plugin(plugin_root, docs_path, answers)
+        findings = check_plugin(
+            plugin_root, skills_root, docs_skills_path, docs_devcontainer_path, answers
+        )
     finally:
         manifest_path.chmod(0o644)
 
@@ -993,25 +1088,35 @@ def test_plugin_manifest_unreadable_is_a_finding(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("frontmatter_key", "frontmatter_value", "expected_substrings"),
+    ("frontmatter_key", "frontmatter_value", "skill_directory", "expected_substrings"),
     [
         pytest.param(
             "description",
             "",
+            "gd-sample",
             ("'description' must not be empty",),
             id="empty-description",
         ),
         pytest.param(
             "name",
             "",
+            "gd-sample",
             ("frontmatter 'name' must not be empty",),
             id="empty-name",
         ),
         pytest.param(
             "name",
-            "wrong-name",
-            ("'name' is 'wrong-name'", "'setup-local'"),
+            "gd-wrong-name",
+            "gd-sample",
+            ("'name' is 'gd-wrong-name'", "'gd-sample'"),
             id="name-not-matching-directory",
+        ),
+        pytest.param(
+            "name",
+            "sample",
+            "sample",
+            ("does not match the roster pattern",),
+            id="name-without-gd-prefix",
         ),
     ],
 )
@@ -1019,6 +1124,7 @@ def test_skill_md_frontmatter_field_is_a_finding(
     tmp_path: Path,
     frontmatter_key: str,
     frontmatter_value: str,
+    skill_directory: str,
     expected_substrings: tuple[str, ...],
 ) -> None:
     """One default-otherwise-valid `SKILL.md` frontmatter field mutated in turn produces
@@ -1026,16 +1132,80 @@ def test_skill_md_frontmatter_field_is_a_finding(
     """
 
     def mutate(spec: dict[str, Any]) -> None:
-        skill = _default_skill("setup-local", backend="local")
+        skill = _default_skill("gd-sample", backend="local")
         skill["frontmatter"][frontmatter_key] = frontmatter_value
-        spec["skills"]["setup-local"] = skill
-        spec["roster"] = ["setup-local"]
+        spec["skills"][skill_directory] = skill
+        spec["roster"] = [skill_directory]
 
     findings = _lint(tmp_path, mutate)
     assert len(findings) == 1
     assert "SKILL.md" in findings[0]
     for substring in expected_substrings:
         assert substring in findings[0]
+
+
+@pytest.mark.parametrize(
+    ("description_length", "expected_findings", "expected_substrings"),
+    [
+        pytest.param(
+            _DESCRIPTION_LIMIT_HOUSE + 1,
+            1,
+            (
+                f"over the {_DESCRIPTION_LIMIT_HOUSE}-character house limit",
+                f"'description' is {_DESCRIPTION_LIMIT_HOUSE + 1} characters",
+            ),
+            id="over-house-limit-only",
+        ),
+        pytest.param(
+            _DESCRIPTION_LIMIT_OPENCODE + 1,
+            2,
+            (
+                f"over the {_DESCRIPTION_LIMIT_OPENCODE}-character limit",
+                f"over the {_DESCRIPTION_LIMIT_HOUSE}-character house limit",
+            ),
+            id="over-opencode-limit",
+        ),
+    ],
+)
+def test_skill_md_description_over_a_limit_is_a_distinct_finding(
+    tmp_path: Path,
+    description_length: int,
+    expected_findings: int,
+    expected_substrings: tuple[str, ...],
+) -> None:
+    """Each description limit produces its own finding: a description over the house
+    limit but under opencode's cap trips one rule, and one over opencode's cap
+    trips both, never collapsing into a single fabricated count.
+    """
+
+    def mutate(spec: dict[str, Any]) -> None:
+        skill = _default_skill("gd-sample", backend=None)
+        skill["frontmatter"]["description"] = "d" * description_length
+        spec["skills"]["gd-sample"] = skill
+        spec["roster"] = ["gd-sample"]
+
+    findings = _lint(tmp_path, mutate)
+    assert len(findings) == expected_findings
+    assert "SKILL.md" in findings[0]
+    for substring in expected_substrings:
+        assert any(substring in finding for finding in findings)
+    if expected_findings == 2:
+        assert findings[0] != findings[1]
+
+
+def test_skill_md_description_at_each_limit_passes(tmp_path: Path) -> None:
+    """A description of exactly the house limit produces no length finding: the
+    limits are inclusive maxima, not exclusive thresholds.
+    """
+
+    def mutate(spec: dict[str, Any]) -> None:
+        skill = _default_skill("gd-sample", backend=None)
+        skill["frontmatter"]["description"] = "d" * _DESCRIPTION_LIMIT_HOUSE
+        spec["skills"]["gd-sample"] = skill
+        spec["roster"] = ["gd-sample"]
+
+    findings = _lint(tmp_path, mutate)
+    assert findings == []
 
 
 @pytest.mark.parametrize(
@@ -1047,14 +1217,14 @@ def test_skill_md_frontmatter_field_is_a_finding(
             id="no-delimiter",
         ),
         pytest.param(
-            "---\nname: setup-local\ndescription: d\n",
+            "---\nname: gd-sample\ndescription: d\n",
             ("not terminated with '---'",),
             id="unterminated",
         ),
         pytest.param(
             "---\n"
-            "name: setup-local\n"
-            "description: The setup-local skill.\n"
+            "name: gd-sample\n"
+            "description: The gd-sample skill.\n"
             "not-a-scalar-line\n"
             "---\n\n"
             "## Checks\n\n" + _CHECKS_HEADER + "\n|---|---|---|---|\n| c | p | m | r |\n",
@@ -1072,8 +1242,8 @@ def test_skill_md_raw_frontmatter_defect_is_a_finding(
     """
 
     def mutate(spec: dict[str, Any]) -> None:
-        spec["skills"]["setup-local"] = {"raw": raw}
-        spec["roster"] = ["setup-local"]
+        spec["skills"]["gd-sample"] = {"raw": raw}
+        spec["roster"] = ["gd-sample"]
 
     findings = _lint(tmp_path, mutate)
     assert len(findings) == 1
@@ -1089,10 +1259,10 @@ def test_skill_md_with_non_utf8_bytes_is_a_finding(tmp_path: Path) -> None:
     """
 
     def mutate(spec: dict[str, Any]) -> None:
-        spec["skills"]["setup-local"] = {
-            "raw_bytes": b"---\nname: setup-local\ndescription: bad byte \xff here\n---\n"
+        spec["skills"]["gd-sample"] = {
+            "raw_bytes": b"---\nname: gd-sample\ndescription: bad byte \xff here\n---\n"
         }
-        spec["roster"] = ["setup-local"]
+        spec["roster"] = ["gd-sample"]
 
     findings = _lint(tmp_path, mutate)
     assert len(findings) == 1
@@ -1101,42 +1271,47 @@ def test_skill_md_with_non_utf8_bytes_is_a_finding(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Rule 5: roster vs. skills/ directories
+# Rule 5: roster vs. canonical skills/ directories
 # ---------------------------------------------------------------------------
 
 
 def test_roster_row_with_no_directory_is_a_finding(tmp_path: Path) -> None:
     def mutate(spec: dict[str, Any]) -> None:
-        spec["roster"] = ["ghost-skill"]
+        spec["roster"] = ["gd-ghost-skill"]
 
     findings = _lint(tmp_path, mutate)
     assert len(findings) == 1
-    assert "roster names skill 'ghost-skill' with no directory" in findings[0]
+    assert "roster names skill 'gd-ghost-skill' with no directory" in findings[0]
 
 
 def test_directory_with_no_roster_row_is_a_finding(tmp_path: Path) -> None:
     def mutate(spec: dict[str, Any]) -> None:
-        spec["skills"]["orphan-skill"] = _default_skill("orphan-skill", backend=None)
+        spec["skills"]["gd-orphan-skill"] = _default_skill("gd-orphan-skill", backend=None)
         spec["roster"] = []
 
     findings = _lint(tmp_path, mutate)
     assert len(findings) == 1
-    assert "orphan-skill" in findings[0]
+    assert "gd-orphan-skill" in findings[0]
     assert "has no roster row" in findings[0]
 
 
 def test_missing_docs_path_is_a_finding(tmp_path: Path) -> None:
-    """A wrong `docs_path` produces exactly `_check_roster`'s 'no such file' finding.
+    """A wrong `docs_skills_path` produces exactly `_check_roster`'s 'no such file'
+    finding.
 
     `_roster_names` itself is silent on a missing path (`set(), []`) because
     `_check_roster` already owns that finding; this pins that the two
     branches agree rather than the reference check (rule 8) silently seeing
     an empty roster and reporting nothing.
     """
-    plugin_root, docs_path = _write_tree(tmp_path, "sample", _default_spec("sample"))
-    missing_docs_path = docs_path.parent / "does-not-exist.md"
+    plugin_root, skills_root, docs_skills_path, docs_devcontainer_path = _write_tree(
+        tmp_path, "sample", _default_spec("sample")
+    )
+    missing_docs_path = docs_skills_path.parent / "does-not-exist.md"
 
-    findings = check_plugin(plugin_root, missing_docs_path, answers)
+    findings = check_plugin(
+        plugin_root, skills_root, missing_docs_path, docs_devcontainer_path, answers
+    )
     assert len(findings) == 1
     assert str(missing_docs_path) in findings[0]
     assert "no such file" in findings[0]
@@ -1148,19 +1323,19 @@ def test_missing_docs_path_is_a_finding(tmp_path: Path) -> None:
 
 
 def _questions_table_missing_required_field_mutate(spec: dict[str, Any]) -> None:
-    skill = _default_skill("setup-local", backend="local")
+    skill = _default_skill("gd-sample", backend="local")
     skill["questions"] = [
         (name, prompt) for name, prompt in skill["questions"] if name != "developer_name"
     ]
-    spec["skills"]["setup-local"] = skill
-    spec["roster"] = ["setup-local"]
+    spec["skills"]["gd-sample"] = skill
+    spec["roster"] = ["gd-sample"]
 
 
 def _questions_table_invented_field_mutate(spec: dict[str, Any]) -> None:
-    skill = _default_skill("setup-local", backend="local")
+    skill = _default_skill("gd-sample", backend="local")
     skill["questions"].append(("not_a_real_field", "Prompt for not_a_real_field"))
-    spec["skills"]["setup-local"] = skill
-    spec["roster"] = ["setup-local"]
+    spec["skills"]["gd-sample"] = skill
+    spec["roster"] = ["gd-sample"]
 
 
 def test_questions_table_missing_a_required_field_is_a_finding(tmp_path: Path) -> None:
@@ -1185,10 +1360,10 @@ def test_questions_table_with_field_not_required_for_backend_is_a_finding(tmp_pa
     """
 
     def mutate(spec: dict[str, Any]) -> None:
-        skill = _default_skill("setup-local", backend="local")
+        skill = _default_skill("gd-sample", backend="local")
         skill["questions"].append(("remote_instance_id", "Prompt for remote_instance_id"))
-        spec["skills"]["setup-local"] = skill
-        spec["roster"] = ["setup-local"]
+        spec["skills"]["gd-sample"] = skill
+        spec["roster"] = ["gd-sample"]
 
     findings = _lint(tmp_path, mutate)
     assert len(findings) == 1
@@ -1208,10 +1383,10 @@ def test_missing_and_invented_field_findings_are_distinct(tmp_path: Path) -> Non
 
 def test_interview_backend_outside_backends_is_a_finding(tmp_path: Path) -> None:
     def mutate(spec: dict[str, Any]) -> None:
-        skill = _default_skill("setup-local", backend="local")
+        skill = _default_skill("gd-sample", backend="local")
         skill["interview_backend"] = "quantum"
-        spec["skills"]["setup-local"] = skill
-        spec["roster"] = ["setup-local"]
+        spec["skills"]["gd-sample"] = skill
+        spec["roster"] = ["gd-sample"]
 
     findings = _lint(tmp_path, mutate)
     assert len(findings) == 1
@@ -1227,13 +1402,13 @@ def test_interview_backend_outside_backends_is_a_finding(tmp_path: Path) -> None
 
 def test_checks_table_duplicate_check_name_is_a_finding(tmp_path: Path) -> None:
     def mutate(spec: dict[str, Any]) -> None:
-        skill = _default_skill("doctor", backend=None)
+        skill = _default_skill("gd-doctor", backend=None)
         skill["checks"] = [
             ("dup-check", "prevents one", "message one", "remedy one"),
             ("dup-check", "prevents two", "message two", "remedy two"),
         ]
-        spec["skills"]["doctor"] = skill
-        spec["roster"] = ["doctor"]
+        spec["skills"]["gd-doctor"] = skill
+        spec["roster"] = ["gd-doctor"]
 
     findings = _lint(tmp_path, mutate)
     assert any("duplicate check name 'dup-check'" in finding for finding in findings)
@@ -1243,13 +1418,13 @@ def test_checks_table_duplicate_check_name_is_a_finding(tmp_path: Path) -> None:
 
 def test_checks_table_duplicate_failure_message_is_a_finding(tmp_path: Path) -> None:
     def mutate(spec: dict[str, Any]) -> None:
-        skill = _default_skill("doctor", backend=None)
+        skill = _default_skill("gd-doctor", backend=None)
         skill["checks"] = [
             ("check-a", "prevents one", "shared message", "remedy one"),
             ("check-b", "prevents two", "shared message", "remedy two"),
         ]
-        spec["skills"]["doctor"] = skill
-        spec["roster"] = ["doctor"]
+        spec["skills"]["gd-doctor"] = skill
+        spec["roster"] = ["gd-doctor"]
 
     findings = _lint(tmp_path, mutate)
     assert any("duplicate failure message 'shared message'" in finding for finding in findings)
@@ -1259,13 +1434,13 @@ def test_checks_table_duplicate_failure_message_is_a_finding(tmp_path: Path) -> 
 
 def test_checks_table_empty_remedy_is_a_finding(tmp_path: Path) -> None:
     def mutate(spec: dict[str, Any]) -> None:
-        skill = _default_skill("doctor", backend=None)
+        skill = _default_skill("gd-doctor", backend=None)
         skill["checks"] = [
             ("check-a", "prevents one", "message one", ""),
             ("check-b", "prevents two", "message two", "remedy two"),
         ]
-        spec["skills"]["doctor"] = skill
-        spec["roster"] = ["doctor"]
+        spec["skills"]["gd-doctor"] = skill
+        spec["roster"] = ["gd-doctor"]
 
     findings = _lint(tmp_path, mutate)
     assert len(findings) == 1
@@ -1273,31 +1448,72 @@ def test_checks_table_empty_remedy_is_a_finding(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Rule 8: /devcontainer:<name> references
+# Rule 8: bare gd-<name> references
 # ---------------------------------------------------------------------------
 
 
 def test_skill_md_reference_to_unknown_skill_is_a_finding(tmp_path: Path) -> None:
     def mutate(spec: dict[str, Any]) -> None:
-        skill = _default_skill("doctor", backend=None)
-        skill["extra_body"] = "Run `/devcontainer:no-such-skill` first."
-        spec["skills"]["doctor"] = skill
-        spec["roster"] = ["doctor"]
+        skill = _default_skill("gd-doctor", backend=None)
+        skill["extra_body"] = "Run `gd-no-such-skill` first."
+        spec["skills"]["gd-doctor"] = skill
+        spec["roster"] = ["gd-doctor"]
 
     findings = _lint(tmp_path, mutate)
     assert len(findings) == 1
     assert "SKILL.md" in findings[0]
-    assert "'/devcontainer:no-such-skill' references a skill not in the roster" in findings[0]
+    assert "'gd-no-such-skill' references a skill not in the roster" in findings[0]
 
 
-def test_docs_reference_to_unknown_skill_is_a_finding(tmp_path: Path) -> None:
+def test_docs_roster_reference_to_unknown_skill_is_a_finding(tmp_path: Path) -> None:
     def mutate(spec: dict[str, Any]) -> None:
-        spec["docs_extra"] = "See also `/devcontainer:no-such-skill` for details."
+        spec["docs_extra"] = "See also `gd-no-such-skill` for details."
+
+    findings = _lint(tmp_path, mutate)
+    assert len(findings) == 1
+    assert "skills.md" in findings[0]
+    assert "'gd-no-such-skill' references a skill not in the roster" in findings[0]
+
+
+def test_devcontainer_docs_reference_to_unknown_skill_is_a_finding(tmp_path: Path) -> None:
+    """The plugin-facing document is a rule-8 source alongside the roster: a
+    dangling bare name there strands the same reader, so it gets the same
+    finding rather than an exemption.
+    """
+
+    def mutate(spec: dict[str, Any]) -> None:
+        spec["devcontainer_docs_extra"] = "See also `gd-no-such-skill` for details."
 
     findings = _lint(tmp_path, mutate)
     assert len(findings) == 1
     assert "devcontainer.md" in findings[0]
-    assert "'/devcontainer:no-such-skill' references a skill not in the roster" in findings[0]
+    assert "'gd-no-such-skill' references a skill not in the roster" in findings[0]
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        pytest.param("The gd- prefix marks every roster skill.", id="bare-prefix"),
+        pytest.param("Invoke `gd-<name>` for the chosen backend.", id="placeholder"),
+        pytest.param(
+            "A skill id is gd- followed by lowercase segments.", id="bare-prefix-no-segment"
+        ),
+    ],
+)
+def test_reference_pattern_ignores_non_name_forms(tmp_path: Path, prose: str) -> None:
+    """A bare `gd-` prefix, a `gd-<name>` placeholder, and a `gd-`-containing word
+    that is not a name segment pattern each produce no finding: the rule
+    polices names, not every appearance of the letters.
+    """
+
+    def mutate(spec: dict[str, Any]) -> None:
+        skill = _default_skill("gd-doctor", backend=None)
+        skill["extra_body"] = prose
+        spec["skills"]["gd-doctor"] = skill
+        spec["roster"] = ["gd-doctor"]
+
+    findings = _lint(tmp_path, mutate)
+    assert findings == []
 
 
 # ---------------------------------------------------------------------------
@@ -1328,20 +1544,20 @@ def _wrong_shaped_json_mutate(spec: dict[str, Any]) -> None:
 def _mis_columned_roster_row_mutate(spec: dict[str, Any]) -> None:
     """A roster table row with one cell under a two-column header.
 
-    `_render_docs` always emits one `| name | /devcontainer:name |` row per
-    roster entry, so this uses `docs_raw` to write a row `_render_docs`
-    could never produce -- the input class a hand-authored roster row is
-    most likely to get wrong (Approach's rationale for this case).
+    `_render_docs` always emits one `| name | name |` row per roster entry,
+    so this uses `docs_raw` to write a row `_render_docs` could never
+    produce -- the input class a hand-authored roster row is most likely to
+    get wrong (Approach's rationale for this case).
     """
     spec["docs_raw"] = "\n".join(
         [
-            "# Synthesized devcontainer internals",
+            "# Synthesized skills",
             "",
-            "## Plugin and skills",
+            "## Roster",
             "",
             _ROSTER_HEADER,
             "|---|---|",
-            "| doctor |",
+            "| gd-doctor |",
             "",
         ]
     )
@@ -1352,8 +1568,8 @@ def _unescaped_pipe_checks_row_mutate(spec: dict[str, Any]) -> None:
     raw = "\n".join(
         [
             _FRONTMATTER_DELIMITER,
-            "name: doctor",
-            "description: The doctor skill.",
+            "name: gd-doctor",
+            "description: The gd-doctor skill.",
             _FRONTMATTER_DELIMITER,
             "",
             "## Checks",
@@ -1364,8 +1580,8 @@ def _unescaped_pipe_checks_row_mutate(spec: dict[str, Any]) -> None:
             "",
         ]
     )
-    spec["skills"]["doctor"] = {"raw": raw}
-    spec["roster"] = ["doctor"]
+    spec["skills"]["gd-doctor"] = {"raw": raw}
+    spec["roster"] = ["gd-doctor"]
 
 
 @pytest.mark.parametrize(
@@ -1379,7 +1595,7 @@ def _unescaped_pipe_checks_row_mutate(spec: dict[str, Any]) -> None:
         ),
         pytest.param(
             _mis_columned_roster_row_mutate,
-            ("devcontainer.md", "line 7", "'| doctor |'", "has 1 cell(s)", "declares 2 column(s)"),
+            ("skills.md", "line 7", "'| gd-doctor |'", "has 1 cell(s)", "declares 2 column(s)"),
             id="mis-columned-roster-row",
         ),
         pytest.param(
@@ -1411,22 +1627,30 @@ def test_checker_never_raises_on_malformed_input(
 
 def test_checker_returns_no_findings_for_an_all_valid_tree(tmp_path: Path) -> None:
     def mutate(spec: dict[str, Any]) -> None:
-        spec["skills"]["setup-local"] = _default_skill("setup-local", backend="local")
-        spec["skills"]["doctor"] = _default_skill("doctor", backend=None)
-        spec["roster"] = ["setup-local", "doctor"]
+        spec["skills"]["gd-sample"] = _default_skill("gd-sample", backend="local")
+        spec["skills"]["gd-doctor"] = _default_skill("gd-doctor", backend=None)
+        spec["roster"] = ["gd-sample", "gd-doctor"]
 
     findings = _lint(tmp_path, mutate)
     assert findings == []
 
 
 def test_real_repository_has_no_findings() -> None:
-    """Rule 5 through 8 hold vacuously today: no `skills/` directory exists yet and the
-    roster table has no data rows, so this is also the suite that later skill work
-    units observe fail (a roster row with no directory, AC-TEST-005) the moment they
-    add a row before adding the directory, and observe pass once both land together.
+    """Rules 1 through 8 hold over the real checkout: the canonical roster at
+    `.agents/skills`, the roster table in `docs/skills.md`, the plugin
+    manifests, and the two documents that carry bare-name references all
+    agree. This is also the suite a later work unit observes fail the moment
+    it adds a roster row before adding the directory (or vice versa), and
+    observes pass once both land together.
     """
     root = repo.find_root(Path(__file__).resolve().parent)
     plugin_root = root / ".claude" / "plugins" / "devcontainer"
-    docs_path = root / "docs" / "devcontainer.md"
-    findings = check_plugin(plugin_root, docs_path, answers)
+    skills_root = root / ".agents" / "skills"
+    findings = check_plugin(
+        plugin_root,
+        skills_root,
+        root / "docs" / "skills.md",
+        root / "docs" / "devcontainer.md",
+        answers,
+    )
     assert findings == []

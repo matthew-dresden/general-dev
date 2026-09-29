@@ -1,9 +1,9 @@
 ---
-name: secrets
+name: gd-creds-setup
 description: Manages host credentials through the hostcreds manifest and the make targets that serve it -- add, list, rotate, delete, and deliver into the container -- never a value on a command line, never a value rendered into the conversation, and never a second path to the keychain; ends every store or delete with a confirmation naming every credential affected.
 ---
 
-# secrets
+# gd-creds-setup
 
 Credentials do not live in `shell.env` and are not read from Parameter
 Store by the container. Each one is named in the hostcreds manifest
@@ -96,7 +96,7 @@ remedy is always "rename it and retry."
 - Section 2, G4: agents reach credentials without any of them touching
   the container's disk as configuration -- the fragment files under
   `~/.hostcreds/` are the container's only copy, written by push-creds.
-- Section 4.2: `secrets`'s own roster row in `docs/devcontainer.md`, and
+- Section 4.2: `gd-creds-setup`'s own roster row in `docs/skills.md`, and
   the interaction contract every skill obeys.
 - `docs/environment-files.md`'s "Host credentials (hostcreds)" section:
   the operator-facing reference for the manifest, `make creds-init`,

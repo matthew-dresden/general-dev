@@ -28,6 +28,11 @@
 # no -f flag needed. .claude/settings.local.json stays ignored: its own
 # later, more specific entry below still wins over this broader re-include.
 !/.claude/
+# The agent-agnostic canonical skills home (.agents/skills/<name>/SKILL.md,
+# every name gd-*-prefixed). The plugin's skills/ entry at
+# .claude/plugins/devcontainer/skills is a relative symlink into it, not a
+# copy, so exactly one copy of every skill body exists.
+!/.agents/
 # The Terraform module (provider/aws) and the per-instance Terragrunt
 # deployments (remote-instances/<name>/) (E5, spec Sections 5.6, 5.7) are
 # allowlisted ahead of their first commit, so that commit is a normal one

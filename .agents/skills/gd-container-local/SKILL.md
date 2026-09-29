@@ -1,11 +1,11 @@
 ---
-name: launch
-description: Diagnoses container state (delegating engine reachability to /devcontainer:engine, whose local-against-remote rdc_backend selection stage 2 simply inherits, then reading rdc_container_ids and rdc_require_container itself), then runs make build, start, restart or reopen as the state calls for, verifying every action by re-reading state afterward rather than trusting a target's exit code; asks nothing and destroys nothing.
+name: gd-container-local
+description: Diagnoses container state (delegating engine reachability to gd-instance-list, whose local-against-remote rdc_backend selection stage 2 simply inherits, then reading rdc_container_ids and rdc_require_container itself), then runs make build, start, restart or reopen as the state calls for, verifying every action by re-reading state afterward rather than trusting a target's exit code; asks nothing and destroys nothing.
 ---
 
-# launch
+# gd-container-local
 
-Section 4.2's own roster row gives `launch` the shortest definition of the
+Section 4.2's own roster row gives `gd-container-local` the shortest definition of the
 nine skills: it asks "Nothing"; it "Diagnoses state, then builds, starts or
 reopens as appropriate"; and it ends by "A running container". A developer
 who has to know whether a container exists, whether it is stopped, and
@@ -20,9 +20,9 @@ keeps a failure's message pointed at its real cause: building against an
 engine that does not answer produces a failure naming the build rather than
 the engine, sending the developer to the wrong remedy. Stage 1 delegates the
 engine's own reachability, disk and configuration validation to
-`/devcontainer:engine`; stage 2, reached only once that delegation reports
+`gd-instance-list`; stage 2, reached only once that delegation reports
 clean, reads the container itself through the Section 3.3 primitives named
-below. This skill never re-implements a check `/devcontainer:engine` already
+below. This skill never re-implements a check `gd-instance-list` already
 owns (Section 3's "DO NOT reinvent" prohibition) and never restates one of
 its thirteen `## Checks` rows or its own `## Verdict` table here; a delegated
 failure is carried forward as engine's own message and remedy, unchanged,
@@ -31,11 +31,10 @@ never paraphrased.
 This skill takes exactly four actions -- `make build`, `make start`, `make
 restart`, `make reopen` -- and never a fifth. It never runs `make clean`,
 `make rebuild`, or either `--no-cache` variant: those destroy or replace
-existing state, and destruction stays behind the confirmation the teardown
-skill that Section 4.2's roster defines, and that E4-F3-S1-T2 authors, owns
-rather than something this skill decides on the developer's behalf. That
-skill has no `/devcontainer:<name>` invocation or roster row yet, so this
-document names it by role rather than by slash command until it lands.
+existing state, and destruction stays behind the confirmation the
+`gd-container-lifecycle` skill that Section 4.2's roster defines, and that
+E4-F3-S1-T2 authors, owns rather than something this skill decides on the
+developer's behalf.
 Section 4.2's own interaction contract governs every step below that this
 skill cannot perform itself: "Where a
 skill cannot act itself, it states the exact command, waits, then verifies
@@ -46,11 +45,11 @@ below.
 
 ## Diagnosis
 
-**Stage 1, the engine.** Invoke `/devcontainer:engine`. When its verdict
+**Stage 1, the engine.** Invoke `gd-instance-list`. When its verdict
 reports anything other than a clean pass -- a failing check, a warning that
 still let it complete, or no verdict at all because the invocation itself
 did not produce one -- stop immediately. Print the failing check's message
-and remedy exactly as `/devcontainer:engine` phrased them, and state plainly
+and remedy exactly as `gd-instance-list` phrased them, and state plainly
 that no target in `## Decision` was attempted, naming all four so the
 developer knows none of `make build`, `make start`, `make restart` or `make
 reopen` ran. Stage 2 below never runs until stage 1 reports a clean pass,
@@ -61,7 +60,7 @@ second reachability probe here would be exactly the duplicated check Section
 
 **Stage 2, the container.** Which backend stage 2 reads against is not
 re-resolved here: `rdc_backend` (`container.sh:99-105`) is the same local
-against remote rule `/devcontainer:engine`'s own procedure already applied
+against remote rule `gd-instance-list`'s own procedure already applied
 to select the active docker context in stage 1, so stage 2 simply acts on
 whichever context is active when stage 1 finished. Read the container itself
 with the remaining Section 3.3 primitives
@@ -96,7 +95,7 @@ container is read as a normal, actionable state rather than as a failure:
    matches nothing, or more than one id with `CONTAINER=` unset, is
    `rdc_require_container`'s own failure, reported unchanged (`## Failure
    semantics`, "a step needs the operator"). On a remote backend, whichever
-   instance stage 1's `/devcontainer:engine INSTANCE=<name>` invocation
+   instance stage 1's `gd-instance-list INSTANCE=<name>` invocation
    resolved is the same instance every target in `## Decision` is run
    against; this skill resolves an instance once, at stage 1, never twice.
 3. With one id resolved, its docker-reported status decides running against
@@ -132,10 +131,10 @@ Dockerfile or feature list `.devcontainer/devcontainer.json` names has
 changed since that image was built. No primitive in this repository computes
 that comparison today; this skill reports it as `NOT RUN`, naming that no
 `rdc_*` function of this name exists yet, the same convention
-`/devcontainer:engine` and `/devcontainer:doctor` already use for a probe
+`gd-instance-list` and `gd-env-doctor` already use for a probe
 that has no owner. A stale image is never acted on by this skill: rebuilding
 replaces the container and its volumes, which is the destructive path
-`## Decision` never takes, and which the confirmation of the teardown skill
+`## Decision` never takes, and which the confirmation of the `gd-container-lifecycle` skill
 that Section 4.2's roster defines, and that E4-F3-S1-T2 authors, governs
 instead.
 
@@ -193,19 +192,19 @@ reruns the target on its own to try again.
 
 | Condition | Behavior |
 |---|---|
-| A precondition check fails | Stage 1's delegated `/devcontainer:engine` verdict is this skill's only precondition. A failure there stops this skill before stage 2 ever reads the container: print the failing check's message and remedy unchanged, and state that no target in `## Decision` was attempted, naming all four (`## Diagnosis`, stage 1). |
+| A precondition check fails | Stage 1's delegated `gd-instance-list` verdict is this skill's only precondition. A failure there stops this skill before stage 2 ever reads the container: print the failing check's message and remedy unchanged, and state that no target in `## Decision` was attempted, naming all four (`## Diagnosis`, stage 1). |
 | An action the skill took did not verify | Report the target that ran, the state the post-action read found, and that the two disagree; never retried silently (`## Verification`). This is also this skill's answer to two task-specific conditions: a target that exits zero while the container is not running afterward is reported this way, never as success from the exit code alone; and `make build` refusing because a container already exists (a race between stage 2's read and the target's own guard, `container.sh:791-798`) is treated as a diagnosis that was already wrong the instant the guard fired -- this skill re-reads container state (`## Diagnosis`, stage 2) and switches to `make start` or `make reopen` based on what that fresh read shows, never passing a force flag to get past the guard, because the refusal is the guard working. |
-| A step needs the operator (SSO, `sudo`, a key) | Two distinct moments reach this row. First, any operator-facing remedy `/devcontainer:engine`'s own stage 1 verdict names (an SSO login, starting the local engine, freeing disk space) is stated, waited on, and re-verified by re-invoking `/devcontainer:engine` before this skill's own diagnosis can proceed -- never assumed to have succeeded, per Section 4.2's interaction contract quoted in this document's introduction. Second, `rdc_require_container` itself needs the operator when more than one container matches and `CONTAINER=` is not set, or when a supplied `CONTAINER=` name matches nothing (`## Diagnosis`, stage 2 step 2): its own failure already states every candidate and the exact `CONTAINER=<name>` invocation to disambiguate, printed unchanged, and this skill waits for the operator to supply it and re-invoke rather than guessing. |
-| A gate is reached (Section 4.4) | This skill reaches no Section 4.4 gate: it creates no AWS resource, runs no `terragrunt apply` or `terragrunt destroy`, and performs no phase 4 cutover. `GATE-APPLY`, `GATE-CUTOVER` and `GATE-DESTROY` are `/devcontainer:setup-remote`'s and a future teardown skill's concern, not this one's. |
-| An answer fails validation | This skill asks nothing of its own (Section 4.2's own roster row: "Asks: Nothing") and never calls `answers.validate`. The one question this plugin ever asks under ambiguity -- which remote instance, Section 4.1.1 -- belongs to `/devcontainer:engine`'s own stage 1 invocation, not to this skill; this skill never re-asks it. |
-| The operator aborts | An abort during stage 1 or stage 2 of `## Diagnosis` leaves no state changed, since both stages only read: `/devcontainer:engine`'s own delegated verdict and this skill's own container reads perform no action of their own. An abort after this skill has started running the target `## Decision` chose may leave that target's own effect complete or partial, exactly as if the operator had run `make build`, `make start`, `make restart` or `make reopen` directly and interrupted it themselves; this skill retries nothing on its own, and its next invocation reads the machine's actual state fresh (`## Diagnosis`, stage 2) rather than assuming the interrupted run finished. |
+| A step needs the operator (SSO, `sudo`, a key) | Two distinct moments reach this row. First, any operator-facing remedy `gd-instance-list`'s own stage 1 verdict names (an SSO login, starting the local engine, freeing disk space) is stated, waited on, and re-verified by re-invoking `gd-instance-list` before this skill's own diagnosis can proceed -- never assumed to have succeeded, per Section 4.2's interaction contract quoted in this document's introduction. Second, `rdc_require_container` itself needs the operator when more than one container matches and `CONTAINER=` is not set, or when a supplied `CONTAINER=` name matches nothing (`## Diagnosis`, stage 2 step 2): its own failure already states every candidate and the exact `CONTAINER=<name>` invocation to disambiguate, printed unchanged, and this skill waits for the operator to supply it and re-invoke rather than guessing. |
+| A gate is reached (Section 4.4) | This skill reaches no Section 4.4 gate: it creates no AWS resource, runs no `terragrunt apply` or `terragrunt destroy`, and performs no phase 4 cutover. `GATE-APPLY`, `GATE-CUTOVER` and `GATE-DESTROY` are `gd-env-setup-remote`'s and a future teardown skill's concern, not this one's. |
+| An answer fails validation | This skill asks nothing of its own (Section 4.2's own roster row: "Asks: Nothing") and never calls `answers.validate`. The one question this plugin ever asks under ambiguity -- which remote instance, Section 4.1.1 -- belongs to `gd-instance-list`'s own stage 1 invocation, not to this skill; this skill never re-asks it. |
+| The operator aborts | An abort during stage 1 or stage 2 of `## Diagnosis` leaves no state changed, since both stages only read: `gd-instance-list`'s own delegated verdict and this skill's own container reads perform no action of their own. An abort after this skill has started running the target `## Decision` chose may leave that target's own effect complete or partial, exactly as if the operator had run `make build`, `make start`, `make restart` or `make reopen` directly and interrupted it themselves; this skill retries nothing on its own, and its next invocation reads the machine's actual state fresh (`## Diagnosis`, stage 2) rather than assuming the interrupted run finished. |
 
 ## Related specifications
 
-- Section 4.2, `repos/spec/devcontainer-platform.md`: `launch` asks nothing,
+- Section 4.2, `repos/spec/devcontainer-platform.md`: `gd-container-local` asks nothing,
   diagnoses, then builds, starts or reopens, and ends with a running
   container; the interaction contract this document's introduction quotes.
-- Section 4.2.1: the thirteen checks `/devcontainer:engine` owns, delegated
+- Section 4.2.1: the thirteen checks `gd-instance-list` owns, delegated
   by reference in `## Diagnosis` stage 1 rather than restated.
 - Section 4.2.2: the failure-semantics table this document's own `##
   Failure semantics` table instantiates for this skill's five conditions.

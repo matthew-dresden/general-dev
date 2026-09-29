@@ -1,11 +1,11 @@
 ---
-name: teardown
+name: gd-container-lifecycle
 description: Destroys container state (`make clean` or `make rebuild`) only after an inventory-grounded confirmation with no default answer, explaining the unpushed-work and uncommitted-config guards rather than only enforcing them, and reports what was destroyed and what survived from a fresh post-operation read; never destroys an instance.
 ---
 
-# teardown
+# gd-container-lifecycle
 
-Section 4.2's own roster row gives `teardown` a column no other skill in it
+Section 4.2's own roster row gives `gd-container-lifecycle` a column no other skill in it
 carries: it "Asks" not "Nothing" but "Confirmation, always." It "Does"
 `clean` or `rebuild`, "explaining the work-loss guards rather than only
 enforcing them," and it "Ends by" stating "What was destroyed and what
@@ -88,7 +88,7 @@ volumes a second way:
 4. **Guard pre-flight, before confirmation is ever asked.** With a
    container confirmed present, this skill also runs `make check`
    (`rdc_check`, `container.sh:265-297`) as part of this same inventory
-   read, the identical reuse `/devcontainer:doctor`'s own "Container state"
+   read, the identical reuse `gd-env-doctor`'s own "Container state"
    finding already makes of this primitive, rather than waiting for
    `rdc_clean`'s own internal call to discover the same guard later. On a
    local backend this always reports "local backend, the container shares
@@ -200,7 +200,7 @@ is exactly Section 4.2.2's own condition -- a docker call that exits zero
 while the resource it targeted is still reachable a moment later (a stale
 reference, a race with something else recreating a volume of the same
 name). This skill's own fresh `make status` after the run is what actually
-closes that gap, the same reason `/devcontainer:launch`'s own
+closes that gap, the same reason `gd-container-local`'s own
 `## Verification` section already gives for never trusting a target's exit
 code alone: a re-read after the fact is not redundant with what the target
 itself claims.
@@ -241,7 +241,7 @@ itself claims.
 
 ## Related specifications
 
-- Section 4.2, `repos/spec/devcontainer-platform.md`: `teardown`'s own
+- Section 4.2, `repos/spec/devcontainer-platform.md`: gd-container-lifecycle's own
   roster row, quoted in this document's introduction, and the interaction
   contract every skill obeys.
 - Section 4.2.2: the failure-semantics table this document's own

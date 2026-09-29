@@ -67,9 +67,9 @@ make build            # build the container, run postCreate, push every credenti
 make exec             # a shell inside the container
 ```
 
-**The skill route:** `/devcontainer:setup-local` prepares this machine, checking
+**The skill route:** `gd-env-setup-local` prepares this machine, checking
 each host tool and stating any command it cannot run itself, and
-`/devcontainer:launch` builds and opens the container. Both reach the same
+`gd-container-local` builds and opens the container. Both reach the same
 container the make targets produce.
 
 `cdevcontainer setup-devcontainer` generates the three gitignored
@@ -122,7 +122,7 @@ IAM, carrying the docker API under mutual TLS. The certificate authenticates
 the client; IAM authorizes the session. Host access does not exist, by design.
 
 Two routes reach the same result. The `make` targets are the mechanism, and the
-`/devcontainer:` skills drive those same targets while asking for what they
+The `gd-*` skills drive those same targets while asking for what they
 need and verifying each step; use whichever suits the moment.
 
 **Prerequisites (laptop):** aws CLI v2, session-manager-plugin, docker CLI, git.
@@ -155,11 +155,11 @@ prints the follow-on chain above when it finishes. `make list-instances`
 lists every configured instance with its live status: EC2 state, recorded
 id, Parameter Store and certificate material, forward port, docker context.
 
-**The skill route:** `/devcontainer:setup-remote` performs the same
+**The skill route:** `gd-env-setup-remote` performs the same
 provisioning and certificate steps and verifies each one before continuing;
-`/devcontainer:certs` owns the certificate lifecycle afterward, including
-renewal; `/devcontainer:engine` switches which engine is active; and
-`/devcontainer:launch` builds and opens the container.
+`gd-cert-lifecycle` owns the certificate lifecycle afterward, including
+renewal; `gd-instance-list` validates which engine is active; and
+`gd-container-local` builds and opens the container.
 
 Anywhere the targets above omit `INSTANCE`, the resolver's order applies:
 an explicit `INSTANCE=` wins, then `DEFAULT_REMOTE_INSTANCE`, then a sole
@@ -265,6 +265,10 @@ Every project gets its own container + volume on the shared engine.
 - Claude Code starts on the classic renderer and never offers the flicker-free
   fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen`
   still opts in for the current container.
+- Claude Code talks to the z.ai GLM Coding Plan: `/model opus` (or
+  `--model opus`) runs the GLM 5.3 flagship, `/model sonnet` runs
+  GLM 5.3 Flash, and `/status` shows the active one. The key comes from
+  `ZAI_API_KEY` at request time, never from a file.
 - Shift+Enter inserts a newline in every VS Code terminal, tmux or not, once
   `make keybindings` has run on the machine.
 - kubectl + helm installed (minikube removed); Python 3.14, Node 25, AWS CLI,

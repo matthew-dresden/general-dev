@@ -355,7 +355,7 @@ def forwarded_port(root: Path, name: str, runner: CommandRunner) -> int:
         raise ForwardedPortNotRecordedError(
             f"ERROR: no forwarded port recorded for instance {name!r}\n"
             f"Docker context {context!r} does not exist yet, so no port has been "
-            "allocated. Run /devcontainer:setup-remote, or connect once, to record one."
+            "allocated. Run gd-env-setup-remote, or connect once, to record one."
         )
     return port
 
@@ -436,7 +436,7 @@ def resolve(root: Path, *, local_backend_active: bool) -> Resolution:
     if not candidates:
         raise NoInstancesConfiguredError(
             f"ERROR: no instances are configured under {INSTANCES_DIR_NAME}/\n"
-            "Run /devcontainer:setup-remote to configure the first one."
+            "Run gd-env-setup-remote to configure the first one."
         )
 
     if len(candidates) == 1:

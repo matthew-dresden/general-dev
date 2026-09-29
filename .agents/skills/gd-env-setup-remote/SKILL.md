@@ -1,11 +1,11 @@
 ---
-name: setup-remote
+name: gd-env-setup-remote
 description: Configures this laptop to reach a remote EC2 docker engine over an SSM port forward secured with mTLS -- no SSH anywhere -- then verifies the result.
 ---
 
-# setup-remote
+# gd-env-setup-remote
 
-`/devcontainer:setup-remote INSTANCE=<name>` is the worked example in spec
+`gd-env-setup-remote INSTANCE=<name>` is the worked example in spec
 Section 2, G2: G1 for a remote instance, with no SSH anywhere. `<name>` is
 the human-chosen instance name (spec Section 9's addressing pattern:
 `remote-instances/<name>/`, docker context `<repo-slug>-<name>`
@@ -15,8 +15,8 @@ the human-chosen instance name (spec Section 9's addressing pattern:
 `DOCKER_CONFIG` is unset; `<certs-root>` stands for that root throughout
 this document); `remote_instance_id` is the separate schema
 field recording the actual EC2 instance id once resolved. This skill is
-`/devcontainer:setup-local` plus the remote fields and the remote work: it
-asks everything `setup-local` asks, plus instance name, id, region and
+`gd-env-setup-local` plus the remote fields and the remote work: it
+asks everything `gd-env-setup-local` asks, plus instance name, id, region and
 profile, and it decides nothing about what a valid answer looks like, what
 a rendered file contains, or what "complete" means -- `answers`, `render`
 and `verify` (`.claude/plugins/devcontainer/scripts/devcontainer_config/`)
@@ -41,7 +41,7 @@ calls `instances.resolve`: `instances.resolve`'s `INSTANCE` /
 `DEFAULT_REMOTE_INSTANCE` / sole-directory order selects among
 already-configured `remote-instances/` directories, and this skill is what
 creates `remote-instances/<name>` for the first time (Procedure step 8), so
-this skill's own `<name>` comes from the operator's `/devcontainer:setup-remote
+this skill's own `<name>` comes from the operator's `gd-env-setup-remote
 INSTANCE=<name>` invocation directly, never from a call to `instances.resolve`
 here.
 
@@ -53,7 +53,7 @@ SSO login this means: state `aws sso login --profile <profile>` with the
 answered profile substituted, wait for the operator to complete the login
 in their browser, then re-probe with `hostprobe.probe_aws_identity` before
 continuing -- it never hands the operator back the whole
-`/devcontainer:setup-remote` invocation to force a re-check, and it never
+`gd-env-setup-remote` invocation to force a re-check, and it never
 assumes the login succeeded.
 
 Interview backend: remote
@@ -70,7 +70,7 @@ Interview backend: remote
 | default_git_branch | What is your default git branch? |
 | template_name | What should this devcontainer template be named? |
 | aws_config_enabled | Do you want AWS profile configuration written into this checkout? |
-| local_docker_context | Which docker context should `make build` use? Collected and validated for schema symmetry with `setup-local`, but this skill does not select or probe it: `render` does not write it into any file, and this run selects the docker context it creates instead. A later switch back to the local backend is a different skill's concern. |
+| local_docker_context | Which docker context should `make build` use? Collected and validated for schema symmetry with `gd-env-setup-local`, but this skill does not select or probe it: `render` does not write it into any file, and this run selects the docker context it creates instead. A later switch back to the local backend is a different skill's concern. |
 | host_proxy | Are you behind a host-side network proxy? |
 | aws_profiles | Asked only when the answered `aws_config_enabled` is `true` (`answers.Requiredness.WHEN_AWS`); not asked otherwise. For each AWS profile, the sub-fields `answers.AWS_PROFILE_SUB_FIELDS` declares. |
 | host_proxy_url | Asked only when the answered `host_proxy` is `true` (`answers.Requiredness.WHEN_PROXY`); not asked otherwise. What is your proxy URL? |
@@ -84,13 +84,13 @@ without being asked, per the frontmatter's `Interview backend: remote`.
 
 ## Checks
 
-Every check `/devcontainer:setup-local`'s own `## Checks` table owns
+Every check `gd-env-setup-local`'s own `## Checks` table owns
 applies here unchanged, on the same machine: the five tool-presence checks
 (docker CLI, git, jq, devcontainer CLI, uv), the docker context list being
 obtainable, and the three private files' completeness, placeholder-freedom,
 `BASH_ENV` correctness, cross-file identity agreement and
 `aws-profile-map.json` agreement with `AWS_CONFIG_ENABLED`. This skill does
-not restate them; see `/devcontainer:setup-local`'s own table for each
+not restate them; see `gd-env-setup-local`'s own table for each
 one's failure message and remedy. The table below lists only the checks
 this skill adds for the remote path, per Section 4.2.1's "Remote, in
 addition" list. Every row below whose remedy names an operator action
@@ -107,21 +107,21 @@ continuing.
 
 ## Procedure
 
-1. Probe this machine with `hostprobe`, exactly as `/devcontainer:setup-local`
+1. Probe this machine with `hostprobe`, exactly as `gd-env-setup-local`
    step 1 does: operating system, the five prerequisite tools, and the
    configured docker contexts. Follow the `## Checks` remedy for any failure
    before continuing.
-2. Report the probe results, as `/devcontainer:setup-local` step 2 does.
+2. Report the probe results, as `gd-env-setup-local` step 2 does.
 3. Run the interview from the `## Questions` table above, setting `backend`
    to `remote` without asking it. Ask `aws_profiles` only when the answered
    `aws_config_enabled` is `true`, and `host_proxy_url` only when the
    answered `host_proxy` is `true`; ask every other row unconditionally.
 4. Validate the collected answers with `answers.validate`, exactly as
-   `/devcontainer:setup-local` step 4 does. If any field fails, report every
+   `gd-env-setup-local` step 4 does. If any field fails, report every
    failing field and its rule in one message and re-ask only those fields;
    do not proceed until every answer validates.
 5. Render, commit and verify the three private files exactly as
-   `/devcontainer:setup-local` steps 6 through 8 do:
+   `gd-env-setup-local` steps 6 through 8 do:
    `render.render_all`, then `render.write_all(rendered, root,
    overwrite=False)` (refusing and naming every existing path rather than
    merging into or replacing one), then `verify.verify_all` reporting every
@@ -144,7 +144,7 @@ continuing.
    selects an instance NAME from the `remote-instances/` directories
    `instances.discover` already lists (the `INSTANCE` /
    `DEFAULT_REMOTE_INSTANCE` / sole-directory order), whereas this skill's
-   `<name>` comes directly from the operator's `/devcontainer:setup-remote
+   `<name>` comes directly from the operator's `gd-env-setup-remote
    INSTANCE=<name>` invocation and `remote_instance_id` is the separate,
    already-answered EC2 id -- neither is something to resolve here. On a
    first run, `remote-instances/<name>` does not exist until step 8 creates
@@ -233,7 +233,7 @@ continuing.
 - Section 4.2 and 4.2.1: what this skill asks, does, ends by, and the
   interaction contract governing browser SSO login and every Terragrunt
   apply; the remote check list this skill's own `## Checks` table adds to
-  `/devcontainer:setup-local`'s.
+  `gd-env-setup-local`'s.
 - Section 4.2.2: the failure-semantics table this skill's own table above
   instantiates.
 - Section 4.4: `GATE-APPLY`, named `PRECHECK-APPLY` in this document, and

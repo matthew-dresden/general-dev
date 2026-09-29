@@ -1,11 +1,11 @@
 ---
-name: quality
-description: Drives `make validate` to green by reading its own sub-target set from the Makefile rather than a copy embedded here, interpreting each failing sub-target's root cause and fixing it -- never a suppression, an ignore-list entry, a raised threshold, or a narrowed `LINT_EXCLUDES`/`SPELL_FILES`; stops and asks for human approval on a suspected false positive, hands anything else it cannot fix to `/devcontainer:doctor` or the operator, and ends by reporting the exit code of a fresh `make validate` run.
+name: gd-quality
+description: Drives `make validate` to green by reading its own sub-target set from the Makefile rather than a copy embedded here, interpreting each failing sub-target's root cause and fixing it -- never a suppression, an ignore-list entry, a raised threshold, or a narrowed `LINT_EXCLUDES`/`SPELL_FILES`; stops and asks for human approval on a suspected false positive, hands anything else it cannot fix to `gd-env-doctor` or the operator, and ends by reporting the exit code of a fresh `make validate` run.
 ---
 
-# quality
+# gd-quality
 
-Section 4.2's own roster row gives `quality` three words for what it does,
+Section 4.2's own roster row gives `gd-quality` three words for what it does,
 quoted here exactly: it "Asks" "Nothing"; it "Does" "Runs `validate`,
 interprets findings, fixes root causes"; and it "Ends by" "Green, or a
 findings list." AC-3.5.1 (Section 3.5, Standards audit) is the rule this
@@ -58,7 +58,7 @@ never assume silence is a yes.
    a real fix (this document's own Error Handling Contract).
 7. Repeat steps 2 through 6 until a fresh `make validate` run started
    after every fix has landed exits `0`, or until every remaining failure
-   has been named to `/devcontainer:doctor` or the operator per
+   has been named to `gd-env-doctor` or the operator per
    `## Handoff`.
 8. Report per `## Completion`.
 
@@ -159,7 +159,7 @@ on the operator's behalf:
   the leaked value stops being valid, then store the replacement in the
   keychain through the hostcreds manifest (`make creds-init`) and re-push
   it into the container (`make push-creds`), the rotation
-  `/devcontainer:secrets` performs, with the rotation and the approval
+  `gd-creds-setup` performs, with the rotation and the approval
   recorded. Rewriting history does not remove the need for this remedy: a
   value recoverable from earlier commits stays valid until its issuer
   retires it.
@@ -170,10 +170,10 @@ Section 4.2's own interaction contract governs this case exactly -- state
 the exact command, wait for the operator, then verify, never assumed to
 have worked. When the same value that failed `lint-secrets` also appears
 in the developer's own `shell.env` -- one of the conditions `lint-secrets`
-itself detects (Section 4.6) -- the finding is also a `/devcontainer:doctor`
+itself detects (Section 4.6) -- the finding is also a `gd-env-doctor`
 configuration finding (its own "`shell.env`'s active configuration holds
 no credential-shaped value" row); this skill names that overlap and hands
-it to `/devcontainer:doctor` per `## Handoff` rather than re-deriving
+it to `gd-env-doctor` per `## Handoff` rather than re-deriving
 doctor's own remedy a second way.
 
 ## Completion
@@ -200,12 +200,12 @@ which run -- the fresh one -- its exit code came from.
 
 Two destinations, never left implied:
 
-- **`/devcontainer:doctor`**, for a finding that is also a state finding
+- **`gd-env-doctor`**, for a finding that is also a state finding
   doctor's own table already covers -- concretely, a `lint-secrets`
   finding that also names a value present in `shell.env` (`##
   Secret findings`), which is simultaneously doctor's own configuration
   finding. This skill names the overlap and points at
-  `/devcontainer:doctor` rather than re-implementing that finding's own
+  `gd-env-doctor` rather than re-implementing that finding's own
   remedy a second way. Nothing else in `## Findings` maps to a
   container-state or drift finding, since `make validate` runs host-only
   with no docker or AWS call (Section 4.1.2) and never itself surfaces
@@ -240,7 +240,7 @@ or a fix already applied under `## Findings`.
   when the suite lands.") and `make test`'s host-only, no-docker-no-AWS
   contract, which `## Handoff` relies on to state that nothing here ever
   surfaces a container-state or drift finding.
-- Section 4.2: `quality`'s own roster row, quoted in this document's
+- Section 4.2: `gd-quality`'s own roster row, quoted in this document's
   introduction, and the interaction contract every skill obeys, applied
   here in `## False positives` and `## Secret findings`.
 - Section 4.2.2: the failure-semantics table this document's own

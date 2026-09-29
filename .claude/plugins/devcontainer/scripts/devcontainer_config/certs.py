@@ -5,7 +5,7 @@ This module implements both halves: generation, and the inspection and expiry
 arithmetic behind `make cert-status`. Section 13 decisions D3 and D4
 fix the design: there is no CA server, no step-ca, no Vault and no AWS
 Private CA -- the authority is nothing more than a key pair and the `openssl`
-binary, driven by `.claude/plugins/devcontainer/skills/certs/SKILL.md`. Every
+binary, driven by `.agents/skills/gd-cert-lifecycle/SKILL.md`. Every
 `openssl` invocation below passes an argument list, never a shell string
 (spec Section 3.4's dependency rule, AC-FUNC-006), and this module imports
 nothing beyond the standard library and this project's own
@@ -17,7 +17,7 @@ rule `_validate_instance` delegates to, rather than this module declaring
 second, independently drifting copies of any of them.
 
 `instance` reaches this module unvalidated from `--instance` on the CLI and,
-per `.claude/plugins/devcontainer/skills/certs/SKILL.md`'s own instance
+per `.agents/skills/gd-cert-lifecycle/SKILL.md`'s own instance
 resolution, from `INSTANCE`/`DEFAULT_REMOTE_INSTANCE`; every path this module
 composes from it -- `CertPaths.instance_dir` and the Parameter Store path
 `publication_set` builds -- validates it first, through `_validate_instance`,
@@ -254,7 +254,7 @@ CERT_WARN_DAYS_DEFAULT = 14
 STATUS_OK = "ok"
 STATUS_RENEW = "RENEW"
 STATUS_EXPIRED = "expired"
-RENEW_INVOCATION_TEMPLATE = "/devcontainer:certs INSTANCE={instance}"
+RENEW_INVOCATION_TEMPLATE = "gd-cert-lifecycle INSTANCE={instance}"
 ROLE_CLIENT = "client"
 ROLE_CA = "ca"
 _INSPECTABLE_ROLES: tuple[str, ...] = (ROLE_CLIENT, ROLE_CA)
@@ -264,7 +264,7 @@ _INSPECTABLE_ROLES: tuple[str, ...] = (ROLE_CLIENT, ROLE_CA)
 # certificate material yet (AC-FUNC-006's empty-inventory edge case).
 _REPORT_HEADER = "INSTANCE   ROLE     EXPIRES       DAYS  STATUS"
 _NO_CERTIFICATES_LINE = (
-    "No certificates found. Run /devcontainer:setup-remote to issue the first instance's material."
+    "No certificates found. Run gd-env-setup-remote to issue the first instance's material."
 )
 
 # spec Section 5.3's Parameter Store layout for TLS material.
@@ -322,7 +322,7 @@ def _validate_instance(instance: str) -> None:
     derivation that composes a path from it. `instance` reaches this
     module unvalidated from
     `--instance` on the CLI and, per
-    `.claude/plugins/devcontainer/skills/certs/SKILL.md`'s own instance
+    `.agents/skills/gd-cert-lifecycle/SKILL.md`'s own instance
     resolution, from `INSTANCE`/`DEFAULT_REMOTE_INSTANCE`, so leaving it
     unvalidated would let a name carrying a path separator (or the empty
     string) compose a filesystem path outside `CertPaths.root`
@@ -400,7 +400,7 @@ class ServerCertificate:
     Neither field is ever written under `CertPaths.instance_dir`: spec
     Section 5.5's own material list has no server-key/server-cert row.
     `issue_server` generates both inside a `tempfile.TemporaryDirectory` at
-    mode `0600`/`0644` (matching `.claude/plugins/devcontainer/skills/certs/
+    mode `0600`/`0644` (matching `.agents/skills/gd-cert-lifecycle/
     SKILL.md`'s "Issue server certificate" row) and removes that directory
     before returning, so the private key exists on disk only briefly, inside
     that removed temporary directory -- it is never persisted under
@@ -1023,7 +1023,7 @@ def _require_parseable_ca_component(path: Path, instance: str) -> None:
 def _require_ca(paths: CertPaths) -> None:
     """Raise unless a usable authority already exists for `paths.instance`.
 
-    `.claude/plugins/devcontainer/skills/certs/SKILL.md`'s own precondition
+    `.agents/skills/gd-cert-lifecycle/SKILL.md`'s own precondition
     row for "Issue server certificate", "Issue client certificate" and
     "Rotate client certificate" names exactly this requirement; every
     function below that needs an authority checks it before shelling out to
@@ -1033,7 +1033,7 @@ def _require_ca(paths: CertPaths) -> None:
     running daemon is serving (this task's Error Handling Contract,
     AC-FUNC-005). The remedy names the exact skill invocation that creates
     an authority (`RENEW_INVOCATION_TEMPLATE`, the identical
-    `/devcontainer:certs INSTANCE=<name>` spelling `## Expiry`'s own `RENEW`
+    `gd-cert-lifecycle INSTANCE=<name>` spelling `## Expiry`'s own `RENEW`
     row already gives an operator, reused here rather than a second literal)
     rather than the Python function name, since the operator driving this
     module is the `certs` skill, never `certs.py` directly. Beyond the
@@ -1366,7 +1366,7 @@ def rotate_client(paths: CertPaths) -> None:
     """Rotate the client certificate and key at `paths.client_cert`/`paths.client_key` (AC-10.9).
 
     Calls `issue_client` and does nothing else: it is the standing name spec
-    Section 4.5 and `.claude/plugins/devcontainer/skills/certs/SKILL.md`'s
+    Section 4.5 and `.agents/skills/gd-cert-lifecycle/SKILL.md`'s
     own "Rotate client certificate" row give the operation `issue_client`
     already performs, reused here rather than a second, independent
     issuance path (this task's own Approach). Every invariant this task
@@ -1608,7 +1608,7 @@ def _missing_role_message(instance: str, missing_role: str) -> str:
         f"ERROR: instance {instance!r} is missing its {missing_role} certificate\n"
         f"Other certificate material exists for this instance, but its {missing_role} "
         "certificate does not -- a partial material set is never reported as a row.\n"
-        f"Run /devcontainer:certs INSTANCE={instance} to reissue it."
+        f"Run gd-cert-lifecycle INSTANCE={instance} to reissue it."
     )
 
 
@@ -1711,7 +1711,7 @@ def render_report(rows: Sequence[CertStatusRow]) -> str:
     """The full `make cert-status` report text for `rows` (spec Section 4.1.2), header included.
 
     An empty `rows` is not an error (AC-FUNC-006): the header still prints,
-    followed by a line directing the operator to `/devcontainer:setup-remote`
+    followed by a line directing the operator to `gd-env-setup-remote`
     rather than a bare header with nothing underneath it.
     """
     lines = [_REPORT_HEADER]

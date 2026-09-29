@@ -114,7 +114,7 @@ make clean CONTAINER=general-dev-review
 
 One-time setup of this machine -- host tools, the SSO profile, and the
 certificate authority and client certificate this transport presents -- is what
-the `/devcontainer:setup-local` and `/devcontainer:setup-remote` skills do.
+the `gd-env-setup-local` and `gd-env-setup-remote` skills do.
 They ask what they need, state any command they cannot run themselves, and
 verify the result rather than assuming it.
 

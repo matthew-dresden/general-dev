@@ -106,6 +106,18 @@ rdc_sh_escape() {
 }
 
 rdc_backend() {
+  if [ -n "${ENGINE:-}" ]; then
+    # ENGINE names the engine this whole run addresses, so classification is
+    # decided by it directly -- 'local' is the local engine, anything else a
+    # remote instance's -- and never by the machine-wide active context,
+    # which another terminal may have switched while this one runs.
+    # rd_engine_context has already failed fast when ENGINE names nothing.
+    case "$(rd_engine_context)" in
+      "$LOCAL_DOCKER_CONTEXT") printf 'local\n' ;;
+      *) printf 'remote\n' ;;
+    esac
+    return 0
+  fi
   if [ "$(docker context show)" = "$REMOTE_DOCKER_CONTEXT" ]; then
     printf 'remote\n'
   else
@@ -864,8 +876,16 @@ rdc_reopen() {
   fi
 
   rd_require_cmd "$VSCODE_CLI" "Install the VS Code 'code' command: Command Palette > Shell Command: Install 'code' command in PATH"
+  # The authority must name the engine this run addresses, not whichever
+  # context is machine-wide active: under ENGINE those differ, and a window
+  # opened against the active context attaches to the wrong engine's
+  # container. Unset, rd_engine_context prints nothing and the active context
+  # is exactly what it always was.
+  local authority_context
+  authority_context="$(rd_engine_context)"
+  [ -n "$authority_context" ] || authority_context="$(docker context show)"
   authority="$(printf '{"containerName":"/%s","settings":{"context":"%s"}}' \
-    "$name" "$(docker context show)" | od -A n -t x1 | tr -d ' \n')"
+    "$name" "$authority_context" | od -A n -t x1 | tr -d ' \n')"
   workspace="$(rdc_workspace_folder)"
   rd_log "opening ${workspace} in '${name}'"
   "$VSCODE_CLI" --folder-uri "vscode-remote://attached-container+${authority}${workspace}"
@@ -1113,6 +1133,20 @@ RDC_COMMAND="${1:-}"
 # all is a legitimately local one, not an error, and it must still be able to
 # build against its local engine.
 if command -v docker > /dev/null 2>&1; then
+  # ENGINE, when set, names one engine explicitly. Resolving it here -- and
+  # exporting its context as DOCKER_CONTEXT, the variable docker reads ahead
+  # of the machine-wide current context -- is what aims every docker call in
+  # this process at that one engine: rd_docker's and the plain ones alike,
+  # and every child process (the devcontainer CLI included) that inherits the
+  # environment. No `docker context use`, so state other terminals share is
+  # never touched. rd_engine_context has already failed fast when ENGINE
+  # names nothing; a direct call, not a command substitution, so the export
+  # lands in this shell.
+  if [ -n "${ENGINE:-}" ]; then
+    DOCKER_CONTEXT="$(rd_engine_context)"
+    export DOCKER_CONTEXT
+  fi
+
   # Resolve once, here, and let every downstream reader use the result. The
   # two names below were previously derived from PROJECT_NAME independently
   # by this script and by push-secrets.sh, which meant two callers could
@@ -1123,6 +1157,17 @@ if command -v docker > /dev/null 2>&1; then
     REMOTE_DOCKER_CONTEXT="$DOCKER_CONTEXT"
     DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
     export REMOTE_DOCKER_CONTEXT DEVCONTAINER_SSM_PREFIX
+  fi
+
+  # Re-assert the ENGINE pin. The resolver's export loop now skips
+  # DOCKER_CONTEXT under ENGINE, but that skip is lib.sh's promise, not this
+  # script's assumption: anything that ever exports DOCKER_CONTEXT between the
+  # pin above and here would silently re-aim the plain docker calls and child
+  # processes at a different engine than rd_docker's --context. One cheap,
+  # idempotent re-derivation closes that window for good.
+  if [ -n "${ENGINE:-}" ]; then
+    DOCKER_CONTEXT="$(rd_engine_context)"
+    export DOCKER_CONTEXT
   fi
 
   # Anything aimed at the remote engine needs the EC2 identity before docker

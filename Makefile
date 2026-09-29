@@ -10,6 +10,17 @@ CONFIG := $(RD_DIR)/config.env
 # Empty by default, so the resolver applies its own four-step order.
 INSTANCE ?=
 
+# ENGINE addresses one engine explicitly instead of following the active
+# docker context: ENGINE=local names this machine's engine, ENGINE=<name> the
+# context of that instance under remote-instances/. Exported when set so the
+# container-level scripts read it from their environment -- a plain make
+# variable does not cross into a recipe's process -- and both `ENGINE=x make
+# <target>` and `make <target> ENGINE=x` reach them. Empty or unset, every
+# target behaves exactly as before and follows the active context.
+ifdef ENGINE
+export ENGINE
+endif
+
 CONTAINER_SH := $(RD_DIR)/container.sh
 SECRETS_SH := $(RD_DIR)/push-secrets.sh
 CERTS_SH := $(RD_DIR)/certs.sh
@@ -45,6 +56,21 @@ if [ -z "$(INSTANCE)" ] && [ "$(ALL)" != "1" ]; then \
 fi; \
 if [ -n "$(INSTANCE)" ] && [ "$(ALL)" = "1" ]; then \
 	printf '\033[0;31m[ERROR]\033[0m pass INSTANCE=<name> or ALL=1 to $(1), not both\n' >&2; \
+	exit 2; \
+fi
+endef
+
+# Refusal for the three targets that switch the machine-wide docker context
+# (local, remote, disconnect). ENGINE, when set, exists so a run never has
+# to: every docker call it makes is aimed at the engine it names without
+# touching the context other terminals share. Running a context switcher
+# under ENGINE is therefore a contradiction -- silently performing the
+# switch would betray exactly what the caller asked ENGINE for -- so the
+# target refuses with the reason and exits 2, matching the usage guards'
+# convention. $(1) is the target name, for the message.
+define ENGINE_CONTEXT_SWITCH_REFUSAL
+if [ -n "$${ENGINE:-}" ]; then \
+	printf '\033[0;31m[ERROR]\033[0m ENGINE=%s is set: make $(1) switches the machine-wide docker context, which ENGINE exists to avoid; run it without ENGINE\n' "$${ENGINE}" >&2; \
 	exit 2; \
 fi
 endef
@@ -192,8 +218,8 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make cert-status"      "host"   "Client and CA expiry per instance."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make connect"          "remote" "What 'make remote' calls. Re-run after a reboot, after sleep, or when SSO expires."
-	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)), refreshing the SSM port forward first."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make connect"          "remote" "What 'make remote' calls. Opens the forward for INSTANCE=<name> (or ENGINE=<name>); re-run after a reboot, after sleep, or when SSO expires."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)), refreshing the SSM port forward first. INSTANCE=<name> targets that instance."
 	@printf '\n\033[1mBUILD\033[0m  every target blocks until the container is up and exits non-zero if anything fails\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make build"            "both"   "Create the container for the active backend. Refuses if one already exists."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make rebuild"          "both"   "clean, then build. Prerequisites are checked before anything is destroyed."
@@ -230,6 +256,7 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make test"             "host"   "Run the hermetic pytest suite in tests/. No docker, no AWS, no network."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make validate"         "host"   "The green-baseline contract automation depends on. Runs lint then test."
 	@printf '\n\033[1mOPTIONS\033[0m\n'
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "ENGINE=local|<name>"   ""       "Address one engine explicitly (ENGINE=x make <target>, or make <target> ENGINE=x): parallel terminals can drive local and remote engines concurrently, without switching contexts. Unset follows the active context."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "CONTAINER=<name>"      ""       "Pick one instance when several clones of this repo exist. 'make status' lists them."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "FORCE=1"               ""       "Proceed past the unpushed-work and uncommitted-config guards."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "SKIP_SECRETS_CHECK=1"  ""       "Do not compare shell.env against Parameter Store, and do not publish it."
@@ -243,19 +270,48 @@ help:
 	@printf '  %s\n' "Every target checks what it needs and fails with the command that installs it."
 	@printf '\n'
 
+# Opens the SSM port forward. The instance it opens one for: INSTANCE when
+# given, else ENGINE when it names an instance, else none -- the resolver's
+# default, addressed through the parse-time config values exactly as before.
+# A named target is resolved here through the same lib.sh resolver every
+# remote entry point uses (which reads the per-instance id store and derives
+# the context the way the rest of the repo does), because the forwarding
+# remedy this target backs -- `make remote INSTANCE=<name>` -- was hollow
+# otherwise: the variable was accepted and ignored, and the forward for
+# whatever instance the resolver defaulted to opened regardless of what was
+# asked for. INSTANCE and ENGINE naming different engines is refused by the
+# resolver's own guard before anything opens.
 connect:
 	@set -euo pipefail; \
+	$(PROXY_ENV) \
 	transport="$${DEVCONTAINER_TRANSPORT:-ssm}"; \
+	target=""; \
+	if [ -n "$(INSTANCE)" ]; then target="$(INSTANCE)"; \
+	elif [ -n "$${ENGINE:-}" ] && [ "$${ENGINE}" != "local" ]; then target="$${ENGINE}"; fi; \
+	if [ -n "$$target" ]; then \
+		. $(RD_DIR)/lib.sh; \
+		INSTANCE="$$target" rd_resolve_instance; \
+		ctx="$$(rd_engine_context)"; \
+		[ -n "$$ctx" ] || ctx="$${DOCKER_CONTEXT:-}"; \
+		if [ -z "$${REMOTE_INSTANCE_ID:-}" ]; then \
+			printf '\033[0;31m[ERROR]\033[0m no EC2 instance id is recorded for instance %s\n' "$$target" >&2; \
+			printf '        Link it first: make instance-link INSTANCE=%s\n' "$$target" >&2; \
+			exit 1; \
+		fi; \
+		set -- --instance-id "$$REMOTE_INSTANCE_ID" --context "$$ctx"; \
+	else \
+		set -- --instance-id "$$REMOTE_INSTANCE_ID" --context "$(REMOTE_CONTEXT)"; \
+	fi; \
 	case "$$transport" in \
-		ssm) $(PROXY_ENV) PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.transport connect \
-			--instance-id "$$REMOTE_INSTANCE_ID" --context "$(REMOTE_CONTEXT)" \
-			--profile "$$REMOTE_AWS_PROFILE" --region "$$REMOTE_AWS_REGION" ;; \
+		ssm) PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.transport connect \
+			"$$@" --profile "$$REMOTE_AWS_PROFILE" --region "$$REMOTE_AWS_REGION" ;; \
 		*) printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT="%s" is not recognized.\n' "$$transport" >&2; \
 		   printf '        Accepted value: ssm. The ssh transport was removed at cutover.\n' >&2; \
 		   exit 1 ;; \
 	esac
 
 disconnect:
+	@$(call ENGINE_CONTEXT_SWITCH_REFUSAL,disconnect)
 	@docker context inspect $(LOCAL_CONTEXT) > /dev/null 2>&1 || { \
 		printf '\033[0;31m[ERROR]\033[0m docker context "%s" does not exist on this machine.\n' "$(LOCAL_CONTEXT)" >&2; \
 		printf 'Set LOCAL_DOCKER_CONTEXT in %s to one of:\n' "$(CONFIG)" >&2; \
@@ -330,10 +386,25 @@ build-no-cache:
 rebuild-no-cache:
 	@INSTANCE="$(INSTANCE)" NO_CACHE=1 $(CONTAINER_SH) rebuild
 
+# The refusal fires in the prerequisite first (make builds disconnect before
+# local's own recipe can run), so under ENGINE `make local` stops before any
+# context is touched; the guard line here keeps this target refusing on its
+# own should the dependency ever move.
 local: disconnect
+	@$(call ENGINE_CONTEXT_SWITCH_REFUSAL,local)
 	@printf '\033[0;32m[DONE]\033[0m targeting the local engine, "make build" bind-mounts this folder\n'
 
-remote: connect
+# The guard runs before the connect prerequisite deliberately: `make remote`
+# under ENGINE must refuse before any forward is opened, and connect itself
+# must keep honoring ENGINE (it is how a single forward is refreshed for one
+# engine without switching anything). So remote does not hang connect off its
+# prerequisite list any more; it guards, then delegates through a sub-make.
+# INSTANCE needs no explicit hand-off: a command-line definition travels to
+# sub-makes inside MAKEFLAGS, and the environment spelling travels in the
+# recipe's own environment -- both spellings reach connect's recipe either way.
+remote:
+	@$(call ENGINE_CONTEXT_SWITCH_REFUSAL,remote)
+	@$(MAKE) --no-print-directory connect
 	@printf '\033[0;32m[DONE]\033[0m targeting the remote engine, "make build" clones into a volume\n'
 
 reopen:

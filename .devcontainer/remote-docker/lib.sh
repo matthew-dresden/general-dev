@@ -109,18 +109,40 @@ rd_check_prereqs() {
 # whether it is even talking to a remote engine needs to ask the question
 # without a repository that configures no instances at all becoming an error.
 rd_resolve_instance_quiet() {
+  rd_require_engine_instance_agreement
   [ -n "${RD_INSTANCE_RESOLVED:-}" ] && return 0
 
-  local repo_root scripts_dir block line
+  local repo_root scripts_dir block line resolver_env
   repo_root="$(cd "${RD_DIR}/../.." && pwd)"
   scripts_dir="${repo_root}/.claude/plugins/devcontainer/scripts"
+  resolver_env=()
 
-  block="$(PYTHONPATH="$scripts_dir" python3 -m devcontainer_config.cli resolve-instance 2>&1)" \
+  # ENGINE names one engine explicitly; when it names a remote instance, that
+  # instance -- not the four-step default order -- is the one whose address
+  # block this run consumes, so REMOTE_DOCKER_CONTEXT, the Parameter Store
+  # prefix and the recorded id all belong to the engine rd_engine_context aims
+  # docker at. The variable is injected only for that case: an unconditional
+  # empty INSTANCE would clobber a real one the caller passed in.
+  if [ -n "${ENGINE:-}" ] && [ "$ENGINE" != "local" ]; then
+    resolver_env+=(INSTANCE="$ENGINE")
+  fi
+
+  block="$(env ${resolver_env[@]+"${resolver_env[@]}"} PYTHONPATH="$scripts_dir" python3 -m devcontainer_config.cli resolve-instance 2>&1)" \
     || { RD_RESOLVE_DIAGNOSIS="$block"; return 1; }
 
   # Only KEY=VALUE lines are consumed; a warning the resolver printed to
   # stderr has already reached the caller and must not be eval'd.
+  # DOCKER_CONTEXT is the one line skipped under ENGINE: the entry points'
+  # prelude has already pinned the process to the context rd_engine_context
+  # derived from ENGINE, and the resolver's block -- resolved from whatever
+  # the four-step order defaulted to, which under ENGINE=local is not
+  # necessarily the pinned engine -- must not clobber that pin and split the
+  # run across two engines (rd_docker's --context aimed at one, every plain
+  # docker call and child process aimed at another).
   while IFS= read -r line; do
+    if [ -n "${ENGINE:-}" ] && [ "${line%%=*}" = "DOCKER_CONTEXT" ]; then
+      continue
+    fi
     case "$line" in
       [A-Z_]*=*) export "${line?}" ;;
     esac
@@ -167,6 +189,28 @@ rd_resolve_instance() {
     "What is configured:       ${RD_BOLD}make list-instances${RD_RESET}"
 }
 
+# INSTANCE and ENGINE both name an engine when both are set -- INSTANCE the
+# instance every remote operation resolves its address block from, ENGINE the
+# engine every docker call is pinned to. When they name different engines, a
+# run would resolve one instance's addresses while aiming docker at another,
+# which is exactly the split this file's single-resolver rule exists to
+# prevent, so it is refused loudly instead of silently preferring one of them.
+# The same value is the redundant-but-consistent spelling and passes; either
+# variable alone passes, because each has its own resolution rule.
+rd_require_engine_instance_agreement() {
+  [ -n "${INSTANCE:-}" ] && [ -n "${ENGINE:-}" ] || return 0
+  [ "$INSTANCE" = "$ENGINE" ] && return 0
+  rd_fail "INSTANCE='${INSTANCE}' and ENGINE='${ENGINE}' name different engines" \
+    "One run addresses one engine: INSTANCE resolves the address block, ENGINE pins" \
+    "docker. Naming two different engines would resolve one while aiming at the other." \
+    "" \
+    "Set one of the two, not both:" \
+    "  ${RD_BOLD}make <target> INSTANCE=${INSTANCE}${RD_RESET}" \
+    "  ${RD_BOLD}make <target> ENGINE=${ENGINE}${RD_RESET}" \
+    "" \
+    "What is configured:       ${RD_BOLD}make list-instances${RD_RESET}"
+}
+
 rd_check_aws_auth() {
   aws sts get-caller-identity --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null 2>&1 \
     || rd_die "AWS credentials for profile '$REMOTE_AWS_PROFILE' are not valid. Run: aws sso login --profile $REMOTE_AWS_PROFILE"
@@ -184,11 +228,100 @@ rd_run() {
   return "$status"
 }
 
-rd_docker() { rd_run rd_docker_failed docker "$@"; }
+# ENGINE, when set, addresses one engine explicitly instead of following the
+# machine-wide active docker context, so several terminals can drive the local
+# engine and several remote instances concurrently without any of them
+# switching contexts underneath the others. 'local' names this machine's
+# engine (LOCAL_DOCKER_CONTEXT); anything else must name an instance directory
+# under remote-instances/, and its context is the same <repo-slug>-<name> form
+# every other consumer derives -- computed through instances.docker_context,
+# never a second shell copy of that rule.
+#
+# Resolved once per process, guarded by RD_ENGINE_CONTEXT_RESOLVED the same
+# way rd_resolve_instance_quiet is, because rd_docker consults this on every
+# docker call and the derivation shells out to python. Prints the context
+# name; empty output means ENGINE is unset and the caller should behave
+# exactly as before.
+rd_engine_context() {
+  [ -n "${ENGINE:-}" ] || return 0
+  rd_require_engine_instance_agreement
+
+  if [ "${RD_ENGINE_CONTEXT_RESOLVED:-}" = "1" ]; then
+    printf '%s\n' "$RD_ENGINE_CONTEXT"
+    return 0
+  fi
+
+  local repo_root scripts_dir resolved err candidates
+  repo_root="$(cd "${RD_DIR}/../.." && pwd)"
+  scripts_dir="${repo_root}/.claude/plugins/devcontainer/scripts"
+
+  if [ "$ENGINE" = "local" ]; then
+    resolved="$LOCAL_DOCKER_CONTEXT"
+  else
+    err="$(mktemp "${TMPDIR:-/tmp}/rd-engine.XXXXXX")"
+    resolved="$(ENGINE_NAME="$ENGINE" PYTHONPATH="$scripts_dir" python3 - 2> "$err" <<'PY'
+import os, sys
+from pathlib import Path
+
+from devcontainer_config import instances, repo
+
+engine = os.environ["ENGINE_NAME"]
+names = instances.discover(repo.find_root(Path.cwd()))
+listing = "\n".join(names) if names else "(none configured)"
+try:
+    instances.validate_name(engine)
+    if engine not in names:
+        print(listing, file=sys.stderr)
+        sys.exit(1)
+    print(instances.docker_context(repo.find_root(Path.cwd()), engine))
+except instances.InvalidInstanceNameError as exc:
+    print(f"{exc}\n\n{listing}", file=sys.stderr)
+    sys.exit(1)
+PY
+)" || {
+      candidates="$(cat "$err")"
+      rm -f "$err"
+      rd_fail "ENGINE='${ENGINE}' names no engine this repository can address" \
+        "'ENGINE' takes 'local', or an instance directory under remote-instances/." \
+        "" \
+        "What exists:" \
+        "$(rd_quote "$candidates")" \
+        "" \
+        "Scaffold a new instance:  ${RD_BOLD}make instance-init INSTANCE=<name>${RD_RESET}" \
+        "" \
+        "Unset ENGINE to follow the active docker context instead."
+    }
+    rm -f "$err"
+  fi
+
+  RD_ENGINE_CONTEXT="$resolved"
+  export RD_ENGINE_CONTEXT
+  RD_ENGINE_CONTEXT_RESOLVED=1
+  export RD_ENGINE_CONTEXT_RESOLVED
+  printf '%s\n' "$resolved"
+}
+
+rd_docker() {
+  # Under ENGINE, every docker call is aimed at the engine it names, ahead of
+  # the machine-wide active context; unset, this is the plain docker call it
+  # always was.
+  local context_args=()
+  if [ -n "${ENGINE:-}" ]; then
+    context_args+=(--context "$(rd_engine_context)")
+  fi
+  rd_run rd_docker_failed docker ${context_args[@]+"${context_args[@]}"} "$@"
+}
 rd_aws() { rd_run rd_aws_failed aws "$@"; }
 
 rd_engine_diagnosis() {
   local context="$1"
+  # The forward-opening remedy must name the instance this run addresses:
+  # a bare `make connect` refreshes whichever instance the resolver defaults
+  # to, which under ENGINE is not necessarily this one.
+  local forward_remedy="make connect"
+  if [ -n "${ENGINE:-}" ] && [ "$ENGINE" != "local" ]; then
+    forward_remedy="make remote INSTANCE=${ENGINE}"
+  fi
   if ! command -v docker > /dev/null 2>&1; then
     printf 'the docker CLI is not installed on this machine.\n'
     printf 'install it: https://docs.docker.com/engine/install/\n'
@@ -202,11 +335,11 @@ rd_engine_diagnosis() {
   if command -v aws > /dev/null 2>&1 \
     && ! aws sts get-caller-identity --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null 2>&1; then
     printf 'the AWS session for profile '\''%s'\'' has expired, which breaks the port forward.\n' "$REMOTE_AWS_PROFILE"
-    printf 'aws sso login --profile %s, then make connect\n' "$REMOTE_AWS_PROFILE"
+    printf 'aws sso login --profile %s, then %s\n' "$REMOTE_AWS_PROFILE" "$forward_remedy"
     return 0
   fi
   printf 'the SSM port forward to %s has dropped.\n' "$REMOTE_INSTANCE_ID"
-  printf 'make connect\n'
+  printf '%s opens the forward\n' "$forward_remedy"
 }
 
 rd_docker_failed() {
@@ -214,6 +347,11 @@ rd_docker_failed() {
   shift 2
   local invocation="$*"
   shift
+  # Under ENGINE, rd_docker puts the global --context option first; the exec
+  # check below reads the first argument after docker's global options.
+  if [ "${1:-}" = "--context" ]; then
+    shift 2
+  fi
   local context diagnosis subject holder
 
   case "$detail" in

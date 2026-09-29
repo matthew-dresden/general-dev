@@ -31,8 +31,8 @@ INSTANCES  one remote engine per project under remote-instances/; instance names
   make cert-install       remote  Have the instance fetch the published material and start its daemon. Run after cert-publish.
   make cert-status        host    Client and CA expiry per instance.
   make push-secrets       remote  Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed.
-  make connect            remote  What 'make remote' calls. Re-run after a reboot, after sleep, or when SSO expires.
-  make remote             host    Point them at the EC2 engine (<REMOTE_DOCKER_CONTEXT>), refreshing the SSM port forward first.
+  make connect            remote  What 'make remote' calls. Opens the forward for INSTANCE=<name> (or ENGINE=<name>); re-run after a reboot, after sleep, or when SSO expires.
+  make remote             host    Point them at the EC2 engine (<REMOTE_DOCKER_CONTEXT>), refreshing the SSM port forward first. INSTANCE=<name> targets that instance.
 
 BUILD  every target blocks until the container is up and exits non-zero if anything fails
   make build              both    Create the container for the active backend. Refuses if one already exists.
@@ -75,6 +75,7 @@ QUALITY
   make validate           host    The green-baseline contract automation depends on. Runs lint then test.
 
 OPTIONS
+  ENGINE=local|<name>             Address one engine explicitly (ENGINE=x make <target>, or make <target> ENGINE=x): parallel terminals can drive local and remote engines concurrently, without switching contexts. Unset follows the active context.
   CONTAINER=<name>                Pick one instance when several clones of this repo exist. 'make status' lists them.
   FORCE=1                         Proceed past the unpushed-work and uncommitted-config guards.
   SKIP_SECRETS_CHECK=1            Do not compare shell.env against Parameter Store, and do not publish it.

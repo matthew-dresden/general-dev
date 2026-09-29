@@ -480,6 +480,7 @@ instance-start:
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; nothing to start.\n'; exit 0; }; \
 	while IFS= read -r name; do \
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-start "$$name" --region "$$REMOTE_AWS_REGION" || exit 1; \
+		make --no-print-directory cert-install INSTANCE="$$name" || exit 1; \
 	done <<< "$$names"
 
 # Records the EC2 id Terragrunt output in the instance's per-instance id
@@ -543,8 +544,13 @@ instance-deploy:
 		tg_init "$$name"; \
 		plan_file="$${PWD}/tfplan.deploy"; \
 		trap 'rm -f "$$plan_file"' EXIT; \
-		terragrunt validate; \
-		plan_log=$$(terragrunt plan -out=tfplan.deploy 2>&1) || { printf '%s\n' "$$plan_log" >&2; exit 1; }; \
+		terragrunt validate || { printf '\033[0;31m[ERROR]\033[0m %s: terragrunt validate failed (output above)\n' "$$name" >&2; exit 1; }; \
+		plan_log=$$(terragrunt plan -out=tfplan.deploy 2>&1); \
+		printf '%s\n' "$$plan_log" | grep -qE 'No changes\.|To perform exactly these actions' || { \
+			printf '%s\n' "$$plan_log" >&2; \
+			printf '\033[0;31m[ERROR]\033[0m %s: the plan produced no outcome summary -- Terragrunt can exit zero on a failed plan, so the guard requires an explicit success marker (No changes, or an apply hint).\n' "$$name" >&2; \
+			exit 1; \
+		}; \
 		if printf '%s\n' "$$plan_log" | grep -q 'must be replaced' || \
 			printf '%s\n' "$$plan_log" | grep -Eq 'Plan: [0-9]+ to add, [0-9]+ to change, [1-9][0-9]* to destroy'; then \
 			if [ "$(CONFIRM)" != "replace" ]; then \
@@ -555,7 +561,7 @@ instance-deploy:
 				exit 1; \
 			fi; \
 		fi; \
-		terragrunt apply -auto-approve tfplan.deploy; \
+		terragrunt apply -auto-approve tfplan.deploy || { printf '\033[0;31m[ERROR]\033[0m %s: terragrunt apply failed (output above)\n' "$$name" >&2; exit 1; }; \
 		id=$$(terragrunt output -raw instance_id); \
 		[ -n "$$id" ] || { \
 			printf '\033[0;31m[ERROR]\033[0m terragrunt output -raw instance_id returned nothing for %s\n' "$$name" >&2; \
@@ -576,8 +582,8 @@ instance-deploy:
 			}; \
 			make --no-print-directory cert-client INSTANCE="$$name" || exit 1; \
 		fi; \
-		if [ "$$params_present" != "true" ]; then \
-			make --no-print-directory cert-publish INSTANCE="$$name" || exit 1; \
+		if [ "$$params_present" != "true" ] || [ ! -f "$$HOME/.docker/certs/$$name/installed" ]; then \
+			[ "$$params_present" = "true" ] || make --no-print-directory cert-publish INSTANCE="$$name" || exit 1; \
 			make --no-print-directory cert-install INSTANCE="$$name" || exit 1; \
 		fi; \
 		make --no-print-directory push-secrets INSTANCE="$$name" || exit 1; \
@@ -713,7 +719,9 @@ cert-install:
 		sleep 5; \
 	done; \
 	[ "$$ok" = "1" ] || { printf '\033[0;31m[ERROR]\033[0m %s: EC2 status checks did not reach ok within the poll window (last: %s)\n' "$(INSTANCE)" "$$state" >&2; exit 1; }; \
-	INSTANCE="$(INSTANCE)" $(CERTS_SH) install
+	INSTANCE="$(INSTANCE)" $(CERTS_SH) install; \
+	mkdir -p "$$HOME/.docker/certs/$(INSTANCE)"; \
+	touch "$$HOME/.docker/certs/$(INSTANCE)/installed"
 
 proxy-start:
 	@$(PROXY_ENV) $(PROXY_SH) start

@@ -664,13 +664,14 @@ def test_certpaths_rejects_unsafe_instance_names(tmp_path: Path, unsafe_instance
 def test_certpaths_rejects_an_over_length_instance_name_matching_instances_bound(
     tmp_path: Path,
 ) -> None:
-    """code_review round 2, WARN (DRY): before this fix `_validate_instance` delegated
-    only to `catalog._validate_scope`, which enforces no length bound, so a 64+ character
-    instance name was accepted by `CertPaths.instance_dir` and rejected by
-    `instances.certs_dir` for the identical directory -- two validators of the same
-    concept disagreeing on the same value. Delegating to `instances.validate_name`
-    instead gives the naming rule a single owner (spec Section 4.5) and this length
-    bound with it.
+    """code_review round 2, WARN (DRY): `_validate_instance` delegates to
+    `instances.validate_name`, so the character-class rule and this length
+    bound arrive together and a 64+ character instance name cannot be
+    accepted by `CertPaths.instance_dir` while rejected by
+    `instances.certs_dir` for the identical directory -- two validators of
+    the same concept disagreeing on the same value. Delegating to
+    `instances.validate_name` gives the naming rule a single owner (spec
+    Section 4.5) and this length bound with it.
     """
     certs = _import_certs()
     instances = importlib.import_module("devcontainer_config.instances")
@@ -1050,35 +1051,35 @@ def test_rotate_client_returns_no_publication_work(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# code_review round 1, WARN 4: PARAMETER_ROOT and SECURE_STRING_TYPE are the
-# same values catalog.py already defines, reused rather than redeclared.
+# code_review round 1, WARN 4: PARAMETER_ROOT is the same value instances.py
+# already defines, reused rather than redeclared.
 # ---------------------------------------------------------------------------
 
 
-def test_parameter_root_and_secure_string_type_are_reused_from_catalog() -> None:
-    """Values must match catalog AND the source must reference catalog's
-    attributes rather than redeclaring the same literals independently --
-    equal values alone would not catch a second, independent definition
-    that merely happens to agree with catalog's today."""
+def test_parameter_root_is_reused_from_instances() -> None:
+    """The value must match instances.PARAMETER_ROOT AND the source must
+    reference that attribute rather than redeclaring the literal
+    independently -- equal values alone would not catch a second,
+    independent definition that merely happens to agree with instances'
+    today."""
     certs = _import_certs()
-    catalog = importlib.import_module("devcontainer_config.catalog")
-    assert certs.PARAMETER_ROOT == catalog.PATH_ROOT
-    assert certs.SECURE_STRING_TYPE == catalog.SECURE_STRING_TYPE
+    instances = importlib.import_module("devcontainer_config.instances")
+    assert certs.PARAMETER_ROOT == instances.PARAMETER_ROOT
 
     source = _certs_module_path().read_text(encoding="utf-8")
     tree = ast.parse(source)
-    reused_from_catalog = {
+    reused_from_instances = {
         target.id
         for node in ast.walk(tree)
         if isinstance(node, ast.Assign)
         for target in node.targets
         if isinstance(target, ast.Name)
-        and target.id in {"PARAMETER_ROOT", "SECURE_STRING_TYPE"}
+        and target.id == "PARAMETER_ROOT"
         and isinstance(node.value, ast.Attribute)
         and isinstance(node.value.value, ast.Name)
-        and node.value.value.id == "catalog"
+        and node.value.value.id == "instances"
     }
-    assert reused_from_catalog == {"PARAMETER_ROOT", "SECURE_STRING_TYPE"}
+    assert reused_from_instances == {"PARAMETER_ROOT"}
 
 
 # ---------------------------------------------------------------------------
@@ -1588,13 +1589,13 @@ def test_main_status_respects_cert_warn_days_override(
 # Parameter Store. `issue_server` returns PEM text and persists nothing
 # precisely so this function can exist; without it the daemon has no
 # certificate and never opens its 2376 listener. Every test below drives a
-# real `catalog.CatalogClient` over a recording Runner double, so the argv/
-# stdin split these tests assert is the one production actually takes.
+# real `certs.ParameterStoreClient` over a recording Runner double, so the
+# argv/stdin split these tests assert is the one production actually takes.
 # ---------------------------------------------------------------------------
 
 
 class _RecordingRunner:
-    """A `catalog.Runner` double: an in-memory parameter store that spawns nothing.
+    """A `certs.Runner` double: an in-memory parameter store that spawns nothing.
 
     Faithful enough for `publish` to run end to end -- a `put-parameter` stores
     the document's value, a `get-parameter` serves it back -- so the read-back
@@ -1624,9 +1625,7 @@ class _RecordingRunner:
             args=[], returncode=0, stdout=json.dumps(payload), stderr=""
         )
 
-    def __call__(
-        self, argv: Sequence[str], stdin: str | None
-    ) -> subprocess.CompletedProcess[str]:
+    def __call__(self, argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
         argv = tuple(argv)
         self.calls.append((argv, stdin))
         if self._failure is not None:
@@ -1662,8 +1661,8 @@ class _RecordingRunner:
 
 
 def _publish_client(runner: _RecordingRunner) -> object:
-    catalog = importlib.import_module("devcontainer_config.catalog")
-    return catalog.CatalogClient(runner)
+    certs = _import_certs()
+    return certs.ParameterStoreClient(runner)
 
 
 def test_publish_writes_exactly_the_publication_set_destinations(
@@ -1676,8 +1675,7 @@ def test_publish_writes_exactly_the_publication_set_destinations(
     written = certs.publish(issued_material.paths, _publish_client(runner))
 
     expected = tuple(
-        entry.parameter_path
-        for entry in certs.publication_set(issued_material.paths.instance)
+        entry.parameter_path for entry in certs.publication_set(issued_material.paths.instance)
     )
     assert written == expected
     assert [doc["Name"] for doc in runner.documents()] == list(expected)
@@ -1703,10 +1701,12 @@ def test_publish_sends_each_destination_the_type_publication_set_declares(
 def test_publish_never_places_material_in_argv(issued_material: _IssuedMaterial) -> None:
     """The private key reaches the child on stdin, never in the process table.
 
-    The invariant `catalog`'s module docstring establishes for a stored secret
-    (E3-F1-S1-T1 AC-FUNC-004), asserted here for the other sensitive material
-    this repository writes. A `--value <pem>` implementation would publish
-    correctly and still fail this test, which is the point.
+    The argv invariant the Parameter Store client establishes for a written
+    value (E3-F1-S1-T1 AC-FUNC-004, carried forward from the deleted
+    secret-catalog client into `certs.ParameterStoreClient`), asserted here
+    for the other sensitive material this repository writes. A
+    `--value <pem>` implementation would publish correctly and still fail
+    this test, which is the point.
     """
     certs = issued_material.certs
     runner = _RecordingRunner()
@@ -1797,9 +1797,7 @@ def test_publish_publishes_the_server_certificate_and_the_ca_that_signed_it(
     assert _verifies_against_ca(cert_path, ca_path)
 
     def _public_key(*args: str) -> str:
-        return subprocess.run(
-            ["openssl", *args], capture_output=True, text=True, check=True
-        ).stdout
+        return subprocess.run(["openssl", *args], capture_output=True, text=True, check=True).stdout
 
     assert _public_key("x509", "-in", str(cert_path), "-pubkey", "-noout") == _public_key(
         "pkey", "-in", str(key_path), "-pubout"
@@ -1822,16 +1820,15 @@ def test_publish_requires_an_existing_ca_and_calls_nothing_without_one(tmp_path:
 def test_publish_lets_a_store_failure_surface_with_its_own_remedy(
     issued_material: _IssuedMaterial,
 ) -> None:
-    """A catalog error is not re-wrapped: its message already carries the fix."""
+    """A store error is not re-wrapped: its message already carries the fix."""
     certs = issued_material.certs
-    catalog = importlib.import_module("devcontainer_config.catalog")
     runner = _RecordingRunner(
         failure=subprocess.CompletedProcess(
             args=[], returncode=254, stdout="", stderr="AccessDeniedException: not authorized"
         )
     )
 
-    with pytest.raises(catalog.CatalogError):
+    with pytest.raises(certs.ParameterStoreError):
         certs.publish(issued_material.paths, _publish_client(runner))
 
 
@@ -1869,3 +1866,277 @@ def test_publish_reads_back_every_destination_it_wrote(
     ]
     assert read_paths == list(written)
     assert all("--with-decryption" in argv for argv, _ in runner.calls if "get-parameter" in argv)
+
+
+# ---------------------------------------------------------------------------
+# ParameterStoreClient's own unit coverage, ported from the deleted
+# secret-catalog client's test file (tests/test_catalog.py, removed together
+# with the catalog module whose client was absorbed into certs.py). Only the
+# path-shaped operations survived the absorption -- `read_parameter` and
+# `write_parameter` -- so only their coverage is ported here: failure
+# classification, `Version` response handling, the region flag, the 0600
+# input document, and the production runner's real round trip. The catalog's
+# secret-shaped surface (the two-tier scope rule, resolve, listing, delete)
+# went with that module and is deliberately not ported.
+# ---------------------------------------------------------------------------
+
+# One fully-qualified path shared by every client-level test below: the
+# client is path-addressed (no scope/name composition of its own), so a
+# single realistic destination keeps every message assertion uniform.
+_CLIENT_PARAMETER_PATH = "/devcontainer/sandbox/tls/server-key.pem"
+
+
+def _seeded_value() -> str:
+    """A generated placeholder value, unique per call, never a real credential."""
+    return f"seeded-value-{uuid.uuid4().hex}"
+
+
+def _ok(payload: object) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(payload), stderr="")
+
+
+def _err(stderr: str, returncode: int = 254) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr=stderr)
+
+
+class _QueuedRunner:
+    """A `certs.Runner` double: records every call, answers from a queue, spawns nothing.
+
+    Ported from the deleted catalog test file's own `_FakeRunner`.
+    `_capture_document` reads any `--cli-input-json` document now, while the
+    file still exists -- `write_parameter` removes its temporary directory
+    before returning, so the moment the real aws CLI would read the document
+    is the only point where its content and its mode can be observed at all.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[str, ...], str | None]] = []
+        self.documents: list[str] = []
+        self.document_modes: list[int] = []
+        self._queue: list[subprocess.CompletedProcess[str]] = []
+
+    def queue(self, result: subprocess.CompletedProcess[str]) -> None:
+        self._queue.append(result)
+
+    def __call__(self, argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        argv = tuple(argv)
+        self.calls.append((argv, stdin))
+        self._capture_document(argv)
+        if not self._queue:
+            raise AssertionError("_QueuedRunner invoked with no queued response")
+        return self._queue.pop(0)
+
+    def _capture_document(self, argv: tuple[str, ...]) -> None:
+        if "--cli-input-json" not in argv:
+            return
+        reference = argv[argv.index("--cli-input-json") + 1]
+        assert reference.startswith("file://"), reference
+        path = Path(reference[len("file://") :])
+        assert path.is_file(), f"the document must be a regular file, not {path}"
+        self.document_modes.append(stat.S_IMODE(path.stat().st_mode))
+        self.documents.append(path.read_text(encoding="utf-8"))
+
+
+class _RaisingRunner:
+    """A `certs.Runner` double standing in for a host with no `aws` binary on PATH.
+
+    `subprocess.run` reports that case by raising `FileNotFoundError`, not by
+    returning a non-zero exit code, so no completing double can produce it.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.calls: list[tuple[tuple[str, ...], str | None]] = []
+
+    def __call__(self, argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        self.calls.append((tuple(argv), stdin))
+        raise self._exc
+
+
+def test_read_parameter_raises_unavailable_when_aws_is_not_on_path() -> None:
+    certs = _import_certs()
+    runner = _RaisingRunner(FileNotFoundError("aws"))
+    client = certs.ParameterStoreClient(runner)
+
+    with pytest.raises(certs.ParameterStoreUnavailableError) as excinfo:
+        client.read_parameter(_CLIENT_PARAMETER_PATH)
+
+    assert _CLIENT_PARAMETER_PATH in str(excinfo.value)
+
+
+def test_read_parameter_raises_unavailable_when_sso_session_is_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    certs = _import_certs()
+    monkeypatch.setenv(certs.AWS_PROFILE_ENV_VAR, "sandbox-profile")
+    runner = _QueuedRunner()
+    runner.queue(
+        _err(
+            "Error loading SSO Token: Token for sandbox-profile does not exist, "
+            "the SSO session associated with this profile has expired"
+        )
+    )
+    client = certs.ParameterStoreClient(runner)
+
+    with pytest.raises(certs.ParameterStoreUnavailableError) as excinfo:
+        client.read_parameter(_CLIENT_PARAMETER_PATH)
+
+    message = str(excinfo.value)
+    assert "sandbox-profile" in message
+    assert "aws sso login" in message
+
+
+def test_read_parameter_raises_unavailable_when_no_credentials_resolve() -> None:
+    """The no-credential-resolved case, distinct from an expired SSO token."""
+    certs = _import_certs()
+    runner = _QueuedRunner()
+    runner.queue(
+        _err(
+            "Unable to locate credentials. You can configure credentials by "
+            'running "aws configure".'
+        )
+    )
+    client = certs.ParameterStoreClient(runner)
+
+    with pytest.raises(certs.ParameterStoreUnavailableError) as excinfo:
+        client.read_parameter(_CLIENT_PARAMETER_PATH)
+
+    assert "aws sso login" in str(excinfo.value)
+
+
+def test_read_parameter_raises_unauthorized_on_access_denied() -> None:
+    certs = _import_certs()
+    runner = _QueuedRunner()
+    runner.queue(
+        _err(
+            "An error occurred (AccessDeniedException) when calling the "
+            "GetParameter operation: User is not authorized"
+        )
+    )
+    client = certs.ParameterStoreClient(runner)
+
+    with pytest.raises(certs.ParameterStoreUnauthorizedError) as excinfo:
+        client.read_parameter(_CLIENT_PARAMETER_PATH)
+
+    assert _CLIENT_PARAMETER_PATH in str(excinfo.value)
+
+
+def test_read_parameter_raises_not_found_on_parameter_not_found() -> None:
+    certs = _import_certs()
+    runner = _QueuedRunner()
+    runner.queue(
+        _err("An error occurred (ParameterNotFound) when calling the GetParameter operation: ")
+    )
+    client = certs.ParameterStoreClient(runner)
+
+    with pytest.raises(certs.ParameterNotFoundError) as excinfo:
+        client.read_parameter(_CLIENT_PARAMETER_PATH)
+
+    assert _CLIENT_PARAMETER_PATH in str(excinfo.value)
+
+
+def test_read_parameter_raises_unclassified_error_for_throttling_not_a_credential_failure() -> None:
+    """An unrelated aws failure must never be misreported as an expired session."""
+    certs = _import_certs()
+    runner = _QueuedRunner()
+    runner.queue(
+        _err(
+            "An error occurred (ThrottlingException) when calling the GetParameter "
+            "operation: Rate exceeded",
+            returncode=254,
+        )
+    )
+    client = certs.ParameterStoreClient(runner)
+
+    with pytest.raises(certs.ParameterStoreUnclassifiedError) as excinfo:
+        client.read_parameter(_CLIENT_PARAMETER_PATH)
+
+    message = str(excinfo.value)
+    assert not isinstance(excinfo.value, certs.ParameterStoreUnavailableError)
+    assert "aws sso login" not in message
+    assert "ThrottlingException" not in message
+    assert _CLIENT_PARAMETER_PATH in message
+    assert certs.GET_PARAMETER_OP in message
+    assert "254" in message
+
+
+@pytest.mark.parametrize(
+    "response,expected_reason",
+    [
+        (_ok({"Tier": "Standard"}), "no integer 'Version' field in the response"),
+        (_ok({"Version": "3"}), "no integer 'Version' field in the response"),
+        (
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="not json", stderr=""),
+            "the response is not valid JSON",
+        ),
+        (_ok({"Version": True}), "no integer 'Version' field in the response"),
+    ],
+    ids=["no-version-field", "version-not-an-integer", "not-json", "version-is-a-bool"],
+)
+def test_write_parameter_raises_parameter_store_error_for_malformed_response(
+    response: subprocess.CompletedProcess[str], expected_reason: str
+) -> None:
+    """A malformed `put-parameter` response fails loudly, naming path and operation."""
+    certs = _import_certs()
+    runner = _QueuedRunner()
+    runner.queue(response)
+    client = certs.ParameterStoreClient(runner)
+
+    with pytest.raises(certs.ParameterStoreError) as excinfo:
+        client.write_parameter(_CLIENT_PARAMETER_PATH, _seeded_value(), certs.SECURE_STRING_TYPE)
+
+    message = str(excinfo.value)
+    assert expected_reason in message
+    assert _CLIENT_PARAMETER_PATH in message
+    assert certs.PUT_PARAMETER_OP in message
+
+
+def test_region_is_appended_to_every_argv_when_configured() -> None:
+    certs = _import_certs()
+    runner = _QueuedRunner()
+    runner.queue(_ok({"Parameter": {"Value": _seeded_value()}}))
+    client = certs.ParameterStoreClient(runner, region="us-east-1")
+
+    client.read_parameter(_CLIENT_PARAMETER_PATH)
+
+    (argv, _stdin) = runner.calls[0]
+    assert argv[-2:] == ("--region", "us-east-1")
+
+
+def test_write_parameter_issues_put_parameter_with_value_only_in_a_private_document() -> None:
+    """The argv invariant, at the client level: value in a 0600 document, never in argv.
+
+    `test_publish_never_places_material_in_argv` asserts the same invariant
+    for publish's TLS material end to end; this ported test pins the client
+    itself, including the store-assigned `Version` handed back on success.
+    """
+    certs = _import_certs()
+    runner = _QueuedRunner()
+    version = 5
+    runner.queue(_ok({"Version": version, "Tier": "Standard"}))
+    client = certs.ParameterStoreClient(runner)
+    value = _seeded_value()
+
+    result = client.write_parameter(_CLIENT_PARAMETER_PATH, value, certs.SECURE_STRING_TYPE)
+
+    assert result == version
+    (argv, stdin) = runner.calls[0]
+    assert "put-parameter" in argv
+    assert value not in argv
+    assert value not in " ".join(argv)
+    assert stdin is None, "the aws CLI v2 cannot read the document from stdin"
+    assert runner.document_modes == [0o600], "the document must not be readable by other users"
+    document = json.loads(runner.documents[0])
+    assert document["Value"] == value
+    assert document["Type"] == certs.SECURE_STRING_TYPE
+    assert document["Name"] == _CLIENT_PARAMETER_PATH
+    assert document["Overwrite"] is True
+
+
+def test_subprocess_runner_invokes_a_real_process_and_captures_output() -> None:
+    certs = _import_certs()
+
+    result = certs.subprocess_runner(["echo", "hello"], None)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "hello"

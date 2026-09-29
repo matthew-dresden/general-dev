@@ -40,9 +40,9 @@ REMOTE_SHELL_ENV=$(sed \
 # shell.env carries every credential this repository has, and an argument is
 # visible in the process table to any other process on this machine for as
 # long as the call runs -- and is echoed back verbatim by rd_run's own error
-# translator. This is the same invariant devcontainer_config.catalog states
-# for a stored secret and devcontainer_config.certs.publish applies to a TLS
-# private key.
+# translator. This is the same invariant devcontainer_config.certs'
+# ParameterStoreClient enforces for every put-parameter it issues: the value
+# travels in a 0600 --cli-input-json file:// document, never an argument.
 #
 # The document is a real file rather than stdin because the aws CLI v2 does
 # not read file:///dev/stdin: it reports "Invalid JSON received" whether stdin

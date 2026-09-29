@@ -18,26 +18,21 @@ states the exact shape), never reproducing engine's own per-check `##
 Verdict` table a second time, then reports the state engine has no reason
 to look at.
 
-`doctor` decides nothing about what a valid file, secret or container looks
-like: `verify`, `catalog`, `secrets` and `container.sh`'s `rdc_*` primitives
+`doctor` decides nothing about what a valid file, credential or container
+looks like: `verify`, `hostcreds`, `secrets` and `container.sh`'s `rdc_*`
+primitives
 (`.claude/plugins/devcontainer/scripts/devcontainer_config/`,
-`.devcontainer/remote-docker/container.sh`) already own those questions, per
-Section 4.5's module split and Section 3.3's "DO NOT reinvent" primitives.
-This skill's only job is calling each of them once per run and reporting
-every result as one line in `## Findings`, grouped exactly as configuration,
-secrets, container state and drift.
+`.devcontainer/remote-docker/container.sh`) already own those questions,
+per Section 4.5's module split and Section 3.3's "DO NOT reinvent"
+primitives. This skill's only job is calling each of them once per run and
+reporting every result as one line in `## Findings`, grouped exactly as
+configuration, secrets, container state and drift.
 
 Unlike `/devcontainer:engine` and `/devcontainer:setup-remote`, this skill
-takes no `INSTANCE=<name>` argument and asks nothing of its own: every check
-below reads whichever backend is currently active (`rdc_backend`, `docker
-context show`) and whichever scope `devsecret` resolves today
-(`catalog.scope_set(None)`, the shared scope alone -- `cli.py`'s own module
-docstring: "`devsecret`'s own commands do not resolve an instance: every
-command here resolves or narrows against `catalog.scope_set(None)` ...
-independent of `devcontainer_config.instances`, this module's separate
-instance-resolution entry point below"). `cli.py` now exposes that entry
-point as the `resolve-instance` subcommand (E8-F1-S1-T1, spec Section
-4.1.1), which `devsecret` itself does not call. Delegating to
+takes no `INSTANCE=<name>` argument and asks nothing of its own: every
+check below reads whichever backend is currently active (`rdc_backend`,
+`docker context show`) and the hostcreds manifest of the checkout the run
+happens in. Delegating to
 `/devcontainer:engine` can still surface engine's own one question (which
 instance, only when Section 4.1.1 resolution is ambiguous, and only on a
 remote backend); that question belongs to `engine`, not to this skill, so it
@@ -91,22 +86,23 @@ place:
 
 | Finding | Source | Remedy |
 |---|---|---|
-| `shell.env`'s active configuration holds no credential-shaped value | `secrets.scan_lines` (`devcontainer_config.secrets`) run over `shell.env`'s active `export` lines -- the same scope `verify._active_configuration_text` already isolates for the placeholder check, reused here rather than re-deriving it -- restricted to the six credential-bearing detectors in `secrets.PATTERNS` (`aws-access-key-id`, `aws-secret-access-key`, `private-key-block`, `github-token`, `slack-token`, `bearer-token`). The three printable detectors (`sso-portal-url`, `account-id`, `ec2-instance-id`) are excluded: `shell.env` legitimately carries a resolved AWS account or instance identifier as configuration, not a credential, so flagging one would be a false positive by design. `shell-env-line` and `catalog-secret-name` are excluded too: the former needs a comparison source this scan is not a comparison against, and the latter needs the catalog secret names this skill has not yet fetched at this point in `## Procedure`. | Move the value into the catalog by piping it into `devsecret set <NAME> --scope <scope> [--exported]` (never as an argument), then delete the offending `export` line from `shell.env` by hand (this skill never edits it) and re-run `/devcontainer:doctor` to confirm. `/devcontainer:secrets` owns this step: its Add row (`## Operations`) is the same `devsecret set` invocation, reading the value from stdin and never as an argument. The finding names only the variable and, via `secrets.render_finding`, a redacted, safe-to-paste rendering of the match -- never the value itself. |
+| `shell.env`'s active configuration holds no credential-shaped value | `secrets.scan_lines` (`devcontainer_config.secrets`) run over `shell.env`'s active `export` lines -- the same scope `verify._active_configuration_text` already isolates for the placeholder check, reused here rather than re-deriving it -- restricted to the seven credential-bearing detectors in `secrets.PATTERNS` (`aws-access-key-id`, `aws-secret-access-key`, `private-key-block`, `github-token`, `slack-token`, `bearer-token`, `hostcreds-value`). The three printable detectors (`sso-portal-url`, `account-id`, `ec2-instance-id`) are excluded: `shell.env` legitimately carries a resolved AWS account or instance identifier as configuration, not a credential, so flagging one would be a false positive by design. `shell-env-line` is excluded too: it needs a comparison source this scan is not a comparison against. | Name the manifest entry the value belongs to (the `hostcreds-value` finding names the credential), add it to the hostcreds manifest and store it with `make creds-init` (never on a command line), then delete the offending `export` line from `shell.env` by hand (this skill never edits it) and re-run `/devcontainer:doctor` to confirm. `/devcontainer:secrets` owns this step: its Add row (`## Operations`) is the same manifest-plus-creds-init flow. The finding names only the variable and, via `secrets.render_finding`, a redacted, safe-to-paste rendering of the match -- never the value itself. |
 
 ### Secrets
 
-Section 4.3's `devsecret` CLI is the only way this skill reaches the
-catalog, and Section 5.4 fixes one backend with no offline store: "The
-store answers or the command fails; nothing degrades to a local copy."
-`devsecret`'s own exit code 3 covers exactly "backend unreachable or
-unauthorized" (spec Section 4.3, 14.2); this skill reads that exit code and
-turns it into a finding, never a retry against anything else.
+The hostcreds mechanism is the only credential path this skill checks: the
+manifest the checkout declares, the keychain items it names, and the
+credentials the container actually received. Every check names an exact
+remedy, never a fallback -- a credential that cannot be resolved fails
+`make push-creds` outright, and this skill reports that fact rather than
+probing a second store.
 
 | Finding | Source | Remedy |
 |---|---|---|
-| The secret catalog answers | `devsecret list` (`catalog.list_resolved`, built on `describe-parameters`) | On `CatalogUnavailableError` (devsecret exit 3), name `aws sso login --profile <profile>` with `<profile>` read from `$AWS_PROFILE` (defaulting to `'default'`, `catalog._unavailable_no_credential_message`), wait for the operator to complete the login, then re-run `/devcontainer:doctor`. Never falls back to any local store (Section 5.4). |
-| The exported list resolves | `devsecret export-list` (`catalog.list_resolved` plus `cli._export_list_names`) | The same catalog call `devsecret list` makes, so an unreachable or unauthorized catalog is the identical condition and the identical remedy above; on `CatalogUnauthorizedError` instead, name the missing `ssm:*` grant on the parameter prefix (`catalog._unauthorized_message`) and ask an operator to grant it, then re-run `/devcontainer:doctor`. |
-| Every name `devsecret list` reports as exported is a valid environment-variable identifier | Every exported `catalog.SecretRecord.name` cross-checked against `catalog._NAME_PATTERN`, the identifier rule `catalog._validate_name` already enforces before any `devsecret set` ever reaches the store (spec Section 4.3: "A name that is not a valid environment-variable identifier is a usage error, since exported secrets become variables"). A record failing this pattern could only have reached the store through a write that bypassed `devsecret set` entirely, and even then only when the record also satisfies `catalog._record_from_entry`'s own listing contract: that function raises `CatalogError` for any parameter under the prefix whose `Description` is missing or is not the JSON document this client writes (`{"exported": ...}`), so `devsecret list` can only ever surface a bad-name row for a parameter planted with both an out-of-pattern `Name` and a client-shaped `Description` -- for example a raw `aws ssm put-parameter` call that copied this client's `Description` format. A parameter with an out-of-pattern name and no client-shaped `Description` instead fails the `devsecret list` call itself with a `CatalogError`, never reaching this row. | Name the offending secret and its scope (from the same `devsecret list` row). `devsecret get` and `devsecret rm` both refuse this name before ever reaching the store -- `catalog.resolve` calls `CatalogClient.read`, which calls `parameter_path`, which calls `_validate_name` (`catalog.py`); `devsecret rm`'s handler calls `parameter_path` directly -- so recover and delete the parameter against the store path directly, using the same shape `catalog.parameter_path` composes (`/devcontainer/<scope>/secrets/<NAME>`), piping the value straight into the replacement rather than writing it to disk: `aws ssm get-parameter --with-decryption --name /devcontainer/<scope>/secrets/<NAME> --query Parameter.Value --output text \| devsecret set <NEW_NAME> --scope <scope> --exported`, then `aws ssm delete-parameter --name /devcontainer/<scope>/secrets/<NAME>` to remove the old entry, then re-run `/devcontainer:doctor`. |
+| The hostcreds manifest loads | `devcontainer_config.hostcreds.load_manifest`, exercised read-only by `creds-fragments --print-git-hosts` (`python3 -m devcontainer_config.cli`, PYTHONPATH set to the plugin scripts directory) | A missing manifest is created by `make init` from its committed example; a malformed one fails with a `ManifestError` naming the path and every problem at once. Fix the manifest, then re-run `/devcontainer:doctor`. |
+| Every keychain credential the manifest names exists | One `security find-generic-password -w -s <service>` probe per keychain entry, the identical argv `hostcreds.keychain_find_argv` builds (`>/dev/null`: presence only, never the value) | A missing item is a prompt away: run `make creds-init`, which prompts once per missing item, stores it and re-probes; then re-run `/devcontainer:doctor`. |
+| Every manifest entry resolved and reached the container | `make verify-container` (the container-side check `make push-creds` delivers: fragment modes, startup block, git and aws reachability) | A credential that failed to resolve failed `make push-creds` naming itself and its remedy (an expired SSO session for `aws-export` entries -- `aws sso login` -- or a missing keychain item -- `make creds-init`); fix it, re-push, then re-run `/devcontainer:doctor`. A container is never shipped a subset of the manifest. |
+| Every manifest name is a valid environment-variable identifier | Every `CredentialSpec.name` cross-checked against the identifier rule `hostcreds.load_manifest` itself enforces | `load_manifest` rejects an invalid name outright with a `ManifestError`, so a row here can only fail alongside the manifest-load row above; rename the entry, then re-run `/devcontainer:doctor`. |
 
 ### Container state
 
@@ -130,7 +126,7 @@ side:
 | Finding | Source | Remedy |
 |---|---|---|
 | Every variable in a committed `.example` file is present in the rendered private file | `NOT RUN`. No function of this name exists in this repository yet, the same gap `/devcontainer:engine`'s own introduction discloses for disk headroom and `HOST_PROXY`: this row states the check's exact contract -- diff the export names in `repo.example_for(relative)` against the export names `verify._ACTIVE_EXPORT_LINE` finds in the rendered file -- and names `verify` as the module a future work unit extends to own it, since Section 4.5 already gives `verify` the "written configuration is complete" responsibility this comparison extends. | Once implemented: re-render with `/devcontainer:setup-local` or `/devcontainer:setup-remote` (moving the three existing private files aside first, since the setup skills always call `render.write_all` with `overwrite=False`, so it refuses and names every existing path rather than replacing one already on disk), then re-run `/devcontainer:doctor`. |
-| The Parameter Store copy of `shell.env` agrees with the local one | `NOT RUN`. `catalog` (`devcontainer_config.catalog`) is the only module that reaches Parameter Store, but its functions read only `/devcontainer/<scope>/secrets/<NAME>` (spec Section 5.3); nothing today fetches `/devcontainer/<instance>/shell.env` itself for comparison, only the shell-side `fetch_parameter` bootstrap (Section 3.5) that writes it once at container creation. This row names `catalog` as the module a future work unit extends to own the comparison. | Once the comparison itself is implemented: `make push-secrets` (`push-secrets.sh`) already republishes the local `shell.env` and `aws-profile-map.json` to Parameter Store, so a finding here is resolved the same way, then re-run `/devcontainer:doctor`. |
+| The Parameter Store copy of `shell.env` agrees with the local one | `NOT RUN`. Nothing today fetches `/devcontainer/<instance>/shell.env` back from Parameter Store for comparison; `push-secrets.sh` (`make push-secrets`) publishes it and the shell-side `fetch_parameter` bootstrap (Section 3.5) reads it once at container creation, but neither compares the two. This row names a future work unit as the owner of that comparison. | Once the comparison itself is implemented: `make push-secrets` (`push-secrets.sh`) already republishes the local `shell.env` and `aws-profile-map.json` to Parameter Store, so a finding here is resolved the same way, then re-run `/devcontainer:doctor`. |
 | The active docker context's certificate paths match the material on disk | `NOT RUN`. Owned by the `certs` module (spec Section 4.5): `certs.py` (E6-F1-S1-T1, E6-F1-S1-T2) now implements both generation and the inspection/expiry arithmetic (`certs.status_rows`, `certs.classify`), but this comparison -- whether the docker context's *configured TLS paths* still point at where the certificate files actually live -- is a distinct check that no function in this repository performs yet. This is a different condition from `/devcontainer:engine`'s own check "client and CA certificates present and unexpired": engine asks whether the certificate files themselves are present and unexpired, this row asks whether the docker context's configured TLS paths still point at where those files actually live under `instances.certs_root()`'s `<instance>/` directory (`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/` when `DOCKER_CONFIG` is unset). | Once implemented: reissue or realign the certificate material with the `/devcontainer:certs` skill (Section 4.2's roster; already authored, E4-F3-S2-T2), then re-run `/devcontainer:doctor`. |
 | Hooks installed on the host are also installed inside the container | `githooks.hooks_status(root)` (`devcontainer_config.githooks`) run on the host, compared against the identical call run inside the container. For a local backend the two are definitionally equal, since the container mounts the host's working tree directly (the same fact `rdc_check`'s local-branch row above states); for a remote backend, run inside the container over the resolved docker context with `rdc_exec` (`container.sh`, the same helper `rdc_check` already uses): `rdc_exec <container-id> sh -c "cd '<CONTAINER_WORKSPACE>' && env PYTHONPATH=<CONTAINER_WORKSPACE>/.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.cli hooks-check"`, where `<CONTAINER_WORKSPACE>` is `repo.container_workspace(root)`. The explicit `cd` is required, not cosmetic: `cli._run_hooks_check` resolves the repository with `repo.find_root(Path.cwd())`, and `rdc_exec` forwards everything after the container id straight through as the command (`rd_docker exec -u "$CONTAINER_USER" "$id" "$@"`, `container.sh:86-89`), so there is no way to inject a bare `-w` after the container id; without the `cd`, the process starts at `/`, where `find_root` fails with "is not inside a git repository" instead of reporting hook drift -- the same `sh -c "cd '${CONTAINER_WORKSPACE}' && ..."` pattern `container.sh`'s own `rdc_exec_probe` call already uses (line 479). This is exactly the gap AC-4.7 (Section 4.6) exists to prevent: "Hooks are installed on the host by `make hooks-install` and inside the container by postCreate, so a commit made from a container terminal is guarded identically." | Re-run `make hooks-install` on whichever side (host or container, named by which `hooks-check` failed) reports drift, then re-run `/devcontainer:doctor`. |
 
@@ -150,8 +146,9 @@ side:
    container-state and drift finding it can.
 2. Configuration: run the credential-shape scan against `shell.env`
    described in `## Findings`.
-3. Secrets: run `devsecret list` and `devsecret export-list`; cross-check
-   every name either reports as exported against `catalog._NAME_PATTERN`.
+3. Secrets: run the four hostcreds checks described in `## Findings`
+   (manifest loads, every keychain item exists, every entry reached the
+   container, every name is a valid identifier).
 4. Container state: run `make status` and `make check`.
 5. Drift: run the host-against-container hooks comparison. Report the
    other three drift rows as `NOT RUN`, each naming the module a future
@@ -193,9 +190,10 @@ CONFIGURATION
   shell.env holds no credential-shaped value                         ok
 
 SECRETS
-  the secret catalog answers                                         ok
-  the exported list resolves                                         ok
-  every exported name is a valid identifier                          ok
+  the hostcreds manifest loads                                       ok
+  every keychain credential the manifest names exists               ok
+  every manifest entry resolved and reached the container           ok
+  every manifest name is a valid identifier                          ok
 
 CONTAINER STATE
   container, image and volumes exist                                 ok      general-dev  [running]
@@ -203,7 +201,7 @@ CONTAINER STATE
 
 DRIFT
   every .example variable is present in the rendered file             NOT RUN (verify: not implemented yet)
-  Parameter Store copy of shell.env agrees with the local one         NOT RUN (catalog: not implemented yet)
+  Parameter Store copy of shell.env agrees with the local one         NOT RUN (comparison: not implemented yet)
   active docker context certificate paths match the material on disk NOT RUN (certs: comparison not implemented yet)
   hooks installed on the host are also installed in the container    ok      match
 
@@ -219,8 +217,8 @@ depends on an earlier row succeeding.
 ## What this skill fixes itself
 
 None. `doctor` reports; it never writes a file, never creates or destroys a
-docker context, never edits `shell.env`, and never touches the secret
-catalog. Every remedy in `## Findings` names the exact operator command or
+docker context, never edits `shell.env`, and never touches the hostcreds
+manifest or the keychain. Every remedy in `## Findings` names the exact operator command or
 skill invocation that fixes the condition instead.
 
 ## Failure semantics
@@ -246,11 +244,12 @@ skill invocation that fixes the condition instead.
 - Section 4.2.1 and 4.2.2: the thirteen checks this skill delegates by
   reference rather than restating, and the failure-semantics table this
   document's own `## Failure semantics` table instantiates.
-- Section 4.3: `devsecret`'s six commands, its five exit codes, and the
-  "never a value" and "usage error" rules `## Findings`' secrets group
-  checks against. AC-4.3.
-- Section 4.5: `verify`, `catalog` and `certs` are the only places a fact
-  about a rendered file, the secret catalog, or a certificate is decided;
+- The hostcreds mechanism (`devcontainer_config.hostcreds`,
+  `docs/environment-files.md`'s "Host credentials" section): the manifest
+  contract and value discipline `## Findings`' secrets group checks
+  against.
+- Section 4.5: `verify`, `hostcreds` and `certs` are the only places a fact
+  about a rendered file, a credential, or a certificate is decided;
   this skill decides none of them itself, and names each as the future
   owner of a drift check that does not exist in this repository yet.
   `githooks` is the one module in this same table this skill's drift group
@@ -264,6 +263,6 @@ skill invocation that fixes the condition instead.
 - Section 5.4: one backend, no offline store, nothing degrades to a local
   copy -- why every secrets finding above names `aws sso login` or an
   IAM grant and never a fallback.
-- AC-4.3 (Section 4.3): `devsecret list` never prints a value; this
-  skill's own secrets findings read only name, scope, last-changed and the
-  exported flag, the same four columns `devsecret list` itself renders.
+- AC-4.3 (Section 4.3): a credential value is never printed; this
+  skill's own secrets findings read only names, sources and probe exit
+  codes, never a value.

@@ -12,8 +12,8 @@ execute can satisfy it.
 
 `.github/workflows/ci.yml` is not Python production source under
 `.claude/plugins/devcontainer/scripts/devcontainer_config` (this task's
-Changes Manifest carries no rows there), so unlike `tests/test_repo.py` and
-`tests/test_catalog.py` this module needs no deferred-import convention: the
+Changes Manifest carries no rows there), so unlike the modules that test Python production source
+this module needs no deferred-import convention: the
 TDD RED gate stashes only the workflow file itself back to its pre-change,
 `lint`-only state, and the file continues to exist either way. `yaml` and
 `gitignore_check` both import cleanly regardless of which state the
@@ -76,8 +76,8 @@ _COVERAGE_FAIL_UNDER_FLAG = "--cov-fail-under=90"
 
 _MAKE_TEST_COMMAND = "make test"
 
-# tests/test_shellrc.py (E3-F2-S2-T1) parametrizes its end-to-end cases over
-# ("bash", "zsh"); `ubuntu-latest`'s base image does not ship zsh, so the
+# The suite's shell end-to-end cases parametrize over ("bash", "zsh");
+# `ubuntu-latest`'s base image does not ship zsh, so the
 # test job must install it itself before `make test` runs. Both markers must
 # appear in the SAME run step's command text -- a bare "zsh" substring match
 # would be satisfied by a step whose command only mentions zsh in a comment
@@ -254,7 +254,7 @@ def test_coverage_step_is_separate_from_the_make_test_step() -> None:
 
 
 def test_test_job_installs_zsh_before_running_make_test() -> None:
-    """`tests/test_shellrc.py`'s zsh end-to-end cases need `zsh` on PATH, and
+    """The suite's zsh end-to-end cases need `zsh` on PATH, and
 
     `ubuntu-latest`'s base image (`actions/runner-images`) does not ship it, so a run
     step naming zsh must appear in the test job before the `make test` step, or the
@@ -269,7 +269,7 @@ def test_test_job_installs_zsh_before_running_make_test() -> None:
     assert zsh_install_indices, (
         f"expected a run step in the test job whose command contains both "
         f"{_ZSH_INSTALL_COMMAND_MARKER!r} and {_ZSH_PACKAGE_MARKER!r} (actually "
-        f"installing zsh, not merely mentioning it) so tests/test_shellrc.py's "
+        f"installing zsh, not merely mentioning it) so the suite's "
         f"zsh-parametrized cases have an interpreter to run against"
     )
 

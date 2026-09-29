@@ -16,20 +16,12 @@ every function in this module that composes one of those from a name (spec
 Section 9, AC-FUNC-008): a name carrying a path separator or `..` is a
 path-traversal vector on the first two and a parameter-injection vector on
 the third, and an unvalidated name is rejected before it reaches any of
-them. Validation delegates its character-class rule to
-`devcontainer_config.catalog._validate_scope`, the control that module
-carries for the identical `/devcontainer/<scope>/` path interpolation,
-rather than a second, independent copy of the same rule; this module adds
-only the length bound `catalog._validate_scope` does not enforce, since
-spec Section 9 has no scope concept and no per-secret name to bound
-instead. `devcontainer_config.certs._validate_instance` delegates to this
-module's own `validate_name` rather than to `catalog._validate_scope`
-directly, so the length bound applies uniformly wherever an instance name
-is validated (E8-F1-S1-T1 round 2, code_review WARN: DRY). Reaching into
-`catalog._validate_scope`, a private symbol, is a pre-existing cross-module
-encapsulation gap `certs._validate_instance` already set precedent for;
-code_review round 2 filed promoting it to a public `catalog.validate_scope`
-as a non-blocking observation for a future unit, not this one.
+them. The character-class rule (`_NAME_SEGMENT_PATTERN` below) is declared
+here, the one module that owns instance naming; `devcontainer_config.certs`
+validates instance names through this module's `validate_name` rather than
+a second, independent copy of the same rule, so the length bound applies
+uniformly wherever an instance name is validated (E8-F1-S1-T1 round 2,
+code_review WARN: DRY).
 
 `forwarded_port` is the sixth artifact, and the only one that is not a pure
 string/path derivation: spec Section 9 fixes the local forwarded port as
@@ -75,7 +67,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from devcontainer_config import catalog, repo
+from devcontainer_config import repo
 from devcontainer_config.hostprobe import (
     CommandRunner,
     HostProbeError,
@@ -112,8 +104,27 @@ _CERTS_SUBDIRNAME = "certs"
 INSTANCE_ENV_VAR = "INSTANCE"
 DEFAULT_REMOTE_INSTANCE_ENV_VAR = "DEFAULT_REMOTE_INSTANCE"
 
-# An instance name is a non-empty path segment (delegated to
-# `catalog._validate_scope`, see the module docstring) bounded to 63
+# The Parameter Store layout root (spec Section 5.3): every parameter this
+# platform addresses lives under `/devcontainer/...`, whether it is an
+# instance's addressing prefix (`parameter_prefix` below) or the TLS
+# material `devcontainer_config.certs` publishes. Declared once here, the
+# module that owns the addressing table, so the literal has a single
+# definition site; `certs.PARAMETER_ROOT` sources this constant rather
+# than redeclaring it.
+PARAMETER_ROOT = "/devcontainer"
+
+# A valid instance name: one or more letters, digits, hyphens or
+# underscores. A name is interpolated directly into the Parameter Store
+# prefix (spec Sections 5.3, 9), so this rejects the empty string and any
+# separator character (notably "/") before that interpolation ever
+# happens; without it, an unvalidated name could compose a path outside
+# `/devcontainer/<name>/` (code_review and security_review, E3-F1-S1-T1,
+# carried forward from the rule's original home in the deleted secret
+# catalog client).
+_NAME_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# An instance name is a non-empty path segment (validated against
+# `_NAME_SEGMENT_PATTERN`, see the module docstring) bounded to 63
 # characters: the DNS-label length limit, chosen because this same value is
 # interpolated into a docker context name and a Parameter Store path
 # segment, neither of which documents its own ceiling, and the DNS-label
@@ -171,20 +182,18 @@ class Resolution:
 def validate_name(name: str) -> None:
     """Raise `InvalidInstanceNameError` unless `name` is safe to use in a path, context or prefix.
 
-    Delegates the character-class rule to `catalog._validate_scope`
-    (see the module docstring), then adds the length bound that check does
-    not enforce. Every derivation function in this module calls this first,
-    so a rejected name never reaches a filesystem path, a docker context
-    name or a Parameter Store prefix (AC-FUNC-008).
+    Applies `_NAME_SEGMENT_PATTERN`'s character-class rule and the
+    `MAX_INSTANCE_NAME_LENGTH` bound in one check. Every derivation
+    function in this module calls this first, so a rejected name never
+    reaches a filesystem path, a docker context name or a Parameter Store
+    prefix (AC-FUNC-008).
 
     Raises:
         InvalidInstanceNameError: `name` is empty, contains a path separator
-            or another character outside `catalog._validate_scope`'s
-            allowed set, or exceeds `MAX_INSTANCE_NAME_LENGTH` characters.
+            or another character outside the allowed set, or exceeds
+            `MAX_INSTANCE_NAME_LENGTH` characters.
     """
-    try:
-        catalog._validate_scope(name)
-    except catalog.InvalidScopeError as exc:
+    if _NAME_SEGMENT_PATTERN.fullmatch(name) is None:
         raise InvalidInstanceNameError(
             f"ERROR: invalid instance name {name!r}\n"
             "An instance name must be a non-empty path segment: letters, digits, "
@@ -192,7 +201,7 @@ def validate_name(name: str) -> None:
             "docker context and a Parameter Store prefix at once, so a path "
             "separator or an empty value is rejected before any of them is built.\n"
             "Use a valid instance name."
-        ) from exc
+        )
     if len(name) > MAX_INSTANCE_NAME_LENGTH:
         raise InvalidInstanceNameError(
             f"ERROR: invalid instance name {name!r}\n"
@@ -264,13 +273,13 @@ def docker_context(root: Path, name: str) -> str:
 def parameter_prefix(name: str) -> str:
     """spec Section 5.3 / 9: `/devcontainer/<name>/`, the Parameter Store prefix for `name`.
 
-    `catalog.PATH_ROOT` supplies the leading `/devcontainer` segment (the
+    `PARAMETER_ROOT` supplies the leading `/devcontainer` segment (the
     same reuse `devcontainer_config.certs`'s own `PARAMETER_ROOT` already
     documents), so the literal exists in exactly one place across both
     modules.
     """
     validate_name(name)
-    return f"{catalog.PATH_ROOT}/{name}/"
+    return f"{PARAMETER_ROOT}/{name}/"
 
 
 def certs_root() -> Path:
@@ -435,6 +444,7 @@ def resolve(root: Path, *, local_backend_active: bool) -> Resolution:
 
     raise _ambiguous_instance_error(candidates)
 
+
 @dataclass(frozen=True)
 class InstanceListing:
     """One row of `make instances`: what an instance is called and where it is.
@@ -493,4 +503,3 @@ def listing(
         )
         for name in discover(root)
     )
-

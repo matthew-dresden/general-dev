@@ -300,33 +300,136 @@ def test_git_identity_variables_fail_with_a_named_error_not_an_unbound_variable(
 
 
 # ---------------------------------------------------------------------------
-# The hostcreds cutover: postCreate no longer installs or renders anything
-# devsecret. A later unit deletes the devsecret modules and docs themselves;
-# this unit removes exactly the two postCreate wiring points -- the
-# configure_devsecret bootstrap step and the devsecret export-list block
-# render -- so these tests pin their absence while the rest of the devsecret
-# surface is still intentionally present.
+# The hostcreds startup block: the shell.env step also renders and appends
+# the credential-startup block postCreate wires into both rc files. The
+# block is rendered by devcontainer_config (never hand-written into this
+# 500-line script), one shell-agnostic render serves both startup files,
+# a render failure is fatal through exit_with_error, and the append is
+# idempotent under the block's own marker. These tests pin that wiring at
+# full strength: the render helper exists and delegates, the append is
+# marker-guarded in both files, and nothing swallows a non-zero render.
 # ---------------------------------------------------------------------------
 
 
-def test_main_no_longer_calls_configure_devsecret() -> None:
-    """The devsecret bootstrap step is out of the provisioning flow."""
-    assert "configure_devsecret" not in _main_body()
+def _configure_shell_env_body() -> str:
+    """The `configure_shell_env` function body from `.devcontainer.postcreate.sh`.
+
+    Isolated by name, the same pattern this file's `_git_hooks_step` uses,
+    so an assertion meant for this step cannot be satisfied by unrelated
+    text elsewhere in the script. Delegates to the shared
+    `conftest._function_body` brace-depth scanner rather than a local
+    regex.
+    """
+    return _function_body("configure_shell_env")
 
 
-def test_configure_devsecret_function_and_its_uv_install_are_gone() -> None:
-    """Not merely uncalled: the function and its `uv tool install` are deleted."""
-    text = _postcreate_text()
-    assert "configure_devsecret" not in text, (
-        "configure_devsecret must be deleted with its main() call, not left as dead code"
+def test_postcreate_installs_no_uv_tools() -> None:
+    """The provisioning flow never installs a tool into the host environment.
+
+    The one `uv tool install` this script ever carried existed to put a
+    console script on PATH for a superseded mechanism; postCreate now
+    provisions only through devcontainer features and files inside the
+    container, so a reintroduced tool install fails here rather than
+    resuming silently.
+    """
+    assert "uv tool install" not in _postcreate_text(), (
+        "postCreate must not install tools into the environment; everything "
+        "installable belongs to a devcontainer feature"
     )
-    assert "uv tool install" not in text, (
-        "the uv tool install existed only to put the devsecret console script on PATH"
+
+
+def test_postcreate_defines_a_render_helper_for_the_hostcreds_block() -> None:
+    """The block is rendered by devcontainer_config, never hand-written here."""
+    assert "devcontainer_config.cli shell-block" in _postcreate_text()
+
+
+def test_configure_shell_env_renders_the_startup_block_once() -> None:
+    """One shell-agnostic block serves both files, so there is exactly one render."""
+    body = _configure_shell_env_body()
+    assert len(re.findall(r"render_hostcreds_shell_block\b", body)) == 1
+
+
+def test_render_helper_takes_no_shell_argument() -> None:
+    """The block is the same text for bash and zsh; a shell argument would be dead."""
+    body = _function_body("render_hostcreds_shell_block")
+    assert "local shell" not in body
+    assert '"${DEVCONTAINER_SCRIPTS_DIR}"' in body
+
+
+def test_configure_shell_env_appends_the_block_to_the_bash_startup_file() -> None:
+    """The rendered block is written into BASH_RC, beside the shell.env lines."""
+    body = _configure_shell_env_body()
+    assert re.search(r'startup_block.*>>\s*"\$\{BASH_RC\}"', body, re.DOTALL)
+
+
+def test_configure_shell_env_appends_the_block_to_the_zsh_environment_file() -> None:
+    """The same rendered block is written into ZSH_ENV, beside the shell.env lines."""
+    body = _configure_shell_env_body()
+    assert re.search(r'startup_block.*>>\s*"\$\{ZSH_ENV\}"', body, re.DOTALL)
+
+
+def test_configure_shell_env_does_not_swallow_a_render_failure() -> None:
+    """Nothing discards the render command's status."""
+    body = _configure_shell_env_body()
+    for line in body.splitlines():
+        if "render_hostcreds_shell_block" not in line:
+            continue
+        for suffix in _FORGIVING_SUFFIXES:
+            assert suffix not in line, f"{suffix!r} would swallow a non-zero render status"
+
+
+def test_configure_shell_env_aborts_through_exit_with_error_on_a_render_failure() -> None:
+    """A non-zero render is fatal through exit_with_error, not warned about."""
+    body = _configure_shell_env_body()
+    render_idx = body.index("render_hostcreds_shell_block")
+    error_idx = body.index("exit_with_error", render_idx)
+    tail = body[render_idx:error_idx]
+    assert "||" in tail, "the render's failure is not wired to a handler"
+    assert "log_section_skipped" not in body[render_idx : error_idx + 400]
+
+
+def test_configure_shell_env_reuses_the_shared_printers() -> None:
+    """No new error printer is introduced; the existing primitives are reused."""
+    body = _configure_shell_env_body()
+    assert re.search(r"\bexit_with_error\b", body)
+    assert re.search(r"\blog_section_done\b", body)
+
+
+def test_configure_shell_env_derives_the_marker_from_the_rendered_block() -> None:
+    """The guard's marker text is read back out of the rendered block itself
+    (its own first line), rather than a second hand-copied literal of
+    hostcreds.MARKER that could drift out of sync with the renderer.
+    """
+    body = _configure_shell_env_body()
+    assert re.search(
+        r'startup_marker="\$\(printf[^\n]*startup_block[^\n]*\|\s*head\s+-n\s*1\)"', body
     )
+
+
+def test_configure_shell_env_guards_the_bash_append_against_a_second_application() -> None:
+    """Idempotence: a second configure_shell_env run must not duplicate the
+    block in BASH_RC. The append is guarded by a grep for the block's own
+    marker line, the same `grep -q ... || <action>` guard style this file
+    already uses.
+    """
+    body = _configure_shell_env_body()
+    assert re.search(
+        r'grep\s+-qF\s+--\s+"\$\{startup_marker\}"\s+"\$\{BASH_RC\}"\s*\|\|.*startup_block.*>>\s*"\$\{BASH_RC\}"',
+        body,
+    ), "the bash append is not guarded by a marker grep"
+
+
+def test_configure_shell_env_guards_the_zsh_append_against_a_second_application() -> None:
+    """Same idempotence guard as the bash case, for ZSH_ENV."""
+    body = _configure_shell_env_body()
+    assert re.search(
+        r'grep\s+-qF\s+--\s+"\$\{startup_marker\}"\s+"\$\{ZSH_ENV\}"\s*\|\|.*startup_block.*>>\s*"\$\{ZSH_ENV\}"',
+        body,
+    ), "the zsh append is not guarded by a marker grep"
 
 
 def test_configure_shell_env_renders_the_hostcreds_startup_block() -> None:
     """The startup block configure_shell_env renders is the hostcreds one."""
-    body = _function_body("configure_shell_env")
+    body = _configure_shell_env_body()
     assert "render_hostcreds_shell_block" in body
-    assert "shellrc" not in body, "the superseded devsecret renderer must not linger here"
+    assert "shellrc" not in body, "the superseded renderer must not linger here"

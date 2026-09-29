@@ -3,41 +3,26 @@ name = "general-dev"
 version = "0.1.0"
 requires-python = ">=3.11"
 
-# devsecret puts the four record commands (spec Section 4.3; E3-F2-S1-T1) on
-# PATH once this project is installed. AC-FUNC-012 requires the console
-# script AND the package-discovery setting that makes `devcontainer_config`
-# importable once something actually builds or installs this project (a
-# container image layer or a host bootstrap step, per Section 4.3's "on
-# PATH in the container and on the host"); declaring only the console
-# script and no build backend would leave `devsecret` pointing at a module
-# no install can ever place on `sys.path`, since `devcontainer_config` lives
-# under `.claude/plugins/devcontainer/scripts`, outside every default
-# discovery root. `[tool.hatch.build.targets.wheel] packages` below names
-# that real directory explicitly instead of relying on flat-layout
-# auto-discovery, which would look under the repository root and find
-# nothing. `[tool.uv] package = false` (below) still keeps `uv run` and
-# `uv sync` from ever invoking this build backend, so `make test` and
-# `make validate` stay hermetic and network-free (AC-10.14) even with a
-# build backend declared; only a future explicit `uv build` or
-# `pip install .` exercises it.
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[project.scripts]
-devsecret = "devcontainer_config.cli:main_devsecret"
-
-[tool.hatch.build.targets.wheel]
-packages = [".claude/plugins/devcontainer/scripts/devcontainer_config"]
+# This project declares no `[project.scripts]` and no `[build-system]`. The
+# build backend this file previously declared existed for exactly one
+# purpose: installing the secret-catalog console script (and the package
+# discovery that made `devcontainer_config` importable to an install). That
+# CLI was removed with the secret catalog it fronted, replaced by the
+# hostcreds mechanism, which ships no console script -- its CLI entry is
+# `python3 -m devcontainer_config.cli` (the form `make creds-init`,
+# `make lint-secrets` and the postCreate startup-block render all invoke),
+# resolved through PYTHONPATH the same way every other module in this
+# package is. `[tool.uv] package = false` (below) still keeps `uv run` and
+# `uv sync` from ever attempting to build this project or fetch a backend,
+# so `make test` and `make validate` stay hermetic and network-free
+# (AC-10.14).
 
 [tool.uv]
 # `package = false` keeps `uv run`/`uv sync` from ever attempting to build
-# this project via the `[build-system]` table above or fetch a build
-# backend, so `make test` and `make validate` stay hermetic (AC-10.14). The
-# build backend exists so a real install (a future container image layer or
-# host bootstrap step) has package-discovery configuration to build from;
-# it is declared but never invoked by anything `make test` or
-# `make validate` runs.
+# or install this project, so `make test` and `make validate` stay
+# hermetic (AC-10.14): the dev toolchain (pytest, ruff, mypy, ...) is
+# installed from the dependency group below and the source tree is put on
+# PYTHONPATH by pytest's `pythonpath` setting instead of an install.
 package = false
 
 [dependency-groups]

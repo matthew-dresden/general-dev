@@ -29,7 +29,7 @@ does now. The identifiers match Section 0 of the platform specification.
 | B2 | `make shell` opened an interactive shell on the EC2 host. | That target is removed. Host access is not available to the developer at all; `make exec` opens a shell inside a container. |
 | B3 | A developer with engine access could obtain root on the EC2 host, through the docker group on a rootful daemon. | Host root is unreachable. The daemon is rootless; containers still run as uid 0 inside a user namespace. |
 | B4 | `make remote`, `make build` and `make status` operated on one implicit instance. | The same targets accept `INSTANCE=<name>`, defaulting to `DEFAULT_REMOTE_INSTANCE`. |
-| B5 | API tokens were placed in `shell.env`, which was published wholesale to Parameter Store. | Tokens live in a per-secret catalog reached through `devsecret`. `shell.env` carries no credentials. |
+| B5 | API tokens were placed in `shell.env`, which was published wholesale to Parameter Store. | Tokens are named in the gitignored hostcreds manifest and resolved on the developer's machine -- the macOS keychain, git's own credential helper, or `aws configure export-credentials` -- by `make creds-init` and `make push-creds`. `shell.env` carries no credentials. |
 | B6 | `git commit --no-verify` succeeded. | Denied by a `PreToolUse` hook and by the pre-commit hook. |
 | B7 | `.claude/` was untracked in its entirety. | `.claude/` is tracked except `settings.local.json`, so the plugin and hooks arrive with a clone. |
 | B8 | The devcontainer image had no Terraform, Terragrunt or session-manager-plugin. | All three are installed by devcontainer features. An image rebuild is required. |

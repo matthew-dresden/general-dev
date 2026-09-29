@@ -61,8 +61,8 @@ network connection, and opens no socket beyond a loopback listener a test
 creates for itself (AC-TEST-005). `subprocess_command_runner` and
 `default_process_launcher` are this module's own production implementations
 of that seam and of the long-lived session-process launcher, following the
-same pattern `devcontainer_config.catalog.subprocess_runner` already
-establishes for its own domain: the seam is injected everywhere else in this
+same pattern the package's other runner seams use for their own domains:
+the seam is injected everywhere else in this
 module, and the real, subprocess-backed implementation lives in exactly one
 function that nothing else in this module calls internally.
 
@@ -216,11 +216,10 @@ _PORT_OPENED_MARKER = b"opened for sessionId"
 # Substrings the AWS CLI's stderr carries for an unusable credential --
 # expired SSO session or none resolved at all -- matched literally against
 # plain-text CLI error output, the same technique
-# `devcontainer_config.hostprobe.probe_aws_identity` and
-# `devcontainer_config.catalog` each already use for their own AWS call
-# sites (independent copies by design: each module owns translating the
-# identical AWS-CLI-observable condition for its own call sites, rather than
-# sharing a private constant across module boundaries).
+# `devcontainer_config.hostprobe.probe_aws_identity` already uses for its
+# own AWS call sites (independent copies by design: each module owns
+# translating the identical AWS-CLI-observable condition for its own call
+# sites, rather than sharing a private constant across module boundaries).
 _EXPIRED_CREDENTIAL_MARKERS: tuple[str, ...] = (
     "Error loading SSO Token",
     "session associated with this profile has expired",

@@ -4,11 +4,10 @@ Detects, in scanned line content: AWS access key identifiers (`AKIA` and
 `ASIA` prefixes), AWS secret access key assignments, private key blocks,
 GitHub tokens (`ghp_`, `gho_`, `github_pat_`), Slack tokens (`xoxb-`,
 `xoxp-`), bearer tokens, SSO portal URLs, twelve-digit account identifiers,
-EC2 instance identifiers, every catalog secret name, every resolved
-hostcreds credential value (whole when the value holds no newline, per
-maximal newline-free segment of at least twelve characters otherwise), and
-any line also present in the developer's own `shell.env` -- excluding a
-line that also
+EC2 instance identifiers, every resolved hostcreds credential value (whole
+when the value holds no newline, per maximal newline-free segment of at
+least twelve characters otherwise), and any line also present in the
+developer's own `shell.env` -- excluding a line that also
 appears, verbatim, in both the git index and `HEAD` version of the tracked
 `shell.env.example` (E2-F1-S1-T4): a line this commit does not introduce or
 change. A line a developer stages into `shell.env.example` itself, whatever
@@ -25,11 +24,9 @@ detector.
 
 `scan_lines` is pure: it opens no file, spawns no subprocess and reaches no
 network. Its only inputs are the lines handed to it and the `ScanSources`
-value carrying the developer's `shell.env` lines, the catalog secret
-names and the resolved hostcreds credential values. All three sources are
-injected because the catalog client does not exist
-until E3 and because the Scanner suite (spec Section 10.2) has to run with no
-AWS, no docker and no network at all (AC-10.14).
+value carrying the developer's `shell.env` lines and the resolved hostcreds
+credential values. Both sources are injected so the Scanner suite (spec
+Section 10.2) runs with no AWS, no docker and no network at all (AC-10.14).
 
 Every finding also carries a rendering decision. The SSO portal URL, the
 account identifier and the EC2 instance identifier are printable, exactly as
@@ -131,14 +128,14 @@ class SecretScanError(RuntimeError):
 class Detector(Protocol):
     """What every detector record carries, regardless of how it matches.
 
-    `PatternDetector` matches with a compiled expression; `ShellEnvLineDetector`,
-    `CatalogSecretNameDetector` and `HostCredsValueDetector` match by comparing
-    against a field of `ScanSources` instead. `scan_lines` depends on this
-    protocol, not on any one of the four concrete records, so adding a new kind
-    of detector never requires changing `scan_lines`.
+    `PatternDetector` matches with a compiled expression; `ShellEnvLineDetector`
+    and `HostCredsValueDetector` match by comparing against a field of
+    `ScanSources` instead. `scan_lines` depends on this protocol, not on any
+    one of the three concrete records, so adding a new kind of detector never
+    requires changing `scan_lines`.
 
     Every member below is declared as a read-only `@property` rather than a
-    plain attribute. All four concrete records are frozen dataclasses, so
+    plain attribute. All three concrete records are frozen dataclasses, so
     their fields are read-only too; a plain-attribute Protocol member is
     structurally a settable variable and mypy would reject a frozen
     dataclass as satisfying it, even though nothing here ever needs to
@@ -210,26 +207,6 @@ class ShellEnvLineDetector:
         return line if line in sources.shell_env_lines else None
 
 
-@dataclass(frozen=True)
-class CatalogSecretNameDetector:
-    """A detector that matches when `line` contains any catalog secret's name.
-
-    Returns the specific name found, not the whole line, so a redacted
-    render never needs more of the line than the name itself.
-    """
-
-    identifier: str
-    description: str
-    printable: bool
-    safe_prefix_len: int
-
-    def find(self, line: str, sources: ScanSources) -> str | None:
-        for name in sources.catalog_secret_names:
-            if name in line:
-                return name
-        return None
-
-
 # The shortest fragment of a multi-line hostcreds value the detector below
 # compares a scanned line against. Segments shorter than this are dropped:
 # a fragment this small matches ordinary content (a stray word, a brace, a
@@ -275,16 +252,15 @@ class HostCredsValueDetector:
 
     The values live in `ScanSources.hostcreds_values` as `(name, value)`
     pairs injected by `hostcreds_values`, never discovered here: this
-    record stays a pure comparison, exactly like the two field-comparing
-    detectors above it.
+    record stays a pure comparison, exactly like the field-comparing
+    detector above it.
 
     Returns the credential's name plus the word "value" -- never any part
     of the value itself, not even a prefix -- so a finding names which
     credential leaked while a redacted render cannot disclose what it
-    leaked. Redacted like `CatalogSecretNameDetector` (the name is a
-    label, not a secret, but it travels the same withheld-prefix rendering
-    as every other credential-bearing finding so no render path ever
-    special-cases printing more of a match).
+    leaked. The name is a label, not a secret, but it travels the same
+    withheld-prefix rendering as every other credential-bearing finding so
+    no render path ever special-cases printing more of a match.
     """
 
     identifier: str
@@ -308,7 +284,6 @@ class ScanSources:
     """
 
     shell_env_lines: tuple[str, ...]
-    catalog_secret_names: tuple[str, ...]
     hostcreds_values: tuple[tuple[str, str], ...]
 
     def __post_init__(self) -> None:
@@ -496,12 +471,6 @@ PATTERNS: tuple[Detector, ...] = build_registry(
             safe_prefix_len=_PRINTABLE_SAFE_PREFIX_LEN,
             pattern=_EC2_INSTANCE_ID_PATTERN,
         ),
-        CatalogSecretNameDetector(
-            identifier="catalog-secret-name",
-            description="Catalog secret name",
-            printable=False,
-            safe_prefix_len=_REDACTED_SAFE_PREFIX_LEN,
-        ),
         HostCredsValueDetector(
             identifier="hostcreds-value",
             description="hostcreds credential value",
@@ -558,9 +527,9 @@ def scan_lines(
             Numbered rather than a plain sequence so a caller scanning a diff
             hunk or a partial file can report the real line number, not a
             position relative to only what was handed in.
-        sources: the developer's `shell.env` lines and the catalog secret
-            names, injected because the catalog client does not exist until
-            E3 (spec Section 4.5) and because this function must stay pure.
+        sources: the developer's `shell.env` lines and the resolved hostcreds
+            credential values, injected so this function stays pure and the
+            loaders that reach the filesystem stay outside it.
         detector_ids: restrict scanning to these detector identifiers. Every
             detector runs when omitted.
 
@@ -613,16 +582,6 @@ def render_finding(finding: Finding, detector: Detector) -> str:
     prefix = finding.matched_text[: detector.safe_prefix_len]
     withheld = len(finding.matched_text) - len(prefix)
     return f"{prefix}... ({withheld} chars withheld)"
-
-
-# Printed verbatim in the lint-secrets header next to the catalog secret name
-# count (spec Section 4.5): the catalog client landed in E3-F1-S1-T1, but its
-# call site is not wired into this staged scan yet, so `run_staged_scan`
-# always sources an explicit empty tuple for `catalog_secret_names` rather
-# than inferring the note from the count being zero. When a follow-up unit
-# wires the call, the call site inside `run_staged_scan` changes to ask the
-# catalog client instead of this constant disappearing.
-_CATALOG_SECRET_NAMES_NOT_WIRED_NOTE = "catalog client not yet wired into this scan"
 
 
 @overload
@@ -1119,17 +1078,10 @@ def _scan_sources(root: Path, shell_env: tuple[str, ...]) -> tuple[ScanSources, 
     `scan_range`, matching how the shell.env loaders are wired, so a test
     injects through the `hostcreds_values` function or the
     `hostcreds.subprocess_runner` attribute instead of a parameter.
-
-    Catalog secret names remain an explicit empty tuple (see
-    `_CATALOG_SECRET_NAMES_NOT_WIRED_NOTE`): the catalog client is not
-    wired into a scan yet, and nothing here infers or guesses a value for
-    it until a follow-up unit adds that call.
     """
     creds = hostcreds_values(root, hostcreds.subprocess_runner)
-    catalog_secret_names: tuple[str, ...] = ()
     sources = ScanSources(
         shell_env_lines=shell_env,
-        catalog_secret_names=catalog_secret_names,
         hostcreds_values=creds.values,
     )
     return sources, creds
@@ -1170,7 +1122,6 @@ class LintReport:
     staged_path_count: int
     shell_env_line_count: int
     shell_env_excluded_line_count: int
-    catalog_secret_name_count: int
     hostcreds_value_count: int
     hostcreds_unavailable_names: tuple[str, ...]
     hostcreds_manifest_present: bool
@@ -1203,11 +1154,11 @@ def run_staged_scan(root: Path) -> LintReport:
     a file edited after being staged is still scanned as it will actually be
     committed (AC-TEST-002). The comparison sources come from the shared
     `_scan_sources` helper: the developer's `shell.env` lines (template
-    intersection already applied), the not-yet-wired catalog names, and the
-    hostcreds values resolved live from the host, whose resolved count,
-    unavailable names and manifest presence the report carries so an
-    operator can tell "nothing to resolve" apart from "could not resolve"
-    apart from "fresh clone, no manifest".
+    intersection already applied) and the hostcreds values resolved live
+    from the host, whose resolved count, unavailable names and manifest
+    presence the report carries so an operator can tell "nothing to
+    resolve" apart from "could not resolve" apart from "fresh clone, no
+    manifest".
     """
     paths = staged_paths(root)
     shell_env, shell_env_excluded_count = _shell_env_comparison_lines(root)
@@ -1223,7 +1174,6 @@ def run_staged_scan(root: Path) -> LintReport:
         staged_path_count=len(paths),
         shell_env_line_count=len(shell_env),
         shell_env_excluded_line_count=shell_env_excluded_count,
-        catalog_secret_name_count=len(sources.catalog_secret_names),
         hostcreds_value_count=len(creds.values),
         hostcreds_unavailable_names=creds.unavailable_names,
         hostcreds_manifest_present=creds.manifest_present,
@@ -1286,8 +1236,6 @@ def render_lint_report(report: LintReport) -> str:
         f"  staged paths scanned: {report.staged_path_count}",
         f"  shell.env lines: {report.shell_env_line_count} "
         f"({report.shell_env_excluded_line_count} template lines excluded)",
-        f"  catalog secret names: {report.catalog_secret_name_count} "
-        f"({_CATALOG_SECRET_NAMES_NOT_WIRED_NOTE})",
         hostcreds_line,
     ]
     for staged in report.findings:

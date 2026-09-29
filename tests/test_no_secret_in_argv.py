@@ -4,10 +4,10 @@ A process's arguments are readable by other processes on the same machine for
 as long as the call runs, and are echoed back verbatim by this repository's own
 failure translator (`rd_run` hands `"$@"` to `rd_aws_failed`). A value passed as
 `--value <secret>` is therefore exposed twice: once in the process table, and
-again in any error message. `devcontainer_config.catalog`'s module docstring
-states the invariant that closes both -- the value travels inside a
-`--cli-input-json` document on the child's stdin -- and
-`tests/test_catalog.py` pins it for the Python client.
+again in any error message. The Python client's own docstrings state the
+invariant that closes both -- the value travels inside a `--cli-input-json`
+document on the child's stdin -- and `tests/test_certs.py` pins it for that
+client.
 
 This module pins the same invariant for the shell entry points, which reach the
 store directly rather than through the client, and additionally pins that they
@@ -81,7 +81,7 @@ def test_no_shell_script_passes_a_parameter_value_in_argv(script: Path) -> None:
         f"{script.name} passes a parameter value as an argument, exposing it in the process "
         f"table and in any error this repository reports: {offenders}\n"
         "Pass it on stdin as a --cli-input-json document instead, the way "
-        "devcontainer_config.catalog.write_parameter does."
+        "devcontainer_config.certs.write_parameter does."
     )
 
 

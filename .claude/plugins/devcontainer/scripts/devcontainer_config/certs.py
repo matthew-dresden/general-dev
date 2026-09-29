@@ -9,13 +9,12 @@ binary, driven by `.claude/plugins/devcontainer/skills/certs/SKILL.md`. Every
 `openssl` invocation below passes an argument list, never a shell string
 (spec Section 3.4's dependency rule, AC-FUNC-006), and this module imports
 nothing beyond the standard library and this project's own
-`devcontainer_config.catalog` and `devcontainer_config.instances` -- no
-third-party package is added. `catalog` is reused below for its existing
-instance/scope validation and Parameter Store constants rather than a
-second, independent copy of either. `instances` supplies `DEFAULT_CERTS_ROOT`
-(`instances.certs_root`, spec Section 9's own addressing-table derivation
-of this identical value, E8-F1-S1-T1 round 2) rather than this module
-declaring a second, `DOCKER_CONFIG`-blind copy of the same root.
+`devcontainer_config.instances` -- no third-party package is added.
+`instances` supplies `DEFAULT_CERTS_ROOT` (`instances.certs_root`, spec
+Section 9's own addressing-table derivation of this identical value,
+E8-F1-S1-T1 round 2), `instances.PARAMETER_ROOT`, and the instance-name
+rule `_validate_instance` delegates to, rather than this module declaring
+second, independently drifting copies of any of them.
 
 `instance` reaches this module unvalidated from `--instance` on the CLI and,
 per `.claude/plugins/devcontainer/skills/certs/SKILL.md`'s own instance
@@ -28,9 +27,9 @@ separator, the empty string, or a name longer than
 `instances.MAX_INSTANCE_NAME_LENGTH` is rejected before it ever reaches a
 filesystem path or a Parameter Store path (code_review, this unit, round 1:
 BLOCKING 1; round 2: WARN, a second, length-unbounded validator of the
-identical concept). `PARAMETER_ROOT` and `SECURE_STRING_TYPE` below are likewise
-`catalog.PATH_ROOT` and `catalog.SECURE_STRING_TYPE` themselves, not a second
-literal declaration of either (round 1, WARN 4).
+identical concept). `PARAMETER_ROOT` below is likewise
+`instances.PARAMETER_ROOT` itself, not a second literal declaration
+(round 1, WARN 4).
 
 Material layout and modes are fixed by spec Section 5.5 and sit outside the
 repository entirely, under `<root>/<instance>/`, where `<root>` defaults to
@@ -161,6 +160,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import secrets
 import shutil
@@ -172,13 +172,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from devcontainer_config import catalog, instances
+from devcontainer_config import instances
 
-# The one external command every function below shells out to. Every argv
-# built in this module starts with this constant; nothing else here names an
-# executable (mirrors `catalog.AWS_EXECUTABLE`'s own single-command
-# guarantee, AC-FUNC-006).
+# The two external commands this module ever shells out to. Every openssl
+# argv built here starts with `OPENSSL_EXECUTABLE`; every Parameter Store
+# argv the client below builds starts with `AWS_EXECUTABLE`; nothing else
+# in this module names an executable (AC-FUNC-006).
 OPENSSL_EXECUTABLE = "openssl"
+AWS_EXECUTABLE = "aws"
 
 # spec Section 5.5's material root. A parameter of `CertPaths`, not a literal
 # baked into any function body, so the test suite can point an entire run at
@@ -266,17 +267,17 @@ _NO_CERTIFICATES_LINE = (
     "No certificates found. Run /devcontainer:setup-remote to issue the first instance's material."
 )
 
-# spec Section 5.3's Parameter Store layout for TLS material. `PARAMETER_ROOT`
-# and `SECURE_STRING_TYPE` are `catalog.PATH_ROOT` and
-# `catalog.SECURE_STRING_TYPE` themselves, not a second literal declaration of
-# either (code_review, this unit, round 1: WARN 4) -- `catalog.py`'s own
-# comment records that `PATH_ROOT` exists so the `/devcontainer/...` path
-# shape has a single definition site. `STRING_TYPE` has no equivalent in
-# `catalog`, which only ever writes `SecureString` secrets, so it stays a
-# local literal.
-PARAMETER_ROOT = catalog.PATH_ROOT
+# spec Section 5.3's Parameter Store layout for TLS material.
+# `PARAMETER_ROOT` is `instances.PARAMETER_ROOT` itself, not a second
+# literal declaration of the `/devcontainer` root -- `instances` owns the
+# addressing table (spec Section 9), so the root has a single definition
+# site across both modules. `SECURE_STRING_TYPE` and `STRING_TYPE` are
+# declared here: publication is the only Parameter Store write this
+# module's client performs, and the deleted secret-catalog client that
+# previously owned the `SecureString` spelling no longer shares it.
+PARAMETER_ROOT = instances.PARAMETER_ROOT
 TLS_SEGMENT = "tls"
-SECURE_STRING_TYPE = catalog.SECURE_STRING_TYPE
+SECURE_STRING_TYPE = "SecureString"
 STRING_TYPE = "String"
 
 # The only three names `publication_set` ever hands back (spec Section 5.3).
@@ -299,7 +300,6 @@ _CA_PRIVATE_KEY_NAMES: frozenset[str] = frozenset(
 )
 
 
-
 class CertsError(RuntimeError):
     """Raised when certificate generation or publication cannot proceed as requested.
 
@@ -316,14 +316,11 @@ def _validate_instance(instance: str) -> None:
     Delegates to `instances.validate_name` (`devcontainer_config.instances`),
     the single owner spec Section 4.5 assigns the naming rule, rather than a
     second, independent implementation of the same rule (code_review, this
-    unit, round 1: BLOCKING 1). An earlier version of this function delegated
-    only to `catalog._validate_scope`, which enforces the character-class
-    rule but no length bound, so a 64+ character instance name was accepted
-    here and rejected by `instances.certs_dir` for the identical directory
-    (code_review, this unit, round 2: WARN); delegating to
-    `instances.validate_name` closes that gap, since it applies the
-    identical character-class rule and `instances.MAX_INSTANCE_NAME_LENGTH`
-    in one call. `instance` reaches this module unvalidated from
+    unit, round 1: BLOCKING 1). Delegating there applies the identical
+    character-class rule and `instances.MAX_INSTANCE_NAME_LENGTH`
+    in one call, so a name accepted here is accepted by every other
+    derivation that composes a path from it. `instance` reaches this
+    module unvalidated from
     `--instance` on the CLI and, per
     `.claude/plugins/devcontainer/skills/certs/SKILL.md`'s own instance
     resolution, from `INSTANCE`/`DEFAULT_REMOTE_INSTANCE`, so leaving it
@@ -424,15 +421,358 @@ class PublicationEntry:
     parameter_type: str
 
 
+# ---------------------------------------------------------------------------
+# The Parameter Store publication client. This section is the write path
+# TLS material takes to the store: `publish` is its only consumer inside
+# this module, and nothing else in the package writes parameters, so the
+# client lives here rather than in a module of its own. Absorbed from the
+# deleted secret-catalog client, which owned the identical argv invariant
+# (a value travels in a `--cli-input-json` document, never an argument);
+# the secret-shaped operations (resolve, list, the two-tier scope rule)
+# went with that module -- only the path-shaped write and read back
+# survived, because publishing a certificate is not a secret operation.
+# ---------------------------------------------------------------------------
 
-def publish(paths: CertPaths, client: catalog.CatalogClient) -> tuple[str, ...]:
+# The two `aws ssm` subcommands this client ever issues. Declared once so
+# each is named identically in the argv it builds and in the operation
+# name an error message reports for it.
+GET_PARAMETER_OP = "get-parameter"
+PUT_PARAMETER_OP = "put-parameter"
+
+# `--cli-input-json` accepts a `file://` URI; pointing it at the process's
+# own stdin is what lets a write hand the value to `aws` without it ever
+# appearing in argv. stdin is not an option: the aws CLI v2 does not read
+# `file:///dev/stdin` (it reports "Invalid JSON received" whether stdin is
+# a pipe or a redirected regular file, and blocks indefinitely on a FIFO),
+# so the document must be a real, regular file for the duration of the
+# call -- created at mode 0600 inside a 0700 directory that is removed
+# before returning.
+PUT_DOCUMENT_FILENAME = "put-parameter.json"
+
+AWS_PROFILE_ENV_VAR = "AWS_PROFILE"
+DEFAULT_AWS_PROFILE = "default"
+
+# Substrings the AWS CLI's stderr carries for the error conditions this
+# client distinguishes from an unclassified failure. Matched literally,
+# not parsed as JSON, because the CLI's own error rendering is plain text.
+# Only these specific conditions are ever diagnosed as "no credential
+# resolved"; every other non-zero exit is unclassified (see
+# `_raise_for_failure`), because asserting a credential cause for a failure
+# that is not one hands the operator a remediation that cannot work.
+PARAMETER_NOT_FOUND_MARKER = "ParameterNotFound"
+ACCESS_DENIED_MARKER = "AccessDeniedException"
+SSO_SESSION_MARKER = "SSO Token"
+NO_CREDENTIALS_MARKER = "Unable to locate credentials"
+
+
+class ParameterStoreError(RuntimeError):
+    """Base class for every failure the Parameter Store client raises.
+
+    Every raise site names the offending parameter path and states the
+    remedy, so an operator reading the message knows what to do next
+    without consulting this module.
+    """
+
+
+class ParameterStoreUnavailableError(ParameterStoreError):
+    """The `aws` binary is missing, or no AWS credential resolved for it."""
+
+
+class ParameterStoreUnauthorizedError(ParameterStoreError):
+    """The caller's identity is not authorized for the parameter prefix."""
+
+
+class ParameterNotFoundError(ParameterStoreError):
+    """No parameter exists at the path a read asked for."""
+
+
+class ParameterStoreUnclassifiedError(ParameterStoreError):
+    """The store rejected the operation for a reason this client does not classify."""
+
+
+# The Runner a ParameterStoreClient is constructed with: given the full
+# argv and an optional stdin document, return a completed process.
+# Injected rather than called internally via `subprocess.run` directly, so
+# every test substitutes a fake runner instead of patching this module.
+Runner = Callable[[Sequence[str], "str | None"], subprocess.CompletedProcess[str]]
+
+
+def subprocess_runner(argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+    """The production Runner: a real subprocess, fed `stdin` on its stdin.
+
+    This is what a caller outside the test suite constructs a
+    `ParameterStoreClient` with. `ParameterStoreClient` itself never calls
+    `subprocess.run`, so nothing here needs patching to be tested
+    hermetically.
+    """
+    return subprocess.run(list(argv), input=stdin, capture_output=True, text=True, check=False)
+
+
+def _unavailable_no_binary_message(path: str) -> str:
+    return (
+        f"ERROR: cannot reach Parameter Store for {path}\n"
+        "The aws CLI is not on PATH.\n"
+        "Install the AWS CLI v2 so this command can run 'aws ssm', then retry."
+    )
+
+
+def _unavailable_no_credential_message(path: str) -> str:
+    profile = os.environ.get(AWS_PROFILE_ENV_VAR, DEFAULT_AWS_PROFILE)
+    return (
+        f"ERROR: cannot reach Parameter Store for {path}\n"
+        f"No AWS credential resolved for profile '{profile}'.\n"
+        f"Run 'aws sso login --profile {profile}' to refresh the session, then retry."
+    )
+
+
+def _unauthorized_message(path: str) -> str:
+    prefix = path.rsplit("/", 1)[0]
+    return (
+        f"ERROR: access denied for {path}\n"
+        f"The caller's identity is not authorized for the parameter prefix {prefix}.\n"
+        "Ask an operator to grant the missing ssm:* permission on this prefix, "
+        "then retry."
+    )
+
+
+def _not_found_message(path: str) -> str:
+    prefix = path.rsplit("/", 1)[0]
+    return (
+        f"ERROR: no parameter at {path}\n"
+        "The store reported ParameterNotFound.\n"
+        f"List what exists under this prefix: aws ssm describe-parameters "
+        f"--parameter-filters Key=Path,Option=Recursive,Values={prefix}"
+    )
+
+
+def _malformed_response_message(path: str, operation: str, reason: str) -> str:
+    """A top-level `aws ssm` response is missing a field this client needs to read.
+
+    Would otherwise escape as a bare `KeyError` or `json.JSONDecodeError`
+    instead of a named `ParameterStoreError`.
+    """
+    return (
+        f"ERROR: cannot complete '{operation}' for {path}\n"
+        f"The store's response is malformed: {reason}.\n"
+        "Retry the operation; if this persists, the aws CLI version may be "
+        "incompatible with this client."
+    )
+
+
+def _parse_response_json(stdout: str, path: str, operation: str) -> dict[str, object]:
+    """Parse `stdout` as the JSON object `aws ssm <operation>` returns for `path`.
+
+    The one place the client turns a response body into data, so a
+    response that is not valid JSON, or that parses to something other
+    than a JSON object, raises a named `ParameterStoreError` here instead
+    of a bare `json.JSONDecodeError` escaping from each call site
+    individually.
+
+    Raises:
+        ParameterStoreError: `stdout` is not valid JSON, or does not parse
+            to a JSON object.
+    """
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise ParameterStoreError(
+            _malformed_response_message(path, operation, "the response is not valid JSON")
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ParameterStoreError(
+            _malformed_response_message(path, operation, "the response is not a JSON object")
+        )
+    return payload
+
+
+def _unclassified_failure_next_step(path: str, operation: str) -> str:
+    """The remediation clause naming a command that actually runs for `operation`.
+
+    `get-parameter` accepts `--name`, so re-running the same shape the
+    client itself issued is a faithful diagnostic. `put-parameter`
+    requires `--value`/`--type` to run at all, and a faithful re-submission
+    would mean typing the private key on a command line, which is exactly
+    what this client exists to avoid, so the hint reads back the
+    parameter's current metadata instead of re-submitting the write.
+    """
+    if operation == PUT_PARAMETER_OP:
+        rerun = f"aws ssm get-parameter --name {path} --output json"
+        return (
+            "The store's diagnostic is not repeated here because it may "
+            "contain the submitted document; re-submitting the write would "
+            "mean typing the parameter value on a command line, so read back "
+            f"the parameter's current metadata instead: '{rerun}', then "
+            "retry the write."
+        )
+    rerun = f"aws ssm {operation} --name {path} --output json"
+    return (
+        "The store's diagnostic is not repeated here because it may contain "
+        f"response detail this client does not echo; re-run '{rerun}' (add "
+        "'--debug' for detail) to see it directly, then retry."
+    )
+
+
+def _unclassified_failure_message(path: str, operation: str, returncode: int) -> str:
+    return (
+        f"ERROR: cannot complete '{operation}' for {path}\n"
+        f"The aws CLI exited with status {returncode}; this is not a missing "
+        "credential, an access-denied response, or a not-found response, so "
+        "this client does not guess a cause.\n"
+        f"{_unclassified_failure_next_step(path, operation)}"
+    )
+
+
+def _raise_for_failure(path: str, operation: str, returncode: int, stderr: str) -> NoReturn:
+    if PARAMETER_NOT_FOUND_MARKER in stderr:
+        raise ParameterNotFoundError(_not_found_message(path))
+    if ACCESS_DENIED_MARKER in stderr:
+        raise ParameterStoreUnauthorizedError(_unauthorized_message(path))
+    if SSO_SESSION_MARKER in stderr or NO_CREDENTIALS_MARKER in stderr:
+        raise ParameterStoreUnavailableError(_unavailable_no_credential_message(path))
+    raise ParameterStoreUnclassifiedError(
+        _unclassified_failure_message(path, operation, returncode)
+    )
+
+
+class ParameterStoreClient:
+    """Writes and reads individual parameters in AWS Parameter Store.
+
+    `runner` and `region` are the only inputs: no credential, endpoint or
+    region is read from anywhere else in this class, which is what lets a
+    test construct one with no network, no AWS and no docker. No region is
+    passed by default: the `aws` CLI resolves it the same way any other
+    invocation on this host does, from `AWS_DEFAULT_REGION` or the active
+    profile, so nothing here hardcodes one.
+    """
+
+    def __init__(self, runner: Runner, *, region: str | None = None) -> None:
+        self._runner = runner
+        self._region = region
+
+    def _argv(self, *operation_args: str) -> list[str]:
+        """The shared argv shell every operation builds on.
+
+        Executable, subcommand, output format and region live here, once,
+        so the output format and the region flag cannot drift between the
+        two operations below.
+        """
+        argv = [AWS_EXECUTABLE, "ssm", *operation_args, "--output", "json"]
+        if self._region is not None:
+            argv += ["--region", self._region]
+        return argv
+
+    def _invoke(
+        self, argv: list[str], stdin: str | None, path: str, *, operation: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Run `argv` through the injected runner and translate any failure.
+
+        The one place every operation's error handling passes through, so
+        the translation from an `aws` exit code or a missing binary to a
+        `ParameterStoreError` subclass exists once, not once per
+        operation. `operation` is the `aws ssm` subcommand this call
+        issues, named in any resulting `ParameterStoreUnclassifiedError`
+        message so the operator knows which command to re-run for the
+        store's own diagnostic.
+        """
+        try:
+            result = self._runner(argv, stdin)
+        except FileNotFoundError as exc:
+            raise ParameterStoreUnavailableError(_unavailable_no_binary_message(path)) from exc
+        if result.returncode != 0:
+            _raise_for_failure(path, operation, result.returncode, result.stderr)
+        return result
+
+    def read_parameter(self, path: str) -> str:
+        """The value stored at the fully-qualified `path`, byte for byte.
+
+        The read counterpart of `write_parameter`, and symmetric with it:
+        `publish` uses it to confirm each published parameter
+        independently, rather than trusting the write call's own exit
+        code.
+
+        Raises:
+            ParameterStoreUnavailableError: the store could not be reached.
+            ParameterStoreUnauthorizedError: the caller lacks access to this prefix.
+            ParameterNotFoundError: no parameter exists at this path.
+            ParameterStoreError: the response has no `Parameter.Value`
+                field, or is not valid JSON.
+            ParameterStoreUnclassifiedError: the store rejected the
+                operation for a reason this client does not classify.
+        """
+        argv = self._argv(GET_PARAMETER_OP, "--name", path, "--with-decryption")
+        result = self._invoke(argv, None, path, operation=GET_PARAMETER_OP)
+        payload = _parse_response_json(result.stdout, path, GET_PARAMETER_OP)
+        parameter = payload.get("Parameter")
+        if not isinstance(parameter, dict) or "Value" not in parameter:
+            raise ParameterStoreError(
+                _malformed_response_message(
+                    path, GET_PARAMETER_OP, "no 'Parameter.Value' field in the response"
+                )
+            )
+        return str(parameter["Value"])
+
+    def write_parameter(
+        self,
+        path: str,
+        value: str,
+        parameter_type: str,
+        *,
+        description: str | None = None,
+    ) -> int:
+        """Store `value` at the fully-qualified `path`, overwriting any existing version.
+
+        The one place in this repository a parameter is written. The argv
+        invariant is structural rather than a discipline a caller has to
+        remember: `value` travels inside a `--cli-input-json` document
+        written to a private file this method creates and removes, and
+        never appears in argv, so no sensitive material -- a TLS private
+        key included -- can reach the process table.
+
+        Returns:
+            The integer `Version` the store assigned to the parameter.
+
+        Raises:
+            ParameterStoreUnavailableError: the store could not be reached.
+            ParameterStoreUnauthorizedError: the caller lacks access to this prefix.
+            ParameterStoreUnclassifiedError: the store rejected the
+                operation for a reason this client does not classify.
+            ParameterStoreError: the response has no integer `Version`
+                field, or is not valid JSON.
+        """
+        document: dict[str, object] = {
+            "Name": path,
+            "Value": value,
+            "Type": parameter_type,
+            "Overwrite": True,
+        }
+        if description is not None:
+            document["Description"] = description
+        with tempfile.TemporaryDirectory() as directory:
+            document_path = Path(directory) / PUT_DOCUMENT_FILENAME
+            descriptor = os.open(document_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(document))
+            argv = self._argv(PUT_PARAMETER_OP, "--cli-input-json", f"file://{document_path}")
+            result = self._invoke(argv, None, path, operation=PUT_PARAMETER_OP)
+        payload = _parse_response_json(result.stdout, path, PUT_PARAMETER_OP)
+        version = payload.get("Version")
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise ParameterStoreError(
+                _malformed_response_message(
+                    path, PUT_PARAMETER_OP, "no integer 'Version' field in the response"
+                )
+            )
+        return version
+
+
+def publish(paths: CertPaths, client: ParameterStoreClient) -> tuple[str, ...]:
     """Publish `paths.instance`'s TLS material to Parameter Store, returning the paths written.
 
     `issue_server` returns the server key and certificate as PEM text and
     persists neither, precisely so this function can hand them to Parameter
     Store without an intermediate file: the private key never touches disk
     outside the temporary directory `issue_server` already removed. It reaches
-    the store through `catalog.CatalogClient.write_parameter`, which passes
+    the store through `ParameterStoreClient.write_parameter`, which passes
     every value on the child's stdin rather than in argv, so the key never
     reaches the process table either -- the same invariant that protects a
     stored secret (spec Section 5.4), applied to the one other kind of
@@ -458,10 +798,11 @@ def publish(paths: CertPaths, client: catalog.CatalogClient) -> tuple[str, ...]:
 
     Raises:
         CertsError: the CA is missing, so there is nothing to sign with.
-        catalog.CatalogError: the store rejected or could not serve a write.
-            Deliberately not translated -- `CatalogUnavailableError` and
-            `CatalogUnauthorizedError` already carry the remedy an operator
-            needs, and re-wrapping them here would only bury it.
+        ParameterStoreError: the store rejected or could not serve a write.
+            Deliberately not translated -- `ParameterStoreUnavailableError`
+            and `ParameterStoreUnauthorizedError` already carry the remedy
+            an operator needs, and re-wrapping them here would only bury
+            it.
     """
     if not paths.ca_key.is_file() or not paths.ca_cert.is_file():
         raise CertsError(
@@ -1494,7 +1835,7 @@ def _run_issue_client(args: argparse.Namespace) -> int:
 def _run_publish(args: argparse.Namespace) -> int:
     """Issue server material and publish it, printing each destination written."""
     paths = CertPaths(instance=args.instance, root=args.root)
-    client = catalog.CatalogClient(catalog.subprocess_runner, region=args.region)
+    client = ParameterStoreClient(subprocess_runner, region=args.region)
     for path in publish(paths, client):
         print(f"published {path}")
     return 0

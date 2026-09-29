@@ -76,9 +76,10 @@ case "$command" in
     rd_require_aws_config
     rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
     rd_check_aws_auth
-    # AWS_PROFILE rather than a --profile flag: the catalog client reaches the
-    # store through the aws CLI's own credential resolution and takes no
-    # profile argument, so the profile is passed the way the CLI reads it.
+    # AWS_PROFILE rather than a --profile flag: the Parameter Store client in
+    # devcontainer_config/certs.py reaches the store through the aws CLI's own
+    # credential resolution and takes no profile argument, so the profile is
+    # passed the way the CLI reads it.
     AWS_PROFILE="$REMOTE_AWS_PROFILE" run_certs publish --region "$REMOTE_AWS_REGION"
     rd_ok "TLS material published for '${INSTANCE}'. The daemon can now open its listener."
     ;;

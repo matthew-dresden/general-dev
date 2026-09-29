@@ -682,7 +682,7 @@ def test_resolve_instance_cli_prints_nothing_and_exits_one_on_no_instances_confi
 def test_module_help_lists_resolve_instance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Wiring smoke test: `resolve-instance` is a subcommand of `main`, not `main_devsecret`."""
+    """Wiring smoke test: `resolve-instance` is a subcommand of `main`."""
     cli = import_cli()
     monkeypatch.chdir(tmp_path)
     with pytest.raises(SystemExit) as exc_info:

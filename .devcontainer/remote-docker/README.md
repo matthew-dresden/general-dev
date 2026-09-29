@@ -124,6 +124,12 @@ existed wrapped `make connect` and `make disconnect`, and a third wrapped a
 `make shell` that no longer exists, so they are one more thing to keep in step
 with the Makefile for no capability the Makefile does not already give.
 
+To drive several engines at once -- one per project instance under
+`remote-instances/`, plus this machine's own -- prefix `ENGINE=local` or
+`ENGINE=<instance-name>` instead of switching contexts; see
+[docs/environment-setup.md](../../docs/environment-setup.md)'s "Working
+with several engines at once", and `make list-instances` for what exists.
+
 **Connect (or reconnect after sleep/reboot/SSO expiry):**
 
 1. `make connect`, if it fails with an auth error, run

@@ -645,8 +645,11 @@ PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.t
 ```
 
 which is the same command, with real values substituted from `config.env`
-and `shell.env`, that the `Makefile`'s own `connect` target issues for that
-value; `transport.resolve_transport` reads the identical
+and the instance's per-instance id store -- the `instance-id` file under
+`<certs-root>/<instance>/`, written by `make instance-link` and recorded
+automatically by `make instance-deploy` at apply time -- that the
+`Makefile`'s own `connect` target issues for that value;
+`transport.resolve_transport` reads the identical
 `DEVCONTAINER_TRANSPORT` inside `connect`'s own handler too, refusing
 before touching AWS or docker at all unless it is `ssm`. This path
 establishes the SSM forward exactly as `start` does, then ties in the two

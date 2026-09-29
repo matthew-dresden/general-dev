@@ -58,7 +58,7 @@ PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer
 PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
 
 .DEFAULT_GOAL := help
-.PHONY: help connect disconnect status exec shell instances start stop restart rename check build push-creds creds-init verify-container clean rebuild push-secrets \
+.PHONY: help connect disconnect status exec shell instances start stop restart rename check build push-creds creds-init verify-container record-instance clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test cert-status
@@ -77,6 +77,7 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make local"            "host"   "Point docker and VS Code at the local engine ($(LOCAL_CONTEXT)). Nothing remote is stopped."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)), refreshing the SSM port forward first."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make instances"        "host" "List every configured instance and mark the active one."
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make record-instance"  "host" "Write a provisioned instance EC2 id into shell.env. INSTANCE=<name> required; idempotent."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make connect"          "remote" "What 'make remote' calls. Re-run after a reboot, after sleep, or when SSO expires."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make disconnect"       "host"   "What 'make local' calls. Only changes where new commands and windows point."
 	@printf '\n\033[1mBUILD\033[0m  every target blocks until the container is up and exits non-zero if anything fails\n'
@@ -252,6 +253,32 @@ vscode-server:
 # stdin so no value rides a docker exec's argv.
 push-creds:
 	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) push-creds
+
+# Records a provisioned instance's EC2 id into shell.env so the remote
+# targets (connect, cert-*, build) can address it. Reads the instance_id
+# Terragrunt output from the instance's own directory, then sets (or
+# appends) an uncommented export line in the gitignored shell.env -- the
+# only place a real identifier is allowed to live. Idempotent: re-running
+# replaces the previous line.
+record-instance:
+	@if [ -z "$(INSTANCE)" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m INSTANCE is required, e.g.: make record-instance INSTANCE=sandbox\n' >&2; \
+		exit 1; \
+	fi
+	@set -euo pipefail; \
+	dir="remote-instances/$(INSTANCE)"; \
+	[ -f "$$dir/terragrunt.hcl" ] || { \
+		printf '\033[0;31m[ERROR]\033[0m no instance directory at %s\n' "$$dir" >&2; \
+		printf '        List what exists:  ls remote-instances/\n' >&2; \
+		exit 1; \
+	}; \
+	id=$$(cd "$$dir" && REMOTE_AWS_REGION=$${REMOTE_AWS_REGION:-us-east-1} terragrunt output -raw instance_id 2>/dev/null); \
+	[ -n "$$id" ] || { \
+		printf '\033[0;31m[ERROR]\033[0m terragrunt output -raw instance_id returned nothing for %s\n' "$(INSTANCE)" >&2; \
+		printf '        Has the instance been applied?  cd %s && terragrunt apply\n' "$$dir" >&2; \
+		exit 1; \
+	}; \
+	python3 .devcontainer/record-instance.py "$$id"
 
 # Host only: prompts once per keychain credential the manifest names whose
 # item is missing, storing each through 'security -i' with the value on

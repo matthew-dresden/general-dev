@@ -15,6 +15,7 @@ ENGINE  pick where builds and containers live
   make local              host    Point docker and VS Code at the local engine (<LOCAL_DOCKER_CONTEXT>). Nothing remote is stopped.
   make remote             host    Point them at the EC2 engine (<REMOTE_DOCKER_CONTEXT>), refreshing the SSM port forward first.
   make instances          host    List every configured instance and mark the active one.
+  make record-instance    host    Write a provisioned instance EC2 id into shell.env. INSTANCE=<name> required; idempotent.
   make connect            remote  What 'make remote' calls. Re-run after a reboot, after sleep, or when SSO expires.
   make disconnect         host    What 'make local' calls. Only changes where new commands and windows point.
 

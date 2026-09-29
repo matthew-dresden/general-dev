@@ -29,7 +29,7 @@ KEYBINDINGS_PY := .devcontainer/vscode-keybindings-install.py
 # Where devcontainer_config lives (spec Section 4.5). Named once here so no
 # target hardcodes this path inline; PYTHONPATH is set to it, not the
 # repository root, because the package is not importable from there.
-DEVCONTAINER_SCRIPTS_DIR := .claude/plugins/devcontainer/scripts
+DEVCONTAINER_SCRIPTS_DIR := $(CURDIR)/.claude/plugins/devcontainer/scripts
 
 # Usage guard for a target that acts on exactly one instance: prints its
 # usage lines and exits 2 when INSTANCE is empty. $(1) is the target name,
@@ -538,6 +538,7 @@ instance-deploy:
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; nothing to deploy.\n'; exit 0; }; \
 	while IFS= read -r name; do \
 	( \
+		set -euo pipefail; \
 		printf '\033[0;36m[DEPLOY]\033[0m %s\n' "$$name"; \
 		tg_init "$$name"; \
 		plan_file="$${PWD}/tfplan.deploy"; \
@@ -561,7 +562,7 @@ instance-deploy:
 			printf '        Did the apply above succeed? Inspect it: cd remote-instances/%s && terragrunt output\n' "$$name" >&2; \
 			exit 1; \
 		}; \
-		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-link "$$name" --instance-id "$$id"; \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-link "$$name" --instance-id "$$id" || exit 1; \
 		cd "$(CURDIR)"; \
 		status_json=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-status "$$name" --json) || { \
 			printf '\033[0;31m[ERROR]\033[0m %s: instance-status --json failed; the trust chain cannot be inspected\n' "$$name" >&2; \
@@ -573,13 +574,13 @@ instance-deploy:
 			ca_out=$$(make --no-print-directory cert-ca INSTANCE="$$name" 2>&1) || { \
 				printf '%s\n' "$$ca_out" | grep -q 'already exists' || { printf '%s\n' "$$ca_out" >&2; exit 1; }; \
 			}; \
-			make --no-print-directory cert-client INSTANCE="$$name"; \
+			make --no-print-directory cert-client INSTANCE="$$name" || exit 1; \
 		fi; \
 		if [ "$$params_present" != "true" ]; then \
-			make --no-print-directory cert-publish INSTANCE="$$name"; \
-			make --no-print-directory cert-install INSTANCE="$$name"; \
+			make --no-print-directory cert-publish INSTANCE="$$name" || exit 1; \
+			make --no-print-directory cert-install INSTANCE="$$name" || exit 1; \
 		fi; \
-		make --no-print-directory push-secrets INSTANCE="$$name"; \
+		make --no-print-directory push-secrets INSTANCE="$$name" || exit 1; \
 		printf '\033[0;32m[DONE]\033[0m %s converged. Next, in order:\n' "$$name"; \
 		printf '  make remote INSTANCE=%s      # refreshes the SSM port forward; blocks until interrupted\n' "$$name"; \
 		printf '  make build INSTANCE=%s\n' "$$name"; \
@@ -695,8 +696,24 @@ cert-client:
 cert-publish:
 	@INSTANCE="$(INSTANCE)" $(CERTS_SH) publish
 
+# Readiness poll before cert-install: a freshly applied instance's SSM
+# agent answers before user-data has finished installing the rootless
+# daemon, and the install SSM command then fails on a dockerd that does not
+# exist yet. This waits (readiness detection, never a fixed sleep) until
+# both EC2 status checks report Ok for the instance the id store names,
+# polling at the same cadence instance_ops uses for power transitions.
 cert-install:
-	@INSTANCE="$(INSTANCE)" $(CERTS_SH) install
+	@set -euo pipefail; \
+	id=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-status "$(INSTANCE)" --json | python3 -c "import json,sys; print(json.loads(sys.stdin.read())['recorded_id'] or '')"); \
+	[ -n "$$id" ] || { printf '\033[0;31m[ERROR]\033[0m no EC2 instance id is recorded for instance '%s'. Link it first: make instance-link INSTANCE=<name>\n' "$(INSTANCE)" >&2; exit 2; }; \
+	ok=0; \
+	for i in $$(seq 1 60); do \
+		state=$$(aws ec2 describe-instance-status --instance-ids "$$id" --include-all-instances --query 'InstanceStatuses[0].[SystemStatus.Status,InstanceStatus.Status]' --output text 2>/dev/null || true); \
+		[ "$$state" = "ok	ok" ] && { ok=1; break; }; \
+		sleep 5; \
+	done; \
+	[ "$$ok" = "1" ] || { printf '\033[0;31m[ERROR]\033[0m %s: EC2 status checks did not reach ok within the poll window (last: %s)\n' "$(INSTANCE)" "$$state" >&2; exit 1; }; \
+	INSTANCE="$(INSTANCE)" $(CERTS_SH) install
 
 proxy-start:
 	@$(PROXY_ENV) $(PROXY_SH) start

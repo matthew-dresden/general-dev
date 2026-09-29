@@ -5,6 +5,7 @@
   "share": "disabled",
   "autoupdate": true,
   "enabled_providers": ["zai-coding-plan"],
+  "permission": "allow",
   "provider": {
     "zai-coding-plan": {
       "options": {

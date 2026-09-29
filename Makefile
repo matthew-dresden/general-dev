@@ -26,6 +26,17 @@ LOCAL_CONTEXT = $(shell source $(CONFIG) && echo $$LOCAL_DOCKER_CONTEXT)
 REMOTE_CONTEXT = $(shell source $(CONFIG) && echo $$REMOTE_DOCKER_CONTEXT)
 
 UVX ?= uvx
+# Every `uv run` this Makefile performs (PYTEST, and the hooks that exec it)
+# must keep its virtual environment OUTSIDE the repository. The workspace
+# directory is bind-mounted into the devcontainer as-is, and a host-OS
+# `.venv` inside it is what the container's Python/Ruff extensions resolve
+# as the workspace interpreter -- its symlinks point at a macOS Python that
+# does not exist in the Linux container, so every window open logs
+# `spawn .venv/bin/python ENOENT` before falling back to the bundled tools.
+# Redirecting uv's project environment removes the cause instead of
+# suppressing the symptom; a developer who already exports their own
+# UV_PROJECT_ENVIRONMENT keeps it.
+export UV_PROJECT_ENVIRONMENT ?= $(HOME)/.venvs/$(notdir $(CURDIR))
 MARKDOWN_LINT ?= $(UVX) pymarkdownlnt --config .pymarkdown.json
 SPELL_LINT ?= $(UVX) codespell --builtin clear,rare,en-GB_to_en-US
 SHELL_LINT ?= $(UVX) --from shellcheck-py shellcheck

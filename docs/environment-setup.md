@@ -297,6 +297,16 @@ deliver the same fragments to the EC2 engine's container.
 
 ## Troubleshooting
 
+**Ruff or Python logs `spawn .venv/bin/python ENOENT`.** Symptom: the
+container's Ruff log shows the error and falls back to its bundled binary.
+Cause: a host-OS virtual environment created inside the workspace -- the
+directory is bind-mounted into the Linux container as-is, and the
+extensions resolve `.venv/bin/python` whose symlinks point at the macOS
+Python. The repository's make targets already redirect uv's project
+environment outside the workspace (`UV_PROJECT_ENVIRONMENT` in the
+Makefile), so this only happens after a bare `uv run` in the repository
+root. Fix: delete the `.venv` directory and use the make targets.
+
 **An AWS credential expired.** Symptom: opening a shell prints
 `notice: <NAME> expired; refresh with: make push-creds` on stderr, and the
 AWS variables are absent from that shell (the fragment's guard exports

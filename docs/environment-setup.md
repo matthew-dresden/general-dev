@@ -430,6 +430,36 @@ already aimed at the named engine and nothing needs switching. For the same
 reason, a run that names two different engines (`INSTANCE=a ENGINE=b`) is
 refused before any work happens.
 
+## Agent skills
+
+The steps above reach a human through make; the same surface reaches an
+AI agent through the `gd-` skill roster shipped in this checkout. Every
+skill lives in one canonical place, `.agents/skills/<name>/SKILL.md`,
+prefixed `gd-` so the names are agent-agnostic, and drives the same
+targets this runbook states -- asking for what it needs, verifying each
+step, and refusing to guess. The roster, its families and its coverage
+guarantee are [skills.md](skills.md).
+
+Inside this checkout both supported agents already see the roster:
+opencode reads `.agents/skills` natively, and Claude Code reads it
+through the plugin's tracked `skills/` symlink -- nothing to install. To
+reach the roster from an agent launched outside this checkout, wire it
+once on this Mac:
+
+```sh
+make skills-install                            # both agents, global scope
+make skills-install AGENT=opencode             # opencode only
+make skills-install AGENT=claude SCOPE=global  # Claude Code, global scope
+```
+
+`SCOPE=global` (the default) creates one symlink named
+`general-dev-skills` in the agent's user-level skill directory, pointing
+at this checkout. `make skills-remove` deletes only a link resolving
+inside this repository, so your personal skills are never touched, and
+`make skills-list` reports the state per agent and scope. The project
+and runtime scopes are described with the full AGENT x SCOPE matrix in
+[skills.md](skills.md)'s "Installing for agents" section.
+
 ## Troubleshooting
 
 **Ruff or Python logs `spawn .venv/bin/python ENOENT`.** Symptom: the

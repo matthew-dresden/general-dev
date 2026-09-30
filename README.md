@@ -46,9 +46,11 @@ does now. The identifiers match Section 0 of the platform specification.
 | `remote-instances/` | One Terragrunt deployment per remote engine, scaffolded by `make instance-init`; see its [README](remote-instances/README.md) |
 | `.devcontainer/nix-family-os/`, `wsl-family-os/` | Host-side proxy (tinyproxy) helpers for local mode |
 | `repos/` | Where project repositories are cloned. Only its `.gitkeep` is tracked |
+| `.agents/skills/` | Canonical agent-agnostic skills home (roster prefixed `gd-`); wired into an agent on this Mac by the `skills-*` make targets |
 | `.vscode/settings.json` | Workspace git-repo detection (nested clones) |
 | `docs/devcontainer.md` | Deep dive: setup flow, secrets, cdevcontainer contract |
 | `docs/environment-setup.md` | Ordered runbook: fresh machine to verified container, one verification per step |
+| `docs/skills.md` | The skill roster: families, flows, coverage guarantee, and installing it for an agent |
 | `CLAUDE.md` | Engineering standards for AI-assisted work in this repo |
 
 ## Quick start, local
@@ -252,6 +254,12 @@ Every project gets its own container + volume on the shared engine.
   Flash; its config still injects the key through `{env:ZAI_API_KEY}`, and the
   variable itself is supplied by the hostcreds startup block from a
   `ZAI_API_KEY` manifest entry -- never committed, never in `shell.env`.
+- The skills suite: `make skills-install`, `make skills-remove` and
+  `make skills-list` wire, unwire and report this repo's `.agents/skills`
+  roster in an agent on this Mac, selected by `AGENT=opencode|claude|both`
+  and `SCOPE=global|project|runtime` -- `make skills-install AGENT=claude
+  SCOPE=global`, for instance, symlinks the roster into `~/.claude/skills`.
+  Symlinks, never copies; see [docs/skills.md](docs/skills.md).
 - `make verify-container` re-checks the pushed credentials inside the
   container: fragment modes, the startup block, silent shell startup, and
   git and aws reachability for whichever sources the manifest names.

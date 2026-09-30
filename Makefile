@@ -196,7 +196,8 @@ PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
 .PHONY: help connect disconnect status exec shell start stop restart rename check build push-creds creds-init verify-container clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-workspace lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
-        keybindings validate test cert-status list-instances instance-init instance-plan instance-deploy instance-status instance-stop instance-start         instance-destroy instance-link \
+        keybindings validate test cert-status list-instances instance-init instance-plan instance-deploy instance-status instance-stop instance-start instance-destroy instance-link \
+        connect-status connect-stop connect-refresh connect-list \
         skills-install skills-remove skills-list
 
 # The help surface. Every two-column row (target, scope, description) renders
@@ -261,8 +262,12 @@ help:
 	row "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."; \
 	row "make cert-status"      "host"   "Client and CA expiry per instance."; \
 	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."; \
-	row "make connect"          "remote" "What 'make remote' calls. Opens the forward for INSTANCE=<name> (or ENGINE=<name>); re-run after a reboot, after sleep, or when SSO expires."; \
-	row "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)), refreshing the SSM port forward first. INSTANCE=<name> targets that instance."; \
+	row "make connect"          "remote" "Open the SSM forward as a background daemon; returns once docker answers through it. INSTANCE=<name> (or ENGINE=<name>); re-run to refresh."; \
+	row "make connect-status"   "host"   "Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1"; \
+	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \
+	row "make connect-refresh"  "host"   "Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1"; \
+	row "make connect-list"     "host"   "Every instance's forward: pid, port, listening or not."; \
+	row "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)): ensures the SSM forward in the background, then switches docker. INSTANCE=<name> targets that instance."; \
 	note "BUILD" "every target blocks until the container is up and exits non-zero if anything fails"; \
 	row "make build"            "both"   "Create the container for the active backend. Refuses if one already exists."; \
 	row "make rebuild"          "both"   "clean, then build. Prerequisites are checked before anything is destroyed."; \
@@ -318,7 +323,8 @@ help:
 	@printf '\n  %s\n' "Every target checks what it needs and fails with the command that installs it."
 	@printf '\n'
 
-# Opens the SSM port forward. The instance it opens one for: INSTANCE when
+# Opens the SSM port forward as a detached daemon and returns once the
+# connection is confirmed. The instance it opens one for: INSTANCE when
 # given, else ENGINE when it names an instance, else none -- the resolver's
 # default, addressed through the parse-time config values exactly as before.
 # A named target is resolved here through the same lib.sh resolver every
@@ -328,7 +334,11 @@ help:
 # otherwise: the variable was accepted and ignored, and the forward for
 # whatever instance the resolver defaulted to opened regardless of what was
 # asked for. INSTANCE and ENGINE naming different engines is refused by the
-# resolver's own guard before anything opens.
+# resolver's own guard before anything opens. The daemon is managed by
+# devcontainer_config.forwards (spawn, readiness poll, record); this recipe
+# only resolves WHICH instance and hands the resolved values over. The
+# lifecycle companions: connect-status, connect-stop, connect-refresh and
+# connect-list.
 connect:
 	@set -euo pipefail; \
 	$(PROXY_ENV) \
@@ -346,17 +356,60 @@ connect:
 			printf '        Link it first: make instance-link INSTANCE=%s\n' "$$target" >&2; \
 			exit 1; \
 		fi; \
-		set -- --instance-id "$$REMOTE_INSTANCE_ID" --context "$$ctx"; \
 	else \
-		set -- --instance-id "$$REMOTE_INSTANCE_ID" --context "$(REMOTE_CONTEXT)"; \
+		[ -n "$${REMOTE_INSTANCE_ID:-}" ] || { \
+			printf '\033[0;31m[ERROR]\033[0m no instance is selected and no default id is recorded\n' >&2; \
+			printf '        Name one: make connect INSTANCE=<instance-name>\n' >&2; \
+			exit 1; \
+		}; \
+		ctx="$(REMOTE_CONTEXT)"; \
 	fi; \
 	case "$$transport" in \
-		ssm) PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.transport connect \
-			"$$@" --profile "$$REMOTE_AWS_PROFILE" --region "$$REMOTE_AWS_REGION" ;; \
+		ssm) PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
+			--instance-id "$$REMOTE_INSTANCE_ID" --context "$$ctx" \
+			--profile "$$REMOTE_AWS_PROFILE" --region "$$REMOTE_AWS_REGION" ;; \
 		*) printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT="%s" is not recognized.\n' "$$transport" >&2; \
 		   printf '        Accepted value: ssm. The ssh transport was removed at cutover.\n' >&2; \
 		   exit 1 ;; \
 	esac
+
+# The forward daemon's lifecycle, one instance at a time or every configured
+# one with ALL=1, each a thin loop over the devcontainer_config.forwards
+# subcommands of the same concern (the engine is that module, the same shape
+# as the instance-* layer). status exits non-zero when a forward is down, so
+# automation can gate on it; stop verifies the forwarded port actually
+# closed before reporting; refresh re-runs the recorded command, for an
+# expired SSO session or a dropped tunnel; list renders every instance's
+# forward state and is the one no-argument member.
+connect-status:
+	@$(call INSTANCE_OR_ALL_GUARD,connect-status)
+	@set -euo pipefail; \
+	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
+	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; no forwards to report.\n'; exit 0; }; \
+	while IFS= read -r name; do \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards status "$$name" || exit 1; \
+	done <<< "$$names"
+
+connect-stop:
+	@$(call INSTANCE_OR_ALL_GUARD,connect-stop)
+	@set -euo pipefail; \
+	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
+	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; no forwards to stop.\n'; exit 0; }; \
+	while IFS= read -r name; do \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards stop "$$name" || exit 1; \
+	done <<< "$$names"
+
+connect-refresh:
+	@$(call INSTANCE_OR_ALL_GUARD,connect-refresh)
+	@set -euo pipefail; \
+	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
+	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; no forwards to refresh.\n'; exit 0; }; \
+	while IFS= read -r name; do \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards refresh "$$name" || exit 1; \
+	done <<< "$$names"
+
+connect-list:
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards list
 
 disconnect:
 	@$(call ENGINE_CONTEXT_SWITCH_REFUSAL,disconnect)
@@ -449,11 +502,13 @@ local: disconnect
 # prerequisite list any more; it guards, then delegates through a sub-make.
 # INSTANCE needs no explicit hand-off: a command-line definition travels to
 # sub-makes inside MAKEFLAGS, and the environment spelling travels in the
-# recipe's own environment -- both spellings reach connect's recipe either way.
+# recipe's own environment -- both spellings reach connect's recipe either
+# way. connect opens the forward as a background daemon and returns once the
+# docker context answers through it; remote then switches the context.
 remote:
 	@$(call ENGINE_CONTEXT_SWITCH_REFUSAL,remote)
 	@$(MAKE) --no-print-directory connect
-	@printf '\033[0;32m[DONE]\033[0m targeting the remote engine, "make build" clones into a volume\n'
+	@printf '\033[0;32m[DONE]\033[0m targeting the remote engine, the forward runs in the background, "make build" clones into a volume\n'
 
 reopen:
 	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) reopen
@@ -668,6 +723,8 @@ instance-destroy:
 	while IFS= read -r name; do \
 	( \
 		printf '\033[0;36m[DESTROY]\033[0m %s: the EC2 instance and its volumes are deleted\n' "$$name"; \
+		printf '  stopping any open forward first\n'; \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards stop "$$name" || exit 1; \
 		ctx=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.docker_context(repo.find_root(Path.cwd()), '$$name'))"); \
 		docker_timeout="$${DOCKER_CHECK_TIMEOUT_SECONDS:-10}"; \
 		timer=""; \

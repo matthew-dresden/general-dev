@@ -145,8 +145,8 @@ make instance-init INSTANCE=<project>    # scaffold remote-instances/<project>/t
                                          # sizes, availability zone, tags
 make instance-deploy INSTANCE=<project>  # converge: provision, record the EC2 id, trust
                                          # chain where missing, push secrets
-make remote INSTANCE=<project>           # open the SSM port forward, point docker at the
-                                         # instance (blocks until interrupted)
+make remote INSTANCE=<project>           # open the SSM forward as a background daemon,
+                                         # point docker at the instance, return
 make build INSTANCE=<project>            # clone into a volume on the engine, build, run postCreate
 make exec INSTANCE=<project>             # a shell inside the container
 ```

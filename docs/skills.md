@@ -64,6 +64,68 @@ prose.
 | gd-quality | `gd-quality` (cross-cutting) -- asks nothing, reads the sub-target set `make validate` invokes from the Makefile itself rather than a copy embedded in the skill, interprets each failing sub-target's root cause and fixes it, never suppresses a finding (no bypass annotation, no linter-ignore entry, no raised threshold, no narrowed `LINT_EXCLUDES` or `SPELL_FILES`), stops and asks for human approval on a suspected false positive, hands anything else it cannot fix to `gd-env-doctor` or the operator, and ends by reporting the exit code of a fresh `make validate` run |
 | gd-help | `gd-help` (cross-cutting) -- the roster index: maps the seven families, names the one skill to invoke for a stated goal, and points at the make targets each family drives |
 
+## Installing for agents
+
+The roster above serves any agent you run on this Mac; wiring one is the
+`make skills-install` family, driven interactively by `gd-skills-install`
+(undone by `gd-skills-remove`, recorded in an agent's own configuration by
+`gd-skills-scope`). Two selectors form the matrix, both defaulted by the
+Makefile (`AGENT=both`, `SCOPE=global`) and validated with their accepted
+sets named on any other value:
+
+| AGENT | SCOPE=global | SCOPE=project | SCOPE=runtime |
+|---|---|---|---|
+| opencode | symlink `general-dev-skills` in `~/.config/opencode/skills` | native -- opencode reads `.agents/skills` directly, nothing to wire | prints the `OPENCODE_CONFIG` one-shot |
+| claude | symlink `general-dev-skills` in `~/.claude/skills` | verifies the tracked `.claude/plugins/devcontainer/skills` relative symlink, wiring it if absent | prints the `claude --settings` one-shot |
+| both | both rows above | both rows above | both rows above |
+
+Every cell is a native-Mac operation touching no devcontainer: a
+devcontainer is not an install target, because the roster lives in the
+checkout that builds the container, not in any image.
+
+The global scope's one symlink points at this checkout's `.agents/skills`
+with an absolute target -- fine for a Mac-personal install, and recorded
+by the install output and `make skills-list`. Removal is safe next to
+your own skills by construction: `make skills-remove` deletes only a
+symlink whose resolved target is this repository's skills home. A
+personal skill of yours (a real directory, or a link resolving anywhere
+else) is named in a refusal and left untouched, and install likewise
+refuses to replace an existing `general-dev-skills` entry it did not
+create. Nothing outside the one named path is ever addressed.
+
+The project scope needs no wiring on the opencode side, because
+`.agents/skills` is the checkout opencode runs in -- it is read natively.
+Claude Code's route is the tracked relative symlink
+`.claude/plugins/devcontainer/skills` to `../../../.agents/skills`, which
+project scope verifies and, if absent, wires with exactly that relative
+target. `make skills-remove` deliberately does not undo it: the adapters
+are versioned repository content, so unwiring is a git change to review,
+not an uninstall.
+
+The runtime scope changes no filesystem state: it prints a one-shot
+incantation for launching the agent against this checkout from outside
+it, and never executes it -- the operator decides:
+
+```sh
+make skills-install AGENT=opencode SCOPE=runtime
+```
+
+The opencode incantation carries one caveat worth knowing: an
+`OPENCODE_CONFIG` override replaces the project config rather than
+merging with it, so the printed JSON embeds the provider/model block read
+from `.devcontainer/opencode.json` at generation time plus the
+`skills.paths` override -- a bare skills-only file would launch opencode
+with no provider at all. The Claude Code incantation is a `--settings`
+one-shot enabling this checkout's plugin marketplace path, printed only
+when the installed build advertises that flag (decided from
+`claude --help` at run time); a build without it gets an explicit
+unsupported message naming the manual fallback instead -- install
+globally with `make skills-install AGENT=claude SCOPE=global`, or
+register the marketplace in `~/.claude/settings.json` by hand.
+
+For where this wiring sits in the fresh-machine sequence, see
+[environment-setup.md](environment-setup.md).
+
 ## Flows
 
 Some recurring developer actions are not a single make target but a named

@@ -15,7 +15,9 @@ includes, and an `inputs` block carrying only what genuinely differs for the
 one deployment. It never runs Terragrunt -- applying the file is
 `make instance-deploy`'s job -- and it never touches the network beyond the
 one SSM read that pins the default AMI (skipped entirely when the caller
-supplies one).
+supplies one). Writing the directory also appends `remote-instances/<name>/`
+to the repository `.gitignore`, so the scaffold stays invisible to git
+status until a developer promotes it deliberately by deleting that line.
 
 `link_id`/`unlink_id`/`recorded_id` are the per-instance id store: a file
 named `instance-id` inside the instance's certificate-material directory
@@ -122,6 +124,14 @@ SSM_ONLINE_STATUS = "Online"
 # The `--query` that turns one `aws ec2 describe-instances` call straight
 # into the instance's `State.Name` text.
 _EC2_STATE_QUERY = "Reservations[0].Instances[0].State.Name"
+
+# The committed `.gitignore` rule every scaffold's per-instance entry is
+# appended below: the blanket lock-file ignore marks the per-instance block,
+# and each new scaffold's own directory entry lands under it -- and under
+# any earlier scaffold's entry -- so the entries stay contiguous and the
+# rest of the file is untouched. Derived from `instances.INSTANCES_DIR_NAME`
+# so the anchor can never drift from the directory this module addresses.
+GITIGNORE_SCAFFOLD_ANCHOR = f"{instances.INSTANCES_DIR_NAME}/*/.terraform.lock.hcl"
 
 
 class InstanceOpsError(RuntimeError):
@@ -487,6 +497,65 @@ def _render_terragrunt_hcl(
     return "\n".join(lines) + "\n"
 
 
+def _append_scaffold_ignore(root: Path, name: str) -> Path:
+    """Hide `remote-instances/<name>/` from git by appending it to `.gitignore`.
+
+    The entry is appended in the same operation that writes the scaffold
+    directory, so the generated `terragrunt.hcl` -- and the
+    `.terraform.lock.hcl` a first `terragrunt init` creates -- never show up
+    in `git status` and cannot be committed by accident. Idempotent: an
+    entry already present (a scaffold re-created after its directory was
+    removed) is left alone rather than duplicated. The insert point is below
+    the committed `.terraform.lock.hcl` blanket rule -- the per-instance
+    block's anchor -- and below any earlier scaffold's entry, so the
+    per-instance entries stay contiguous and the rest of the file is
+    untouched. Promoting a scaffold into tracked scope is the developer's
+    own deliberate edit: delete the appended line, then commit the
+    directory.
+
+    Returns:
+        The `.gitignore` path the entry was (or already was) recorded in.
+
+    Raises:
+        ScaffoldError: `.gitignore` is missing, or it carries no anchor
+            rule -- this checkout predates the per-instance scaffold block,
+            and guessing an insert point would be a fallback, not a
+            behavior. The message names what to update.
+    """
+    gitignore = root / ".gitignore"
+    entry = f"{instances.INSTANCES_DIR_NAME}/{name}/"
+    try:
+        text = gitignore.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ScaffoldError(
+            f"ERROR: no .gitignore at {gitignore}\n"
+            f"A scaffold must hide {entry} from git status in the same "
+            "operation that writes it, and there is no .gitignore to append "
+            "to.\n"
+            "Restore this repository's committed .gitignore, then retry."
+        ) from exc
+    lines = text.splitlines()
+    if any(line.strip() == entry for line in lines):
+        return gitignore
+    try:
+        insert_at = lines.index(GITIGNORE_SCAFFOLD_ANCHOR) + 1
+    except ValueError as exc:
+        raise ScaffoldError(
+            f"ERROR: {gitignore} carries no {GITIGNORE_SCAFFOLD_ANCHOR} rule\n"
+            "Per-instance scaffold entries are appended below that committed "
+            "blanket rule, and this checkout's .gitignore predates the "
+            "per-instance scaffold block.\n"
+            "Update the checkout's .gitignore to the current committed one, "
+            "then retry."
+        ) from exc
+    per_instance_entry = re.compile(rf"^{re.escape(instances.INSTANCES_DIR_NAME)}/[^/]+/$")
+    while insert_at < len(lines) and per_instance_entry.match(lines[insert_at]):
+        insert_at += 1
+    lines.insert(insert_at, entry)
+    gitignore.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return gitignore
+
+
 def scaffold(
     root: Path, name: str, *, region: str, ami: str | None, runner: Runner
 ) -> ScaffoldResult:
@@ -498,12 +567,19 @@ def scaffold(
     default AMI is Canonical's current Ubuntu 24.04 arm64 image, resolved
     through SSM via `runner` unless the caller passes `ami` explicitly.
     Never runs Terragrunt: applying the file is `make instance-deploy`'s
-    job, and the returned guidance says so.
+    job, and the returned guidance says so. Writing the directory also
+    appends `remote-instances/<name>/` to the repository `.gitignore`
+    (`_append_scaffold_ignore`), so the scaffold never shows up in
+    `git status`; the gitignore append runs before anything is created, so a
+    checkout whose `.gitignore` predates the per-instance block is refused
+    with nothing written.
 
     Raises:
         ScaffoldError: the name is invalid, the context name would be too
-            long, the directory already exists, or the default AMI could
-            not be resolved (naming the manual AMI= override).
+            long, the directory already exists, the default AMI could
+            not be resolved (naming the manual AMI= override), or
+            `.gitignore` is missing or lacks the per-instance scaffold
+            block's anchor rule (naming what to update).
     """
     try:
         instances.validate_name(name)
@@ -518,6 +594,7 @@ def scaffold(
 
     resolved_ami = ami if ami is not None else _default_ami(runner, region)
     vpc_cidr, subnet_cidr = _allocate_cidrs(root)
+    _append_scaffold_ignore(root, name)
     hcl_path = directory / "terragrunt.hcl"
     directory.mkdir(parents=True)
     hcl_path.write_text(

@@ -33,14 +33,15 @@
 # .claude/plugins/devcontainer/skills is a relative symlink into it, not a
 # copy, so exactly one copy of every skill body exists.
 !/.agents/
-# The Terraform module (provider/aws) and the per-instance Terragrunt
-# deployments (remote-instances/<name>/) (E5, spec Sections 5.6, 5.7) are
-# allowlisted ahead of their first commit, so that commit is a normal one
-# instead of one that also has to reason about why its own files are
-# invisible to git. Both are directory-only re-includes; see
-# tests/gitignore_check.py for why a `git check-ignore` query for either
-# needs the directory form only while nothing exists at that path for git
-# to stat.
+# The Terraform module (provider/aws) and the shared Terragrunt layer under
+# remote-instances/ (its README, root.hcl and _envcommon/) (E5, spec
+# Sections 5.6, 5.7) are tracked, while a per-instance deployment scaffold
+# is not: `make instance-init` appends remote-instances/<name>/ to this
+# file, keeping every scaffold local to its checkout until the developer
+# promotes it deliberately by deleting that appended line. Both re-includes
+# are directory-only; see tests/gitignore_check.py for why a `git
+# check-ignore` query for either needs the directory form only while
+# nothing exists at that path for git to stat.
 !/provider/
 !/remote-instances/
 # The folder is tracked so it exists in a fresh clone; what you clone into
@@ -79,6 +80,9 @@ __pycache__/
 
 # Terragrunt download and module caches under per-instance directories.
 remote-instances/*/.terragrunt-cache/
+
+# Per-instance scaffolds are local-only; promote deliberately by moving the directory into tracked scope.
+remote-instances/*/.terraform.lock.hcl
 
 # Host-side uv project environments must never live in this bind-mounted
 # workspace (see Makefile UV_PROJECT_ENVIRONMENT); ignored in case a bare

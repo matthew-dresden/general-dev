@@ -214,9 +214,15 @@ PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
 # command row).
 help:
 	@printf '\n\033[1m%s\033[0m devcontainer control.   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
-	@printf 'Local engine builds bind-mount this folder. The remote engine clones the repo into a volume on EC2.\n'
-	@printf 'Second column: \033[1mboth\033[0m = works on either engine via the active context, \033[1mlocal\033[0m/\033[1mremote\033[0m = that engine only,\n'
-	@printf '\033[1mhost\033[0m = runs on this machine and touches no engine at all.\n'
+	@printf '\033[1mEngines\033[0m   the two backends a target can act on:\n'
+	@printf '          \033[1mlocal\033[0m   this machine'"'"'s engine; builds bind-mount this folder\n'
+	@printf '          \033[1mremote\033[0m  an EC2 engine; the repo is cloned into a volume on it\n'
+	@printf '\033[1mScope\033[0m     the second column of every row:\n'
+	@printf '          \033[1mboth\033[0m    works on either engine via the active context\n'
+	@printf '          \033[1mlocal\033[0m   that engine only\n'
+	@printf '          \033[1mremote\033[0m  that engine only\n'
+	@printf '          \033[1mhost\033[0m    runs on this machine and touches no engine at all\n'
+	@printf '\n  \033[1m%-23s\033[0m %-7s %s\n' "TARGET" "SCOPE" "WHAT IT DOES"
 	@set -euo pipefail; \
 	row() { \
 		if [ "$$((34 + $${#3}))" -le 180 ]; then \
@@ -297,6 +303,7 @@ help:
 	row "SKIP_SECRETS_CHECK=1"  ""       "Do not compare shell.env against Parameter Store, and do not publish it."; \
 	row "NO_CACHE=1"            ""       "What the no-cache targets set. Works with build and rebuild directly."
 	@printf '\n\033[1mPREREQUISITES\033[0m\n'
+	@printf '  \033[1m%-23s\033[0m %s\n' "TARGETS" "REQUIREMENTS"
 	@printf '  %-23s %s\n' "container targets"     "docker"
 	@printf '  %-23s %s\n' "remote engine"         "aws, session-manager-plugin, and the instance id recorded by instance-deploy (make instance-link)"
 	@printf '  %-23s %s\n' "build and rebuild"     "devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli"

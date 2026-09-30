@@ -1,8 +1,15 @@
 
 <REPO_DIR> devcontainer control.   Backend follows the active docker context.
-Local engine builds bind-mount this folder. The remote engine clones the repo into a volume on EC2.
-Second column: both = works on either engine via the active context, local/remote = that engine only,
-host = runs on this machine and touches no engine at all.
+Engines   the two backends a target can act on:
+          local   this machine's engine; builds bind-mount this folder
+          remote  an EC2 engine; the repo is cloned into a volume on it
+Scope     the second column of every row:
+          both    works on either engine via the active context
+          local   that engine only
+          remote  that engine only
+          host    runs on this machine and touches no engine at all
+
+  TARGET                  SCOPE   WHAT IT DOES
 
 START HERE
   make up                 both    Get working from any state: refreshes the tunnel (remote), builds or starts as needed, then opens VS Code.
@@ -97,6 +104,7 @@ OPTIONS
   NO_CACHE=1                      What the no-cache targets set. Works with build and rebuild directly.
 
 PREREQUISITES
+  TARGETS                 REQUIREMENTS
   container targets       docker
   remote engine           aws, session-manager-plugin, and the instance id recorded by instance-deploy (make instance-link)
   build and rebuild       devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli

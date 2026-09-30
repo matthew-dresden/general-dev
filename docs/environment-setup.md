@@ -424,7 +424,7 @@ terminal can run `make build ENGINE=local` while another runs
 `make build ENGINE=acme`, and a third drives a second instance. Each
 remote engine needs its forward open first: `make remote INSTANCE=<name>`
 opens it as a background daemon and returns once docker answers through
-it, and later `make connect ENGINE=<name>` re-opens a single forward
+it, and later `make connect-start ENGINE=<name>` re-opens a single forward
 without touching what other terminals see. The forward daemon's lifecycle
 has its own targets: `make connect-status INSTANCE=<name>` (or `ALL=1`)
 reports pid, port and whether the tunnel answers, `make connect-stop`
@@ -537,7 +537,7 @@ one instance, `make instance-destroy INSTANCE=<name>`, which needs no
 confirmation.
 
 **A remote target reports the engine unreachable, or no recorded id.**
-Symptom: `make connect` or any docker call against the remote context fails
+Symptom: `make connect-start` or any docker call against the remote context fails
 with a connection diagnosis, or names a missing recorded id. Cause: the SSM
 port forward is not open -- it lives in the terminal that ran
 `make remote INSTANCE=<name>` and dies when that terminal is interrupted,

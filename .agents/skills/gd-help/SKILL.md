@@ -21,7 +21,7 @@ members.
 
 | Family | Members | Drives |
 |---|---|---|
-| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-doctor` | `make init`, `make local` (and its `make disconnect`), `make remote`, `make connect`; the Section 4.2.1 check contract |
+| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-doctor` | `make init`, `make local` (and its `make disconnect`), `make remote`, `make connect-start`; the Section 4.2.1 check contract |
 | project- | `gd-project-onboard` | `make init`, `make keybindings` |
 | instance- | `gd-instance-create`, `gd-instance-fleet`, `gd-instance-list`, `gd-instance-destroy` | `make instance-init`, `make instance-plan`, `make instance-deploy`, `make instance-link`, `make list-instances`, `make instance-status`, `make instance-stop`, `make instance-start`, `make instance-destroy` |
 | container- | `gd-container-local`, `gd-container-remote`, `gd-container-verify`, `gd-container-lifecycle` | `make build`, `make start`, `make restart`, `make reopen`, `make status`, `make check`, `make clean`, `make rebuild`, `make rename` |

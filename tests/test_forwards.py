@@ -1,6 +1,6 @@
 """Tests for `devcontainer_config.forwards`, the detached forward lifecycle.
 
-`make connect` opens the SSM forward as a daemon and returns once the
+`make connect-start` opens the SSM forward as a daemon and returns once the
 transport announces readiness; `status`, `stop`, `refresh` and `list` manage
 the daemon from its per-instance record. These tests pin that contract
 hermetically: a fake spawner launches a stand-in child that writes whatever
@@ -505,7 +505,7 @@ def test_refresh_respawns_the_recorded_command_and_re_records(tmp_path: Path) ->
 
 
 def test_refresh_raises_naming_the_remedy_without_a_record(tmp_path: Path) -> None:
-    with pytest.raises(ForwardError, match="make connect"):
+    with pytest.raises(ForwardError, match="make connect-start"):
         forwards.refresh_forward("x", tmp_path, poll_clock=lambda _seconds: None)
 
 
@@ -567,11 +567,12 @@ def test_main_open_prints_the_message_and_exits_zero(
     assert "is open" in capsys.readouterr().out
 
 
-def test_main_status_exits_one_when_the_forward_is_down(
+def test_main_status_reports_any_state_as_a_success(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """A correct report -- even `no forward` -- is the outcome, not an error."""
     exit_code = forwards.main(["status", "x"])
-    assert exit_code == 1
+    assert exit_code == 0
     assert "no forward" in capsys.readouterr().out
 
 

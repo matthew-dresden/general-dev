@@ -642,7 +642,7 @@ daemon's API version -- which must be at least 1.44 for mTLS on a TCP
 listener with a rootless daemon (spec Section 6) -- and whether it reports
 running rootless.
 
-**One build path, and a selector kept for the next one.** `make connect`
+**One build path, and a selector kept for the next one.** `make connect-start`
 reads `DEVCONTAINER_TRANSPORT` from the environment
 (`docs/environment-files.md`) and dispatches on it. Since the cutover there is
 one accepted value, `ssm`, which is also the default; any other value, including

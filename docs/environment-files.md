@@ -407,7 +407,7 @@ error -- see `docs/devcontainer.md`'s "Transport" section.
 (E1-F3-S1-T1) is the docker-handshake probe `gd-instance-list`, `gd-env-setup-local` and
 `gd-env-setup-remote` share for their own, simpler "does the engine answer" check.
 
-`DEVCONTAINER_TRANSPORT` selects the transport for the `make connect` entry
+`DEVCONTAINER_TRANSPORT` selects the transport for the `make connect-start` entry
 point. Since the cutover there is one transport, so the selector has one
 accepted value, `ssm`, which is also the default. It is kept rather than
 removed because it is the seam a future transport is added at, and because a
@@ -438,7 +438,7 @@ to request the default; leave it unset instead.
 | `MATERIAL_INSTALL_TIMEOUT` | `300` | `transport.py`, read by `install_material` for the instance-side fetch and daemon start |
 | `PORT_PROBE_TIMEOUT` | `2` | `transport.py`, read by `_port_has_live_listener` for the loopback connect that decides whether a recorded port is genuinely occupied |
 | `DOCKER_HANDSHAKE_TIMEOUT` | `30` | `hostprobe.py`'s `read_positive_seconds`, the one place its name, default and validation are declared; `transport.py`'s `handshake` (E6-F2-S1-T2) calls the same function rather than declaring its own copy |
-| `DEVCONTAINER_TRANSPORT` | `ssm` | selector for `make connect`'s transport dispatch; both the Makefile's `connect` recipe and `transport.py`'s `resolve_transport` (used by the module's own `connect` subcommand) read and dispatch on it; `ssm` is the only accepted value, and `ssh` is rejected by name as removed at cutover |
+| `DEVCONTAINER_TRANSPORT` | `ssm` | selector for `make connect-start`'s transport dispatch; both the Makefile's `connect-start` recipe and `transport.py`'s `resolve_transport` (used by the module's own `connect` subcommand, which the forwards daemon runs) read and dispatch on it; `ssm` is the only accepted value, and `ssh` is rejected by name as removed at cutover |
 
 `DOCKER_TLS_PORT` is the port the rootless docker daemon on the instance
 listens on, `127.0.0.1`-only, behind a security group with zero ingress

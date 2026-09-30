@@ -316,9 +316,9 @@ rd_aws() { rd_run rd_aws_failed aws "$@"; }
 rd_engine_diagnosis() {
   local context="$1"
   # The forward-opening remedy must name the instance this run addresses:
-  # a bare `make connect` refreshes whichever instance the resolver defaults
+  # a bare `make connect-start` refreshes whichever instance the resolver defaults
   # to, which under ENGINE is not necessarily this one.
-  local forward_remedy="make connect"
+  local forward_remedy="make connect-start"
   if [ -n "${ENGINE:-}" ] && [ "$ENGINE" != "local" ]; then
     forward_remedy="make remote INSTANCE=${ENGINE}"
   fi
@@ -371,7 +371,7 @@ rd_docker_failed() {
         "$(rd_quote "$(env -u DOCKER_CONTEXT docker context ls --format '{{.Name}}' 2> /dev/null || printf 'none, docker could not list them')")" \
         "" \
         "Set REMOTE_DOCKER_CONTEXT or LOCAL_DOCKER_CONTEXT in shell.env to one of those," \
-        "or create the remote one: ${RD_BOLD}make connect${RD_RESET}"
+        "or create the remote one: ${RD_BOLD}make connect-start${RD_RESET}"
       ;;
     *'is already in use by container'*)
       subject="$(printf '%s' "$detail" | sed -n 's|.*container name "/\{0,1\}\([^"]*\)".*|\1|p')"

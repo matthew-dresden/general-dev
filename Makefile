@@ -262,7 +262,7 @@ help:
 	row "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."; \
 	row "make cert-status"      "host"   "Client and CA expiry per instance."; \
 	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."; \
-	row "make connect"          "remote" "Open the SSM forward as a background daemon; returns once docker answers through it. INSTANCE=<name> (or ENGINE=<name>); re-run to refresh."; \
+	row "make connect"          "remote" "Open the SSM forward as a background daemon; returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
 	row "make connect-status"   "host"   "Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1"; \
 	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \
 	row "make connect-refresh"  "host"   "Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1"; \

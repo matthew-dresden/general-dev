@@ -132,13 +132,13 @@ def _cert_status_recipe_body(makefile_text: str) -> str:
 
 
 def _connect_recipe_body(makefile_text: str) -> str:
-    """The recipe lines (tab-indented) that follow the `connect:` target header.
+    """The recipe lines (tab-indented) that follow the `connect-start:` target header.
 
-    E6-F2-S1-T4's own addition: the `connect` recipe now dispatches on
+    E6-F2-S1-T4's own addition: the `connect-start` recipe now dispatches on
     `DEVCONTAINER_TRANSPORT` instead of running `$(TUNNEL_SH)` unconditionally.
     """
-    match = re.search(r"^connect:.*\n((?:\t.*\n?)*)", makefile_text, re.MULTILINE)
-    assert match is not None, "no connect target found in Makefile"
+    match = re.search(r"^connect-start:.*\n((?:\t.*\n?)*)", makefile_text, re.MULTILINE)
+    assert match is not None, "no connect-start target found in Makefile"
     return match.group(1)
 
 
@@ -454,7 +454,7 @@ def test_cert_status_help_row_matches_the_two_roles_the_command_reports() -> Non
 # already responsible for -- never against invoking the ssm branch for real.
 # ---------------------------------------------------------------------------
 
-# `make connect` shells out with a bogus DEVCONTAINER_TRANSPORT value in a
+# `make connect-start` shells out with a bogus DEVCONTAINER_TRANSPORT value in a
 # real subprocess; bounded so a regression that makes the recipe hang (rather
 # than exit fast in its `*` branch) fails this test instead of the run.
 # Configurable per CLAUDE.md's no-hardcoded-timeouts rule; see
@@ -575,9 +575,9 @@ def test_connect_recipe_defaults_to_the_ssm_transport_when_unset() -> None:
     assert "ssh)" not in recipe, "the ssh branch must be gone from the case statement"
 
 
-def test_connect_recipe_rejects_an_unrecognized_transport() -> None:
+def test_connect_start_recipe_rejects_an_unrecognized_transport() -> None:
     """AC-FUNC-002 / AC-TEST-003: an unrecognized DEVCONTAINER_TRANSPORT value
-    makes `make connect` exit non-zero before any transport starts, printing
+    makes `make connect-start` exit non-zero before any transport starts, printing
     an ERROR line naming the variable, the offending value and the accepted
     values -- proved by actually running the dispatch, not only by inspecting
     the recipe's source text.
@@ -585,11 +585,11 @@ def test_connect_recipe_rejects_an_unrecognized_transport() -> None:
     env = dict(os.environ)
     env["DEVCONTAINER_TRANSPORT"] = "bogus-transport"
     result = _run_make(
-        "connect",
+        "connect-start",
         env=env,
         timeout_env_var=_CONNECT_REJECT_TEST_TIMEOUT_SECONDS_ENV_VAR,
     )
-    assert result.returncode != 0, "make connect must fail fast on an unrecognized transport"
+    assert result.returncode != 0, "make connect-start must fail fast on an unrecognized transport"
     assert "ERROR" in result.stderr
     assert "DEVCONTAINER_TRANSPORT" in result.stderr
     assert "bogus-transport" in result.stderr
@@ -891,7 +891,7 @@ def test_help_instances_section_carries_the_whole_surface_with_the_naming_rule()
         "make cert-install",
         "make cert-status",
         "make push-secrets",
-        "make connect",
+        "make connect-start",
         "make remote",
     )
     for row in moved_rows:
@@ -968,7 +968,7 @@ def test_help_row_helper_constants_match_the_helpline_module() -> None:
     """`row()`'s literal threshold and column widths equal helpline's geometry.
 
     The shell helper decides inline-versus-wrapped from its own literals (the
-    120-character description cap) and the module wraps from the same
+    180-character description cap) and the module wraps from the same
     geometry; reading both sides here is what keeps a change to one from
     silently outdating the other.
     """
@@ -1028,7 +1028,7 @@ def test_help_column_titles_pin_the_value_columns() -> None:
 # the Makefile source spells it (the $$ is make's escape for the shell's $).
 _REGION_GUARD_LINE = (
     ': "$${REMOTE_AWS_REGION:?REMOTE_AWS_REGION is required and has no default '
-    '(root.hcl names each state bucket from it). Set it with: '
+    "(root.hcl names each state bucket from it). Set it with: "
     'export REMOTE_AWS_REGION=<region>}"'
 )
 

@@ -49,21 +49,21 @@ def test_short_row_matches_the_recipe_printf_byte_for_byte() -> None:
     )
 
 
-def test_description_cap_boundary_inline_at_120_wraps_at_121() -> None:
-    """A 120-character description stays inline; one more character wraps.
+def test_description_cap_boundary_inline_at_180_wraps_at_181() -> None:
+    """A 180-character description stays inline; one more character wraps.
 
-    The 121-character side is two words (`"a" * 120 + " b"`), because a
-    single 121-character word is unsplittable and refused outright -- the
+    The 181-character side is two words (`"a" * 180 + " b"`), because a
+    single 181-character word is unsplittable and refused outright -- the
     next test pins that refusal.
     """
-    inline = render_row("make x", "both", "a" * 120)
-    assert inline == _printf_equivalent("make x", "both", "a" * 120)
+    inline = render_row("make x", "both", "a" * 180)
+    assert inline == _printf_equivalent("make x", "both", "a" * 180)
     assert len(inline.splitlines()) == 1
 
-    wrapped = render_row("make x", "both", "a" * 120 + " b")
+    wrapped = render_row("make x", "both", "a" * 180 + " b")
     lines = wrapped.splitlines()
     assert len(lines) == 3
-    assert lines[1] == " " * helpline.INSTRUCTION_COLUMN + "a" * 120
+    assert lines[1] == " " * helpline.INSTRUCTION_COLUMN + "a" * 180
     assert lines[2] == " " * helpline.INSTRUCTION_COLUMN + "b"
     assert all(
         len(line) <= helpline.INSTRUCTION_COLUMN + helpline.DESCRIPTION_MAX for line in lines
@@ -72,7 +72,7 @@ def test_description_cap_boundary_inline_at_120_wraps_at_121() -> None:
 
 def test_unsplittable_word_longer_than_the_budget_raises_naming_it() -> None:
     """A single word longer than the description budget fails fast, naming it."""
-    long_word = "w" * 121
+    long_word = "w" * 181
     with pytest.raises(HelpLineError) as exc_info:
         render_row("make x", "both", f"starts fine {long_word} then more")
     message = str(exc_info.value)
@@ -121,18 +121,18 @@ def test_wrapped_row_with_scope_keeps_both_columns_on_line_one() -> None:
 
 
 def test_wrapping_packs_whole_words_greedily_across_continuation_lines() -> None:
-    """Ten-character words pack 11 per line (11*11-1 == 120), then spill two."""
-    description = " ".join("abcdefghij" for _ in range(13))
+    """Ten-character words pack 16 per line (16*11-1 == 175), then spill two."""
+    description = " ".join("abcdefghij" for _ in range(18))
     rendered = render_row("make x", "host", description)
     lines = rendered.splitlines()
-    assert lines[1] == " " * helpline.INSTRUCTION_COLUMN + " ".join(["abcdefghij"] * 11)
+    assert lines[1] == " " * helpline.INSTRUCTION_COLUMN + " ".join(["abcdefghij"] * 16)
     assert lines[2] == " " * helpline.INSTRUCTION_COLUMN + "abcdefghij abcdefghij"
     assert len(lines) == 3
 
 
 def test_rendered_lines_each_end_with_one_newline() -> None:
     """The renderer returns newline-terminated lines and nothing else."""
-    for description in ("short", "a" * 120 + " " + "b" * 40):
+    for description in ("short", "a" * 180 + " " + "b" * 40):
         rendered = render_row("make x", "both", description)
         assert rendered.endswith("\n")
         assert not rendered.endswith("\n\n")
@@ -162,7 +162,7 @@ def test_main_rejects_any_argument_count_other_than_three(
 
 def test_module_constants_carry_the_documented_geometry() -> None:
     """The geometry constants hold the values the help recipe's columns define."""
-    assert helpline.DESCRIPTION_MAX == 120
+    assert helpline.DESCRIPTION_MAX == 180
     assert helpline.INSTRUCTION_COLUMN == 34
     assert helpline.TARGET_WIDTH == 23
     assert helpline.SCOPE_WIDTH == 7

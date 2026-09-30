@@ -610,10 +610,18 @@ def test_main_list_exits_zero_for_a_known_down_forward_and_one_for_a_failed_prob
     (root / "remote-instances" / "x").mkdir(parents=True)
     monkeypatch.chdir(root)
     assert forwards.main(["list"]) == 0, "a known-down forward is a valid answer"
+    _record(root, "x", pid=os.getpid(), port=51368)
+    monkeypatch.setattr(forwards, "port_listening", lambda _port: None)
+    assert forwards.main(["list"]) == 1, (
+        "a probe that cannot answer on a live daemon is the error case"
+    )
+    assert "port probe failed" in capsys.readouterr().out
     _record(root, "x", pid=999999999, port=51368)
     monkeypatch.setattr(forwards, "port_listening", lambda _port: None)
-    assert forwards.main(["list"]) == 1, "a probe that cannot answer is the error case"
-    assert "port probe failed" in capsys.readouterr().out
+    assert forwards.main(["list"]) == 0, (
+        "a stale record's port is never probed, so it is a valid answer, not a probe failure"
+    )
+    assert "port probe failed" not in capsys.readouterr().out
 
 
 def test_module_entry_point_invokes_main_under_the_dunder_guard() -> None:

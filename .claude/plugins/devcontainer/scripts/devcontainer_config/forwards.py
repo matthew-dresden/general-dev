@@ -764,9 +764,11 @@ def _run_list(rest: Sequence[str]) -> int:
     for status in statuses:
         print(_render_status_row(status))
     # A forward that is simply down is a valid answer, not an error; only a
-    # probe that could not answer leaves the state unknown, and that fails.
+    # probe on a LIVE daemon that could not answer leaves the state unknown,
+    # and that fails. A stale record's port is never probed at all.
     probe_failed = any(
-        status.record is not None and status.port_listening is None for status in statuses
+        status.record is not None and status.process_alive and status.port_listening is None
+        for status in statuses
     )
     return 1 if probe_failed else 0
 
@@ -781,7 +783,13 @@ def _render_status_row(status: ForwardStatus) -> str:
         state = "port not answering"
     else:
         state = "stale record"
-    note = "" if status.port_listening is not None else " (port probe failed)"
+    # A probe that could not answer is only reportable while the daemon is
+    # alive: for a dead one nothing was probed, so there is nothing failed.
+    note = (
+        ""
+        if not status.process_alive or status.port_listening is not None
+        else (" (port probe failed)")
+    )
     return (
         f"{status.instance:<20} {status.record.pid:>7}  {status.record.port:>6}  "
         f"{state:<14} {status.record.context}{note}"

@@ -491,68 +491,78 @@ def stop_forward(
 ) -> str:
     """Stop one forward daemon and verify the tunnel is actually closed.
 
-    SIGINT is sent first -- the transport tears its `aws ssm start-session`
-    child down cleanly on the interrupt, which a SIGTERM would bypass -- and
-    the process is polled until it is gone, escalating to SIGTERM and then
-    SIGKILL if it refuses. The record is removed, and the forwarded port is
-    then polled until nothing listens on it anymore: a daemon whose process
-    died while its `aws` child kept the tunnel would otherwise be reported
-    stopped while the port was still live. No record is the desired state
-    already, and reports as such.
+    The daemon is a session leader: its whole process tree -- the transport
+    wrapper, its `aws ssm start-session` child, and the
+    session-manager-plugin that actually holds the listening port -- lives
+    in one process group. Signals go to that GROUP, never to the wrapper
+    alone: SIGINT first (the transport tears its aws child down cleanly on
+    the interrupt, which a SIGTERM would bypass, and the plugin exits on
+    it too), then SIGTERM, then SIGKILL to a holdout, each waited out by
+    polling. The stop condition is the port, not the process: a wrapper
+    that died while its plugin kept the tunnel -- the orphan the previous
+    per-process signalling left behind -- is stopped the same way, and no
+    record is removed until nothing listens on the port anymore. No record
+    is the desired state already, and reports as such.
 
     Returns:
         A message naming what was stopped, or that nothing was running.
 
     Raises:
-        ForwardError: the instance name is invalid, the process refused to
-            die, or the port never closed.
+        ForwardError: the instance name is invalid, the process group
+            refused to die, or the port never closed.
     """
     _validated(instance)
-    send = send_signal if send_signal is not None else _send_signal
+    send = send_signal if send_signal is not None else _signal_group
     alive = alive_probe if alive_probe is not None else process_alive
     listening = listening_probe if listening_probe is not None else port_listening
     record = read_record(instance)
     if record is None:
         return f"no forward for {instance!r}; nothing to stop"
     if alive(record.pid):
-        _terminate(record.pid, send, alive, poll_clock, poll_seconds)
         stopped = f"stopped forward for {instance!r} (pid {record.pid})"
     else:
         stopped = f"forward for {instance!r} was not running (pid {record.pid} is gone)"
-    # The tunnel, not the process, is what must be gone: a daemon whose
-    # process died while its aws child kept the session would otherwise be
-    # reported stopped while the port was still live.
+    _terminate_tree(record.pid, send, alive, poll_clock, poll_seconds)
     _verify_port_closed(record.port, listening, poll_clock, poll_seconds, poll_limit)
     _remove_record(instance)
     return stopped
 
 
-def _send_signal(pid: int, sig: int) -> None:
-    os.kill(pid, sig)
+def _signal_group(pid: int, sig: int) -> None:
+    """Signal the daemon's whole process group (the pid is its session leader)."""
+    os.killpg(pid, sig)
 
 
-def _terminate(
+def _terminate_tree(
     pid: int,
     send: SignalSender,
     alive: AliveProbe,
     poll_clock: Callable[[float], None],
     poll_seconds: float,
 ) -> None:
-    """SIGINT, then SIGTERM, then SIGKILL, each polled until the process is gone."""
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        send(pid, sig)
+    """Signal the group through SIGINT, SIGTERM, then SIGKILL until the tree is gone.
+
+    A group whose last member already exited raises ProcessLookupError from
+    the signal call, which is the stopped state, not a failure.
+    """
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+        _send_to_group_quietly(pid, send, sig)
         for _ in range(SIGKILL_POLL_LIMIT):
             if not _alive_quiet(pid, alive):
                 return
             poll_clock(poll_seconds)
-    send(pid, signal.SIGKILL)
-    for _ in range(SIGKILL_POLL_LIMIT):
-        if not _alive_quiet(pid, alive):
-            return
-        poll_clock(poll_seconds)
     raise ForwardError(
-        f"the forward daemon (pid {pid}) refused to stop after SIGINT, SIGTERM and SIGKILL"
+        f"the forward daemon's process group (pgid {pid}) refused to stop after "
+        "SIGINT, SIGTERM and SIGKILL"
     )
+
+
+def _send_to_group_quietly(pid: int, send: SignalSender, sig: int) -> None:
+    """Send one group signal, treating a vanished group as already stopped."""
+    try:
+        send(pid, sig)
+    except ProcessLookupError:
+        pass
 
 
 def _alive_quiet(pid: int, alive: AliveProbe) -> bool:

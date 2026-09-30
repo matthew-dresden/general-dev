@@ -892,9 +892,34 @@ def test_help_instances_section_sits_between_engine_and_build() -> None:
     """Section order: ENGINE, then INSTANCES, then BUILD."""
     help_recipe = _help_recipe_body(_makefile_text())
     engine_index = help_recipe.index("ENGINE")
-    instances_index = help_recipe.index("\\033[1mINSTANCES\\033[0m")
-    build_index = help_recipe.index("\\033[1mBUILD\\033[0m")
+    instances_index = help_recipe.index('"INSTANCES"')
+    build_index = help_recipe.index('"BUILD"')
     assert engine_index < instances_index < build_index
+
+
+# The instruction-column note rule: every bold legend label and section
+# header that carries a note renders through the one `note()` helper, whose
+# printf pads the bold name to the instruction column so the note aligns
+# with the descriptions below it.
+
+
+def test_header_notes_render_through_one_helper_at_the_instruction_column() -> None:
+    """The note printf appears once, inside `note()`, padded to column 34.
+
+    One printf occurrence proves no header note bypasses the helper; the
+    width pin ties the helper's pad to helpline's instruction column, so the
+    notes can never drift from the description column the rows use.
+    """
+    recipe = _help_recipe_body(_makefile_text())
+    note_format = "printf '\\n\\033[1m%-34s\\033[0m%s\\n'"
+    assert recipe.count(note_format) == 1, (
+        "the header-note printf must exist only inside the note() helper"
+    )
+    assert 'note "Engines"' in recipe
+    assert 'note "INSTANCES"' in recipe
+    width = re.search(re.escape("\\033[1m%-") + r"(\d+)" + re.escape("s\\033[0m%s"), recipe)
+    assert width is not None, "note() carries no name pad to pin"
+    assert int(width.group(1)) == helpline.INSTRUCTION_COLUMN
 
 
 # The 180-character rule (the wrapped help row): every two-column row renders

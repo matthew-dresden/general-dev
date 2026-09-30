@@ -477,7 +477,14 @@ def test_connect_recipe_dispatches_on_the_transport_selector() -> None:
         assert identifier not in text, (
             f"the Makefile must not reference {identifier!r}, deleted at cutover"
         )
-    assert "devcontainer_config.transport connect" in recipe
+    assert "devcontainer_config.forwards open" in recipe, (
+        "the connect dispatch must go through devcontainer_config.forwards, "
+        "which opens the forward as a background daemon and confirms it"
+    )
+    assert "devcontainer_config.transport" not in recipe, (
+        "the recipe must not invoke the transport directly: the daemon's "
+        "spawn, readiness poll and record live in devcontainer_config.forwards"
+    )
     assert "general-dev" not in recipe, (
         "the recipe must never carry a literal 'general-dev' substring "
         "(AC-FUNC-003: no prefix arithmetic on REMOTE_DOCKER_CONTEXT)"
@@ -512,7 +519,10 @@ def test_connect_recipe_passes_the_resolved_context_variable() -> None:
     (the standards violation the rejected E6-F2-S1-T3 amendment carried).
     """
     recipe = _connect_recipe_body(_makefile_text())
-    assert '--context "$(REMOTE_CONTEXT)"' in recipe
+    assert 'ctx="$(REMOTE_CONTEXT)"' in recipe, (
+        "the unnamed-target default must reuse the parse-time $(REMOTE_CONTEXT) "
+        "variable, resolved into ctx and dispatched as-is"
+    )
     assert "REMOTE_DOCKER_CONTEXT#" not in recipe, _remote_docker_context_prefix_diagnostic()
 
 

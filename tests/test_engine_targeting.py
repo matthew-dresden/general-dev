@@ -573,16 +573,17 @@ def test_connect_resolves_the_instance_it_is_asked_for() -> None:
     engine_at = recipe.index('[ "$${ENGINE}" != "local" ]')
     source_at = recipe.index(". $(RD_DIR)/lib.sh")
     resolve_at = recipe.index("rd_resolve_instance")
+    default_at = recipe.index('ctx="$(REMOTE_CONTEXT)"')
     resolved_at = recipe.index('--instance-id "$$REMOTE_INSTANCE_ID" --context "$$ctx"')
-    default_at = recipe.index('--context "$(REMOTE_CONTEXT)"')
     assert instance_at < engine_at, (
         "INSTANCE wins the target selection; ENGINE is honored when it names "
         "an instance and INSTANCE is empty"
     )
-    assert source_at < resolve_at < resolved_at < default_at, (
+    assert source_at < resolve_at < default_at < resolved_at, (
         "a named target must resolve through lib.sh -- which reads the "
-        "per-instance id store -- and forward that instance's id and context; "
-        "the parse-time REMOTE_CONTEXT stays the unnamed-target default"
+        "per-instance id store -- and the dispatch must forward that "
+        "instance's id and context; the parse-time REMOTE_CONTEXT stays the "
+        "unnamed-target default, resolved into ctx before the dispatch"
     )
 
 

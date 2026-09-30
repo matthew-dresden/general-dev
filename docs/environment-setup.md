@@ -306,7 +306,7 @@ every stage:
 | Scaffold (no EC2 exists yet) | `make instance-init INSTANCE=<project>` | Writes `remote-instances/<project>/terragrunt.hcl`; never deploys |
 | Edit the deployment | edit the file `instance-init` wrote | Instance type, volume sizes, availability zone, tags, AMI |
 | Provision and converge | `make instance-deploy INSTANCE=<project>` | Terragrunt apply, id link, trust chain where missing, secret push |
-| Open the forward | `make remote INSTANCE=<project>` | Refreshes the SSM port forward, points docker at the engine; blocks until interrupted |
+| Open the forward | `make remote INSTANCE=<project>` | Opens the SSM forward as a background daemon, points docker at the engine; returns once docker answers through it |
 | Build and open | `make build INSTANCE=<project>`, then `make reopen INSTANCE=<project>` | Clone into a volume on the engine, build, run postCreate, attach VS Code |
 | Day to day | `make status`, `stop`, `start`, `exec` with `INSTANCE=<project>` | Container lifecycle; the checkout survives all of it |
 | Pause to save cost | `make instance-stop INSTANCE=<project>`, later `make instance-start INSTANCE=<project>` | Stops and starts the EC2 instance; containers, volumes and checkouts survive |
@@ -418,10 +418,15 @@ every docker call the target makes is aimed at the engine it names: one
 terminal can run `make build ENGINE=local` while another runs
 `make build ENGINE=acme`, and a third drives a second instance. Each
 remote engine needs its forward open first: `make remote INSTANCE=<name>`
-opens it (in its own terminal -- it blocks), and later
-`make connect ENGINE=<name>` re-opens a single forward without touching
-what other terminals see. `make list-instances` shows the forward port each
-instance's context records.
+opens it as a background daemon and returns once docker answers through
+it, and later `make connect ENGINE=<name>` re-opens a single forward
+without touching what other terminals see. The forward daemon's lifecycle
+has its own targets: `make connect-status INSTANCE=<name>` (or `ALL=1`)
+reports pid, port and whether the tunnel answers, `make connect-stop`
+closes one or every forward, `make connect-refresh` stops and reopens from
+the recorded command when an SSO session expires or a tunnel drops, and
+`make connect-list` shows the roster. `make list-instances` shows the
+forward port each instance's context records.
 
 VS Code is per engine by attachment, not by switching: a window attaches to
 the container it was opened against, wherever that container lives. Run one

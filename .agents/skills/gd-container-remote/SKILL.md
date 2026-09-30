@@ -1,6 +1,6 @@
 ---
 name: gd-container-remote
-description: Drives the remote backend's container -- refreshes the SSM port forward with make connect, points docker and VS Code at the instance with make remote, then builds, starts or reopens through the same state diagnosis as the local skill, against the cloned checkout in the instance's volume; destroys nothing.
+description: Drives the remote backend's container -- opens the SSM port forward as a background daemon with make connect, manages that daemon's lifecycle (status, stop, refresh, list) without touching the instance, points docker and VS Code at the instance with make remote, then builds, starts or reopens through the same state diagnosis as the local skill, against the cloned checkout in the instance's volume; destroys nothing.
 ---
 
 # gd-container-remote
@@ -30,15 +30,18 @@ section).
 | Step | What this skill runs | Notes |
 |---|---|---|
 | Validate the instance | Invoke `gd-instance-list INSTANCE=<name>` first | Its thirteen-check verdict is this skill's precondition; a failure there is reported unchanged and stops this skill. |
-| Refresh the forward | `make connect INSTANCE=<name>` | Re-run after a reboot, after sleep, or when SSO expires; idempotent. |
-| Select the engine | `make remote INSTANCE=<name>` | Points docker and VS Code at the instance's context, refreshing the forward first. |
+| Open the forward | `make connect INSTANCE=<name>` | Opens the forward as a background daemon and returns once docker answers through it; idempotent -- already-open reports and exits 0. |
+| Forward status | `make connect-status INSTANCE=<name>` / `ALL=1` | pid, port, listening per instance; exits non-zero when a forward is down. |
+| Close the forward | `make connect-stop INSTANCE=<name>` / `ALL=1` | Stops the daemon, verifies the port closed; the instance itself keeps running. |
+| Forward roster | `make connect-list` | Every configured instance's forward state. |
+| Select the engine | `make remote INSTANCE=<name>` | Ensures the forward in the background, then points docker and VS Code at the instance's context. |
 | Build or resume | `make build` / `make start` / `make restart` / `make reopen` | The same state diagnosis `gd-container-local` performs, on the now-active remote context. |
 
 ## Checks
 
 | Check | Prevents | Failure message | Remedy |
 |---|---|---|---|
-| the forward answers before any docker call | a build failing mid-flight on a dead tunnel instead of at the gate | `docker version` over the forwarded port does not answer within `DOCKER_HANDSHAKE_TIMEOUT` | Re-run `make connect INSTANCE=<name>`, then re-probe before continuing; a forward that still does not answer is reported, never retried silently. |
+| the forward answers before any docker call | a build failing mid-flight on a dead tunnel instead of at the gate | `docker version` over the forwarded port does not answer within `DOCKER_HANDSHAKE_TIMEOUT` | Re-run `make connect-refresh INSTANCE=<name>` (an expired SSO session or a dropped tunnel is the usual cause), then re-probe before continuing; a forward that still does not answer is reported, never retried silently. |
 | no unpushed work would be stranded by a rebuild | a rebuild re-cloning from origin and discarding container-only commits | `make check` reports uncommitted or unpushed work in the volume | State `make check`'s own remedy (push from inside the container), wait for the operator, then re-run `make check`; rebuilding is refused until it is clean. |
 
 ## Failure semantics

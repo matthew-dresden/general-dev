@@ -96,21 +96,23 @@ endef
 # Per-instance shell helpers, inlined into each recipe that runs Terragrunt
 # (make expands them textually; the shell sees one function definition per
 # run). tg_init <name> cds into the instance's directory -- always from
-# $(CURDIR), so consecutive iterations never nest relative paths -- and
-# inits non-interactively. The backend-bootstrap retry exists for the very
-# first init in a fresh account: the instance's remote-state bucket does
-# not exist yet and Terragrunt wants a y/n confirmation no non-interactive
-# pipe can answer proactively. The retry is attempted only when the failed
-# init's output names the missing bucket -- Terragrunt's own "Remote state
-# bucket ... does not exist" wording, matched with both phrases
-# case-insensitively -- so any other init failure (a versioning refusal, an
-# AccessDenied on an existing bucket, anything else) prints its log and
-# stops the run at the step that failed instead of triggering a bootstrap
-# that would answer the wrong question.
+# $(CURDIR), so consecutive iterations never nest relative paths -- then
+# decides the init form BEFORE running any Terragrunt, from one explicit
+# probe instead of a caught error: devcontainer_config.state_bucket composes
+# the backend bucket's name from remote-instances/root.hcl's own template
+# (the single declaration of it), probes the bucket with `aws s3api
+# head-bucket`, and prints `bootstrap` when the bucket is confirmed missing
+# and `plain` otherwise. `bootstrap` runs `terragrunt init
+# --backend-bootstrap`, which provisions the bucket on the first run; every
+# other probe outcome -- a 403 on a bucket this identity cannot see, a
+# failed account lookup, anything unexpected -- is raised by the module with
+# the command and its raw output, so the run stops loudly instead of
+# retrying behind the failure. Neither init form is retried, and neither
+# failure is swallowed: both end the target at the step that failed.
 #
 # REMOTE_AWS_REGION has no default here (see REMOTE_AWS_REGION_GUARD): the
 # helper requires it fail-fast before the first Terragrunt call, because
-# root.hcl derives the instance's state bucket name from it.
+# root.hcl derives each instance's state bucket name from it.
 define TERRAGRUNT_INIT_HELPER
 tg_init() { \
 	name="$$1"; \
@@ -123,14 +125,11 @@ tg_init() { \
 	cd "$$dir" || exit 1; \
 	$(REMOTE_AWS_REGION_GUARD) \
 	export TG_NON_INTERACTIVE=true; \
-	if ! init_log=$$(terragrunt init -input=false 2>&1); then \
-		printf '%s\n' "$$init_log" >&2; \
-		if printf '%s' "$$init_log" | grep -qi 'remote state bucket' && \
-		   printf '%s' "$$init_log" | grep -qi 'does not exist'; then \
-			echo y | terragrunt init --backend-bootstrap -input=false || exit 1; \
-		else \
-			exit 1; \
-		fi; \
+	init_form=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket "$(CURDIR)" "$$name" "$$REMOTE_AWS_REGION") || exit 1; \
+	if [ "$$init_form" = "bootstrap" ]; then \
+		echo y | terragrunt init --backend-bootstrap -input=false || exit 1; \
+	else \
+		terragrunt init -input=false || exit 1; \
 	fi; \
 }
 endef

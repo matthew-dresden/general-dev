@@ -1123,15 +1123,39 @@ def test_deploy_status_probes_must_answer_exactly_true_or_false() -> None:
     )
 
 
-def test_init_bootstrap_retries_only_on_the_missing_bucket_message() -> None:
-    """The bootstrap trigger must match Terragrunt's own wording -- both
-    phrases, case-insensitively -- so versioning or AccessDenied failures on
-    an existing bucket surface instead of triggering a bootstrap."""
+def test_init_form_comes_from_one_explicit_probe_not_a_caught_error() -> None:
+    """`tg_init` decides the init form before running Terragrunt, from one probe.
+
+    The probe (`devcontainer_config.state_bucket`) composes the backend
+    bucket's name from root.hcl's own template, tests the bucket with
+    `head-bucket`, and answers `bootstrap` only when the bucket is confirmed
+    missing. No error-driven branching may survive: the helper must not
+    capture a failed init's log to re-decide from it, must not grep any
+    Terragrunt error wording, and must not run init twice -- a failure that
+    used to trigger the old catch-and-retry bootstrap now ends the target
+    loudly.
+    """
     body = _make_define_body(_makefile_text(), "TERRAGRUNT_INIT_HELPER")
-    assert "grep -qi 'remote state bucket'" in body
-    assert "grep -qi 'does not exist'" in body
-    assert "grep -qi 'bucket'" not in body, (
-        "the trigger must not fire on any line mentioning a bucket: a "
-        "versioning or AccessDenied error on an existing bucket must fail "
-        "the init, not trigger a bootstrap"
+    assert "devcontainer_config.state_bucket" in body, (
+        "the init form must be decided by devcontainer_config.state_bucket's probe, "
+        "not re-derived or guessed in the recipe"
+    )
+    assert 'if [ "$$init_form" = "bootstrap" ]' in body, (
+        "the helper must branch on the probe's answer, not on a caught error"
+    )
+    assert "--backend-bootstrap" in body, (
+        "the bootstrap form must run Terragrunt's own backend bootstrap when the "
+        "probe confirms the bucket is missing"
+    )
+    assert "grep -qi" not in body, (
+        "no error wording may be grepped anywhere in the helper: the probe decides, "
+        "and a caught init failure must fail the target, never trigger a retry"
+    )
+    assert "init_log" not in body, (
+        "the helper must not capture a failed init's output to re-decide from it -- "
+        "that capture was the fallback logic this probe replaced"
+    )
+    assert body.count("terragrunt init") == 2, (
+        "exactly the two init forms (plain and bootstrap) may appear; a retry "
+        "would run init again after a failure"
     )

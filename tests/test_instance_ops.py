@@ -69,6 +69,16 @@ def _import_instances() -> ModuleType:
     return importlib.import_module("devcontainer_config.instances")
 
 
+def _import_repo() -> ModuleType:
+    """Import devcontainer_config.repo from inside a function body."""
+    return importlib.import_module("devcontainer_config.repo")
+
+
+def _import_gitignore_check() -> ModuleType:
+    """Import tests/gitignore_check from inside a function body."""
+    return importlib.import_module("gitignore_check")
+
+
 def _ok(stdout: str) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
 
@@ -152,7 +162,13 @@ def _instance_name(prefix: str = "inst") -> str:
 
 
 def _git_root(tmp_path: Path) -> Path:
-    """A disposable git checkout whose origin slug is this repository's own."""
+    """A disposable git checkout whose origin slug is this repository's own.
+
+    The checkout carries this repository's committed `.gitignore` -- the
+    same seeding `tests/test_gitignore_allowlist.py` uses for its scratch
+    repositories -- so a scaffold's per-instance ignore append exercises the
+    real anchor rule rather than a test-owned stand-in.
+    """
     root = generated_root(tmp_path)
     init_repo(root)
     subprocess.run(
@@ -168,6 +184,10 @@ def _git_root(tmp_path: Path) -> Path:
         check=True,
         capture_output=True,
     )
+    real_gitignore = (
+        _import_repo().find_root(Path(__file__).resolve().parent) / ".gitignore"
+    ).read_text(encoding="utf-8")
+    (root / ".gitignore").write_text(real_gitignore, encoding="utf-8")
     return root
 
 
@@ -446,6 +466,172 @@ def test_scaffold_invalid_name_rejected(tmp_path: Path) -> None:
         with pytest.raises(ops.ScaffoldError):
             ops.scaffold(tmp_path, bad_name, region=REGION, ami=_ami_id(), runner=runner)
     assert runner.calls == []
+
+
+def _gitignore_lines(root: Path) -> list[str]:
+    """The scratch checkout's `.gitignore`, one list entry per line."""
+    return (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+
+def test_scaffold_appends_exactly_one_gitignore_entry_below_the_anchor(tmp_path: Path) -> None:
+    """One scaffold writes its own single ignore entry, directly under the anchor.
+
+    The anchor is the committed `.terraform.lock.hcl` blanket rule that marks
+    the per-instance block; the scaffold's entry lands immediately below it,
+    so the appended line -- not some earlier rule -- is what git reports for
+    the scaffolded path.
+    """
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+
+    ops.scaffold(root, name, region=REGION, ami=_ami_id(), runner=_FakeRunner())
+
+    lines = _gitignore_lines(root)
+    entry = f"remote-instances/{name}/"
+    assert lines.count(entry) == 1
+    assert lines.index(entry) == lines.index(ops.GITIGNORE_SCAFFOLD_ANCHOR) + 1
+
+
+def test_scaffold_second_instance_appends_its_own_entry(tmp_path: Path) -> None:
+    """A second scaffold adds a second entry, and neither duplicates either's."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    first = _instance_name()
+    second = _instance_name()
+
+    ops.scaffold(root, first, region=REGION, ami=_ami_id(), runner=_FakeRunner())
+    ops.scaffold(root, second, region=REGION, ami=_ami_id(), runner=_FakeRunner())
+
+    lines = _gitignore_lines(root)
+    anchor_index = lines.index(ops.GITIGNORE_SCAFFOLD_ANCHOR)
+    assert lines[anchor_index + 1] == f"remote-instances/{first}/"
+    assert lines[anchor_index + 2] == f"remote-instances/{second}/"
+    for entry in (f"remote-instances/{first}/", f"remote-instances/{second}/"):
+        assert lines.count(entry) == 1
+
+
+def test_scaffold_gitignore_entry_is_idempotent_when_already_present(tmp_path: Path) -> None:
+    """Re-scaffolding a name whose entry survives its directory never duplicates.
+
+    A prior scaffold whose directory was later removed leaves its `.gitignore`
+    entry behind; scaffolding the same name again must append nothing.
+    """
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    entry = f"remote-instances/{name}/"
+    lines = _gitignore_lines(root)
+    lines.insert(lines.index(ops.GITIGNORE_SCAFFOLD_ANCHOR) + 1, entry)
+    (root / ".gitignore").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    ops.scaffold(root, name, region=REGION, ami=_ami_id(), runner=_FakeRunner())
+
+    assert _gitignore_lines(root).count(entry) == 1
+
+
+def test_scaffold_refusal_leaves_gitignore_untouched(tmp_path: Path) -> None:
+    """The existing-directory refusal fires before any `.gitignore` append."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    _seed_instance_dir(root, name)
+    before = (root / ".gitignore").read_text(encoding="utf-8")
+
+    with pytest.raises(ops.ScaffoldError):
+        ops.scaffold(root, name, region=REGION, ami=_ami_id(), runner=_FakeRunner())
+
+    assert (root / ".gitignore").read_text(encoding="utf-8") == before
+
+
+def test_scaffold_directory_is_ignored_by_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a scaffold, git reports the directory and everything in it ignored.
+
+    `git check-ignore` names the appended rule for the scaffolded directory
+    and its `terragrunt.hcl`, and `git status --porcelain` lists nothing
+    under `remote-instances/`. Deleting the appended entry -- the promotion
+    path -- then leaves the deployment trackable while the committed blanket
+    rule keeps a first init's `.terraform.lock.hcl` out of git regardless.
+    """
+    gitignore_check = _import_gitignore_check()
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    ops.scaffold(root, name, region=REGION, ami=_ami_id(), runner=_FakeRunner())
+    monkeypatch.setattr(gitignore_check, "repo_root", lambda: root)
+
+    directory = f"remote-instances/{name}"
+    for path in (directory, f"{directory}/terragrunt.hcl"):
+        result = gitignore_check.check_ignore(path)
+        assert result.ignored, f"{path}: expected ignored; evidence={result.evidence!r}"
+        assert result.evidence == f"{directory}/"
+    lock_result = gitignore_check.check_ignore(f"{directory}/.terraform.lock.hcl")
+    assert lock_result.ignored
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert not any("remote-instances" in line for line in status.stdout.splitlines()), status.stdout
+
+    lines = _gitignore_lines(root)
+    lines.remove(f"{directory}/")
+    (root / ".gitignore").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    promoted = subprocess.run(
+        ["git", "check-ignore", "--no-index", "-v", f"{directory}/terragrunt.hcl"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert promoted.returncode == 1, (
+        "the promoted deployment's terragrunt.hcl must be trackable, not ignored"
+    )
+    lock_after_promotion = gitignore_check.check_ignore(f"{directory}/.terraform.lock.hcl")
+    assert lock_after_promotion.ignored, (
+        "the lock file must stay ignored under the blanket rule after promotion"
+    )
+    assert lock_after_promotion.evidence == ops.GITIGNORE_SCAFFOLD_ANCHOR
+    assert not any("remote-instances" in line for line in status.stdout.splitlines()), status.stdout
+
+
+def test_scaffold_fails_fast_when_gitignore_anchor_missing(tmp_path: Path) -> None:
+    """A `.gitignore` without the per-instance block's anchor refuses, writing nothing.
+
+    Guessing an insert point would be a fallback; the scaffold names the
+    missing rule and creates no directory.
+    """
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    (root / ".gitignore").write_text(
+        "# a checkout predating the scaffold block\n.venv/\n", encoding="utf-8"
+    )
+    name = _instance_name()
+
+    with pytest.raises(ops.ScaffoldError) as exc_info:
+        ops.scaffold(root, name, region=REGION, ami=_ami_id(), runner=_FakeRunner())
+
+    assert ops.GITIGNORE_SCAFFOLD_ANCHOR in str(exc_info.value)
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_scaffold_fails_fast_when_gitignore_is_missing(tmp_path: Path) -> None:
+    """No `.gitignore` at all refuses for the same reason, creating nothing."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    (root / ".gitignore").unlink()
+    name = _instance_name()
+
+    with pytest.raises(ops.ScaffoldError) as exc_info:
+        ops.scaffold(root, name, region=REGION, ami=_ami_id(), runner=_FakeRunner())
+
+    assert ".gitignore" in str(exc_info.value)
+    assert not (root / "remote-instances" / name).exists()
 
 
 # ---------------------------------------------------------------------------

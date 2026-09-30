@@ -1181,6 +1181,16 @@ def test_instance_init_delegates_to_scaffold_and_prints_its_guidance(
 ) -> None:
     """The handler prints scaffold's messages verbatim and never calls Terragrunt."""
     root = _git_root_with_origin(tmp_path)
+    # The scaffold appends its per-instance ignore entry to the checkout's
+    # .gitignore below the committed per-instance block, so the scratch
+    # checkout carries this repository's committed .gitignore, anchor and all.
+    repo = importlib.import_module("devcontainer_config.repo")
+    (root / ".gitignore").write_text(
+        (repo.find_root(Path(__file__).resolve().parent) / ".gitignore").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
     instance_ops = _import_instance_ops()
     name = _instance_name()
     ami_id = "ami-" + uuid.uuid4().hex

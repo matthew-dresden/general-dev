@@ -323,7 +323,11 @@ for every configured instance at once.
 `make instance-init INSTANCE=<name>` writes the one file a new instance
 requires, `remote-instances/<name>/terragrunt.hcl`, from a template
 carrying the default sizing and a freshly allocated CIDR block, then prints
-the commonly edited inputs. It never runs Terragrunt. Its `REGION=` option
+the commonly edited inputs. It never runs Terragrunt. The scaffold stays
+local to this checkout: `instance-init` also appends
+`remote-instances/<name>/` to the repository `.gitignore`, so the directory
+never appears in `git status`; to track a deployment deliberately, delete
+that appended line and commit the directory. Its `REGION=` option
 selects only where the default AMI and availability zone are looked up; the
 deployment region is `REMOTE_AWS_REGION`, which every Terragrunt-running
 target requires with no default.

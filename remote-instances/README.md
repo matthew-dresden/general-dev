@@ -25,8 +25,10 @@ module from its deployments: an instance is configured by writing an
 `inputs` block, never by editing the module. Adding an instance is
 `make instance-init INSTANCE=<name>`, which creates a directory under
 `remote-instances/` holding exactly one scaffolded file, `terragrunt.hcl`,
-and nothing else (Section 9); nothing outside the new directory changes.
-The scaffold never deploys and never runs Terragrunt; it only pins a
+and nothing else (Section 9); the only thing that changes outside the new
+directory is one appended `.gitignore` line that keeps the scaffold local
+to the checkout (see "No instance directory is committed" below). The
+scaffold never deploys and never runs Terragrunt; it only pins a
 default AMI (Canonical's current Ubuntu 24.04 arm64, resolved from SSM
 unless `AMI=` names one), allocates a free CIDR block, and writes the
 file below for you to edit. Re-running the target on an existing directory
@@ -335,8 +337,12 @@ target once `INSTANCE` and `DEFAULT_REMOTE_INSTANCE` are both unset;
 committing one here would hand every fresh clone a default instance
 belonging to somebody else, with a name they did not choose and a region
 they may not use. An empty `remote-instances/` directory on a remote backend
-fails too, with a non-zero exit. The file above is not copied from this
-document, either: `make instance-init INSTANCE=<name>` scaffolds it,
+fails too, with a non-zero exit. A scaffold of your own stays out of git the
+same way: `make instance-init` appends `remote-instances/<name>/` to the
+repository `.gitignore`, so the directory never appears in `git status`;
+promoting a deployment into tracked scope means deleting that appended line
+and committing the directory deliberately. The file above is not copied from
+this document, either: `make instance-init INSTANCE=<name>` scaffolds it,
 honoring the contract described here (the two includes, and an `inputs`
 block carrying only what genuinely differs for the one deployment), and
 `gd-env-setup-remote` performs the same provisioning and certificate

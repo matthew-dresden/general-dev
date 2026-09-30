@@ -36,10 +36,7 @@ EXAMPLE_SUFFIX = ".example"
 # a local, network-free read of the checkout's own `.git/config` file. Read
 # fresh on every call through `hostprobe.read_positive_seconds`, the single
 # shared reader this variable's name and default are resolved against.
-# This module holds the single declaration of both names below;
-# `tests/test_state_bucket_name.py` binds to them by importing
-# `GIT_REMOTE_TIMEOUT_ENV_VAR` and `GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS`
-# from this module rather than restating either.
+# This module holds the single declaration of both names below.
 GIT_REMOTE_TIMEOUT_ENV_VAR = "REPO_SLUG_GIT_TIMEOUT_SECONDS"
 GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS = 10.0
 

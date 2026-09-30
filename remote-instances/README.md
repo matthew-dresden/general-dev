@@ -156,14 +156,15 @@ layer enforces that agreement:
 | Recorded EC2 id | `<certs-root>/<name>/instance-id`, the same directory the certificates live in | `E6` (`make instance-link` writes it; `make instance-deploy` records the applied id automatically) |
 | Local forwarded port | Allocated per instance, recorded, never a fixed number | `E6` |
 
-The docker context row's Pattern is `<repo-slug>-<name>`, `repo.repo_slug`
-(the same value `root.hcl`'s own `local.repo_slug` derives) prepended to the
-instance name -- never a literal, so a fork of this repository under a
-different name gets its own, non-colliding prefix without editing any of
-this table's owners. `general-dev-<name>` above is this repository's own
-worked example, not a fixed pattern to copy into a fork. The certificates
-row's on-disk material root and this table's addressing value are the same
-derivation, `devcontainer_config.instances.certs_root` --
+The docker context row's Pattern is `<repo-slug>-<name>`,
+`devcontainer_config.repo.repo_slug` (derived from the git remote's URL)
+prepended to the instance name -- never a literal, so a fork of this
+repository under a different name gets its own, non-colliding prefix
+without editing any of this table's owners. `general-dev-<name>` above is
+this repository's own worked example, not a fixed pattern to copy into a
+fork. The certificates row's on-disk material root and this table's
+addressing value are the same derivation,
+`devcontainer_config.instances.certs_root` --
 `devcontainer_config.certs.DEFAULT_CERTS_ROOT` is sourced from it -- so an
 operator who has set `DOCKER_CONFIG` never has certificates written under
 one directory while this table points at another.
@@ -245,28 +246,28 @@ builds, which is why the floor sits where it does. The input is an
 ordinary `inputs` entry: edit it in the instance's own `terragrunt.hcl`
 and apply the edit with `make instance-deploy INSTANCE=<name>`.
 
-## Remote state: one bucket per fleet
+## Remote state: one bucket per instance
 
-All instances of a repository, in one account and region, share one
-remote-state bucket. `root.hcl` derives its name
-(`tg-state-<account-id>-<region>-<repo-slug>-<suffix>`) from the account,
-the region in `REMOTE_AWS_REGION`, the repository's git remote slug and a
-committed suffix, so every instance computes the same name without any
-per-instance file naming it. What is per instance is the state *key*:
-`<name>/terraform.tfstate`, derived from the instance directory's own
-path, so two instances never share state even though they share a bucket.
+Every instance owns its own remote-state bucket.
+`root.hcl` derives its name
+(`tg-state-<instance-name>-<region>-<account-id>-<suffix>`) from the
+instance name (the including directory), the region in `REMOTE_AWS_REGION`,
+the AWS account and a committed suffix, so an instance computes its own
+bucket's name without any per-instance file naming it. The state *key*
+inside the bucket is `<name>/terraform.tfstate`, derived from the instance
+directory's own path, so two instances never share a bucket or a state key.
 
 Terragrunt bootstraps the bucket itself -- versioning, encryption and
-TLS enforcement included -- the first time any instance runs a command
+TLS enforcement included -- the first time the instance runs a command
 with backend bootstrapping, which every Terragrunt-running make target
-does on your behalf (`make instance-plan`'s help line names this). Because
-the bucket is fleet-wide, it stands outside the instance lifecycle:
+does on your behalf (`make instance-plan`'s help line names this). The
+bucket stands outside the instance lifecycle:
 `make instance-destroy` removes the instance's Parameter Store parameters,
 docker context, certificates and recorded id; its state *key* survives the
 destroy (the record of what existed), and the bucket is never touched.
-After the last instance of a fleet is destroyed, deleting the bucket is a
-separate, manual step -- and one worth pausing over, since it takes every
-instance's state history with it.
+After an instance is destroyed, deleting its state bucket by hand is a
+separate, manual step -- and one worth pausing over, since it takes that
+instance's whole state history with it.
 
 ## The make targets, and the Terragrunt underneath them
 

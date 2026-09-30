@@ -490,25 +490,34 @@ readers apply the same fail-fast rule to every non-empty value other than
 `transport.py`'s `resolve_transport` does the same; the one value they
 disagree on, the empty string, is documented above.
 
+### State bucket name components
+
+`remote-instances/root.hcl`'s `state_bucket_name` local composes each
+instance's Terraform state bucket name from the instance's own name --
+`basename(path_relative_to_include())`, the including directory under
+`remote-instances/` -- plus the region in `REMOTE_AWS_REGION`, the AWS
+account, and a committed suffix. The instance name is derived, never typed,
+so the bucket cannot disagree with the directory it belongs to;
+`tests/test_state_bucket_name.py` pins the composition and the committed
+suffix the same way `root.hcl` declares them.
+
 ### Repository slug derivation
 
-`remote-instances/root.hcl`'s own `repo_slug` local derives a repo-slug
-component of the Terraform state bucket name, consumed by that same
-file's `state_bucket_name` local, from `git config --get
-remote.origin.url`, applying a `basename()`-plus-`trimsuffix(".git")`
-transform to that URL. `tests/test_state_bucket_name.py`'s private
-`_repo_slug_from_git_remote` reads the identical git remote the same way,
-bounded, for readers of the variable, by `REPO_SLUG_GIT_TIMEOUT_SECONDS`,
-resolved through `hostprobe.py`'s `read_positive_seconds`, the same shared
+`devcontainer_config.repo.repo_slug` derives the repo-slug component of a
+docker context name (the `<repo-slug>-<name>` pattern the docker context
+row of `remote-instances/README.md`'s artifacts table documents) from
+`git config --get remote.origin.url`, applying a `basename()`-plus-
+`trimsuffix(".git")` transform to that URL. The read is bounded, for
+readers of the variable, by `REPO_SLUG_GIT_TIMEOUT_SECONDS`, resolved
+through `hostprobe.py`'s `read_positive_seconds`, the same shared
 reader `transport.py` uses for `DOCKER_HANDSHAKE_TIMEOUT`.
 `read_positive_seconds` rejects a non-numeric or non-positive value by
-name rather than silently falling back to the default, and
-`_repo_slug_from_git_remote` reads a `10` second default for that
-git-remote read.
+name rather than silently falling back to the default, and `repo.repo_slug`
+reads a `10` second default for that git-remote read.
 
 | Variable | Default | Defined in |
 |---|---|---|
-| `REPO_SLUG_GIT_TIMEOUT_SECONDS` | `10` | Resolved through `hostprobe.py`'s `read_positive_seconds`; read by `tests/test_state_bucket_name.py`'s private `_repo_slug_from_git_remote` |
+| `REPO_SLUG_GIT_TIMEOUT_SECONDS` | `10` | Resolved through `hostprobe.py`'s `read_positive_seconds`; read by `devcontainer_config.repo.repo_slug` |
 
 `read_positive_seconds` applies the same fail-fast rule
 `DOCKER_HANDSHAKE_TIMEOUT`'s reader applies to every reader of

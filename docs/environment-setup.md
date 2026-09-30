@@ -333,7 +333,7 @@ deployment region is `REMOTE_AWS_REGION`, which every Terragrunt-running
 target requires with no default.
 
 `make instance-deploy INSTANCE=<name>` converges the instance: terragrunt
-init (bootstrapping the fleet's shared state bucket on the very first
+init (bootstrapping the instance's state bucket on the very first
 run), validate, a plan guarded against accidental replacement, apply of
 exactly the guarded plan, then follow-ups that run only when a status probe
 reports the corresponding piece missing -- recording the applied EC2 id,
@@ -385,13 +385,14 @@ Parameter Store parameters, its docker context, its certificate directory
 instance, and only that form requires `CONFIRM=destroy`, because a typo'd
 ALL should never be all it takes to end the fleet.
 
-The remote-state bucket is shared by the whole fleet and stands outside
-every instance's lifecycle: one bucket per AWS account, region and
-repository (`tg-state-<account-id>-<region>-<repo-slug>-<suffix>`, derived
-in `remote-instances/root.hcl`), holding one state key per instance
-(`<name>/terraform.tfstate`). No destroy target deletes it; after the last
-instance of a fleet is gone, deleting the bucket by hand is a separate,
-deliberate step.
+Each instance owns its remote-state bucket, and it stands outside that
+instance's lifecycle: one bucket per instance
+(`tg-state-<instance-name>-<region>-<account-id>-<suffix>`, derived in
+`remote-instances/root.hcl` from the instance's name, the region, the
+account and a committed suffix), holding the instance's state key
+(`<name>/terraform.tfstate`). No destroy target deletes it; after an
+instance is gone, deleting its bucket by hand is a separate, deliberate
+step.
 
 ### Working with several engines at once
 

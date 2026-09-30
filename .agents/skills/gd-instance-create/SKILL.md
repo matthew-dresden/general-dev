@@ -25,7 +25,7 @@ doing so is a work-unit failure under AC-4.4.
 | Step | What this skill runs | Notes |
 |---|---|---|
 | Scaffold | `make instance-init INSTANCE=<name>` | Creates `remote-instances/<name>/`; never deploys. `AMI=` and `REGION=` name the AMI/AZ lookup only; the deployment region is `REMOTE_AWS_REGION`. |
-| Plan | `make instance-plan INSTANCE=<name>` | Terragrunt plan; bootstraps the shared state bucket on first run. |
+| Plan | `make instance-plan INSTANCE=<name>` | Terragrunt plan; bootstraps the instance's state bucket on first run. |
 | Confirm | PRECHECK-APPLY | Present the plan output, wait for the operator's explicit confirmation, record both. Never self-approve. |
 | Converge | `make instance-deploy INSTANCE=<name>` | Provisions, links the id, establishes the trust chain if missing, pushes secrets. Refuses instance replacement without `CONFIRM=replace` -- a refusal this skill reports, never bypasses. |
 | Link | `make instance-link INSTANCE_ID=<id>` | Only needed after re-provisioning outside make; `instance-deploy` does it automatically. This row is also the recovery path for a lost or stale link (the `flow: INSTANCE_ID link recovery` flow of `docs/skills.md`'s Flows section): when a target reports that no EC2 id is recorded for `<name>`, re-running it with the id from the Terragrunt output re-records it. |

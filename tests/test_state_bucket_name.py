@@ -1,45 +1,33 @@
-"""State bucket name reproducibility (spec Section 5.7, AC-5.1).
+"""State bucket name reproducibility.
 
-AC-5.1 requires that, given a fixed account, region and suffix, the computed
-bucket name is byte-identical across runs. The name template itself --
-`tg-state-<account-id>-<region>-<repo-slug>-<suffix>` -- and the committed
-suffix both live in `remote-instances/root.hcl`; this module reads both from
-that file rather than restating either as a Python literal, so a test that
-hard-coded the expected name would keep passing even if the file started
-composing something else, which is exactly the drift AC-5.1 exists to catch.
+The bucket name must be byte-identical across runs, given a fixed instance
+name, region and suffix. The name template itself --
+`tg-state-<instance-name>-<region>-<account-id>-<suffix>` -- and the
+committed suffix both live in `remote-instances/root.hcl`; this module reads
+both from that file rather than restating either as a Python literal, so a
+test that hard-coded the expected name would keep passing even if the file
+started composing something else.
 
-The account id, region and repository slug are the three components
+The instance name, region and account id are the three components
 `remote-instances/root.hcl` resolves at Terragrunt runtime
-(`get_aws_account_id()`, `get_env("REMOTE_AWS_REGION")`, and a value derived
-from `git config --get remote.origin.url`); none of the three is declared
-anywhere in this repository as a value to read, and re-deriving the account
-id or region here would need an AWS STS call or a required environment
-variable, making this module non-hermetic and environment-dependent and
-breaking AC-TEST-008's "no network" contract on every machine that has not
-exported `REMOTE_AWS_REGION`. So this module builds all three the way
-AC-FUNC-001 requires instead of typing any of them as a literal:
+(`basename(path_relative_to_include())`, `get_env("REMOTE_AWS_REGION")`, and
+`get_aws_account_id()`); none of the three is declared anywhere in this
+repository as a value to read, and re-deriving the account id or region here
+would need an AWS STS call or a required environment variable, making this
+module non-hermetic and environment-dependent. So this module builds all
+three instead of typing any of them as a literal:
 
 - `_FIXED_ACCOUNT_ID` is generated at runtime by
   `tests/conftest.py::_synthetic_account_id`, the same twelve-digit-shaped
   generator `tests/test_answers.py` already uses so no AWS-account-shaped
   digit run ever appears as source text (`lint-secrets` keys on exactly that
   shape).
-- `_FIXED_REPO_SLUG` is derived from this checkout's own git remote via
-  `_repo_slug_from_git_remote`, which delegates to
-  `devcontainer_config.repo.repo_slug`, the same production reader that
-  applies the identical `basename(...)` / `trimsuffix(..., ".git")`
-  transform root.hcl's `repo_slug` local applies, so it is read from the
-  repository rather than typed.
+- `_FIXED_INSTANCE_NAME` is generated at runtime, in the instance-name shape
+  `devcontainer_config.instances.validate_name` accepts, for the identical
+  "generated, not typed" reason.
 - `_FIXED_REGION` is generated at runtime by `_synthetic_region`, from the
   same partition/direction vocabulary real AWS region names use, for the
-  identical "generated, not typed" reason `_synthetic_account_id` exists.
-
-AC-5.1 itself asks for the property "given a fixed account, region and
-suffix", which is exactly what a module-level constant, computed once, gives
-this suite: all three stay fixed for the whole test run, so the *composition*
-and the *committed suffix* -- the two values genuinely declared in the
-repository -- are what gets exercised, never the account/region/slug values
-themselves.
+  same reason.
 
 Two computations of the name are asserted equal from two independent reads
 of `remote-instances/root.hcl`, not from one parse reused twice, so a
@@ -47,17 +35,17 @@ suffix or template read that were non-deterministic (e.g. accidentally
 generated instead of read) would be caught by this test instead of hidden
 behind Python's own referential equality.
 
-`ROOT_HCL_RELATIVE`, `_repo_root`, `_read_repo_file`, the ast-based
-skip/xfail/guarded-import detector and the self-check test that uses it are
-shared with `tests/test_tool_version_floors.py` via `tests/conftest.py`
-rather than declared twice; see that module's docstring for why.
+`ROOT_HCL_RELATIVE`, `_repo_root`, `_read_repo_file` and the
+skip/xfail/guarded-import detector are shared with
+`tests/test_tool_version_floors.py` via `tests/conftest.py` rather than
+declared twice; see that module's docstring for why.
 """
 
 from __future__ import annotations
 
-import ast
 import random
 import re
+import uuid
 from pathlib import Path
 
 import pytest
@@ -65,10 +53,8 @@ from conftest import (
     ROOT_HCL_RELATIVE,
     _assert_no_skip_guard,
     _read_repo_file,
-    _repo_root,
     _synthetic_account_id,
 )
-from devcontainer_config import repo
 
 _INTERPOLATION_TOKEN = re.compile(r"\$\{local\.([A-Za-z0-9_]+)\}")
 
@@ -79,27 +65,18 @@ _INTERPOLATION_TOKEN = re.compile(r"\$\{local\.([A-Za-z0-9_]+)\}")
 # such as "us-east-1" keeps `_synthetic_region` from ever restating a
 # specific, identifiable region as a literal, mirroring
 # `tests/conftest.py::_synthetic_account_id`'s "generated, not typed"
-# approach for the same AC-FUNC-001 reason.
+# approach for the same reason.
 _REGION_PARTITIONS = ("us", "eu", "ap", "ca", "sa", "af", "me")
 _REGION_DIRECTIONS = ("east", "west", "north", "south", "central")
-
-# Bound to `devcontainer_config.repo`'s own declaration rather than
-# restated as a second literal: `repo.repo_slug` is the sole reader of
-# `REPO_SLUG_GIT_TIMEOUT_SECONDS` now that `_repo_slug_from_git_remote`
-# below delegates its whole derivation to that function, so this module
-# names the production constants instead of typing the env-var name and
-# default a second time (E8-F1-S1-T6).
-_GIT_REMOTE_TIMEOUT_ENV_VAR = repo.GIT_REMOTE_TIMEOUT_ENV_VAR
-_GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS = repo.GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS
 
 
 class BucketNameError(AssertionError):
     """The name template, the committed suffix, or a substitution could not be resolved.
 
     Every raise site below names the file and the value it could not make
-    sense of, matching this work unit's Error Handling Contract: "the
-    Terragrunt root configuration declares no suffix... the test fails
-    naming the file and the missing declaration".
+    sense of: the Terragrunt root configuration declares no suffix, or the
+    template references an unsupplied component, and the test fails naming
+    the file and the missing declaration.
     """
 
 
@@ -115,33 +92,24 @@ def _synthetic_region() -> str:
     return f"{partition}-{direction}-{digit}"
 
 
-def _repo_slug_from_git_remote() -> str:
-    """The `repo_slug` root.hcl's own `locals` block derives, read the same way root.hcl reads it.
+def _synthetic_instance_name() -> str:
+    """An instance-name-shaped value, generated at runtime.
 
-    Delegates the entire derivation to `devcontainer_config.repo.repo_slug`,
-    the production function that mirrors `remote-instances/root.hcl`'s
-    `repo_slug` local (`git config --get remote.origin.url`, then the final
-    `/`-delimited path segment, then a trailing `.git` removed). This
-    module no longer runs its own copy of that transform; it only adapts
-    `repo.RepoError` to this module's own `BucketNameError` contract, so
-    every caller of this helper keeps catching the same exception type it
-    always has, with the original operator-facing message text intact
-    (E8-F1-S1-T6).
+    `devcontainer_config.instances.validate_name` accepts letters, digits,
+    hyphens and underscores; this generator composes from that vocabulary at
+    runtime so no instance-name-shaped literal is stored in this file.
     """
-    try:
-        return repo.repo_slug(_repo_root())
-    except repo.RepoError as exc:
-        raise BucketNameError(str(exc)) from exc
+    return f"inst-{uuid.uuid4().hex[:8]}"
 
 
 # Arbitrary, fixed stand-ins for the three components root.hcl resolves at
-# Terragrunt runtime -- see the module docstring for why these are
-# generated/derived rather than literals. Computed once, at import, so both
-# computations in `test_bucket_name_is_byte_identical_across_two_computations`
-# use the identical "fixed account, region [and slug]" AC-5.1 describes.
+# Terragrunt runtime -- see the module docstring for why these are generated
+# rather than literals. Computed once, at import, so both computations in
+# `test_bucket_name_is_byte_identical_across_two_computations` use the
+# identical "fixed instance name, region and account" this property needs.
 _FIXED_ACCOUNT_ID = _synthetic_account_id()
 _FIXED_REGION = _synthetic_region()
-_FIXED_REPO_SLUG = _repo_slug_from_git_remote()
+_FIXED_INSTANCE_NAME = _synthetic_instance_name()
 
 
 def _root_hcl_text() -> str:
@@ -159,10 +127,10 @@ def _declared_template(hcl_text: str) -> str:
 def _declared_suffix(hcl_text: str) -> str:
     """The committed `state_bucket_suffix` value.
 
-    AC-TEST-005: raises naming the file and the missing declaration when no
-    suffix is committed, since inventing a replacement here would silently
-    point the composed name at a different bucket than the one Terragrunt's
-    own bootstrap would find.
+    Raises naming the file and the missing declaration when no suffix is
+    committed, since inventing a replacement here would silently point the
+    composed name at a different bucket than the one Terragrunt's own
+    bootstrap would find.
     """
     match = re.search(r'^\s*state_bucket_suffix\s*=\s*"([^"]*)"', hcl_text, re.MULTILINE)
     if match is None or not match.group(1):
@@ -179,8 +147,7 @@ def _compose(template: str, values: dict[str, str]) -> str:
     Raises naming the unresolved `local.NAME` reference and the file it
     came from when the template names a component this caller did not
     supply, rather than leaving the literal `${local...}` token embedded in
-    the returned string -- the "name template is missing a component"
-    malformed-input case this unit's Approach requires.
+    the returned string.
     """
 
     def _substitute(match: re.Match[str]) -> str:
@@ -199,9 +166,9 @@ def _bucket_name(hcl_text: str) -> str:
     template = _declared_template(hcl_text)
     suffix = _declared_suffix(hcl_text)
     values = {
-        "account_id": _FIXED_ACCOUNT_ID,
+        "instance_name": _FIXED_INSTANCE_NAME,
         "aws_region": _FIXED_REGION,
-        "repo_slug": _FIXED_REPO_SLUG,
+        "account_id": _FIXED_ACCOUNT_ID,
         "state_bucket_suffix": suffix,
     }
     return _compose(template, values)
@@ -223,18 +190,18 @@ def _without_suffix_declaration(hcl_text: str) -> str:
 def _with_unknown_template_component(hcl_text: str) -> str:
     """A copy of `hcl_text` whose `state_bucket_name` template names an unsupplied component."""
     perturbed, count = re.subn(
-        r"\$\{local\.repo_slug\}", "${local.unknown_component}", hcl_text, count=1
+        r"\$\{local\.instance_name\}", "${local.unknown_component}", hcl_text, count=1
     )
     if count != 1:
         raise BucketNameError(
-            f"could not perturb the state_bucket_name template's local.repo_slug reference "
+            f"could not perturb the state_bucket_name template's local.instance_name reference "
             f"in a copy of {ROOT_HCL_RELATIVE} to build the missing-component fixture"
         )
     return perturbed
 
 
 def test_bucket_name_is_byte_identical_across_two_computations() -> None:
-    """AC-5.1 / AC-TEST-004: same fixed account, region, slug and suffix -> same name, twice."""
+    """Same fixed instance name, region, account and suffix -> same name, twice."""
     first = _bucket_name(_root_hcl_text())
     second = _bucket_name(_root_hcl_text())
     assert first == second
@@ -246,7 +213,7 @@ def test_bucket_name_embeds_every_component_in_the_template_order() -> None:
     hcl_text = _root_hcl_text()
     name = _bucket_name(hcl_text)
     suffix = _declared_suffix(hcl_text)
-    ordered_components = (_FIXED_ACCOUNT_ID, _FIXED_REGION, _FIXED_REPO_SLUG, suffix)
+    ordered_components = (_FIXED_INSTANCE_NAME, _FIXED_REGION, _FIXED_ACCOUNT_ID, suffix)
     positions = [name.index(component) for component in ordered_components]
     assert positions == sorted(positions), (
         f"components are not embedded in the order {ROOT_HCL_RELATIVE}'s template declares: "
@@ -255,83 +222,19 @@ def test_bucket_name_embeds_every_component_in_the_template_order() -> None:
 
 
 def test_missing_committed_suffix_raises_naming_the_missing_declaration() -> None:
-    """AC-TEST-005: no committed suffix -> a specific error naming it, and no name produced."""
+    """No committed suffix -> a specific error naming it, and no name produced."""
     perturbed_hcl_text = _without_suffix_declaration(_root_hcl_text())
     with pytest.raises(BucketNameError, match="state_bucket_suffix"):
         _bucket_name(perturbed_hcl_text)
 
 
 def test_template_referencing_an_unsupplied_component_raises_naming_it() -> None:
-    """Malformed-input case (Approach step 5): the name template names an unsupplied component."""
+    """Malformed-input case: the name template names an unsupplied component."""
     perturbed_hcl_text = _with_unknown_template_component(_root_hcl_text())
     with pytest.raises(BucketNameError, match="unknown_component"):
         _bucket_name(perturbed_hcl_text)
 
 
 def test_no_skip_xfail_or_conditional_import_guards_this_module() -> None:
-    """AC-TEST-007: this module hides no failure behind a skip, xfail or guarded import."""
+    """This module hides no failure behind a skip, xfail or guarded import."""
     _assert_no_skip_guard(Path(__file__))
-
-
-# Maps this module's private, leading-underscore local name to the exact
-# `devcontainer_config.repo` attribute it must be an `ast.Attribute` load of,
-# so a local rebound onto the wrong attribute name (e.g. a typo or a swap
-# between the two constants) is caught, not only a re-declared literal.
-_GIT_REMOTE_TIMEOUT_LOCAL_TO_REPO_ATTR = {
-    "_GIT_REMOTE_TIMEOUT_ENV_VAR": "GIT_REMOTE_TIMEOUT_ENV_VAR",
-    "_GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS": "GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS",
-}
-
-
-def test_git_remote_timeout_name_and_default_are_bound_to_repo_module() -> None:
-    """AC-TEST-002: this module declares no independent copy of `devcontainer_config.repo`'s
-    timeout name or default; both are loaded from `repo`'s own attributes.
-
-    Runtime `is`/`==` checks against the two names' current values cannot enforce this:
-    CPython interns identifier-shaped string literals across separately-compiled modules,
-    so a re-declaration such as `_GIT_REMOTE_TIMEOUT_ENV_VAR = "REPO_SLUG_GIT_TIMEOUT_SECONDS"`
-    would still satisfy `is repo.GIT_REMOTE_TIMEOUT_ENV_VAR`, and a re-declared `10.0` would
-    still satisfy `==` against `repo`'s `10.0` -- both were observed to hold against the
-    pre-fix, independently-declared literals during this test's own RED phase. Parsing this
-    module's own source with `ast` sidesteps interning entirely: it inspects how each name
-    is bound rather than what its current runtime value happens to be, so only an
-    `ast.Attribute` load off the `repo` name satisfies the check; any `ast.Constant`
-    right-hand side, including one that happens to equal the current default, fails. Mirrors
-    the deleted catalog suite's `test_module_emits_exactly_one_external_command_name` convention
-    of asserting the module's own parsed source instead of a value observed at runtime.
-    """
-    source = Path(__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    bound_via_repo_attribute: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
-            continue
-        target = node.targets[0]
-        if (
-            not isinstance(target, ast.Name)
-            or target.id not in _GIT_REMOTE_TIMEOUT_LOCAL_TO_REPO_ATTR
-        ):
-            continue
-        expected_attr = _GIT_REMOTE_TIMEOUT_LOCAL_TO_REPO_ATTR[target.id]
-        assert isinstance(node.value, ast.Attribute), (
-            f"{target.id} must be bound to devcontainer_config.repo's own attribute, "
-            f"not restated as a literal; found {ast.unparse(node.value)!r} at "
-            f"{Path(__file__).name}:{node.lineno}"
-        )
-        assert isinstance(node.value.value, ast.Name) and node.value.value.id == "repo", (
-            f"{target.id} must read from the `repo` module, not {ast.unparse(node.value.value)!r}"
-        )
-        assert node.value.attr == expected_attr, (
-            f"{target.id} must be bound to repo.{expected_attr}, not repo.{node.value.attr}"
-        )
-        bound_via_repo_attribute.add(target.id)
-    assert bound_via_repo_attribute == set(_GIT_REMOTE_TIMEOUT_LOCAL_TO_REPO_ATTR), (
-        f"expected exactly one module-level assignment for each of "
-        f"{sorted(_GIT_REMOTE_TIMEOUT_LOCAL_TO_REPO_ATTR)} binding to repo's attribute; "
-        f"found {sorted(bound_via_repo_attribute)}"
-    )
-
-    # The parsed binding is the load-bearing guarantee above; these confirm the runtime
-    # values still agree with `repo`'s, catching a rebind onto the wrong attribute name.
-    assert _GIT_REMOTE_TIMEOUT_ENV_VAR is repo.GIT_REMOTE_TIMEOUT_ENV_VAR
-    assert _GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS == repo.GIT_REMOTE_TIMEOUT_DEFAULT_SECONDS

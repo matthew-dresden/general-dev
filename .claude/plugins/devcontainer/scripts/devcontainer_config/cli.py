@@ -609,8 +609,9 @@ Deletes every SSM parameter under the instance's prefix, removes its docker
 context, and deletes its certificate-material directory (the recorded
 instance-id file included). Every operation is attempted even after an
 earlier one failed; all failures are raised together at the end. The
-remote-state bucket is deliberately out of scope: the fleet shares one
-bucket, so its lifecycle is a Terragrunt/backend concern.
+remote-state bucket is deliberately out of scope: each instance's bucket is
+derived in root.hcl from its own name, so its lifecycle is a
+Terragrunt/backend concern.
 """
 
 # The region default every aws-touching instance subcommand applies, the same

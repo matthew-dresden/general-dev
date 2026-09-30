@@ -83,7 +83,7 @@ DISCOVER_INSTANCE_NAMES = PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "fro
 
 # REMOTE_AWS_REGION is required, never defaulted, in every target that names
 # a region -- the Terragrunt helper and the power/destroy targets alike.
-# root.hcl derives the fleet's shared state bucket's name from this variable,
+# root.hcl derives each instance's state bucket's name from this variable,
 # so a silently substituted default would point a whole run's state at a
 # bucket belonging to another region instead of failing, and no region is a
 # safe guess. Expanded into each recipe that needs the region, so the
@@ -98,7 +98,7 @@ endef
 # run). tg_init <name> cds into the instance's directory -- always from
 # $(CURDIR), so consecutive iterations never nest relative paths -- and
 # inits non-interactively. The backend-bootstrap retry exists for the very
-# first init in a fresh account: the fleet's shared remote-state bucket does
+# first init in a fresh account: the instance's remote-state bucket does
 # not exist yet and Terragrunt wants a y/n confirmation no non-interactive
 # pipe can answer proactively. The retry is attempted only when the failed
 # init's output names the missing bucket -- Terragrunt's own "Remote state
@@ -110,7 +110,7 @@ endef
 #
 # REMOTE_AWS_REGION has no default here (see REMOTE_AWS_REGION_GUARD): the
 # helper requires it fail-fast before the first Terragrunt call, because
-# root.hcl derives the shared state bucket's name from it.
+# root.hcl derives the instance's state bucket name from it.
 define TERRAGRUNT_INIT_HELPER
 tg_init() { \
 	name="$$1"; \
@@ -251,7 +251,7 @@ help:
 	row "make instance-init"    "host"   "Scaffold <project>'s directory; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= for the AMI/AZ lookup only; the deployment region is REMOTE_AWS_REGION]"; \
 	row "make instance-deploy"  "remote" "Converge: provision, link id, trust chain if missing, push secrets. Refuses instance replacement without CONFIRM=replace. INSTANCE= | ALL=1"; \
 	row "make instance-status"  "host"   "One instance's live state, or every instance with ALL=1. INSTANCE=<instance-name> | ALL=1"; \
-	row "make instance-plan"    "remote" "Terragrunt plan per instance; bootstraps the shared state bucket on first run. INSTANCE=<instance-name> | ALL=1"; \
+	row "make instance-plan"    "remote" "Terragrunt plan per instance; bootstraps the instance's state bucket on first run. INSTANCE=<instance-name> | ALL=1"; \
 	row "make instance-stop"    "remote" "Stop the EC2 instance and wait until it reports stopped. INSTANCE=<instance-name> | ALL=1"; \
 	row "make instance-start"   "remote" "Start it again and wait for its SSM agent to report ready. INSTANCE=<instance-name> | ALL=1"; \
 	row "make instance-destroy" "remote" "Destroy + cleanup params, certs, context, id. CONFIRM=destroy only for ALL=1. INSTANCE=<instance-name> | ALL=1"; \
@@ -494,7 +494,7 @@ instance-status:
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-status "$$name" || exit 1; \
 	done <<< "$$names"
 
-# Dry run: init (bootstrapping the shared state bucket on the very first
+# Dry run: init (bootstrapping the instance's state bucket on the very first
 # run, see TERRAGRUNT_INIT_HELPER), then plan. Never applies anything.
 instance-plan:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-plan)

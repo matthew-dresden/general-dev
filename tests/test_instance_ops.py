@@ -164,10 +164,12 @@ def _instance_name(prefix: str = "inst") -> str:
 def _git_root(tmp_path: Path) -> Path:
     """A disposable git checkout whose origin slug is this repository's own.
 
-    The checkout carries this repository's committed `.gitignore` -- the
-    same seeding `tests/test_gitignore_allowlist.py` uses for its scratch
-    repositories -- so a scaffold's per-instance ignore append exercises the
-    real anchor rule rather than a test-owned stand-in.
+    The checkout carries this repository's committed `.gitignore` -- read
+    from the real checkout's HEAD, not its working tree, so a scratch repo
+    never inherits uncommitted entries -- the same seeding
+    `tests/test_gitignore_allowlist.py` uses for its scratch repositories,
+    so a scaffold's per-instance ignore append exercises the real anchor
+    rule rather than a test-owned stand-in.
     """
     root = generated_root(tmp_path)
     init_repo(root)
@@ -184,10 +186,14 @@ def _git_root(tmp_path: Path) -> Path:
         check=True,
         capture_output=True,
     )
-    real_gitignore = (
-        _import_repo().find_root(Path(__file__).resolve().parent) / ".gitignore"
-    ).read_text(encoding="utf-8")
-    (root / ".gitignore").write_text(real_gitignore, encoding="utf-8")
+    real_repo_root = _import_repo().find_root(Path(__file__).resolve().parent)
+    committed_gitignore = subprocess.run(
+        ["git", "-C", str(real_repo_root), "show", "HEAD:.gitignore"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    (root / ".gitignore").write_text(committed_gitignore, encoding="utf-8")
     return root
 
 

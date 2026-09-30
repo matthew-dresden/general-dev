@@ -4,9 +4,11 @@ The bucket name must be byte-identical across runs, given a fixed instance
 name, region and suffix. The name template itself --
 `tg-state-<instance-name>-<region>-<account-id>-<suffix>` -- and the
 committed suffix both live in `remote-instances/root.hcl`; this module reads
-both from that file rather than restating either as a Python literal, so a
-test that hard-coded the expected name would keep passing even if the file
-started composing something else.
+both from that file through `devcontainer_config.state_bucket`'s own parser
+-- the same functions production composes the name with -- rather than
+restating either as a Python literal, so a test that hard-coded the expected
+name would keep passing even if the file started composing something else,
+and a parser that drifted from root.hcl's grammar would fail here too.
 
 The instance name, region and account id are the three components
 `remote-instances/root.hcl` resolves at Terragrunt runtime
@@ -35,10 +37,9 @@ suffix or template read that were non-deterministic (e.g. accidentally
 generated instead of read) would be caught by this test instead of hidden
 behind Python's own referential equality.
 
-`ROOT_HCL_RELATIVE`, `_repo_root`, `_read_repo_file` and the
-skip/xfail/guarded-import detector are shared with
-`tests/test_tool_version_floors.py` via `tests/conftest.py` rather than
-declared twice; see that module's docstring for why.
+`ROOT_HCL_RELATIVE` and the skip/xfail/guarded-import detector are shared
+with `tests/test_tool_version_floors.py` via `tests/conftest.py` rather
+than declared twice; see that module's docstring for why.
 """
 
 from __future__ import annotations
@@ -49,14 +50,10 @@ import uuid
 from pathlib import Path
 
 import pytest
-from conftest import (
-    ROOT_HCL_RELATIVE,
-    _assert_no_skip_guard,
-    _read_repo_file,
-    _synthetic_account_id,
-)
-
-_INTERPOLATION_TOKEN = re.compile(r"\$\{local\.([A-Za-z0-9_]+)\}")
+from conftest import ROOT_HCL_RELATIVE, _assert_no_skip_guard, _synthetic_account_id
+from devcontainer_config import state_bucket
+from devcontainer_config.repo import find_root
+from devcontainer_config.state_bucket import StateBucketError
 
 # AWS region names are `<partition>-<direction>-<digit>`
 # (`devcontainer_config.answers._REGION_PATTERN`:
@@ -68,16 +65,6 @@ _INTERPOLATION_TOKEN = re.compile(r"\$\{local\.([A-Za-z0-9_]+)\}")
 # approach for the same reason.
 _REGION_PARTITIONS = ("us", "eu", "ap", "ca", "sa", "af", "me")
 _REGION_DIRECTIONS = ("east", "west", "north", "south", "central")
-
-
-class BucketNameError(AssertionError):
-    """The name template, the committed suffix, or a substitution could not be resolved.
-
-    Every raise site below names the file and the value it could not make
-    sense of: the Terragrunt root configuration declares no suffix, or the
-    template references an unsupplied component, and the test fails naming
-    the file and the missing declaration.
-    """
 
 
 def _synthetic_region() -> str:
@@ -113,65 +100,19 @@ _FIXED_INSTANCE_NAME = _synthetic_instance_name()
 
 
 def _root_hcl_text() -> str:
-    return _read_repo_file(ROOT_HCL_RELATIVE, error_cls=BucketNameError)
-
-
-def _declared_template(hcl_text: str) -> str:
-    """The raw `state_bucket_name` interpolation string committed in root.hcl."""
-    match = re.search(r'^\s*state_bucket_name\s*=\s*"([^"]*)"', hcl_text, re.MULTILINE)
-    if match is None:
-        raise BucketNameError(f"no state_bucket_name declaration found in {ROOT_HCL_RELATIVE}")
-    return match.group(1)
-
-
-def _declared_suffix(hcl_text: str) -> str:
-    """The committed `state_bucket_suffix` value.
-
-    Raises naming the file and the missing declaration when no suffix is
-    committed, since inventing a replacement here would silently point the
-    composed name at a different bucket than the one Terragrunt's own
-    bootstrap would find.
-    """
-    match = re.search(r'^\s*state_bucket_suffix\s*=\s*"([^"]*)"', hcl_text, re.MULTILINE)
-    if match is None or not match.group(1):
-        raise BucketNameError(
-            f"no committed state_bucket_suffix found in {ROOT_HCL_RELATIVE}; a missing suffix "
-            "means a fresh bootstrap would mint a new bucket instead of finding the existing one"
-        )
-    return match.group(1)
-
-
-def _compose(template: str, values: dict[str, str]) -> str:
-    """`template`'s `${local.NAME}` tokens substituted from `values`.
-
-    Raises naming the unresolved `local.NAME` reference and the file it
-    came from when the template names a component this caller did not
-    supply, rather than leaving the literal `${local...}` token embedded in
-    the returned string.
-    """
-
-    def _substitute(match: re.Match[str]) -> str:
-        name = match.group(1)
-        if name not in values:
-            raise BucketNameError(
-                f"{ROOT_HCL_RELATIVE}'s state_bucket_name template references local.{name}, "
-                f"which is not one of the composed components {sorted(values)}"
-            )
-        return values[name]
-
-    return _INTERPOLATION_TOKEN.sub(_substitute, template)
+    """`remote-instances/root.hcl` as the production parser reads it."""
+    root = find_root(Path(__file__).resolve().parent)
+    try:
+        return state_bucket.root_hcl_path(root).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise StateBucketError(f"{ROOT_HCL_RELATIVE} could not be read: {exc}") from exc
 
 
 def _bucket_name(hcl_text: str) -> str:
-    template = _declared_template(hcl_text)
-    suffix = _declared_suffix(hcl_text)
-    values = {
-        "instance_name": _FIXED_INSTANCE_NAME,
-        "aws_region": _FIXED_REGION,
-        "account_id": _FIXED_ACCOUNT_ID,
-        "state_bucket_suffix": suffix,
-    }
-    return _compose(template, values)
+    """The name production's own composer produces for this module's fixed components."""
+    return state_bucket.compose_from_root_hcl(
+        hcl_text, _FIXED_INSTANCE_NAME, _FIXED_REGION, _FIXED_ACCOUNT_ID
+    )
 
 
 def _without_suffix_declaration(hcl_text: str) -> str:
@@ -180,7 +121,7 @@ def _without_suffix_declaration(hcl_text: str) -> str:
         r'^\s*state_bucket_suffix\s*=\s*"[^"]*"\n', "", hcl_text, count=1, flags=re.MULTILINE
     )
     if count != 1:
-        raise BucketNameError(
+        raise StateBucketError(
             f"could not remove the state_bucket_suffix declaration from a copy of "
             f"{ROOT_HCL_RELATIVE} to build the missing-suffix fixture"
         )
@@ -193,7 +134,7 @@ def _with_unknown_template_component(hcl_text: str) -> str:
         r"\$\{local\.instance_name\}", "${local.unknown_component}", hcl_text, count=1
     )
     if count != 1:
-        raise BucketNameError(
+        raise StateBucketError(
             f"could not perturb the state_bucket_name template's local.instance_name reference "
             f"in a copy of {ROOT_HCL_RELATIVE} to build the missing-component fixture"
         )
@@ -212,7 +153,7 @@ def test_bucket_name_embeds_every_component_in_the_template_order() -> None:
     """Proves substitution ran, rather than the template happening to already equal itself."""
     hcl_text = _root_hcl_text()
     name = _bucket_name(hcl_text)
-    suffix = _declared_suffix(hcl_text)
+    suffix = state_bucket.declared_suffix(hcl_text)
     ordered_components = (_FIXED_INSTANCE_NAME, _FIXED_REGION, _FIXED_ACCOUNT_ID, suffix)
     positions = [name.index(component) for component in ordered_components]
     assert positions == sorted(positions), (
@@ -224,14 +165,14 @@ def test_bucket_name_embeds_every_component_in_the_template_order() -> None:
 def test_missing_committed_suffix_raises_naming_the_missing_declaration() -> None:
     """No committed suffix -> a specific error naming it, and no name produced."""
     perturbed_hcl_text = _without_suffix_declaration(_root_hcl_text())
-    with pytest.raises(BucketNameError, match="state_bucket_suffix"):
+    with pytest.raises(StateBucketError, match="state_bucket_suffix"):
         _bucket_name(perturbed_hcl_text)
 
 
 def test_template_referencing_an_unsupplied_component_raises_naming_it() -> None:
     """Malformed-input case: the name template names an unsupplied component."""
     perturbed_hcl_text = _with_unknown_template_component(_root_hcl_text())
-    with pytest.raises(BucketNameError, match="unknown_component"):
+    with pytest.raises(StateBucketError, match="unknown_component"):
         _bucket_name(perturbed_hcl_text)
 
 

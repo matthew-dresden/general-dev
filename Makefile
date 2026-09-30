@@ -193,7 +193,7 @@ PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer
 PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
 
 .DEFAULT_GOAL := help
-.PHONY: help connect disconnect status exec shell start stop restart rename check build push-creds creds-init verify-container clean rebuild push-secrets \
+.PHONY: help connect-start disconnect status exec shell start stop restart rename check build push-creds creds-init verify-container clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-workspace lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test cert-status list-instances instance-init instance-plan instance-deploy instance-status instance-stop instance-start instance-destroy instance-link \
@@ -202,7 +202,7 @@ PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
 
 # The help surface. Every two-column row (target, scope, description) renders
 # through the single `row` helper defined inside the recipe: with a
-# description at or under 120 characters it prints exactly what the plain
+# description at or under 180 characters it prints exactly what the plain
 # printf printed before the cap existed, and past it the row wraps -- the
 # description leaves line 1 and continues on 34-space-indented lines (the
 # instruction column), each chunk kept inside the cap by
@@ -220,7 +220,7 @@ help:
 	@printf '\n\033[1m%s\033[0m devcontainer control.   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
 	@set -euo pipefail; \
 	row() { \
-		if [ "$${#3}" -le 120 ]; then \
+		if [ "$${#3}" -le 180 ]; then \
 			printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "$$1" "$$2" "$$3"; \
 		else \
 			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.helpline "$$1" "$$2" "$$3"; \
@@ -257,12 +257,12 @@ help:
 	row "make instance-destroy" "remote" "Destroy + cleanup params, certs, context, id. CONFIRM=destroy only for ALL=1. INSTANCE=<instance-name> | ALL=1"; \
 	row "make instance-link"    "host"   "Save the instance's EC2 id for other targets. Deploy does this automatically; run it only after re-provisioning outside make. INSTANCE_ID=<id>"; \
 	row "make cert-ca"          "host"   "Create this instance's certificate authority. Once per instance; refuses if one exists."; \
-	row "make cert-client"      "host"   "Issue the client certificate 'make connect' presents. Run after cert-ca, and again at renewal."; \
+	row "make cert-client"      "host"   "Issue the client certificate 'make connect-start' presents. Run after cert-ca, and again at renewal."; \
 	row "make cert-publish"     "remote" "Issue server material and publish it to Parameter Store. The daemon needs it to open its listener."; \
 	row "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."; \
 	row "make cert-status"      "host"   "Client and CA expiry per instance."; \
 	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."; \
-	row "make connect"          "remote" "Open the SSM forward as a background daemon; returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
+	row "make connect-start"    "remote" "Open the SSM forward as a background daemon; returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
 	row "make connect-status"   "host"   "Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1"; \
 	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \
 	row "make connect-refresh"  "host"   "Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1"; \
@@ -306,11 +306,11 @@ help:
 	row "make test"             "host"   "Run the hermetic pytest suite in tests/. No docker, no AWS, no network."; \
 	row "make validate"         "host"   "The green-baseline contract automation depends on. Runs lint then test."; \
 	note "SKILLS" "wire this repo's .agents/skills roster into an agent on this Mac; no devcontainer involved"; \
-	row "make skills-install"   "host"   "Wire an agent to the canonical skills home: global symlink (default), project verify/wire, or the runtime one-shot incantation (printed, never run). AGENT=opencode|claude|both SCOPE=global|project|runtime"; \
+	row "make skills-install"   "host"   "Wire an agent to the skills home: global symlink (default), project verify/wire, or runtime one-shot (printed, never run). AGENT=opencode|claude|both SCOPE=global|project|runtime"; \
 	row "make skills-remove"    "host"   "Delete only a general-dev-skills symlink resolving inside this repo; refuses everything else. AGENT=opencode|claude|both SCOPE=global|project|runtime"; \
 	row "make skills-list"      "host"   "Show each agent scope: installed (target), native (project), or not installed. AGENT=opencode|claude|both SCOPE=global|project|runtime"; \
 	printf '\n\033[1mOPTIONS\033[0m\n'; \
-	row "ENGINE=local|<name>"   ""       "Address one engine explicitly (ENGINE=x make <target>, or make <target> ENGINE=x): parallel terminals can drive local and remote engines concurrently, without switching contexts. Unset follows the active context."; \
+	row "ENGINE=local|<name>"   ""       "Address one engine explicitly (ENGINE=x make <target> or make <target> ENGINE=x): drive local and remote engines in parallel; unset follows the active context."; \
 	row "CONTAINER=<name>"      ""       "Pick one instance when several clones of this repo exist. 'make status' lists them."; \
 	row "FORCE=1"               ""       "Proceed past the unpushed-work and uncommitted-config guards."; \
 	row "SKIP_SECRETS_CHECK=1"  ""       "Do not compare shell.env against Parameter Store, and do not publish it."; \
@@ -339,9 +339,9 @@ help:
 # resolver's own guard before anything opens. The daemon is managed by
 # devcontainer_config.forwards (spawn, readiness poll, record); this recipe
 # only resolves WHICH instance and hands the resolved values over. The
-# lifecycle companions: connect-status, connect-stop, connect-refresh and
-# connect-list.
-connect:
+# lifecycle companions: connect-start (this target), connect-status,
+# connect-stop, connect-refresh and connect-list.
+connect-start:
 	@set -euo pipefail; \
 	$(PROXY_ENV) \
 	transport="$${DEVCONTAINER_TRANSPORT:-ssm}"; \
@@ -361,7 +361,7 @@ connect:
 	else \
 		[ -n "$${REMOTE_INSTANCE_ID:-}" ] || { \
 			printf '\033[0;31m[ERROR]\033[0m no instance is selected and no default id is recorded\n' >&2; \
-			printf '        Name one: make connect INSTANCE=<instance-name>\n' >&2; \
+			printf '        Name one: make connect-start INSTANCE=<instance-name>\n' >&2; \
 			exit 1; \
 		}; \
 		ctx="$(REMOTE_CONTEXT)"; \
@@ -388,8 +388,9 @@ connect:
 # The forward daemon's lifecycle, one instance at a time or every configured
 # one with ALL=1, each a thin loop over the devcontainer_config.forwards
 # subcommands of the same concern (the engine is that module, the same shape
-# as the instance-* layer). status exits non-zero when a forward is down, so
-# automation can gate on it; stop verifies the forwarded port actually
+# as the instance-* layer). status and list are reports -- any state they
+# answer is a success, and only an unanswerable probe fails them; stop
+# verifies the forwarded port actually
 # closed before reporting; refresh re-runs the recorded command, for an
 # expired SSO session or a dropped tunnel; list renders every instance's
 # forward state and is the one no-argument member.
@@ -548,7 +549,7 @@ local: disconnect
 # docker context answers through it; remote then switches the context.
 remote:
 	@$(call ENGINE_CONTEXT_SWITCH_REFUSAL,remote)
-	@$(MAKE) --no-print-directory connect
+	@$(MAKE) --no-print-directory connect-start
 	@printf '\033[0;32m[DONE]\033[0m targeting the remote engine, the forward runs in the background, "make build" clones into a volume\n'
 
 reopen:

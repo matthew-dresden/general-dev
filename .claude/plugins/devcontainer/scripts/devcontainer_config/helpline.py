@@ -35,7 +35,7 @@ from collections.abc import Sequence
 # longer than this many visible characters; longer descriptions wrap onto
 # continuation lines indented to the instruction column. Public so the
 # Makefile contract test can pin the `row()` helper's literal threshold to it.
-DESCRIPTION_MAX = 120
+DESCRIPTION_MAX = 180
 
 # The column the description text starts at: a two-space indent plus the
 # 23-column target field, a separating space, the 7-column scope field, and

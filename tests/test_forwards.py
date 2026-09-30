@@ -168,11 +168,9 @@ def test_open_spawns_the_transport_confirms_and_records(tmp_path: Path) -> None:
         )
 
     assert "pid 777" in message and "51368" in message
-    assert spawner.argv is not None and spawner.argv[1:4] == (
-        "-m",
-        "devcontainer_config.transport",
-        "connect",
-    )
+    assert spawner.argv is not None
+    assert spawner.argv[1:3] == ("-u", "-m")
+    assert spawner.argv[3:5] == ("devcontainer_config.transport", "connect")
     assert "--instance-id" in spawner.argv and "i-abc" in spawner.argv
     assert "--profile" in spawner.argv and "--region" in spawner.argv
     assert any("docker" in call and "context" in call for call in port_probe_calls)

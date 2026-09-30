@@ -26,6 +26,8 @@ by acting at the smaller scope by default.
 | Confirm | Present the instance, its id, and the clean precheck; wait for the operator's explicit confirmation | Recorded verbatim. Silence, an empty answer, or ambiguity is a decline. |
 | Destroy | `make instance-destroy INSTANCE=<name>` | Destroys the instance and cleans up its parameters, certificates, docker context and linked id. `ALL=1` (fleet) additionally requires `CONFIRM=destroy` and belongs to `gd-instance-fleet`. |
 | Verify | `make list-instances` afterward | The instance is gone from the report, with no orphaned parameter, certificate, context or id entry. |
+| Bucket roster | `make bucket-list` | The instance's state bucket survives the destroy by design; this shows it, marked orphaned, along with every other bucket the fleet's template matches. |
+| State bucket removal | `make bucket-delete INSTANCE=<name>` | Deletes the instance's bucket after purging every version. `ALL=1 CONFIRM=delete` clears every bucket in `REMOTE_AWS_REGION`; an operator decision, never this skill's. |
 
 ## Checks
 

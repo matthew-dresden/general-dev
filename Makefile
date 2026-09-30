@@ -90,7 +90,7 @@ DISCOVER_INSTANCE_NAMES = PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "fro
 # requirement is stated once and enforced everywhere (fail-fast, per
 # CLAUDE.md).
 define REMOTE_AWS_REGION_GUARD
-: "$${REMOTE_AWS_REGION:?REMOTE_AWS_REGION must be set (no default: root.hcl names the state bucket from it)}";
+: "$${REMOTE_AWS_REGION:?REMOTE_AWS_REGION is required and has no default (root.hcl names each state bucket from it). Set it with: export REMOTE_AWS_REGION=<region>}";
 endef
 
 # Per-instance shell helpers, inlined into each recipe that runs Terragrunt
@@ -125,7 +125,7 @@ tg_init() { \
 	cd "$$dir" || exit 1; \
 	$(REMOTE_AWS_REGION_GUARD) \
 	export TG_NON_INTERACTIVE=true; \
-	init_form=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket "$(CURDIR)" "$$name" "$$REMOTE_AWS_REGION") || exit 1; \
+	init_form=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket init-form "$(CURDIR)" "$$name") || exit 1; \
 	if [ "$$init_form" = "bootstrap" ]; then \
 		echo y | terragrunt init --backend-bootstrap -input=false || exit 1; \
 	else \
@@ -197,7 +197,7 @@ PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-workspace lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test cert-status list-instances instance-init instance-plan instance-deploy instance-status instance-stop instance-start instance-destroy instance-link \
-        connect-status connect-stop connect-refresh connect-list \
+        connect-status connect-stop connect-refresh connect-list bucket-list bucket-delete \
         skills-install skills-remove skills-list
 
 # The help surface. Every two-column row (target, scope, description) renders
@@ -267,6 +267,8 @@ help:
 	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \
 	row "make connect-refresh"  "host"   "Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1"; \
 	row "make connect-list"     "host"   "Every instance's forward: pid, port, listening or not."; \
+	row "make bucket-list"      "host"   "Every state bucket this fleet's naming template matches: name, configured or orphaned. REMOTE_AWS_REGION required."; \
+	row "make bucket-delete"    "host"   "Purge + delete state buckets: INSTANCE=<name>, or ALL=1 CONFIRM=delete for every one in REMOTE_AWS_REGION. REMOTE_AWS_REGION required."; \
 	row "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)): ensures the SSM forward in the background, then switches docker. INSTANCE=<name> targets that instance."; \
 	note "BUILD" "every target blocks until the container is up and exits non-zero if anything fails"; \
 	row "make build"            "both"   "Create the container for the active backend. Refuses if one already exists."; \
@@ -364,6 +366,16 @@ connect:
 		}; \
 		ctx="$(REMOTE_CONTEXT)"; \
 	fi; \
+	[ -n "$${REMOTE_AWS_REGION:-}" ] || { \
+		printf '\033[0;31m[ERROR]\033[0m REMOTE_AWS_REGION is required and has no default: the forward opens an SSM session in it\n' >&2; \
+		printf '        Set it with: export REMOTE_AWS_REGION=<region>\n' >&2; \
+		exit 2; \
+	}; \
+	[ -n "$${REMOTE_AWS_PROFILE:-}" ] || { \
+		printf '\033[0;31m[ERROR]\033[0m REMOTE_AWS_PROFILE is required and has no default: the SSM session resolves credentials through it\n' >&2; \
+		printf '        Set it with: export REMOTE_AWS_PROFILE=<sso-profile>, after: aws sso login --profile <sso-profile>\n' >&2; \
+		exit 2; \
+	}; \
 	case "$$transport" in \
 		ssm) PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
 			--instance-id "$$REMOTE_INSTANCE_ID" --context "$$ctx" \
@@ -410,6 +422,35 @@ connect-refresh:
 
 connect-list:
 	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards list
+
+# State buckets: one per instance, named tg-state-<instance>-<region>-<account>-<suffix>
+# (the template and its committed suffix live in remote-instances/root.hcl,
+# which is the only place both are declared). list shows every bucket in the
+# account whose name the template matches, marking the ones a configured
+# instance owns; delete purges every version and delete marker first, then
+# deletes the bucket -- one instance's with INSTANCE=<name>, every fleet
+# bucket in REMOTE_AWS_REGION with ALL=1, which additionally requires
+# CONFIRM=delete because a typo'd ALL should never be all it takes to erase
+# every instance's state history. Both take REMOTE_AWS_REGION with no
+# default (the region guard below); deleting is deliberate, and the bucket
+# stands outside the instance lifecycle, so no instance-* target ever calls
+# these.
+bucket-list:
+	@$(REMOTE_AWS_REGION_GUARD) \
+	PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket list
+
+bucket-delete:
+	@$(call INSTANCE_OR_ALL_GUARD,bucket-delete)
+	@if [ "$(ALL)" = "1" ] && [ "$(CONFIRM)" != "delete" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m ALL=1 deletes every state bucket this fleet names in REMOTE_AWS_REGION; confirm it: make bucket-delete ALL=1 CONFIRM=delete\n' >&2; \
+		exit 1; \
+	fi; \
+	$(REMOTE_AWS_REGION_GUARD) \
+	if [ "$(ALL)" = "1" ]; then \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket delete-all; \
+	else \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket delete "$(INSTANCE)"; \
+	fi
 
 disconnect:
 	@$(call ENGINE_CONTEXT_SWITCH_REFUSAL,disconnect)
@@ -691,7 +732,7 @@ instance-deploy:
 		fi; \
 		make --no-print-directory push-secrets INSTANCE="$$name" || exit 1; \
 		printf '\033[0;32m[DONE]\033[0m %s converged. Next, in order:\n' "$$name"; \
-		printf '  make remote INSTANCE=%s      # refreshes the SSM port forward; blocks until interrupted\n' "$$name"; \
+		printf '  make remote INSTANCE=%s      # opens the forward as a background daemon, points docker at the engine\n' "$$name"; \
 		printf '  make build INSTANCE=%s\n' "$$name"; \
 		printf '  make reopen INSTANCE=%s\n' "$$name"; \
 	) || exit 1; \

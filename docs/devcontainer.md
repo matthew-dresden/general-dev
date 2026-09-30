@@ -653,38 +653,37 @@ caller who exports the old value out of habit is told so instead of being
 silently redirected. Unset, or the explicit value `ssm`, runs
 
 ```sh
-PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.transport \
-  connect --instance-id <id> --context <context> --profile <profile> --region <region> \
-  [--certs-root <path>]
+PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.forwards \
+  open --instance-id <id> --context <context> --profile <profile> --region <region>
 ```
 
-which is the same command, with real values substituted from `config.env`
-and the instance's per-instance id store -- the `instance-id` file under
+which is the same connection the operator targets make with, real values
+substituted from `config.env` and the instance's per-instance id store --
+the `instance-id` file under
 `<certs-root>/<instance>/`, written by `make instance-link` and recorded
 automatically by `make instance-deploy` at apply time -- that the
 `Makefile`'s own `connect` target issues for that value;
 `transport.resolve_transport` reads the identical
-`DEVCONTAINER_TRANSPORT` inside `connect`'s own handler too, refusing
-before touching AWS or docker at all unless it is `ssm`. This path
-establishes the SSM forward exactly as `start` does, then ties in the two
-calls `start` alone never makes -- `transport.ensure_context` and
+`DEVCONTAINER_TRANSPORT` inside the transport's own connect handler too,
+refusing before touching AWS or docker at all unless it is `ssm`. This
+path establishes the SSM forward exactly as `start` does, then ties in the
+two calls `start` alone never makes -- `transport.ensure_context` and
 `transport.handshake` -- and activates the resulting context with
-`docker context use` before confirming the handshake, so `connect` alone
-leaves a working, mTLS-secured `tcp://127.0.0.1:<port>` docker context,
-already active, ready to build against. Unlike the SSH default, though,
-this command does not return: `_run_connect` ends in
-`_run_until_interrupted`, which blocks on `process.wait()`, echoing the
-session process's own output, until the operator interrupts it or it
-exits on its own, and whose `finally` clause always calls `stop_forward`
-on the way out. `DEVCONTAINER_TRANSPORT=ssm make connect` (and `make
-remote`, which drives the same recipe) therefore occupies the terminal it
-was run from for as long as the context needs to stay usable; the forward
--- and with it the docker context's endpoint -- must be left running,
-either in that same foreground or in a second terminal, for a subsequent
-`make build` to reach the `tcp://` context, and interrupting the `connect`
-process tears the forward down and stops the context from working. This is unlike a
-transport that daemonizes and returns, where the command returns
-control to the shell once its work is done. `--certs-root`
+`docker context use` before confirming the handshake. The daemon is
+managed by `devcontainer_config.forwards`, not run in the foreground: the
+connect recipe spawns the command above as a detached process (unbuffered
+stdout streaming into a per-instance log), polls for its `Connected:`
+announcement -- printed only after the handshake answered -- records the
+daemon's pid, command, log and forwarded port beside the instance's
+certificate material, and returns once all of that is confirmed; a child
+that dies first or never announces surfaces with its log tail, and nothing
+is retried behind a failure. The forward stays open after the command
+returns, so a subsequent `make build` reaches the `tcp://` context
+directly; the lifecycle targets manage it afterwards --
+`make connect-status` (per instance or `ALL=1`), `make connect-stop`
+(SIGINT first, then the port-closed verification), `make connect-refresh`
+(re-runs the recorded command, for an expired SSO session or a dropped
+tunnel) and `make connect-list`. `--certs-root`
 defaults to `certs.DEFAULT_CERTS_ROOT` -- the same `<certs-root>` root
 `make cert-status` and the certificate material above use -- and only
 needs overriding for a test fixture or an alternate checkout layout.

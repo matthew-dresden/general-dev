@@ -550,7 +550,7 @@ def test_transport_table_documents_devcontainer_transport() -> None:
 
 
 def _connect_recipe_body() -> str:
-    """The recipe lines (tab-indented) that follow the Makefile's `connect:` target header.
+    """The recipe lines (tab-indented) that follow the Makefile's `connect-start:` target header.
 
     `_makefile_text` (imported from `tests/conftest.py`) already resolves
     the repository root through `devcontainer_config.repo.find_root` and
@@ -560,7 +560,7 @@ def _connect_recipe_body() -> str:
     declares four times, once per Make target it inspects
     (`_test_recipe_body`, `_lint_secrets_recipe_body`, `_help_recipe_body`,
     `_cert_status_recipe_body`); this is a fifth, file-local copy for
-    `connect:`. A shared `_recipe_body(makefile_text, target)` helper in
+    `connect-start:`. A shared `_recipe_body(makefile_text, target)` helper in
     `tests/conftest.py`, which this module already imports `_makefile_text`
     and `_normalize_whitespace` from, would let all five call sites share
     one implementation. `tests/test_makefile_contract.py` and
@@ -573,7 +573,7 @@ def _connect_recipe_body() -> str:
     call, and `_connect_recipe_reads_devcontainer_transport` below changes
     its answer with it.
     """
-    match = re.search(r"^connect:.*\n((?:\t.*\n?)*)", _makefile_text(), re.MULTILINE)
+    match = re.search(r"^connect-start:.*\n((?:\t.*\n?)*)", _makefile_text(), re.MULTILINE)
     assert match is not None, "no connect target found in Makefile"
     return match.group(1)
 
@@ -603,7 +603,7 @@ def _connect_recipe_reads_devcontainer_transport() -> bool:
 # (code_review REVIEW_FAIL, round 4); scoping each reader to its own
 # mentions via the shared `_mention_vicinities` helper below closes both
 # holes at once.
-_CONNECT_RECIPE_MENTION_PATTERN = re.compile(r"connect`?\s*recipe")
+_CONNECT_RECIPE_MENTION_PATTERN = re.compile(r"connect-start`?\s*recipe|\bconnect`?\s*recipe")
 
 # Matches a mention of `transport.py`'s `resolve_transport` reader.
 _RESOLVE_TRANSPORT_MENTION_PATTERN = re.compile(r"resolve_transport")
@@ -919,12 +919,12 @@ def test_connect_recipe_reads_devcontainer_transport_extracts_from_the_real_make
 
     Reads `_connect_recipe_body()` directly (not just the boolean helper
     built on top of it) so this test fails if the extraction ever stops
-    finding a `connect:` target at all, independently of whatever the
+    finding a `connect-start:` target at all, independently of whatever the
     recipe body currently contains.
     """
     body = _connect_recipe_body()
     assert body.strip(), (
-        "_connect_recipe_body() returned an empty recipe body; the `connect:` target "
+        "_connect_recipe_body() returned an empty recipe body; the `connect-start:` target "
         "extraction regex may be stale against the current Makefile."
     )
     assert _connect_recipe_reads_devcontainer_transport() == ("DEVCONTAINER_TRANSPORT" in body), (
@@ -935,7 +935,7 @@ def test_connect_recipe_reads_devcontainer_transport_extracts_from_the_real_make
 
 
 def test_transport_section_describes_connect_entry_point() -> None:
-    """AC-DOC-003: the section describes `make connect` and states the DEVCONTAINER_TRANSPORT
+    """AC-DOC-003: the section describes `make connect-start` and states the DEVCONTAINER_TRANSPORT
     dispatch contract, naming both readers without claiming either one's landed state.
 
     Both caveats' presence is checked by `_assert_transport_landed_caveat_state`,
@@ -947,9 +947,9 @@ def test_transport_section_describes_connect_entry_point() -> None:
     single-signal pin would go silently false.
     """
     section = _transport_section_text_normalized()
-    assert "make connect" in section, (
+    assert "make connect-start" in section, (
         f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not describe the "
-        "`make connect` entry point."
+        "`make connect-start` entry point."
     )
     assert "resolve_transport" in section, (
         f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not name "
@@ -967,34 +967,34 @@ def test_transport_section_describes_connect_entry_point() -> None:
 # text proving the two signals are never collapsed into one boolean: text
 # correct for a different combination fails here (`should_raise=True`) even
 # though a single-signal guard would have accepted it.
-_NEITHER_LANDED_TEXT = "make connect ... resolve_transport ... has not landed"
+_NEITHER_LANDED_TEXT = "make connect-start ... resolve_transport ... has not landed"
 _MAKEFILE_ONLY_TEXT = (
-    "make connect reads DEVCONTAINER_TRANSPORT ... resolve_transport has not landed"
+    "make connect-start reads DEVCONTAINER_TRANSPORT ... resolve_transport has not landed"
 )
-_BLANKET_NEITHER_TEXT = "make connect ... resolve_transport ... neither reader has not landed"
-_BOTH_OR_RESOLVE_ONLY_TEXT = "make connect ... resolve_transport only"
-_STALE_NO_EFFECT_TEXT = "make connect ... resolve_transport ... no effect at all"
-_STALE_NOT_READ_TEXT = "make connect ... resolve_transport ... not read by any code"
+_BLANKET_NEITHER_TEXT = "make connect-start ... resolve_transport ... neither reader has not landed"
+_BOTH_OR_RESOLVE_ONLY_TEXT = "make connect-start ... resolve_transport only"
+_STALE_NO_EFFECT_TEXT = "make connect-start ... resolve_transport ... no effect at all"
+_STALE_NOT_READ_TEXT = "make connect-start ... resolve_transport ... not read by any code"
 
 # AC-FIX-005 fix (code_review/doc_review REVIEW_FAIL, round 2): the retired
 # stale-phrase forbid must be permitted, not mechanically prohibited, while
 # neither reader has landed, so an accurate statement of the real current
 # state stays writable.
 _NEITHER_LANDED_TRUE_STATEMENT_TEXT = (
-    "make connect ... resolve_transport has not landed ... setting it has no effect at all"
+    "make connect-start ... resolve_transport has not landed ... setting it has no effect at all"
 )
 
 # Proves `makefile_reads_variable` alone (independent of resolve_transport)
 # also triggers the stale-phrase forbid, closing the round-2 finding that
 # the parameter was dead at its only real call site (code_review).
-_MAKEFILE_ONLY_STALE_TEXT = "make connect ... resolve_transport has not landed ... no effect at all"
+_MAKEFILE_ONLY_STALE_TEXT = "make connect-start ... resolve_transport has not landed ... no effect at all"
 
 # Proves the mirror-image check (`_connect_recipe_mentions_without_landed_caveat`)
 # fires: a mention of the Makefile's `connect` recipe reading/dispatching the
 # variable with no landed-state caveat nearby, exactly the shape of text a
 # probe against the round-2 guard confirmed it accepted (test_review, round 2).
 _MAKEFILE_RECIPE_UNCAVEATED_TEXT = (
-    "make connect recipe reads DEVCONTAINER_TRANSPORT and dispatches it, resolve_transport only"
+    "make connect-start recipe reads DEVCONTAINER_TRANSPORT and dispatches it, resolve_transport only"
 )
 
 # Round 3 fix (code_review/test_review REVIEW_FAIL): proves the mirror

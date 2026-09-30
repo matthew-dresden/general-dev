@@ -50,7 +50,7 @@ one); the same value is the redundant-but-consistent spelling and passes.
 docker context -- the exact state ENGINE exists to leave untouched -- so
 under ENGINE they refuse with the reason and exit 2.
 
-And `make connect` (the forwarding remedy `make remote INSTANCE=<name>`
+And `make connect-start` (the forwarding remedy `make remote INSTANCE=<name>`
 stands on) resolves the instance it was asked for -- INSTANCE, or ENGINE
 when it names one -- through the same lib.sh resolver every remote entry
 point uses, instead of ignoring the variable and forwarding for the
@@ -188,11 +188,11 @@ def test_diagnosis_names_the_instance_qualified_forward_remedy() -> None:
     body = _lib_function_body("rd_engine_diagnosis")
     assert "make remote INSTANCE=" in body, (
         "under ENGINE, the forward remedy must name the instance this run "
-        "addresses: a bare 'make connect' refreshes the resolver's default, "
+        "addresses: a bare 'make connect-start' refreshes the resolver's default, "
         "which is not necessarily this one"
     )
-    assert '"make connect"' in body, (
-        "with ENGINE unset the remedy must stay the plain 'make connect' it always was"
+    assert '"make connect-start"' in body, (
+        "with ENGINE unset the remedy must stay the plain 'make connect-start' it always was"
     )
 
 
@@ -561,14 +561,14 @@ def test_every_context_switching_target_carries_the_refusal_in_its_recipe() -> N
         )
 
 
-def test_connect_resolves_the_instance_it_is_asked_for() -> None:
+def test_connect_start_resolves_the_instance_it_is_asked_for() -> None:
     """connect honors INSTANCE (else ENGINE): resolution, then that id/context.
 
-    The remedy `make remote INSTANCE=<name>` stands on this target, so the
+    The remedy `make remote INSTANCE=<name>` stands on connect-start, so the
     variable must reach a real resolution through lib.sh -- not be accepted
     and ignored while the parse-time config defaults are forwarded.
     """
-    recipe = _make_target_recipe("connect")
+    recipe = _make_target_recipe("connect-start")
     instance_at = recipe.index('if [ -n "$(INSTANCE)" ]')
     engine_at = recipe.index('[ "$${ENGINE}" != "local" ]')
     source_at = recipe.index(". $(RD_DIR)/lib.sh")
@@ -587,16 +587,16 @@ def test_connect_resolves_the_instance_it_is_asked_for() -> None:
     )
 
 
-def test_connect_refuses_an_unknown_instance_before_opening_anything() -> None:
-    """Behavioral: `make connect INSTANCE=<unknown>` fails loudly, naming it."""
-    result = _run_make("connect", {"INSTANCE": "no-such-instance"})
+def test_connect_start_refuses_an_unknown_instance_before_opening_anything() -> None:
+    """Behavioral: `make connect-start INSTANCE=<unknown>` fails loudly, naming it."""
+    result = _run_make("connect-start", {"INSTANCE": "no-such-instance"})
     assert result.returncode != 0, "an unresolvable INSTANCE must fail the target"
     assert "no-such-instance" in result.stderr, (
         f"the failure must name the instance it could not resolve; stderr={result.stderr[:400]!r}"
     )
 
 
-def test_remote_passes_the_instance_through_to_connect() -> None:
+def test_remote_passes_the_instance_through_to_connect_start() -> None:
     """The remedy is real: `make remote INSTANCE=<name>` reaches the resolver.
 
     Before the delegation this failed with the resolver's default instead of
@@ -638,7 +638,7 @@ def test_remote_passes_the_instance_through_to_connect() -> None:
 
 def test_connect_refuses_instance_and_engine_naming_different_engines() -> None:
     """Behavioral: the resolver's agreement guard fires through the make target."""
-    result = _run_make("connect", {"INSTANCE": "one", "ENGINE": "two"})
+    result = _run_make("connect-start", {"INSTANCE": "one", "ENGINE": "two"})
     assert result.returncode != 0, "two different engines in one run must not forward"
     assert "name different engines" in result.stderr
     assert "INSTANCE='one'" in result.stderr

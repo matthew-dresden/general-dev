@@ -1,6 +1,7 @@
-"""Detached SSM port-forward lifecycle behind the make connect targets.
+"""Detached SSM port-forward lifecycle behind the make connect-* targets.
 
-`make connect` opens the instance's SSM port forward as a detached daemon
+`make connect-start` opens the instance's SSM port forward as a detached
+daemon
 and returns as soon as the connection is confirmed, instead of holding the
 terminal: this module spawns `devcontainer_config.transport connect` in a
 new session (its stdout and stderr stream into a per-instance log), waits
@@ -12,7 +13,8 @@ beside the instance's certificate material (`instances.certs_dir`), so
 `make instance-destroy`'s cleanup removes it with everything else the
 instance scattered.
 
-The rest of the lifecycle reads and mutates that record: `status` reports
+`make connect-start` is the open operation. The rest of the lifecycle
+reads and mutates that record: `status` reports
 process aliveness and whether the forwarded port is listening (exit
 non-zero when the forward is down), `stop` terminates the daemon with
 SIGINT first -- the transport tears its `aws ssm start-session` child down
@@ -621,7 +623,7 @@ def refresh_forward(
     record = read_record(instance)
     if record is None:
         raise ForwardError(
-            f"no forward for {instance!r} to refresh; open one with: make connect "
+            f"no forward for {instance!r} to refresh; open one with: make connect-start "
             f"INSTANCE={instance}"
         )
     stop_message = stop_forward(instance, poll_clock=poll_clock, poll_seconds=poll_seconds)
@@ -676,9 +678,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     `open` takes the resolved connection values the make recipe supplies;
     `status`, `stop` and `refresh` take one instance name; `list` takes
-    none. Exit 0 means the requested state is confirmed (a status row that
-    is listening, a stop that verified the port closed, an open whose
-    handshake answered); exit 1 with the reason on stderr means it is not.
+    none. Exit 0 means the operation produced its answer or reached its
+    state: a status or list row that reports anything -- listening, down,
+    or no forward -- is a success, because the report IS the outcome, and
+    so is a stop that verified the port closed and an open whose handshake
+    answered. Exit 1 with the reason on stderr is reserved for real
+    failures: an unanswerable probe, a daemon that would not die, a port
+    that would not close, an invalid name.
     """
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
@@ -746,9 +752,11 @@ def _run_open(rest: Sequence[str]) -> int:
 
 def _run_status(rest: Sequence[str]) -> int:
     (instance,) = _require_args(rest, 1, "status")
-    status = status_forward(instance)
-    print(_render_status_row(status))
-    return 0 if status.listening else 1
+    print(_render_status_row(status_forward(instance)))
+    # A correct report -- listening, down, or no forward at all -- is a
+    # success: the row IS the answer. Only a real failure (an unanswerable
+    # probe, an invalid name) is an error, and main turns those into exit 1.
+    return 0
 
 
 def _run_stop(rest: Sequence[str]) -> int:

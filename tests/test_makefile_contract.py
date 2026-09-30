@@ -1004,7 +1004,7 @@ def test_help_column_titles_pin_the_value_columns() -> None:
 
 # ---------------------------------------------------------------------------
 # Review round: REMOTE_AWS_REGION carries no default anywhere in the
-# Makefile, because root.hcl derives the fleet's shared state bucket's name
+# Makefile, because root.hcl derives each instance's state bucket's name
 # from it -- a silently substituted region would address another region's
 # bucket instead of failing. The guard macro is the single statement of the
 # requirement; every region-consuming target expands it. The deploy recipe

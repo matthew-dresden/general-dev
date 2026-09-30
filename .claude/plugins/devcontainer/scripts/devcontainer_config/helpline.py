@@ -1,17 +1,18 @@
-"""Renders the two-column rows of `make help` under the 180-visible-character rule.
+"""Renders the two-column rows of `make help` under the description-column cap.
 
 `make help` renders every command row through one geometry: a two-space
 indent, the target padded to 23 columns, a space, the scope word
 (both/host/remote/local) padded to 7, a space, then the description -- so
-the description column starts at character 34. A row whose visible length
-(ANSI escape sequences excluded, exactly the normalization
-`tests/test_help_snapshot.py` performs) would pass 180 characters must not
-keep its description inline: line 1 carries the target and scope columns
-only, with trailing whitespace trimmed, and the description starts on the
-line below, indented to the instruction column and wrapped at the last word
-boundary that fits within `LINE_LIMIT` visible characters per line. Rows at
-or under the limit render byte-identically to the plain `printf` the help
-recipe used before this rule existed.
+the description column starts at character 34. The description column has a
+maximum width: no description renders longer than `DESCRIPTION_MAX` visible
+characters (ANSI escape sequences excluded, exactly the normalization
+`tests/test_help_snapshot.py` performs). A longer description does not stay
+inline: line 1 carries the target and scope columns only, with trailing
+whitespace trimmed, and the description starts on the line below, indented
+to the instruction column and wrapped at the last word boundary that fits
+within `DESCRIPTION_MAX` characters per line. Rows at or under the cap
+render byte-identically to the plain `printf` the help recipe used before
+this rule existed.
 
 The Makefile's `row()` shell helper owns the threshold decision (its literal
 constants are pinned to this module's by `tests/test_makefile_contract.py`)
@@ -22,9 +23,7 @@ invoked per wrapped row as
 in the Makefile uses.
 
 Descriptions are plain text -- no ANSI sequences, no make references --
-which is what makes the visible length of a row computable here from the
-description alone: the fixed-width columns contribute exactly
-`INSTRUCTION_COLUMN` characters ahead of it.
+which is what makes the description length directly measurable here.
 """
 
 from __future__ import annotations
@@ -32,16 +31,16 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 
-# The 180-character rule: no `make help` line may render longer than this
-# many visible characters, measured after ANSI escape sequences are stripped.
-# Public so the Makefile contract test can pin the `row()` helper's literal
-# threshold to it.
-LINE_LIMIT = 180
+# The description column's maximum width: no `make help` description renders
+# longer than this many visible characters; longer descriptions wrap onto
+# continuation lines indented to the instruction column. Public so the
+# Makefile contract test can pin the `row()` helper's literal threshold to it.
+DESCRIPTION_MAX = 120
 
 # The column the description text starts at: a two-space indent plus the
 # 23-column target field, a separating space, the 7-column scope field, and
-# one more separating space. Public for the same reason as `LINE_LIMIT`; the
-# wrapped description lines indent to exactly this column.
+# one more separating space. Public for the same reason as `DESCRIPTION_MAX`;
+# the wrapped description lines indent to exactly this column.
 INSTRUCTION_COLUMN = 34
 
 # The help table's column widths, matching the `row()` helper's printf format
@@ -54,30 +53,30 @@ SCOPE_WIDTH = 7
 _TARGET_ANSI_PREFIX = "\033[1;36m"
 _TARGET_ANSI_SUFFIX = "\033[0m"
 
-# The most visible characters a description chunk may occupy: the room left
-# on a line after `INSTRUCTION_COLUMN` spaces of indent, inside `LINE_LIMIT`.
-_DESCRIPTION_BUDGET = LINE_LIMIT - INSTRUCTION_COLUMN
+# The most visible characters a description chunk may occupy: the column's
+# own maximum.
+_DESCRIPTION_BUDGET = DESCRIPTION_MAX
 
 
 class HelpLineError(RuntimeError):
-    """A description cannot be rendered within the 180-character rule.
+    """A description cannot be rendered within the description-column cap.
 
     Raised only for content a help row can never legally carry -- a word
-    longer than the per-line budget, which no wrapping can fit. The message
+    longer than the column's budget, which no wrapping can fit. The message
     names the word and the budget, so editing the description (not the
     renderer) is the remedy.
     """
 
 
 def _description_chunks(description: str) -> list[str]:
-    """The description packed greedily into chunks of at most the per-line budget.
+    """The description packed greedily into chunks of at most the column budget.
 
     Words are split on runs of whitespace (help descriptions carry none of
     the spacing that collapsing would change) and packed left to right: each
-    chunk takes as many whole words as fit within
-    `LINE_LIMIT - INSTRUCTION_COLUMN` characters, so every rendered line
-    stays inside the limit. A word longer than the budget cannot be wrapped
-    from any position and raises rather than silently overflowing a line.
+    chunk takes as many whole words as fit within `DESCRIPTION_MAX`
+    characters, so every description line stays inside the cap. A word longer
+    than the budget cannot be wrapped from any position and raises rather
+    than silently overflowing a line.
     """
     chunks: list[str] = []
     current = ""
@@ -85,8 +84,8 @@ def _description_chunks(description: str) -> list[str]:
         if len(word) > _DESCRIPTION_BUDGET:
             raise HelpLineError(
                 f"ERROR: description word {word!r} is {len(word)} characters, "
-                f"longer than the {_DESCRIPTION_BUDGET}-character per-line budget\n"
-                f"No `make help` line may exceed {LINE_LIMIT} visible "
+                f"longer than the {_DESCRIPTION_BUDGET}-character description budget\n"
+                f"No `make help` description may exceed {DESCRIPTION_MAX} visible "
                 "characters, and a word this long cannot wrap.\n"
                 "Shorten the description in the Makefile's help recipe."
             )
@@ -121,17 +120,17 @@ def _wrapped_first_line(target: str, scope: str) -> str:
 def render_row(target: str, scope: str, description: str) -> str:
     """One help row's rendered text: inline when it fits, wrapped when it does not.
 
-    At or under `LINE_LIMIT` visible characters this reproduces the help
+    At or under `DESCRIPTION_MAX` visible characters this reproduces the help
     recipe's own printf byte for byte, so a short row's rendering never
-    depends on which renderer produced it. Past the limit, line 1 carries the
+    depends on which renderer produced it. Past the cap, line 1 carries the
     target and scope columns only (`_wrapped_first_line`) and the description
     starts on line 2, indented to `INSTRUCTION_COLUMN` and wrapped at word
-    boundaries to keep every line within the limit.
+    boundaries to keep every description line within the cap.
 
     Returns:
         The rendered lines, each terminated by a newline.
     """
-    if len(description) + INSTRUCTION_COLUMN <= LINE_LIMIT:
+    if len(description) <= DESCRIPTION_MAX:
         return (
             f"  {_TARGET_ANSI_PREFIX}{target:<{TARGET_WIDTH}}{_TARGET_ANSI_SUFFIX}"
             f" {scope:<{SCOPE_WIDTH}} {description}\n"

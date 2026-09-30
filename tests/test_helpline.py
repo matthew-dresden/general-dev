@@ -41,41 +41,43 @@ def _printf_equivalent(target: str, scope: str, description: str) -> str:
 
 
 def test_short_row_matches_the_recipe_printf_byte_for_byte() -> None:
-    """A row under the limit renders exactly what the recipe's printf produces."""
+    """A row under the cap renders exactly what the recipe's printf produces."""
     rendered = render_row("make up", "both", "Get working from any state.")
     assert rendered == _printf_equivalent("make up", "both", "Get working from any state.")
     assert len(rendered.splitlines()[0].replace(_ANSI_PREFIX, "").replace(_ANSI_SUFFIX, "")) <= (
-        helpline.LINE_LIMIT
+        helpline.INSTRUCTION_COLUMN + helpline.DESCRIPTION_MAX
     )
 
 
-def test_description_budget_boundary_inline_at_146_wraps_at_147() -> None:
-    """34 + 146 == 180 stays inline; one more visible character wraps.
+def test_description_cap_boundary_inline_at_120_wraps_at_121() -> None:
+    """A 120-character description stays inline; one more character wraps.
 
-    The 147-character side is two words (`"a" * 146 + " b"`), because a
-    single 147-character word is unsplittable and refused outright -- the
+    The 121-character side is two words (`"a" * 120 + " b"`), because a
+    single 121-character word is unsplittable and refused outright -- the
     next test pins that refusal.
     """
-    inline = render_row("make x", "both", "a" * 146)
-    assert inline == _printf_equivalent("make x", "both", "a" * 146)
+    inline = render_row("make x", "both", "a" * 120)
+    assert inline == _printf_equivalent("make x", "both", "a" * 120)
     assert len(inline.splitlines()) == 1
 
-    wrapped = render_row("make x", "both", "a" * 146 + " b")
+    wrapped = render_row("make x", "both", "a" * 120 + " b")
     lines = wrapped.splitlines()
     assert len(lines) == 3
-    assert lines[1] == " " * helpline.INSTRUCTION_COLUMN + "a" * 146
+    assert lines[1] == " " * helpline.INSTRUCTION_COLUMN + "a" * 120
     assert lines[2] == " " * helpline.INSTRUCTION_COLUMN + "b"
-    assert all(len(line) <= helpline.LINE_LIMIT for line in lines)
+    assert all(
+        len(line) <= helpline.INSTRUCTION_COLUMN + helpline.DESCRIPTION_MAX for line in lines
+    )
 
 
 def test_unsplittable_word_longer_than_the_budget_raises_naming_it() -> None:
-    """A single word longer than the per-line budget fails fast, naming the word."""
-    long_word = "w" * 147
+    """A single word longer than the description budget fails fast, naming it."""
+    long_word = "w" * 121
     with pytest.raises(HelpLineError) as exc_info:
         render_row("make x", "both", f"starts fine {long_word} then more")
     message = str(exc_info.value)
     assert long_word in message
-    assert str(helpline.LINE_LIMIT) in message
+    assert str(helpline.DESCRIPTION_MAX) in message
 
 
 def test_wrapped_row_scoped_columns_and_alignment() -> None:
@@ -98,7 +100,7 @@ def test_wrapped_row_scoped_columns_and_alignment() -> None:
     for line in wrapped_lines:
         assert line.startswith(" " * helpline.INSTRUCTION_COLUMN)
         assert line[helpline.INSTRUCTION_COLUMN] != " "
-        assert len(line) <= helpline.LINE_LIMIT
+        assert len(line) <= helpline.INSTRUCTION_COLUMN + helpline.DESCRIPTION_MAX
     assert " ".join(line.strip() for line in wrapped_lines) == description
 
 
@@ -113,22 +115,24 @@ def test_wrapped_row_with_scope_keeps_both_columns_on_line_one() -> None:
     lines = rendered.splitlines()
     assert lines[0] == f"  {_ANSI_PREFIX}make skills-install    {_ANSI_SUFFIX} host"
     assert " ".join(line.strip() for line in lines[1:]) == description
-    assert all(len(line) <= helpline.LINE_LIMIT for line in lines)
+    assert all(
+        len(line) <= helpline.INSTRUCTION_COLUMN + helpline.DESCRIPTION_MAX for line in lines
+    )
 
 
 def test_wrapping_packs_whole_words_greedily_across_continuation_lines() -> None:
-    """Ten-character words pack 13 per line (13*11-1 == 142), then spill one word."""
-    description = " ".join("abcdefghij" for _ in range(14))
+    """Ten-character words pack 11 per line (11*11-1 == 120), then spill two."""
+    description = " ".join("abcdefghij" for _ in range(13))
     rendered = render_row("make x", "host", description)
     lines = rendered.splitlines()
-    assert lines[1] == " " * helpline.INSTRUCTION_COLUMN + " ".join(["abcdefghij"] * 13)
-    assert lines[2] == " " * helpline.INSTRUCTION_COLUMN + "abcdefghij"
+    assert lines[1] == " " * helpline.INSTRUCTION_COLUMN + " ".join(["abcdefghij"] * 11)
+    assert lines[2] == " " * helpline.INSTRUCTION_COLUMN + "abcdefghij abcdefghij"
     assert len(lines) == 3
 
 
 def test_rendered_lines_each_end_with_one_newline() -> None:
     """The renderer returns newline-terminated lines and nothing else."""
-    for description in ("short", "a" * 146 + " " + "b" * 40):
+    for description in ("short", "a" * 120 + " " + "b" * 40):
         rendered = render_row("make x", "both", description)
         assert rendered.endswith("\n")
         assert not rendered.endswith("\n\n")
@@ -158,11 +162,11 @@ def test_main_rejects_any_argument_count_other_than_three(
 
 def test_module_constants_carry_the_documented_geometry() -> None:
     """The geometry constants hold the values the help recipe's columns define."""
-    assert helpline.LINE_LIMIT == 180
+    assert helpline.DESCRIPTION_MAX == 120
     assert helpline.INSTRUCTION_COLUMN == 34
     assert helpline.TARGET_WIDTH == 23
     assert helpline.SCOPE_WIDTH == 7
-    assert helpline._DESCRIPTION_BUDGET == helpline.LINE_LIMIT - helpline.INSTRUCTION_COLUMN
+    assert helpline._DESCRIPTION_BUDGET == helpline.DESCRIPTION_MAX
     # The indent arithmetic the wrapped lines rely on: 34 spaces of indent are
     # produced from the constant, never a literal.
     assert re.fullmatch(r" {34}", " " * helpline.INSTRUCTION_COLUMN)

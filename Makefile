@@ -201,23 +201,26 @@ PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
         skills-install skills-remove skills-list
 
 # The help surface. Every two-column row (target, scope, description) renders
-# through the single `row` helper defined inside the recipe: at or under 180
-# visible characters it prints exactly what the plain printf printed before
-# the rule existed, and past the limit the row wraps -- the description
-# leaves line 1 and continues on 34-space-indented lines (the instruction
-# column), kept inside the limit by devcontainer_config.helpline, whose
-# geometry constants tests/test_makefile_contract.py pins to this recipe's
-# literals. The helpers need the rows on one recipe line because a shell
-# function defined on one recipe line is invisible to the next; the note()
-# helper places every legend and section-header note at the instruction
-# column, aligned with the descriptions below it, and the
-# PREREQUISITES block keeps its own printf format (it is not a two-column
-# command row).
+# through the single `row` helper defined inside the recipe: with a
+# description at or under 120 characters it prints exactly what the plain
+# printf printed before the cap existed, and past it the row wraps -- the
+# description leaves line 1 and continues on 34-space-indented lines (the
+# instruction column), each chunk kept inside the cap by
+# devcontainer_config.helpline, whose geometry constants
+# tests/test_makefile_contract.py pins to this recipe's literals. The legend
+# entries render through `row` too, with an empty target, so their names sit
+# in the scope column and their descriptions in the description column; the
+# column-title rows sit flush left with the section headers. The helpers
+# need the rows on one recipe line because a shell function defined on one
+# recipe line is invisible to the next; the note() helper places every
+# legend and section-header note at the instruction column, aligned with the
+# descriptions below it, and the PREREQUISITES block keeps its own printf
+# format (it is not a two-column command row).
 help:
 	@printf '\n\033[1m%s\033[0m devcontainer control.   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
 	@set -euo pipefail; \
 	row() { \
-		if [ "$$((34 + $${#3}))" -le 180 ]; then \
+		if [ "$${#3}" -le 120 ]; then \
 			printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "$$1" "$$2" "$$3"; \
 		else \
 			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.helpline "$$1" "$$2" "$$3"; \
@@ -227,14 +230,14 @@ help:
 		printf '\n\033[1m%-34s\033[0m%s\n' "$$1" "$$2"; \
 	}; \
 	note "Engines" "the two backends a target can act on:"; \
-	printf '          \033[1mlocal\033[0m   this machine'"'"'s engine; builds bind-mount this folder\n'; \
-	printf '          \033[1mremote\033[0m  an EC2 engine; the repo is cloned into a volume on it\n'; \
+	row "" "local" "this machine's engine; builds bind-mount this folder"; \
+	row "" "remote" "an EC2 engine; the repo is cloned into a volume on it"; \
 	note "Scope" "the second column of every row:"; \
-	printf '          \033[1mboth\033[0m    works on either engine via the active context\n'; \
-	printf '          \033[1mlocal\033[0m   that engine only\n'; \
-	printf '          \033[1mremote\033[0m  that engine only\n'; \
-	printf '          \033[1mhost\033[0m    runs on this machine and touches no engine at all\n'; \
-	printf '\n  \033[1m%-23s\033[0m %-7s %s\n' "TARGET" "SCOPE" "WHAT IT DOES"; \
+	row "" "both" "works on either engine via the active context"; \
+	row "" "local" "that engine only"; \
+	row "" "remote" "that engine only"; \
+	row "" "host" "runs on this machine and touches no engine at all"; \
+	printf '\n\033[1m%-25s\033[0m %-7s %s\n' "TARGET" "SCOPE" "WHAT IT DOES"; \
 	printf '\n\033[1mSTART HERE\033[0m\n'; \
 	row "make up"               "both"   "Get working from any state: refreshes the tunnel (remote), builds or starts as needed, then opens VS Code."; \
 	note "FIRST RUN" "once per machine"; \
@@ -307,12 +310,12 @@ help:
 	row "SKIP_SECRETS_CHECK=1"  ""       "Do not compare shell.env against Parameter Store, and do not publish it."; \
 	row "NO_CACHE=1"            ""       "What the no-cache targets set. Works with build and rebuild directly."
 	@printf '\n\033[1mPREREQUISITES\033[0m\n'
-	@printf '  \033[1m%-23s\033[0m %s\n' "TARGETS" "REQUIREMENTS"
+	@printf '\033[1m%-25s\033[0m %s\n' "TARGETS" "REQUIREMENTS"
 	@printf '  %-23s %s\n' "container targets"     "docker"
 	@printf '  %-23s %s\n' "remote engine"         "aws, session-manager-plugin, and the instance id recorded by instance-deploy (make instance-link)"
 	@printf '  %-23s %s\n' "build and rebuild"     "devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli"
 	@printf '  %-23s %s\n' "lint"                  "uv                                      brew install uv"
-	@printf '  %-23s %s\n' "test"                  "uv, zsh                                 uv: $(TEST_INSTALL_HINT_uv)   zsh: $(TEST_INSTALL_HINT_zsh)"
+	@printf '  %-23s %s\n' "test"                  "uv, zsh   uv: $(TEST_INSTALL_HINT_uv)   zsh: $(TEST_INSTALL_HINT_zsh)"
 	@printf '\n  %s\n' "Every target checks what it needs and fails with the command that installs it."
 	@printf '\n'
 

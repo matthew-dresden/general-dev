@@ -39,9 +39,9 @@ SSM agent's ping status) to their target states with an injected `sleep`, so
 the whole path is testable without a clock. `cleanup` tears down everything
 an instance scattered outside its Terragrunt directory -- its SSM
 parameters, its docker context, its certificate directory. The remote-state
-bucket is deliberately out of scope for cleanup: the fleet shares one
-bucket, derived once in `remote-instances/root.hcl`, so destroying it is a
-Terragrunt/backend concern, never an instance-lifecycle one.
+bucket is deliberately out of scope for cleanup: each instance's bucket is
+derived in `remote-instances/root.hcl` from its own name, so destroying it
+is a Terragrunt/backend concern, never an instance-lifecycle one.
 
 Every aws/docker command is issued through an injected `Runner` (the same
 shape `devcontainer_config.hostcreds` defines), so the unit suite runs
@@ -1078,9 +1078,9 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
     or unreachable daemon, say -- is recorded as a failed operation, so
     cleanup never reports success while the context survives.
 
-    The remote-state bucket is deliberately out of scope: the fleet shares
-    one bucket derived in `remote-instances/root.hcl`, so its lifecycle is
-    a Terragrunt/backend concern, never an instance's.
+    The remote-state bucket is deliberately out of scope: each instance's
+    bucket is derived in `remote-instances/root.hcl` from its own name, so
+    its lifecycle is a Terragrunt/backend concern, never an instance's.
 
     Raises:
         CleanupError: `name` is invalid, or any aws/docker/filesystem

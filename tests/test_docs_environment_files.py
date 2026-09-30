@@ -1570,25 +1570,19 @@ def _run_repo_slug_section_assertions() -> None:
         f"`read_positive_seconds` as the shared reader {git_remote_timeout_env_var} is "
         "resolved through."
     )
-    assert "test_state_bucket_name.py" in section, (
-        f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not name the sibling "
-        "declaration in tests/test_state_bucket_name.py."
-    )
-    assert "_repo_slug_from_git_remote" in section, (
+    assert "devcontainer_config.repo.repo_slug" in section, (
         f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not name "
-        "tests/test_state_bucket_name.py's private _repo_slug_from_git_remote as a reader "
-        f"of {git_remote_timeout_env_var}."
+        f"`devcontainer_config.repo.repo_slug` as the reader of {git_remote_timeout_env_var}."
     )
     _assert_repo_section_state_neutral(section)
-    _assert_repo_section_attributes_transform_to_root_hcl(section)
+    _assert_repo_section_attributes_transform_to_repo_slug(section)
 
 
 def test_repo_section_documents_repo_slug_git_timeout_seconds() -> None:
-    """AC-DOC-001 / AC-TEST-001: the `REPO_SLUG_GIT_TIMEOUT_SECONDS` row states
-    its default, its resolver (`hostprobe.py`'s `read_positive_seconds`),
-    and a reader (`tests/test_state_bucket_name.py`'s private
-    `_repo_slug_from_git_remote`), in prose that is true regardless of
-    whether `devcontainer_config.repo` declares its own `repo_slug` reader
+    """The `REPO_SLUG_GIT_TIMEOUT_SECONDS` row states its default, its resolver
+    (`hostprobe.py`'s `read_positive_seconds`), and its reader
+    (`devcontainer_config.repo.repo_slug`), in prose that is true regardless
+    of whether any other module also reads the variable
     (`_run_repo_slug_section_assertions` makes no claim about how many
     readers exist, and `_assert_repo_section_state_neutral` forbids one).
 
@@ -1714,49 +1708,60 @@ def _assert_repo_section_state_neutral(section: str) -> None:
         )
 
 
-_REPO_UNDECLARED_MODULE_REFERENCES: tuple[str, ...] = (
-    "devcontainer_config.repo",
-    "repo.py",
-)
+_REPO_ATTRIBUTED_MODULE_REFERENCES: tuple[str, ...] = ("devcontainer_config.repo.repo_slug",)
 
 
-def _assert_repo_section_attributes_transform_to_root_hcl(section: str) -> None:
-    """Round-2 doc_review and code_review REVIEW_FAIL fix: pins that the
-    section attributes the `basename()`-plus-`trimsuffix(".git")` transform
-    to `remote-instances/root.hcl`'s own `repo_slug` Terragrunt local, which
-    applies it today, rather than to `devcontainer_config.repo` / `repo.py`.
+def _assert_repo_section_attributes_transform_to_repo_slug(section: str) -> None:
+    """Pins that the section attributes the `basename()`-plus-`trimsuffix(".git")`
+    transform to `devcontainer_config.repo`'s own `repo_slug` function, the
+    artifact that applies it, rather than to `remote-instances/root.hcl`.
 
-    This is a fixed attribution ban, not a state-dependent comparison: the
-    section must never name `devcontainer_config.repo` or `repo.py` as the
-    transform's owner, in either state of that module's declaration set.
-    Branching this guard on `repo`'s current namespace would reintroduce
-    the exact coupling this task exists to remove (round-2 judges flagged
-    that regression), so the ban applies unconditionally regardless of
-    whether `devcontainer_config.repo` declares `repo_slug` right now. The
-    correct, permanently state-neutral attribution is
-    `remote-instances/root.hcl`'s local, which exists and applies the
-    transform in both states.
+    The attribution moved once already: `root.hcl`'s own `repo_slug` local
+    used to apply the transform to compose the state bucket name, and an
+    earlier version of this guard banned naming `devcontainer_config.repo`
+    as the owner. The state bucket name is now composed from the instance
+    name (`root.hcl`'s `instance_name` local), the git-remote transform
+    survives only in `devcontainer_config.repo.repo_slug` (the docker
+    context's `<repo-slug>-<name>` prefix), so this guard bans the stale
+    attribution instead. This is a fixed attribution ban, not a
+    state-dependent comparison: branching on any module's current namespace
+    would reintroduce the coupling the earlier guard existed to remove.
 
     Raises:
-        AssertionError: naming the offending undeclared-module reference
-            found in `section`, or reporting that `root.hcl` is not named
-            as the transform's owner.
+        AssertionError: naming the offending stale attribution found in
+            `section`, or reporting that `repo.repo_slug` is not named as
+            the transform's owner.
     """
-    for reference in _REPO_UNDECLARED_MODULE_REFERENCES:
+    for reference in _REPO_STALE_TRANSFORM_ATTRIBUTIONS:
         assert reference not in section, (
             f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section names {reference!r} as the "
-            "transform's owner. Attributing the transform to a symbol whose declaration "
-            "lives in a different work unit's Changes Manifest makes the sentence "
-            "state-dependent, which AC-FUNC-002's 'true both before and after' requirement "
-            "forbids regardless of what devcontainer_config.repo currently declares; "
-            "attribute it to remote-instances/root.hcl's own repo_slug local instead, which "
-            "applies the transform in both states."
+            "git-remote transform's owner. The state bucket name is composed from the "
+            "instance name root.hcl derives, and the basename()-plus-trimsuffix('.git') "
+            "transform now lives only in devcontainer_config.repo.repo_slug; attribute "
+            "the transform there."
         )
-    assert "root.hcl" in section, (
-        f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not attribute the "
-        "basename()-plus-trimsuffix('.git') transform to remote-instances/root.hcl's own "
-        "repo_slug local, the artifact that actually applies it today."
-    )
+    for reference in _REPO_ATTRIBUTED_MODULE_REFERENCES:
+        assert reference in section, (
+            f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not name "
+            f"{reference} as the basename()-plus-trimsuffix('.git') transform's owner, "
+            "the artifact that actually applies it."
+        )
+        assert reference in section, (
+            f"{_DOC_RELATIVE_PATH}'s '{_REPO_HEADING}' section does not name "
+            f"{reference} as the basename()-plus-trimsuffix('.git') transform's owner, "
+            "the artifact that actually applies it."
+        )
+
+
+# The stale attribution this guard bans: `root.hcl` composed the state
+# bucket name from a git-remote slug before the name moved to the instance
+# name, so prose still crediting it as the transform's owner describes a
+# removed derivation.
+_REPO_STALE_TRANSFORM_ATTRIBUTIONS: tuple[str, ...] = (
+    "root.hcl's own repo_slug",
+    "root.hcl's repo_slug local",
+    "root.hcl's own `repo_slug`",
+)
 
 
 @pytest.mark.parametrize(
@@ -1792,28 +1797,27 @@ def test_repo_section_state_neutral_guard_fires_on_synthetic_forbidden_phrase(
         _assert_repo_section_state_neutral(section_text)
 
 
-@pytest.mark.parametrize("reference", _REPO_UNDECLARED_MODULE_REFERENCES)
-def test_repo_section_root_hcl_guard_fires_on_synthetic_undeclared_module_reference(
+@pytest.mark.parametrize("reference", _REPO_STALE_TRANSFORM_ATTRIBUTIONS)
+def test_repo_section_repo_slug_guard_fires_on_synthetic_stale_attribution(
     reference: str,
 ) -> None:
-    """AC-TEST-003 negative control: naming `devcontainer_config.repo` or
-    `repo.py` anywhere in synthetic section text fails
-    `_assert_repo_section_attributes_transform_to_root_hcl` by name, proving
-    the round-2 fix (attribute the transform to `remote-instances/root.hcl`,
-    not to the undeclared `devcontainer_config.repo` symbol) is actually
-    enforced rather than merely declared.
+    """Negative control: attributing the git-remote transform to a stale
+    owner (the removed root.hcl slug local) anywhere in synthetic section
+    text fails `_assert_repo_section_attributes_transform_to_repo_slug` by
+    name, proving the ban is actually enforced rather than merely declared.
     """
-    section_text = f"This variable's transform is derived by {reference}'s repo_slug."
+    section_text = f"This variable's transform is derived by {reference}."
     with pytest.raises(AssertionError, match=re.escape(reference)):
-        _assert_repo_section_attributes_transform_to_root_hcl(section_text)
+        _assert_repo_section_attributes_transform_to_repo_slug(section_text)
 
 
-def test_repo_section_root_hcl_guard_fires_when_root_hcl_not_named() -> None:
-    """AC-TEST-003 negative control: synthetic section text that never names
-    `root.hcl` fails `_assert_repo_section_attributes_transform_to_root_hcl`,
-    proving the positive half of the guard (the transform must be attributed
-    to something) is not vacuous.
+def test_repo_section_repo_slug_guard_fires_when_repo_slug_not_named() -> None:
+    """Negative control: synthetic section text that never names
+    `devcontainer_config.repo.repo_slug` fails
+    `_assert_repo_section_attributes_transform_to_repo_slug`, proving the
+    positive half of the guard (the transform must be attributed to
+    something) is not vacuous.
     """
     section_text = "This variable bounds a git-remote read somewhere unnamed."
-    with pytest.raises(AssertionError, match="root.hcl"):
-        _assert_repo_section_attributes_transform_to_root_hcl(section_text)
+    with pytest.raises(AssertionError, match="devcontainer_config.repo.repo_slug"):
+        _assert_repo_section_attributes_transform_to_repo_slug(section_text)

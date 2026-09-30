@@ -54,31 +54,28 @@ locals {
   # account's state bucket is impossible (spec Section 5.7, decision D7).
   account_id = get_aws_account_id()
 
-  # Derived from the git remote rather than typed or read from the local
-  # checkout directory name, which a developer is free to rename. basename()
-  # splits on the last "/", which lands after the org/user segment for both
-  # the HTTPS form (https://host/org/repo.git) and the SSH form
-  # (git@host:org/repo.git); trimsuffix() removes the trailing ".git" either
-  # form leaves.
-  repo_slug = trimsuffix(
-    basename(run_cmd("--terragrunt-quiet", "git", "config", "--get", "remote.origin.url")),
-    ".git",
-  )
+  # The instance's own name, derived from the including directory rather
+  # than typed, exactly the way the state key below is derived: root.hcl is
+  # included only by per-instance directories under remote-instances/, and
+  # path_relative_to_include() names that directory, so the bucket the
+  # instance's state lives in is keyed by the same value the directory, the
+  # docker context, the Parameter Store prefix and the state key all carry.
+  instance_name = basename(path_relative_to_include())
 
-  # Generated once on first bootstrap and committed here; never regenerated.
-  # Committing it, rather than deriving it, is what makes the bucket name
-  # reproducible (spec Section 5.7, decision D7): a fresh clone with no
-  # local state still computes this same suffix and finds the bucket that
-  # already exists instead of creating an orphaned second one. If this
-  # value is ever absent, nothing here invents a replacement: a new suffix
-  # means a new, empty bucket, which strands whatever state the missing
-  # suffix used to point at.
-  state_bucket_suffix = "8f2ac1"
+  # Generated once, committed here, never regenerated. Committing it, rather
+  # than deriving it, is what makes the bucket name reproducible: a fresh
+  # clone with no local state still computes this same name and finds the
+  # bucket that already exists instead of creating an orphaned second one.
+  # If this value is ever absent, nothing here invents a replacement: a new
+  # suffix means a new, empty bucket, which strands whatever state the
+  # missing suffix used to point at.
+  state_bucket_suffix = "3734c3"
 
-  # tg-state-<account-id>-<region>-<repo-slug>-<suffix>, in the order
-  # Section 5.7 states. Every component is derived except the suffix, which
-  # is a literal by design (see above).
-  state_bucket_name = "tg-state-${local.account_id}-${local.aws_region}-${local.repo_slug}-${local.state_bucket_suffix}"
+  # tg-state-<instance-name>-<region>-<account-id>-<suffix>, the operator's
+  # stated order. Every instance owns its own state bucket, named from the
+  # component the whole platform keys on (the instance name); the suffix is
+  # the one component that is a literal, for the reason above.
+  state_bucket_name = "tg-state-${local.instance_name}-${local.aws_region}-${local.account_id}-${local.state_bucket_suffix}"
 }
 
 # Section 6 floors, enforced by Terragrunt itself at parse time and asserted

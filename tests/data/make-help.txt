@@ -33,7 +33,7 @@ INSTANCES                         one remote engine per project under remote-ins
                                   Converge: provision, link id, trust chain if missing, push secrets. Refuses instance replacement without
                                   CONFIRM=replace. INSTANCE= | ALL=1
   make instance-status    host    One instance's live state, or every instance with ALL=1. INSTANCE=<instance-name> | ALL=1
-  make instance-plan      remote  Terragrunt plan per instance; bootstraps the shared state bucket on first run. INSTANCE=<instance-name> | ALL=1
+  make instance-plan      remote  Terragrunt plan per instance; bootstraps the instance's state bucket on first run. INSTANCE=<instance-name> | ALL=1
   make instance-stop      remote  Stop the EC2 instance and wait until it reports stopped. INSTANCE=<instance-name> | ALL=1
   make instance-start     remote  Start it again and wait for its SSM agent to report ready. INSTANCE=<instance-name> | ALL=1
   make instance-destroy   remote  Destroy + cleanup params, certs, context, id. CONFIRM=destroy only for ALL=1. INSTANCE=<instance-name> | ALL=1

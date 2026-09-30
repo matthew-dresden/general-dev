@@ -298,8 +298,8 @@ deliver the same fragments to the EC2 engine's container.
 ### The lifecycle at a glance
 
 One remote engine per project under `remote-instances/`; the instance name
-is the project name (e.g. `brimbooks`), never a geography or a stage. The
-`make help` INSTANCES group drives every stage:
+is the project name (e.g. `acme`). The `make help` INSTANCES group drives
+every stage:
 
 | Stage | Command | What it does |
 |---|---|---|
@@ -404,14 +404,14 @@ instance under `remote-instances/`. Both spellings below are the same
 command:
 
 ```sh
-make status ENGINE=brimbooks
-ENGINE=brimbooks make status
+make status ENGINE=acme
+ENGINE=acme make status
 ```
 
 Unset, every target behaves as before and follows the active context. Set,
 every docker call the target makes is aimed at the engine it names: one
 terminal can run `make build ENGINE=local` while another runs
-`make build ENGINE=brimbooks`, and a third drives a second instance. Each
+`make build ENGINE=acme`, and a third drives a second instance. Each
 remote engine needs its forward open first: `make remote INSTANCE=<name>`
 opens it (in its own terminal -- it blocks), and later
 `make connect ENGINE=<name>` re-opens a single forward without touching

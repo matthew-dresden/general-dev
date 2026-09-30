@@ -233,7 +233,7 @@ def _power_describe_argv(instance_id: str) -> tuple[str, ...]:
 def test_scaffold_wires_name_and_readme_contract(tmp_path: Path) -> None:
     ops = _import_instance_ops()
     root = _git_root(tmp_path)
-    name = _instance_name("brimbooks")
+    name = _instance_name("acme")
     ami = _ami_id()
     runner = _FakeRunner()
     runner.queue(_ok(ami))

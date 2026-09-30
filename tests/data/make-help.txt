@@ -15,9 +15,11 @@ ENGINE  pick where builds and containers live
   make local              host    Point docker and VS Code at the local engine (<LOCAL_DOCKER_CONTEXT>). Nothing remote is stopped.
   make disconnect         host    What 'make local' calls. Only changes where new commands and windows point.
 
-INSTANCES  one remote engine per project under remote-instances/; instance names are project names (e.g. brimbooks), never geographies or stages
+INSTANCES  one remote engine per project under remote-instances/; instance names are project names (e.g. acme)
   make list-instances     host    List every instance with live status: EC2 state, id, params, certs, forward, context.
-  make instance-init      host    Scaffold <project>'s directory; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= for the AMI/AZ lookup only; the deployment region is REMOTE_AWS_REGION]
+  make instance-init      host
+                                  Scaffold <project>'s directory; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= for the AMI/AZ lookup only; the deployment region is
+                                  REMOTE_AWS_REGION]
   make instance-deploy    remote  Converge: provision, link id, trust chain if missing, push secrets. Refuses instance replacement without CONFIRM=replace. INSTANCE= | ALL=1
   make instance-status    host    One instance's live state, or every instance with ALL=1. INSTANCE=<instance-name> | ALL=1
   make instance-plan      remote  Terragrunt plan per instance; bootstraps the shared state bucket on first run. INSTANCE=<instance-name> | ALL=1
@@ -63,7 +65,9 @@ HOST PROXY  only needed behind a corporate proxy; remote builds force HOST_PROXY
   make proxy-stop         local   Stop it. Settings come from .devcontainer/remote-docker/config.env; set HOST_PROXY=true in shell.env to make the container use it.
 
 QUALITY
-  make lint               host    Private files untracked, no nested repos, no host venv in the workspace, JSON parses, shellcheck, markdown, US English, staged secrets. Non-zero on any finding.
+  make lint               host
+                                  Private files untracked, no nested repos, no host venv in the workspace, JSON parses, shellcheck, markdown, US English, staged secrets. Non-zero
+                                  on any finding.
   make lint-secrets       host    Scan staged content for secrets, or RANGE=<a>..<b> for a commit range. Exit 1 on any finding; there is no ignore list.
   make format             host    Auto-fix what the markdown tooling can fix, then report what is left.
   make lint-spell         host    US English spelling over this repo's markdown. SPELL_FILES overrides the set.
@@ -75,12 +79,18 @@ QUALITY
   make validate           host    The green-baseline contract automation depends on. Runs lint then test.
 
 SKILLS  wire this repo's .agents/skills roster into an agent on this Mac; no devcontainer involved
-  make skills-install     host    Wire an agent to the canonical skills home: global symlink (default), project verify/wire, or the runtime one-shot incantation (printed, never run). AGENT=opencode|claude|both SCOPE=global|project|runtime
-  make skills-remove      host    Delete only a general-dev-skills symlink resolving inside this repo; refuses everything else. AGENT=opencode|claude|both SCOPE=global|project|runtime
+  make skills-install     host
+                                  Wire an agent to the canonical skills home: global symlink (default), project verify/wire, or the runtime one-shot incantation (printed, never
+                                  run). AGENT=opencode|claude|both SCOPE=global|project|runtime
+  make skills-remove      host
+                                  Delete only a general-dev-skills symlink resolving inside this repo; refuses everything else. AGENT=opencode|claude|both
+                                  SCOPE=global|project|runtime
   make skills-list        host    Show each agent scope: installed (target), native (project), or not installed. AGENT=opencode|claude|both SCOPE=global|project|runtime
 
 OPTIONS
-  ENGINE=local|<name>             Address one engine explicitly (ENGINE=x make <target>, or make <target> ENGINE=x): parallel terminals can drive local and remote engines concurrently, without switching contexts. Unset follows the active context.
+  ENGINE=local|<name>
+                                  Address one engine explicitly (ENGINE=x make <target>, or make <target> ENGINE=x): parallel terminals can drive local and remote engines
+                                  concurrently, without switching contexts. Unset follows the active context.
   CONTAINER=<name>                Pick one instance when several clones of this repo exist. 'make status' lists them.
   FORCE=1                         Proceed past the unpushed-work and uncommitted-config guards.
   SKIP_SECRETS_CHECK=1            Do not compare shell.env against Parameter Store, and do not publish it.

@@ -78,6 +78,19 @@ with a check of its own: it refuses an id outside the `i-`-plus-lowercase-hex
 shape as a usage error before the store is written, because a typo'd id would
 misdirect every power and status operation at once.
 
+`skills-install`, `skills-remove` and `skills-list` are the skills surface
+(U3): thin handlers over `devcontainer_config.skills_install`, the engine
+the `make skills-install`, `make skills-remove` and `make skills-list`
+targets also drive. Each takes `--agent` and `--scope` (defaults `both`
+and `global`, the same values the Makefile declares; `argparse`'s
+`choices=` is the validation, so an invalid value is a usage error listing
+the accepted ones). `skills-install` at the `runtime` scope prints the
+agent's one-shot incantation -- `OPENCODE_CONFIG` for opencode, a
+`--settings` JSON for Claude Code -- and never executes it; the engine
+owns every refusal and every filesystem rule (delete only our own
+repository-pointing symlink), this layer only prints its messages and
+maps `SkillsInstallError` to exit 1.
+
 This module exposes no console script and installs none: its CLI entry is
 `python3 -m devcontainer_config.cli` (the form `make creds-init`,
 `make lint-secrets` and the postCreate startup-block render all invoke),
@@ -96,7 +109,7 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
-from devcontainer_config import hostcreds, instance_ops, instances, repo
+from devcontainer_config import hostcreds, instance_ops, instances, repo, skills_install
 from devcontainer_config.githooks import (
     HOOK_NAMES,
     GitHooksError,
@@ -226,6 +239,53 @@ _SHELL_BLOCK_DESCRIPTION = (
     "postCreate appends to ~/.bashrc and ~/.zshenv, which sources every "
     "fragment under ~/.hostcreds/ at shell startup. Takes no arguments; "
     "the first line of the output is the idempotence marker."
+)
+
+# The skills surface (U3): three thin handlers over
+# devcontainer_config.skills_install, the engine the make skills-* targets
+# also drive. AGENT and SCOPE carry the make variables' values and carry
+# the same defaults the Makefile declares (AGENT ?= both, SCOPE ?= global),
+# so a direct cli call behaves like the target with no variables set.
+# argparse's choices= is the validation: an invalid value is a usage error
+# (exit 2) whose message lists the valid ones, and nothing reaches the
+# engine unvalidated.
+_SKILLS_AGENT_HELP = (
+    f"Which agent surface to act on: {', '.join(skills_install.AGENTS)}, "
+    f"or {skills_install.AGENT_BOTH} (the default)."
+)
+
+_SKILLS_SCOPE_HELP = (
+    f"Which scope to act on: {skills_install.SCOPE_GLOBAL} (the user-level "
+    f"skill directories), {skills_install.SCOPE_PROJECT} (the in-repo "
+    f"adapters), or {skills_install.SCOPE_RUNTIME} (print the one-shot "
+    "incantation, changing nothing)."
+)
+
+_SKILLS_INSTALL_DESCRIPTION = (
+    "Wire an agent's skill surface to this checkout's canonical .agents/"
+    "skills home. SCOPE=global creates the general-dev-skills symlink in "
+    "the agent's user-level skill directory (absolute target, recorded); "
+    "SCOPE=project verifies -- and, for Claude Code, wires -- the in-repo "
+    "adapters; SCOPE=runtime prints the agent's one-shot incantation "
+    "(OPENCODE_CONFIG for opencode, --settings for Claude Code) and never "
+    "executes it. Never copies a skill body: a copy would be a second "
+    "source of truth."
+)
+
+_SKILLS_REMOVE_DESCRIPTION = (
+    "Unwire an agent's skill surface. Only SCOPE=global deletes anything, "
+    "and only a general-dev-skills symlink whose resolved target is inside "
+    "this repository: a non-symlink is refused, a symlink resolving "
+    "elsewhere is refused (your own skills are never touched), and sibling "
+    "entries are never examined. SCOPE=project and SCOPE=runtime report why "
+    "they leave the filesystem as found."
+)
+
+_SKILLS_LIST_DESCRIPTION = (
+    "Report each selected agent's state at SCOPE: installed (with the "
+    "resolved target) or not installed for the global scope, native or "
+    "wired for the project scope; the runtime scope holds no persistent "
+    "state and names where its one-shot incantation is printed."
 )
 
 # The remedy appended to a hostcreds ManifestError on the creds commands.
@@ -435,6 +495,63 @@ def _build_parser() -> argparse.ArgumentParser:
         description=_SHELL_BLOCK_DESCRIPTION,
     )
     shell_block_parser.set_defaults(handler=_run_shell_block)
+
+    skills_install_parser = subparsers.add_parser(
+        "skills-install",
+        help="Wire an agent's skill surface to this checkout's .agents/skills home.",
+        description=_SKILLS_INSTALL_DESCRIPTION,
+    )
+    skills_install_parser.add_argument(
+        "--agent",
+        default=skills_install.AGENT_BOTH,
+        choices=skills_install.AGENT_CHOICES,
+        help=_SKILLS_AGENT_HELP,
+    )
+    skills_install_parser.add_argument(
+        "--scope",
+        default=skills_install.SCOPE_GLOBAL,
+        choices=skills_install.SCOPES,
+        help=_SKILLS_SCOPE_HELP,
+    )
+    skills_install_parser.set_defaults(handler=_run_skills_install)
+
+    skills_remove_parser = subparsers.add_parser(
+        "skills-remove",
+        help="Unwire an agent's skill surface, deleting only links that point inside this repo.",
+        description=_SKILLS_REMOVE_DESCRIPTION,
+    )
+    skills_remove_parser.add_argument(
+        "--agent",
+        default=skills_install.AGENT_BOTH,
+        choices=skills_install.AGENT_CHOICES,
+        help=_SKILLS_AGENT_HELP,
+    )
+    skills_remove_parser.add_argument(
+        "--scope",
+        default=skills_install.SCOPE_GLOBAL,
+        choices=skills_install.SCOPES,
+        help=_SKILLS_SCOPE_HELP,
+    )
+    skills_remove_parser.set_defaults(handler=_run_skills_remove)
+
+    skills_list_parser = subparsers.add_parser(
+        "skills-list",
+        help="Report each agent scope's state: installed, native, or not installed.",
+        description=_SKILLS_LIST_DESCRIPTION,
+    )
+    skills_list_parser.add_argument(
+        "--agent",
+        default=skills_install.AGENT_BOTH,
+        choices=skills_install.AGENT_CHOICES,
+        help=_SKILLS_AGENT_HELP,
+    )
+    skills_list_parser.add_argument(
+        "--scope",
+        default=skills_install.SCOPE_GLOBAL,
+        choices=skills_install.SCOPES,
+        help=_SKILLS_SCOPE_HELP,
+    )
+    skills_list_parser.set_defaults(handler=_run_skills_list)
 
     return parser
 
@@ -1096,16 +1213,48 @@ def _run_shell_block(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_skills_install(args: argparse.Namespace) -> int:
+    """Print `skills_install.install`'s messages verbatim; runtime scope included.
+
+    The engine validates AGENT/SCOPE semantics (the parser has already
+    constrained the values), resolves the repository root and the real
+    home itself being the only machine-specific read, and prints every
+    returned line -- the runtime scope's incantations included -- without
+    ever executing one.
+    """
+    root = repo.find_root(Path.cwd())
+    for message in skills_install.install(root, Path.home(), args.agent, args.scope):
+        print(message)
+    return 0
+
+
+def _run_skills_remove(args: argparse.Namespace) -> int:
+    """Print `skills_install.remove`'s messages verbatim; refusals exit 1 via main."""
+    root = repo.find_root(Path.cwd())
+    for message in skills_install.remove(root, Path.home(), args.agent, args.scope):
+        print(message)
+    return 0
+
+
+def _run_skills_list(args: argparse.Namespace) -> int:
+    """Print `skills_install.report`'s state lines verbatim; read-only."""
+    root = repo.find_root(Path.cwd())
+    for message in skills_install.report(root, Path.home(), args.agent, args.scope):
+        print(message)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Parse `argv`, run the selected command, and exit the process.
 
     This module's one public console entry point (AC-FUNC-006), and
     the only `sys.exit` site on the `devcontainer_config` command path: every
     command handler raises `SecretScanError`, `repo.RepoError`,
-    `GitHooksError`, `instances.InstancesError`, `instance_ops.InstanceOpsError`
-    or `hostcreds.HostCredsError` on a real failure instead of exiting itself,
-    and this is where that exception becomes an exit code -- printed with an
-    `ERROR:` prefix to stderr, never a stack trace.
+    `GitHooksError`, `instances.InstancesError`, `instance_ops.InstanceOpsError`,
+    `hostcreds.HostCredsError` or `skills_install.SkillsInstallError` on a
+    real failure instead of exiting itself, and this is where that exception
+    becomes an exit code -- printed with an `ERROR:` prefix to stderr, never
+    a stack trace.
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1118,6 +1267,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         instances.InstancesError,
         instance_ops.InstanceOpsError,
         hostcreds.HostCredsError,
+        skills_install.SkillsInstallError,
     ) as exc:
         print(str(exc), file=sys.stderr)
         exit_code = 1

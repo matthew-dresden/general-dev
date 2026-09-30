@@ -213,7 +213,7 @@ its live state, one row per instance:
 
 ```text
 INSTANCE  STATE    ID               PARAMS  CERTS  FORWARD  CONTEXT
-brimbooks running  i-0abc123def456  yes     yes    49231    general-dev-brimbooks
+acme      running  i-0abc123def456  yes     yes    49231    general-dev-acme
 sandbox   stopped  -                no      no     -        absent
 ```
 

@@ -402,6 +402,48 @@ def test_make_help_output_matches_its_snapshot(normalized_help_output: str) -> N
     _compare_snapshot(expected, normalized_help_output, "tests/data/make-help.txt")
 
 
+def test_no_help_line_exceeds_180_visible_characters(normalized_help_output: str) -> None:
+    """No `make help` line renders longer than 180 visible characters.
+
+    The normalization already stripped ANSI, so these are visible lengths --
+    the same measurement the Makefile's wrapping rule itself applies. This is
+    the assertion that makes the rule contractual rather than incidental to
+    the current row texts.
+    """
+    overlong = [
+        (number, line)
+        for number, line in enumerate(normalized_help_output.splitlines(), start=1)
+        if len(line) > 180
+    ]
+    assert not overlong, f"help lines past the 180-character limit: {overlong}"
+
+
+def test_wrapped_rows_align_their_description_at_the_instruction_column(
+    normalized_help_output: str,
+) -> None:
+    """Wrapped description lines start exactly at column 34 -- and wrapping happened.
+
+    A line whose first non-space character sits at column 34 is a wrapped
+    description line; 35 or more spaces of indent would mean the renderer
+    drifted from the instruction column. The ENGINE row is asserted
+    explicitly (its line 1 carries the target alone, its description starts
+    on the line below) so this test cannot pass vacuously if every
+    description were someday shortened below the limit.
+    """
+    lines = normalized_help_output.splitlines()
+    wrapped = [line for line in lines if re.match(r"^ {34}\S", line)]
+    assert wrapped, "no help row wrapped, so the 180-character rule never fired"
+    misaligned = [line for line in wrapped if len(line) - len(line.lstrip(" ")) != 34]
+    assert not misaligned, f"description lines not aligned at column 34: {misaligned}"
+    assert re.search(r"^  ENGINE=local\|<name>$", normalized_help_output, re.MULTILINE), (
+        "the ENGINE OPTIONS row must wrap: line 1 carries the target and scope "
+        "alone and the description starts on the line below"
+    )
+    assert any(re.match(r"^ {34}Address one engine explicitly", line) for line in lines), (
+        "the ENGINE row's description must open the line below its wrapped first line"
+    )
+
+
 def test_make_help_snapshot_reports_a_unified_diff_naming_the_changed_line() -> None:
     """AC-TEST-003: one changed help row fails the comparison, naming the changed line in a diff.
 

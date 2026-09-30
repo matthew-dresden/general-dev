@@ -7,7 +7,7 @@ description: Provisions one remote EC2 instance end to end -- scaffolds remote-i
 
 This skill owns first-time provisioning of one named instance. The instance
 name is a project name (the convention `make help`'s INSTANCES section
-states: instance names are project names, never geographies or stages), and
+states: instance names are project names), and
 every address this skill derives -- `remote-instances/<name>/`, the docker
 context, the Parameter prefix, the certificate paths -- follows from it
 through `devcontainer_config.instances`, the single owner of the addressing

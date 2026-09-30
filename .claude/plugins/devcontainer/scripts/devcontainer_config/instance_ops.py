@@ -302,8 +302,7 @@ def _invalid_name_message(name: str) -> str:
         f"{instances.MAX_INSTANCE_NAME_LENGTH} characters: letters, digits, "
         "hyphens and underscores only -- it keys a Terragrunt directory, a "
         "docker context and a Parameter Store prefix at once, and instance "
-        "names are project names (e.g. brimbooks), never geographies or "
-        "stages.\n"
+        "names are project names (e.g. acme).\n"
         "Choose a valid instance name and retry."
     )
 
@@ -428,7 +427,7 @@ def _render_terragrunt_hcl(
         f"# remote-instances/{name}/terragrunt.hcl",
         "#",
         "# The directory name IS this instance's identity, and instance names are",
-        "# project names (e.g. brimbooks), never geographies or stages.",
+        "# project names (e.g. acme).",
         "#",
         "# Everything in the inputs block below is yours to edit freely: instance",
         "# type, volume sizes, availability zone, tags and AMI. Apply any edit with:",

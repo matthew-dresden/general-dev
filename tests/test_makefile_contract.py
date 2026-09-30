@@ -54,7 +54,7 @@ from pathlib import Path
 
 import pytest
 from conftest import _makefile_text, _removed_identifiers, _resolve_make_refs
-from devcontainer_config import instances
+from devcontainer_config import helpline, instances
 from devcontainer_config.repo import find_root
 
 # Spec Section 4.1.2 requires the `make test` row to stay "no docker, no AWS,
@@ -895,6 +895,56 @@ def test_help_instances_section_sits_between_engine_and_build() -> None:
     instances_index = help_recipe.index("\\033[1mINSTANCES\\033[0m")
     build_index = help_recipe.index("\\033[1mBUILD\\033[0m")
     assert engine_index < instances_index < build_index
+
+
+# The 180-character rule (the wrapped help row): every two-column row renders
+# through the one `row()` helper defined in the recipe -- short rows via its
+# printf, long rows via devcontainer_config.helpline -- and the helper's
+# literal constants are pinned to the module's geometry so the two renderers
+# cannot drift. The literal fragments below are read out of the recipe text,
+# never duplicated as expectations about rendered output.
+
+
+def test_help_rows_render_through_one_helper() -> None:
+    """The two-column printf appears once, inside `row()`, and rows call `row()`.
+
+    One printf occurrence proves no row bypasses the helper (the format lives
+    only inside `row()`'s short-row branch); the ENGINE OPTIONS row's `row()`
+    call pins that the wrapping-motivating OPTIONS row routes through it too,
+    and the first row's call pins that the helper predates every row.
+    """
+    recipe = _help_recipe_body(_makefile_text())
+    row_format = "printf '  \\033[1;36m%-23s\\033[0m %-7s %s\\n'"
+    assert recipe.count(row_format) == 1, (
+        "the two-column printf must exist only inside the row() helper; a row "
+        "rendering through its own printf bypasses the 180-character rule"
+    )
+    assert 'row "ENGINE=local|<name>"' in recipe
+    assert 'row "make up"' in recipe
+
+
+def test_help_row_helper_constants_match_the_helpline_module() -> None:
+    """`row()`'s literal threshold and column widths equal helpline's geometry.
+
+    The shell helper decides inline-versus-wrapped from its own literals
+    (34-column instruction start, 180-character limit) and the module wraps
+    from the same geometry; reading both sides here is what keeps a change to
+    one from silently outdating the other.
+    """
+    recipe = _help_recipe_body(_makefile_text())
+    threshold = re.search(re.escape('$$((34 + $${#3}))" -le ') + r"(\d+)", recipe)
+    assert threshold is not None, "row() carries no visible-length threshold to pin"
+    assert int(threshold.group(1)) == helpline.LINE_LIMIT
+    indent = re.search(re.escape("$$((") + r"(\d+)" + re.escape(" + $${#3}))"), recipe)
+    assert indent is not None, "row() carries no instruction-column literal to pin"
+    assert int(indent.group(1)) == helpline.INSTRUCTION_COLUMN
+    widths = re.search(r"printf '  \\033\[1;36m%-(\d+)s\\033\[0m %-(\d+)s", recipe)
+    assert widths is not None, "row() carries no two-column printf to pin"
+    assert int(widths.group(1)) == helpline.TARGET_WIDTH
+    assert int(widths.group(2)) == helpline.SCOPE_WIDTH
+    assert "devcontainer_config.helpline" in recipe, (
+        "rows past the limit must wrap through devcontainer_config.helpline"
+    )
 
 
 # ---------------------------------------------------------------------------

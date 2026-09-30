@@ -618,7 +618,7 @@ bucket, so its lifecycle is a Terragrunt/backend concern.
 # example). Declared once so the four parsers that use it cannot drift.
 _DEFAULT_REGION = "us-east-1"
 
-_INSTANCE_NAME_HELP = "The instance name (a project name, e.g. brimbooks)."
+_INSTANCE_NAME_HELP = "The instance name (a project name, e.g. acme)."
 
 _REGION_HELP = (
     "AWS region the operation targets (default: us-east-1, the same default "

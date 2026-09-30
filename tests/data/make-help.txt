@@ -1,9 +1,11 @@
 
 <REPO_DIR> devcontainer control.   Backend follows the active docker context.
-Engines   the two backends a target can act on:
+
+Engines                           the two backends a target can act on:
           local   this machine's engine; builds bind-mount this folder
           remote  an EC2 engine; the repo is cloned into a volume on it
-Scope     the second column of every row:
+
+Scope                             the second column of every row:
           both    works on either engine via the active context
           local   that engine only
           remote  that engine only
@@ -14,15 +16,15 @@ Scope     the second column of every row:
 START HERE
   make up                 both    Get working from any state: refreshes the tunnel (remote), builds or starts as needed, then opens VS Code.
 
-FIRST RUN  once per machine
+FIRST RUN                         once per machine
   make init               host    Create the gitignored config files (incl. the hostcreds manifest) from their examples. Never overwrites an existing one.
   make keybindings        host    Bind Shift+Enter to a newline in VS Code terminals. Must run on the host, not in the container.
 
-ENGINE  pick where builds and containers live
+ENGINE                            pick where builds and containers live
   make local              host    Point docker and VS Code at the local engine (<LOCAL_DOCKER_CONTEXT>). Nothing remote is stopped.
   make disconnect         host    What 'make local' calls. Only changes where new commands and windows point.
 
-INSTANCES  one remote engine per project under remote-instances/; instance names are project names (e.g. acme)
+INSTANCES                         one remote engine per project under remote-instances/; instance names are project names (e.g. acme)
   make list-instances     host    List every instance with live status: EC2 state, id, params, certs, forward, context.
   make instance-init      host
                                   Scaffold <project>'s directory; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= for the AMI/AZ lookup only; the deployment region is
@@ -43,7 +45,7 @@ INSTANCES  one remote engine per project under remote-instances/; instance names
   make connect            remote  What 'make remote' calls. Opens the forward for INSTANCE=<name> (or ENGINE=<name>); re-run after a reboot, after sleep, or when SSO expires.
   make remote             host    Point them at the EC2 engine (<REMOTE_DOCKER_CONTEXT>), refreshing the SSM port forward first. INSTANCE=<name> targets that instance.
 
-BUILD  every target blocks until the container is up and exits non-zero if anything fails
+BUILD                             every target blocks until the container is up and exits non-zero if anything fails
   make build              both    Create the container for the active backend. Refuses if one already exists.
   make rebuild            both    clean, then build. Prerequisites are checked before anything is destroyed.
   make build-no-cache     both    build with the image rebuilt from scratch.
@@ -65,7 +67,7 @@ SECRETS AND CERTIFICATES
   make creds-init         host    Prompt once per missing keychain item the hostcreds manifest names and store it. CREDS_INIT_ARGS='--stdin NAME' feeds one value from stdin.
   make verify-container   both    Check the pushed credentials inside the container: fragment modes, startup block, git and aws reachability.
 
-HOST PROXY  only needed behind a corporate proxy; remote builds force HOST_PROXY=false
+HOST PROXY                        only needed behind a corporate proxy; remote builds force HOST_PROXY=false
   make proxy-start        local   Run tinyproxy on this machine. Local containers reach it via host.docker.internal.
   make proxy-status       local   Whether it is running, and on which port.
   make proxy-restart      local   Stop then start, picking up changed settings.
@@ -85,7 +87,7 @@ QUALITY
   make test               host    Run the hermetic pytest suite in tests/. No docker, no AWS, no network.
   make validate           host    The green-baseline contract automation depends on. Runs lint then test.
 
-SKILLS  wire this repo's .agents/skills roster into an agent on this Mac; no devcontainer involved
+SKILLS                            wire this repo's .agents/skills roster into an agent on this Mac; no devcontainer involved
   make skills-install     host
                                   Wire an agent to the canonical skills home: global symlink (default), project verify/wire, or the runtime one-shot incantation (printed, never
                                   run). AGENT=opencode|claude|both SCOPE=global|project|runtime
@@ -110,5 +112,6 @@ PREREQUISITES
   build and rebuild       devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli
   lint                    uv                                      brew install uv
   test                    uv, zsh                                 uv: brew install uv   zsh: brew install zsh (macOS) or sudo apt-get install -y zsh (Linux, WSL)
+
   Every target checks what it needs and fails with the command that installs it.
 

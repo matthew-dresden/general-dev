@@ -207,22 +207,14 @@ PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
 # leaves line 1 and continues on 34-space-indented lines (the instruction
 # column), kept inside the limit by devcontainer_config.helpline, whose
 # geometry constants tests/test_makefile_contract.py pins to this recipe's
-# literals. The helper needs the rows on one recipe line because a shell
-# function defined on one recipe line is invisible to the next; section
-# headers render as plain printfs inside the same block, and the
+# literals. The helpers need the rows on one recipe line because a shell
+# function defined on one recipe line is invisible to the next; the note()
+# helper places every legend and section-header note at the instruction
+# column, aligned with the descriptions below it, and the
 # PREREQUISITES block keeps its own printf format (it is not a two-column
 # command row).
 help:
 	@printf '\n\033[1m%s\033[0m devcontainer control.   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
-	@printf '\033[1mEngines\033[0m   the two backends a target can act on:\n'
-	@printf '          \033[1mlocal\033[0m   this machine'"'"'s engine; builds bind-mount this folder\n'
-	@printf '          \033[1mremote\033[0m  an EC2 engine; the repo is cloned into a volume on it\n'
-	@printf '\033[1mScope\033[0m     the second column of every row:\n'
-	@printf '          \033[1mboth\033[0m    works on either engine via the active context\n'
-	@printf '          \033[1mlocal\033[0m   that engine only\n'
-	@printf '          \033[1mremote\033[0m  that engine only\n'
-	@printf '          \033[1mhost\033[0m    runs on this machine and touches no engine at all\n'
-	@printf '\n  \033[1m%-23s\033[0m %-7s %s\n' "TARGET" "SCOPE" "WHAT IT DOES"
 	@set -euo pipefail; \
 	row() { \
 		if [ "$$((34 + $${#3}))" -le 180 ]; then \
@@ -231,15 +223,27 @@ help:
 			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.helpline "$$1" "$$2" "$$3"; \
 		fi; \
 	}; \
+	note() { \
+		printf '\n\033[1m%-34s\033[0m%s\n' "$$1" "$$2"; \
+	}; \
+	note "Engines" "the two backends a target can act on:"; \
+	printf '          \033[1mlocal\033[0m   this machine'"'"'s engine; builds bind-mount this folder\n'; \
+	printf '          \033[1mremote\033[0m  an EC2 engine; the repo is cloned into a volume on it\n'; \
+	note "Scope" "the second column of every row:"; \
+	printf '          \033[1mboth\033[0m    works on either engine via the active context\n'; \
+	printf '          \033[1mlocal\033[0m   that engine only\n'; \
+	printf '          \033[1mremote\033[0m  that engine only\n'; \
+	printf '          \033[1mhost\033[0m    runs on this machine and touches no engine at all\n'; \
+	printf '\n  \033[1m%-23s\033[0m %-7s %s\n' "TARGET" "SCOPE" "WHAT IT DOES"; \
 	printf '\n\033[1mSTART HERE\033[0m\n'; \
 	row "make up"               "both"   "Get working from any state: refreshes the tunnel (remote), builds or starts as needed, then opens VS Code."; \
-	printf '\n\033[1mFIRST RUN\033[0m  once per machine\n'; \
+	note "FIRST RUN" "once per machine"; \
 	row "make init"             "host"   "Create the gitignored config files (incl. the hostcreds manifest) from their examples. Never overwrites an existing one."; \
 	row "make keybindings"      "host"   "Bind Shift+Enter to a newline in VS Code terminals. Must run on the host, not in the container."; \
-	printf '\n\033[1mENGINE\033[0m  pick where builds and containers live\n'; \
+	note "ENGINE" "pick where builds and containers live"; \
 	row "make local"            "host"   "Point docker and VS Code at the local engine ($(LOCAL_CONTEXT)). Nothing remote is stopped."; \
 	row "make disconnect"       "host"   "What 'make local' calls. Only changes where new commands and windows point."; \
-	printf '\n\033[1mINSTANCES\033[0m  one remote engine per project under remote-instances/; instance names are project names (e.g. acme)\n'; \
+	note "INSTANCES" "one remote engine per project under remote-instances/; instance names are project names (e.g. acme)"; \
 	row "make list-instances"   "host"   "List every instance with live status: EC2 state, id, params, certs, forward, context."; \
 	row "make instance-init"    "host"   "Scaffold <project>'s directory; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= for the AMI/AZ lookup only; the deployment region is REMOTE_AWS_REGION]"; \
 	row "make instance-deploy"  "remote" "Converge: provision, link id, trust chain if missing, push secrets. Refuses instance replacement without CONFIRM=replace. INSTANCE= | ALL=1"; \
@@ -257,7 +261,7 @@ help:
 	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."; \
 	row "make connect"          "remote" "What 'make remote' calls. Opens the forward for INSTANCE=<name> (or ENGINE=<name>); re-run after a reboot, after sleep, or when SSO expires."; \
 	row "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)), refreshing the SSM port forward first. INSTANCE=<name> targets that instance."; \
-	printf '\n\033[1mBUILD\033[0m  every target blocks until the container is up and exits non-zero if anything fails\n'; \
+	note "BUILD" "every target blocks until the container is up and exits non-zero if anything fails"; \
 	row "make build"            "both"   "Create the container for the active backend. Refuses if one already exists."; \
 	row "make rebuild"          "both"   "clean, then build. Prerequisites are checked before anything is destroyed."; \
 	row "make build-no-cache"   "both"   "build with the image rebuilt from scratch."; \
@@ -276,7 +280,7 @@ help:
 	row "make push-creds"       "both"   "Resolve every hostcreds manifest entry on this machine and push it into the container. Git entries also seed ~/.git-credentials."; \
 	row "make creds-init"       "host"   "Prompt once per missing keychain item the hostcreds manifest names and store it. CREDS_INIT_ARGS='--stdin NAME' feeds one value from stdin."; \
 	row "make verify-container" "both"   "Check the pushed credentials inside the container: fragment modes, startup block, git and aws reachability."; \
-	printf '\n\033[1mHOST PROXY\033[0m  only needed behind a corporate proxy; remote builds force HOST_PROXY=false\n'; \
+	note "HOST PROXY" "only needed behind a corporate proxy; remote builds force HOST_PROXY=false"; \
 	row "make proxy-start"      "local"  "Run tinyproxy on this machine. Local containers reach it via host.docker.internal."; \
 	row "make proxy-status"     "local"  "Whether it is running, and on which port."; \
 	row "make proxy-restart"    "local"  "Stop then start, picking up changed settings."; \
@@ -292,7 +296,7 @@ help:
 	row "make hooks-run-push"   "host"   "Exactly what pre-push runs: lint, then a secrets scan of every commit in the pushed range."; \
 	row "make test"             "host"   "Run the hermetic pytest suite in tests/. No docker, no AWS, no network."; \
 	row "make validate"         "host"   "The green-baseline contract automation depends on. Runs lint then test."; \
-	printf '\n\033[1mSKILLS\033[0m  wire this repo'"'"'s .agents/skills roster into an agent on this Mac; no devcontainer involved\n'; \
+	note "SKILLS" "wire this repo's .agents/skills roster into an agent on this Mac; no devcontainer involved"; \
 	row "make skills-install"   "host"   "Wire an agent to the canonical skills home: global symlink (default), project verify/wire, or the runtime one-shot incantation (printed, never run). AGENT=opencode|claude|both SCOPE=global|project|runtime"; \
 	row "make skills-remove"    "host"   "Delete only a general-dev-skills symlink resolving inside this repo; refuses everything else. AGENT=opencode|claude|both SCOPE=global|project|runtime"; \
 	row "make skills-list"      "host"   "Show each agent scope: installed (target), native (project), or not installed. AGENT=opencode|claude|both SCOPE=global|project|runtime"; \
@@ -309,7 +313,7 @@ help:
 	@printf '  %-23s %s\n' "build and rebuild"     "devcontainer CLI, git, jq, python3      npm install -g @devcontainers/cli"
 	@printf '  %-23s %s\n' "lint"                  "uv                                      brew install uv"
 	@printf '  %-23s %s\n' "test"                  "uv, zsh                                 uv: $(TEST_INSTALL_HINT_uv)   zsh: $(TEST_INSTALL_HINT_zsh)"
-	@printf '  %s\n' "Every target checks what it needs and fails with the command that installs it."
+	@printf '\n  %s\n' "Every target checks what it needs and fails with the command that installs it."
 	@printf '\n'
 
 # Opens the SSM port forward. The instance it opens one for: INSTANCE when

@@ -42,6 +42,15 @@ already used and reports success only from that fresh reading, never from
 success from an action that did not verify, and a `clean` that left a volume
 behind is exactly the case where the exit code and the truth disagree.
 
+## Invocation map
+
+| Operation | What this skill runs | Confirmation |
+|---|---|---|
+| Inventory and pre-flight | `make status`, `make check`, and, when the request is a rebuild, `make build` against the already-existing container | None: reads and a harmless refusal (`## Inventory` step 4). |
+| Tear down | `make clean` | Confirmation, always (`## Confirmation`). |
+| Rebuild in place | `make rebuild` | Confirmation, always. |
+| Rebuild from scratch | `make build-no-cache` or `make rebuild-no-cache` | The same confirmation gate as rebuild: both replace the container and its image, and are for when a feature or base image changed (`make help`'s own BUILD rows). |
+
 ## Inventory
 
 Before asking anything, this skill reads state through the Section 3.3

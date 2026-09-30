@@ -52,6 +52,20 @@ contract happens across two separate invocations of this skill rather than
 inside one. A `gd-env-doctor` run is one-shot: it never repeats an action, and it
 never reports a finding as fixed without that fresh re-run confirming it.
 
+## Invocation map
+
+This skill runs reads; every make target below is a remedy named for the
+operator (or the named skill) to run, never a run of this skill's own
+(`## What this skill fixes itself` is empty).
+
+| Step | What this skill runs | Notes |
+|---|---|---|
+| Engine verdict | Invoke `gd-instance-list` | Carried forward as the single `ENGINE` summary line (`## Report shape`), never restated. |
+| Configuration | The `shell.env` credential-shape scan of `## Findings` | Read-only; the remedy names `make creds-init` and a hand edit of `shell.env`. |
+| Secrets | The four hostcreds checks of `## Findings` | Read-only; remedies name `make init`, `make creds-init`, `make push-creds` and `make verify-container`. |
+| Container state | `make status` and `make check` | The two dispatch reads `## Findings`' container-state group is built on; remedies name `make up`, `make build` and `make clean FORCE=1` for the operator. |
+| Drift | The host-against-container hooks comparison; the other three rows report `NOT RUN` | Remedies name `make hooks-install` and `make push-secrets` for whoever owns the repair. |
+
 ## Findings
 
 Every row below follows this skill's own three-column shape: the condition
@@ -86,7 +100,7 @@ place:
 
 | Finding | Source | Remedy |
 |---|---|---|
-| `shell.env`'s active configuration holds no credential-shaped value | `secrets.scan_lines` (`devcontainer_config.secrets`) run over `shell.env`'s active `export` lines -- the same scope `verify._active_configuration_text` already isolates for the placeholder check, reused here rather than re-deriving it -- restricted to the seven credential-bearing detectors in `secrets.PATTERNS` (`aws-access-key-id`, `aws-secret-access-key`, `private-key-block`, `github-token`, `slack-token`, `bearer-token`, `hostcreds-value`). The three printable detectors (`sso-portal-url`, `account-id`, `ec2-instance-id`) are excluded: `shell.env` legitimately carries a resolved AWS account or instance identifier as configuration, not a credential, so flagging one would be a false positive by design. `shell-env-line` is excluded too: it needs a comparison source this scan is not a comparison against. | Name the manifest entry the value belongs to (the `hostcreds-value` finding names the credential), add it to the hostcreds manifest and store it with `make creds-init` (never on a command line), then delete the offending `export` line from `shell.env` by hand (this skill never edits it) and re-run `gd-env-doctor` to confirm. `gd-creds-setup` owns this step: its Add row (`## Operations`) is the same manifest-plus-creds-init flow. The finding names only the variable and, via `secrets.render_finding`, a redacted, safe-to-paste rendering of the match -- never the value itself. |
+| `shell.env`'s active configuration holds no credential-shaped value | `secrets.scan_lines` (`devcontainer_config.secrets`) run over `shell.env`'s active `export` lines -- the same scope `verify._active_configuration_text` already isolates for the placeholder check, reused here rather than re-deriving it -- restricted to the seven credential-bearing detectors in `secrets.PATTERNS` (`aws-access-key-id`, `aws-secret-access-key`, `private-key-block`, `github-token`, `slack-token`, `bearer-token`, `hostcreds-value`). The three printable detectors (`sso-portal-url`, `account-id`, `ec2-instance-id`) are excluded: `shell.env` legitimately carries a resolved AWS account or instance identifier as configuration, not a credential, so flagging one would be a false positive by design. `shell-env-line` is excluded too: it needs a comparison source this scan is not a comparison against. | Name the manifest entry the value belongs to (the `hostcreds-value` finding names the credential), add it to the hostcreds manifest and store it with `make creds-init` (never on a command line), then delete the offending `export` line from `shell.env` by hand (this skill never edits it) and re-run `gd-env-doctor` to confirm. `gd-creds-setup` owns this step: its Add row (`## Invocation map`) is the same manifest-plus-creds-init flow. The finding names only the variable and, via `secrets.render_finding`, a redacted, safe-to-paste rendering of the match -- never the value itself. |
 
 ### Secrets
 

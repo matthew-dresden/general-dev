@@ -20,7 +20,7 @@ re-renders an existing file -- re-rendering is `gd-env-setup-local`'s and
 | Step | What this skill runs | Notes |
 |---|---|---|
 | Create the private files | `make init` | Creates `shell.env`, `devcontainer-environment-variables.json`, `.devcontainer/aws-profile-map.json` and the hostcreds manifest `.devcontainer/hostcreds.map.json` from their examples. Never overwrites an existing file. |
-| Bind Shift+Enter | `make keybindings` | Host-only; must run on this machine, not in a container. |
+| Bind Shift+Enter | `make keybindings` | Host-only; must run on this machine, not in a container. This step is the `flow: keybindings setup` flow of `docs/skills.md`'s Flows section. |
 | Name the next skill | None | Ends by naming `gd-env-setup-local` (this machine is the engine) or `gd-env-setup-remote` (a remote instance is the engine), per which backend the operator means to use. This skill runs neither. |
 
 ## Checks

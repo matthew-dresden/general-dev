@@ -56,6 +56,18 @@ continuing -- it never hands the operator back the whole
 `gd-env-setup-remote` invocation to force a re-check, and it never
 assumes the login succeeded.
 
+## Invocation map
+
+| Step | What this skill runs | Notes |
+|---|---|---|
+| Probe and interview | `hostprobe`, the `## Questions` table, `answers.validate` | Exactly `gd-env-setup-local`'s opening steps plus the remote fields; nothing is written until every answer validates. |
+| Render and verify | `render.render_all`, `render.write_all(..., overwrite=False)`, `verify.verify_all` | `## Procedure` step 5; the remote identity fields are written because `backend` answers `remote`. |
+| SSO and agent | `hostprobe.probe_aws_identity`, then `transport.ensure_agent_online` | `aws sso login --profile <profile>` is the operator's action, never an assumed one. |
+| Terragrunt changes | PRECHECK-APPLY before any `terragrunt apply` | Only when `<name>`'s state must be created or changed (`## Procedure` step 8); never self-approved. |
+| Certificates | `certs.create_ca`, `certs.issue_server`, `certs.issue_client`, published through `certs.publication_set(<name>)` | First issuance only (`## Procedure` steps 9-10); renewal is `gd-cert-lifecycle`'s, and `make cert-status` reports expiry. |
+| Forward and context | `transport.allocate_local_port`, `transport.start_forward`, `transport.wait_ready`, then the `<repo-slug>-<name>` docker context | `make connect` and `make remote` are the standing operator-invocable forms after setup. |
+| Handshake and handoff | The docker version handshake, then name `make build INSTANCE=<name>` | This skill never runs the build. |
+
 Interview backend: remote
 
 ## Questions

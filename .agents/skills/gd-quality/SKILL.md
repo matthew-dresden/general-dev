@@ -31,6 +31,15 @@ False positives` is this skill's own instance of Section 4.2's interaction
 contract applied to that one case: state the exact request, wait, and
 never assume silence is a yes.
 
+## Invocation map
+
+| Step | What this skill runs | Notes |
+|---|---|---|
+| Baseline | `make validate` | Its `validate:` line names `lint` and `test`, and `lint:` names the sub-targets `## Findings` interprets; both sets are read from the Makefile, never copied here. |
+| Interpret | `## Findings`, per failing sub-target | A sub-target with no row is reported by its own name and raw output. |
+| Reproduce a hook failure | `make hooks-run` (exactly what pre-commit runs) or `make hooks-run-push` (exactly what pre-push runs: lint, then a secrets scan of every commit in the pushed range) | Reproduction only; the fix follows `## Findings`, and `## Never` governs every response. |
+| Close | A fresh `make validate` | `## Completion`'s only source of truth. |
+
 ## Procedure
 
 1. Read the current sub-target set `make validate` actually runs from the
@@ -168,7 +177,9 @@ This skill never rewrites history and never rotates a value itself: both
 remedies change something outside the file that failed the check, and
 Section 4.2's own interaction contract governs this case exactly -- state
 the exact command, wait for the operator, then verify, never assumed to
-have worked. When the same value that failed `lint-secrets` also appears
+have worked. This remedy pair is the `flow: scanner-blocked-commit remedy`
+flow of `docs/skills.md`'s Flows section. When the same value that failed
+`lint-secrets` also appears
 in the developer's own `shell.env` -- one of the conditions `lint-secrets`
 itself detects (Section 4.6) -- the finding is also a `gd-env-doctor`
 configuration finding (its own "`shell.env`'s active configuration holds

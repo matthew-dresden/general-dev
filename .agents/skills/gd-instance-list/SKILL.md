@@ -64,6 +64,20 @@ per the Section 4.1.4 error handling contract for every target ("Engine
 unreachable | 1 | The context name and the diagnosis from
 `rd_engine_diagnosis`"), rather than a generic connection error.
 
+## Invocation map
+
+| Step | What this skill runs | Notes |
+|---|---|---|
+| Resolve the backend and instance | `hostprobe.probe_docker`, `rdc_backend`'s rule, `instances.resolve` | `## Procedure` step 1; the one question it may ask is Section 4.1.1's. |
+| Walk the checks | The `## Checks` table in dependency order | Stops at the first failure; `## Procedure` steps 2 through 16 apply each row's remedy. |
+| Self-fix | Select an existing context (`docker context use <name>`) and re-establish the port forward | The only two actions `## What this skill fixes itself` names; everything else is stated for the operator. |
+| Report | The `## Verdict` table | One row per check that ran, plus the trailing not-reached line. |
+
+The make targets its remedies name (`make cert-status`, `make cert-ca`,
+`make cert-client`, `make proxy-start`, `make proxy-status`,
+`make proxy-restart`, `make proxy-stop`) are operator commands, never runs
+of this skill.
+
 ## Checks
 
 The table below is Section 4.2.1's own two lists, verbatim and in order: the

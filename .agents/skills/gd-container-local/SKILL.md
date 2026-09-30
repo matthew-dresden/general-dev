@@ -50,7 +50,7 @@ reports anything other than a clean pass -- a failing check, a warning that
 still let it complete, or no verdict at all because the invocation itself
 did not produce one -- stop immediately. Print the failing check's message
 and remedy exactly as `gd-instance-list` phrased them, and state plainly
-that no target in `## Decision` was attempted, naming all four so the
+that no target in `## Invocation map` was attempted, naming all four so the
 developer knows none of `make build`, `make start`, `make restart` or `make
 reopen` ran. Stage 2 below never runs until stage 1 reports a clean pass,
 because every stage 2 read (`docker ps`, `docker inspect`, an exec into the
@@ -72,7 +72,7 @@ container is read as a normal, actionable state rather than as a failure:
    filter (`container.sh:120`; `PROJECT_NAME` defaults to the repository
    directory basename, `container.sh:9`) on the active context, and returns
    an empty result rather than an error when none exist -- that
-   empty-on-zero-exit result is `## Decision`'s "no container" row.
+   empty-on-zero-exit result is `## Invocation map`'s "no container" row.
    `rdc_container_ids` is not itself infallible: it calls `rd_docker`
    (`lib.sh:146`), which translates a non-zero `docker` exit through
    `rd_run`'s own translation step (`lib.sh:135-144`) into
@@ -96,7 +96,7 @@ container is read as a normal, actionable state rather than as a failure:
    `rdc_require_container`'s own failure, reported unchanged (`## Failure
    semantics`, "a step needs the operator"). On a remote backend, whichever
    instance stage 1's `gd-instance-list INSTANCE=<name>` invocation
-   resolved is the same instance every target in `## Decision` is run
+   resolved is the same instance every target in `## Invocation map` is run
    against; this skill resolves an instance once, at stage 1, never twice.
 3. With one id resolved, its docker-reported status decides running against
    stopped: `rdc_start`'s own comparison (`container.sh:231-242`) is the
@@ -134,11 +134,19 @@ that comparison today; this skill reports it as `NOT RUN`, naming that no
 `gd-instance-list` and `gd-env-doctor` already use for a probe
 that has no owner. A stale image is never acted on by this skill: rebuilding
 replaces the container and its volumes, which is the destructive path
-`## Decision` never takes, and which the confirmation of the `gd-container-lifecycle` skill
+`## Invocation map` never takes, and which the confirmation of the `gd-container-lifecycle` skill
 that Section 4.2's roster defines, and that E4-F3-S1-T2 authors, governs
 instead.
 
-## Decision
+## Invocation map
+
+Every target in this map accepts `ENGINE=` in either argument position
+(`ENGINE=local make build` for this machine's engine, `ENGINE=<name> make
+build` for an instance's context), which is how parallel terminals drive
+both engines concurrently without switching the machine-wide docker
+context -- the `flow: ENGINE multi-engine addressing` flow of
+`docs/skills.md`'s Flows section. Unset, every row follows the active
+context exactly as before.
 
 One row per state stage 2 can observe, mutually exclusive and covering
 every combination of container present or absent and running or stopped:
@@ -161,7 +169,7 @@ Section 4.2.2's rule for every skill in this plugin -- "An action the skill
 took did not verify: report the action, the verification that failed, and
 what state the machine is now in. Never retry silently" -- is this skill's
 central obligation, because its whole job is choosing and running one of
-four targets. After running the target `## Decision` chose, this skill
+four targets. After running the target `## Invocation map` chose, this skill
 re-reads container state with the same stage 2 primitives (`rdc_container_ids`
 and, once resolved, `rdc_container_state`) and reports success only from
 that fresh reading, never from the target's own exit code. A zero exit code
@@ -192,12 +200,12 @@ reruns the target on its own to try again.
 
 | Condition | Behavior |
 |---|---|
-| A precondition check fails | Stage 1's delegated `gd-instance-list` verdict is this skill's only precondition. A failure there stops this skill before stage 2 ever reads the container: print the failing check's message and remedy unchanged, and state that no target in `## Decision` was attempted, naming all four (`## Diagnosis`, stage 1). |
+| A precondition check fails | Stage 1's delegated `gd-instance-list` verdict is this skill's only precondition. A failure there stops this skill before stage 2 ever reads the container: print the failing check's message and remedy unchanged, and state that no target in `## Invocation map` was attempted, naming all four (`## Diagnosis`, stage 1). |
 | An action the skill took did not verify | Report the target that ran, the state the post-action read found, and that the two disagree; never retried silently (`## Verification`). This is also this skill's answer to two task-specific conditions: a target that exits zero while the container is not running afterward is reported this way, never as success from the exit code alone; and `make build` refusing because a container already exists (a race between stage 2's read and the target's own guard, `container.sh:791-798`) is treated as a diagnosis that was already wrong the instant the guard fired -- this skill re-reads container state (`## Diagnosis`, stage 2) and switches to `make start` or `make reopen` based on what that fresh read shows, never passing a force flag to get past the guard, because the refusal is the guard working. |
 | A step needs the operator (SSO, `sudo`, a key) | Two distinct moments reach this row. First, any operator-facing remedy `gd-instance-list`'s own stage 1 verdict names (an SSO login, starting the local engine, freeing disk space) is stated, waited on, and re-verified by re-invoking `gd-instance-list` before this skill's own diagnosis can proceed -- never assumed to have succeeded, per Section 4.2's interaction contract quoted in this document's introduction. Second, `rdc_require_container` itself needs the operator when more than one container matches and `CONTAINER=` is not set, or when a supplied `CONTAINER=` name matches nothing (`## Diagnosis`, stage 2 step 2): its own failure already states every candidate and the exact `CONTAINER=<name>` invocation to disambiguate, printed unchanged, and this skill waits for the operator to supply it and re-invoke rather than guessing. |
 | A gate is reached (Section 4.4) | This skill reaches no Section 4.4 gate: it creates no AWS resource, runs no `terragrunt apply` or `terragrunt destroy`, and performs no phase 4 cutover. `GATE-APPLY`, `GATE-CUTOVER` and `GATE-DESTROY` are `gd-env-setup-remote`'s and a future teardown skill's concern, not this one's. |
 | An answer fails validation | This skill asks nothing of its own (Section 4.2's own roster row: "Asks: Nothing") and never calls `answers.validate`. The one question this plugin ever asks under ambiguity -- which remote instance, Section 4.1.1 -- belongs to `gd-instance-list`'s own stage 1 invocation, not to this skill; this skill never re-asks it. |
-| The operator aborts | An abort during stage 1 or stage 2 of `## Diagnosis` leaves no state changed, since both stages only read: `gd-instance-list`'s own delegated verdict and this skill's own container reads perform no action of their own. An abort after this skill has started running the target `## Decision` chose may leave that target's own effect complete or partial, exactly as if the operator had run `make build`, `make start`, `make restart` or `make reopen` directly and interrupted it themselves; this skill retries nothing on its own, and its next invocation reads the machine's actual state fresh (`## Diagnosis`, stage 2) rather than assuming the interrupted run finished. |
+| The operator aborts | An abort during stage 1 or stage 2 of `## Diagnosis` leaves no state changed, since both stages only read: `gd-instance-list`'s own delegated verdict and this skill's own container reads perform no action of their own. An abort after this skill has started running the target `## Invocation map` chose may leave that target's own effect complete or partial, exactly as if the operator had run `make build`, `make start`, `make restart` or `make reopen` directly and interrupted it themselves; this skill retries nothing on its own, and its next invocation reads the machine's actual state fresh (`## Diagnosis`, stage 2) rather than assuming the interrupted run finished. |
 
 ## Related specifications
 

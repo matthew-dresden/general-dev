@@ -21,6 +21,12 @@ the instance itself to `gd-instance-destroy`.
 
 ## Invocation map
 
+Like its local twin, every target below accepts `ENGINE=` in either
+argument position, so a run can address one instance's engine explicitly
+without switching the machine-wide docker context (the
+`flow: ENGINE multi-engine addressing` flow of `docs/skills.md`'s Flows
+section).
+
 | Step | What this skill runs | Notes |
 |---|---|---|
 | Validate the instance | Invoke `gd-instance-list INSTANCE=<name>` first | Its thirteen-check verdict is this skill's precondition; a failure there is reported unchanged and stops this skill. |

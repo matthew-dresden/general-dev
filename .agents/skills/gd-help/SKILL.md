@@ -13,14 +13,18 @@ table it indexes is the roster in `docs/skills.md`, which
 this index cannot name a skill that does not exist.
 
 The hierarchy is one flat namespace, `gd-<name>`, grouped into seven
-families by the middle segment:
+families by the middle segment. The table below is this skill's
+invocation map: each family's make targets, one column over from its
+members.
+
+## Invocation map
 
 | Family | Members | Drives |
 |---|---|---|
-| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-doctor` | `make init`, `make local`, `make remote`, `make connect`; the Section 4.2.1 check contract |
+| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-doctor` | `make init`, `make local` (and its `make disconnect`), `make remote`, `make connect`; the Section 4.2.1 check contract |
 | project- | `gd-project-onboard` | `make init`, `make keybindings` |
 | instance- | `gd-instance-create`, `gd-instance-fleet`, `gd-instance-list`, `gd-instance-destroy` | `make instance-init`, `make instance-plan`, `make instance-deploy`, `make instance-link`, `make list-instances`, `make instance-status`, `make instance-stop`, `make instance-start`, `make instance-destroy` |
-| container- | `gd-container-local`, `gd-container-remote`, `gd-container-verify`, `gd-container-lifecycle` | `make build`, `make start`, `make restart`, `make reopen`, `make status`, `make check`, `make clean`, `make rebuild` |
+| container- | `gd-container-local`, `gd-container-remote`, `gd-container-verify`, `gd-container-lifecycle` | `make build`, `make start`, `make restart`, `make reopen`, `make status`, `make check`, `make clean`, `make rebuild`, `make rename` |
 | creds- | `gd-creds-setup`, `gd-creds-rotate`, `gd-creds-doctor` | `make creds-init`, `make push-creds`, `make verify-container` |
 | cert- | `gd-cert-lifecycle` | `make cert-ca`, `make cert-client`, `make cert-publish`, `make cert-install`, `make cert-status` |
 | skills- | `gd-skills-install`, `gd-skills-remove`, `gd-skills-scope` | the U3 skills-management make targets (forthcoming) |

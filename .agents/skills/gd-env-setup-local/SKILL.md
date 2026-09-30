@@ -20,6 +20,17 @@ operator to run it, then re-probes with `hostprobe` itself before
 continuing. It never assumes the action succeeded, and it never asks the
 operator to re-invoke `gd-env-setup-local` to force a re-check.
 
+## Invocation map
+
+| Step | What this skill runs | Notes |
+|---|---|---|
+| Probe | `hostprobe.probe_tools` and `hostprobe.probe_docker` | The `## Checks` table's prerequisites, before anything is asked. |
+| Interview | The `## Questions` table, validated by `answers.validate` | Nothing is written until every answer validates. |
+| Render and write | `render.render_all`, then `render.write_all(..., overwrite=False)` | Refuses and names every existing path rather than replacing it (`## Procedure` steps 6-7). |
+| Verify | `verify.verify_all` | Every finding reported, never the first alone. |
+| Select the engine | `docker context use <local_docker_context>`, re-probed afterward | The operator-invocable equivalent is `make local` (which runs `make disconnect`); this skill performs the same selection itself. |
+| Handoff | Name `make build` | This skill never runs it; the container- family owns the build. |
+
 Interview backend: local
 
 ## Questions

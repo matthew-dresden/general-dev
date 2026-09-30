@@ -26,7 +26,7 @@ never a store trusted on the command's own exit code. That last point is
 this skill's one addition to Section 4.2.2's own interaction contract --
 "Nothing is assumed to have worked" -- applied to `make creds-init`:
 `stored: <NAME>` on stdout is the command's own claim about what
-happened, and every write-shaped row in `## Operations` below re-probes
+happened, and every write-shaped row in `## Invocation map` below re-probes
 the keychain afterward rather than repeating that claim as this skill's
 own.
 
@@ -36,7 +36,7 @@ printed by this skill into the conversation, and a request to see one is
 answered with the exact command the operator runs in their own terminal
 instead.
 
-## Operations
+## Invocation map
 
 | Operation | What this skill runs | Confirmation | Verification |
 |---|---|---|---|

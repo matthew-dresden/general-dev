@@ -63,3 +63,37 @@ prose.
 | gd-skills-scope | `gd-skills-scope` (skills-) -- records which skill families an agent surface receives, in that surface's own configuration, never by deleting from the canonical home; drives the U3 `skills-scope` make target (forthcoming) |
 | gd-quality | `gd-quality` (cross-cutting) -- asks nothing, reads the sub-target set `make validate` invokes from the Makefile itself rather than a copy embedded in the skill, interprets each failing sub-target's root cause and fixes it, never suppresses a finding (no bypass annotation, no linter-ignore entry, no raised threshold, no narrowed `LINT_EXCLUDES` or `SPELL_FILES`), stops and asks for human approval on a suspected false positive, hands anything else it cannot fix to `gd-env-doctor` or the operator, and ends by reporting the exit code of a fresh `make validate` run |
 | gd-help | `gd-help` (cross-cutting) -- the roster index: maps the seven families, names the one skill to invoke for a stated goal, and points at the make targets each family drives |
+
+## Flows
+
+Some recurring developer actions are not a single make target but a named
+flow -- a judgment, an answer, or a multi-step procedure spanning several
+targets. Each flow below is listed once here and referenced by name in
+every covering skill's body as the backticked `` `flow: <name>` `` marker,
+so the correspondence is exact in both directions:
+`tests/test_skills_coverage.py` fails when a flow listed here is missing
+from a covering skill's body, and when any skill references a flow this
+section does not list.
+
+| Flow | Covering skill(s) |
+|---|---|
+| `keybindings setup` | gd-project-onboard |
+| `ENGINE multi-engine addressing` | gd-container-local gd-container-remote |
+| `INSTANCE_ID link recovery` | gd-instance-create |
+| `credential expiry troubleshooting` | gd-creds-doctor |
+| `scanner-blocked-commit remedy` | gd-quality |
+| `opencode/claude agent setup pointers` | gd-skills-install |
+
+## Coverage guarantee
+
+Coverage over the make-target surface is test-enforced.
+`tests/test_skills_coverage.py` parses the live `make help` output and the
+declared names in `tests/data/help-unadvertised.txt` -- the same two
+sources `tests/test_help_snapshot.py` uses to account for every `.PHONY`
+target -- and fails, naming each uncovered target, if any target in that
+union is referenced by no `SKILL.md` under `.agents/skills`. The same
+suite pins the roster's structure: every `SKILL.md` carries exactly one
+`## Invocation map` heading, the one section where the make targets a
+skill drives are declared. A make target added without a covering skill, a
+skill body losing its invocation map, and a flow drifting on either side
+of the table above each fail `make test`.

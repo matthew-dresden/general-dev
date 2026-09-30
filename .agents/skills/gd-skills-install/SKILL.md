@@ -18,6 +18,14 @@ This skill never copies or renders a skill body into another location: a
 copied skill is a second source of truth, which is the failure this roster
 layout exists to prevent.
 
+The two agents this repository ships wiring for are the standing example of
+the `flow: opencode/claude agent setup pointers` flow of `docs/skills.md`'s
+Flows section: opencode reads `.agents/skills` directly (the canonical
+home needs no pointer), and Claude Code consumes the roster through the
+plugin's `skills/` relative symlink described above. Wiring any other
+agent follows the same two rules this skill verifies -- point at the
+canonical home, never copy it -- and resolves every `gd-` name afterward.
+
 ## Invocation map
 
 | Step | What this skill runs | Notes |

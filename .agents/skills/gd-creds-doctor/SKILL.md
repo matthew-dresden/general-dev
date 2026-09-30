@@ -16,7 +16,14 @@ edits the manifest, and never pushes a partial manifest.
 The check definitions are deliberately not restated here: `gd-env-doctor`'s
 secrets group owns their exact sources and remedies, and two copies would
 drift. This skill invokes that group's checks as its own first section and
-adds the repair loop.
+adds the repair loop. It is also the standing place for the
+`flow: credential expiry troubleshooting` flow of `docs/skills.md`'s Flows
+section: a credential the container reports as expired -- the rendered
+fragment's own `notice: <NAME> expired; refresh with: make push-creds`
+line, or an SSO session a probe reports expired -- is diagnosed by the
+read step and cleared by the repair step (`make creds-init` to restage a
+keychain value, `aws sso login` to refresh the session, then
+`make push-creds`), each verified by the closing re-read.
 
 ## Invocation map
 

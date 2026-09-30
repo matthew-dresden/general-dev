@@ -10,22 +10,55 @@ EC2 reference, troubleshooting) live in
 `.devcontainer/devcontainer.json`:
 
 - Built from `.devcontainer/Dockerfile`, user `vscode`, workspace at
-  `/workspaces/${localWorkspaceFolderBasename}`. The Dockerfile is
-  `FROM mcr.microsoft.com/devcontainers/base:noble` plus one layer: it creates
-  `~/.vscode-server` and the directories the server volumes mount over, owned by
-  `vscode`. Docker creates a missing mount point, and a named volume that is
-  empty, root-owned; VS Code installs its server as `vscode` before any
-  lifecycle hook has run, so nothing inside the container can hand those
-  directories over in time. In local mode that failure was fatal: the extension
-  runs `devcontainer up --skip-post-create`, then installs the server itself and
-  stops at `ln: failed to create symbolic link
-  '/home/vscode/.vscode-server/bin/<build>': Permission denied`. Ownership set in
-  the image is what a fresh volume is initialized with, so the mount points are
-  writable from the moment the container starts. Remote mode never hit it,
-  because `make build` runs the whole of `devcontainer up`, postCreate included,
-  before it seeds the server.
+  `/workspaces/${localWorkspaceFolderBasename}`. The Dockerfile declares a
+  `# syntax=docker/dockerfile:1` directive (required for the heredoc `RUN`
+  form used below) and is `FROM mcr.microsoft.com/devcontainers/base:noble`
+  plus two layers. The first creates `~/.vscode-server` and the directories
+  the server volumes mount over, owned by `vscode`. Docker creates a missing
+  mount point, and a named volume that is empty, root-owned; VS Code installs
+  its server as `vscode` before any lifecycle hook has run, so nothing inside
+  the container can hand those directories over in time. In local mode that
+  failure was fatal: the extension runs `devcontainer up --skip-post-create`,
+  then installs the server itself and stops at `ln: failed to create symbolic
+  link '/home/vscode/.vscode-server/bin/<build>': Permission denied`.
+  Ownership set in the image is what a fresh volume is initialized with, so
+  the mount points are writable from the moment the container starts. Remote
+  mode never hit it, because `make build` runs the whole of `devcontainer up`,
+  postCreate included, before it seeds the server. The second layer installs
+  the AWS session-manager-plugin (see the dedicated bullet below).
 - Features: aws-cli, Python 3.14, Node 25, kubectl + helm (minikube disabled
-  via `"minikube": "none"`), common-utils, docker-in-docker, uv.
+  via `"minikube": "none"`), common-utils, docker-in-docker, uv,
+  `ghcr.io/devcontainers/features/terraform:1` (Terraform, Terragrunt and
+  tflint, each pinned `latest`); `jq` joins the existing apt-packages list.
+- The AWS `session-manager-plugin` is installed by the Dockerfile's second
+  `RUN` layer rather than by a devcontainer Feature: no registry Feature for
+  it exists. The spec originally named
+  `ghcr.io/devcontainers-extra/features/aws-ssm-session-manager-plugin:1` as
+  the mechanism, but that Feature has never existed in any registry, and the
+  only two personal repositories that come close are either unresolvable on
+  `ghcr` or unmaintained since 2024-06-27, so `CLAUDE.md`'s dependency-trust
+  rule rules them out. The step fetches the package over TLS from AWS's own
+  S3-hosted download path and
+  verifies its detached signature with `gpg --batch --verify` before
+  `dpkg --install` ever runs, failing the build on any verification error.
+  The trust anchor is AWS's publisher signing key, embedded in the Dockerfile
+  and pinned by fingerprint `7959637124CE093AD501D47A2C4D4AFF6F6757EE`
+  (`devcontainer_config.plugin_install` carries the same pinned values so a
+  test can assert the Dockerfile has not drifted from them). No package
+  checksum is pinned: the download always targets AWS's moving `latest` path,
+  so a checksum pinned against today's build would break every future rebuild
+  the moment AWS publishes a new plugin version at that same URL; the
+  signing key's fingerprint is stable across releases, so verifying the
+  signature against it is what gives the install provenance without freezing
+  the plugin version. The plugin runs at build time, not `postCreateCommand`,
+  so it ships inside the immutable image; `devcontainer_config/transport.py`
+  shells out to it by relying on it being on `PATH` for the non-root
+  `vscode` user (work unit `E5-F3-S1-T2`, operator ruling signed at commit
+  `9a38c703adda210e27c2c34607cb1a09a4d63378`).
+- The IaC engine is Terraform, per D14, spec `devcontainer-platform.md`
+  Section 13, licensed BUSL-1.1; the installed Terraform and Terragrunt
+  versions satisfy the spec Section 6 floors, `>= 1.10` and `>= 1.1.3`
+  respectively.
 - Features contribute VS Code extensions of their own, merged with the
   `customizations.vscode.extensions` list: the container image's
   `devcontainer.metadata` label records which feature added which. The aws-cli
@@ -247,19 +280,30 @@ EC2 reference, troubleshooting) live in
 2. **Postcreate: configuration.** Installs nothing, everything installable is
    a feature. Each step is a function in `.devcontainer.postcreate.sh`, states
    the dependency it needs, and is skipped with a banner when that dependency
-   is absent rather than aborting the build. The resmon link is the exception:
-   `postAttachCommand` runs it unconditionally, so a container that cannot
-   provide it fails on every attach, and the build stops instead of shipping
-   one:
+   is absent rather than aborting the build, except for every step the table
+   below marks `required`: the VS Code server volumes handed to the container
+   user, because a path that is not a mount point refills from empty on every
+   rebuild and a volume an earlier build left root-owned cannot be written by
+   the container user; the resmon-disks postAttach link, because
+   `postAttachCommand` runs it unconditionally and a container that cannot
+   provide it fails on every attach; the vscode-settings-sync postAttach
+   link, for the same postAttach reason; the git hooks step, because a
+   container whose hooks did not install would run `git commit` with no
+   secret scan; and the hostcreds startup block render, because a
+   container whose shells silently lack their credentials is worse
+   than a container that failed to create. Each of those aborts the build
+   through `exit_with_error` instead of shipping a container missing the
+   guarantee:
 
    | Step | Depends on |
    |---|---|
    | apt proxy config (root-only, for later manual `apt` use) | `HTTP_PROXY` set |
    | every npm prefix holding a global CLI handed to the container user | the node feature |
    | `~/.vscode-server` handed to the container user | the `mounts` volume, required |
-   | `shell.env` sourcing into `.bashrc` / `.zshenv` |, |
+   | `shell.env` sourcing into `.bashrc` / `.zshenv`, plus the hostcreds credential-startup block appended to both | `python3` + `devcontainer_config` on `PYTHONPATH`, required |
    | `ccd` / `ccdr` aliases | `claude-code` feature |
-   | `claude-settings.json` merged into `~/.claude/settings.json` | `claude-code` feature + `jq` |
+   | `claude-settings.json` merged into `~/.claude/settings.json` (GLM endpoint, model tiers, `apiKeyHelper` reading `ZAI_API_KEY`) | `claude-code` feature + `jq` + a `ZAI_API_KEY` manifest entry |
+   | opencode installed globally, `~/.config/opencode/opencode.json` written from `.devcontainer/opencode.json` (GLM 5.3 flagship + GLM 5.3 Flash; the z.ai key is injected at run time through `{env:ZAI_API_KEY}`, supplied by the hostcreds startup block from a `ZAI_API_KEY` manifest entry) | the node feature + `jq` |
    | `tm-*` commands sourced into both shells | `tmux` |
    | `resmon-disks.py` linked into `~/.local/bin` for postAttach | `python3`, required |
    | `vscode-settings-sync.py` linked into `~/.local/bin` for postAttach | `python3`, required |
@@ -267,6 +311,7 @@ EC2 reference, troubleshooting) live in
    | `~/.aws/config` from `aws-profile-map.json` | `jq` + a non-empty map |
    | host proxy reachability | `HOST_PROXY=true` |
    | git identity and credential helper | `git` |
+   | pre-commit and pre-push hooks, via `make hooks-install` | the workspace `.git` directory, required |
    | `.gitmodules` per repository, for live repo detection | `git` |
 
    It then hands `$HOME` back to the container user and runs
@@ -293,25 +338,52 @@ EC2 reference, troubleshooting) live in
      root-owned, which reported a successful build and left the update broken
      until someone ran `claude update` by hand.
 
-   `.devcontainer/claude-settings.json` is the desired state for Claude Code's
-   own `~/.claude/settings.json`, merged in rather than written over so
-   anything the CLI has already stored there survives. `$HOME` is not a volume,
-   so a rebuild starts from an empty `~/.claude` and the merge is what makes
-   the choice repeatable. It currently sets `tui` to `default`, the classic
-   main-screen renderer. The value matters less than the key being present:
-   Claude Code offers the flicker-free fullscreen renderer on startup only
-   while `tui` is unset, so declaring it both picks the renderer and retires
-   the prompt and the tip that advertises it. `/tui fullscreen` still switches
-   the running container, and postCreate puts it back on the next rebuild.
+    `.devcontainer/claude-settings.json` is the desired state for Claude Code's
+    own `~/.claude/settings.json`, merged in rather than written over so
+    anything the CLI has already stored there survives. `$HOME` is not a volume,
+    so a rebuild starts from an empty `~/.claude` and the merge is what makes
+    the choice repeatable. It currently sets `tui` to `default`, the classic
+    main-screen renderer. The value matters less than the key being present:
+    Claude Code offers the flicker-free fullscreen renderer on startup only
+    while `tui` is unset, so declaring it both picks the renderer and retires
+    the prompt and the tip that advertises it. `/tui fullscreen` still switches
+    the running container, and postCreate puts it back on the next rebuild.
+
+    The same file also points Claude Code at the z.ai GLM Coding Plan, the same
+    provider opencode uses. `ANTHROPIC_BASE_URL` selects the
+    Anthropic-compatible endpoint, and the `ANTHROPIC_DEFAULT_*_MODEL` entries
+    map Claude Code's model tiers onto GLM models: the Opus tier resolves to
+    `glm-5.3` (flagship) and the Sonnet and Haiku tiers to `glm-5.3-flash`.
+    The `[1m]` suffix opts each model into the 1M-token context window, which
+    `CLAUDE_CODE_AUTO_COMPACT_WINDOW` sizes to match. Choosing a model inside
+    Claude Code therefore chooses a GLM model: `/model opus` (or
+    `claude --model opus`) runs the flagship, `/model sonnet` runs Flash, and
+    `/status` shows which one is active. The key itself is never stored in the
+    file: `apiKeyHelper` runs `printenv ZAI_API_KEY`, so each request pulls the
+    credential from the environment variable the hostcreds startup block
+    exports, and an unset variable fails the request instead of falling back.
 
 ## Git credentials
 
 The container holds no credential of its own until one is pushed to it.
 postCreate only sets `credential.helper store` and the SSH→HTTPS URL rewrite;
-`make push-git-creds`, which `make build` runs as its last step, copies in
-the credential that already works on the developer's machine, obtained through
+pushing is `make push-creds`'s job, and `make build` runs it as its last
+step. The push resolves every entry the hostcreds manifest names; the git
+half is gated by the manifest itself and runs only when an entry carries
+`"source": "git"`. It copies in the credential that already works on the
+developer's machine for origin's host, obtained through
 `git credential fill` so it works with any configured helper (osxkeychain,
-libsecret, gh, store).
+libsecret, gh, store), written to `~/.git-credentials` at mode 600 inside
+the container. The step resets `credential.helper` with
+`git config --replace-all`, because the Dev Containers extension copies the
+host's `~/.gitconfig` into the container when a window attaches -- which a
+rebuild usually has one already attached to the previous container -- and that
+copy leaves several helper values in place, against which a plain
+`git config` set fails with "cannot overwrite multiple values" after the
+container is otherwise complete. One helper, `store`, is the intended state,
+and the push proves the credential answers by running `git ls-remote origin`
+inside the container before reporting success. `make verify-container`
+re-checks that state on demand, on either engine.
 
 This replaced `GIT_AUTH_METHOD` / `GIT_TOKEN` / ssh-key handling driven by
 `shell.env`, which had two problems: the token had to be rotated by hand, and
@@ -320,6 +392,133 @@ which reads only `~/.git-credentials`, so it authenticated nothing even when
 the token was current. Neither failure was visible while VS Code was attached,
 because the extension forwards the host's credentials; it surfaced only when an
 agent tried to push from a detached session.
+
+## Git hooks
+
+`make hooks-install` installs a pre-commit and a pre-push hook, both written
+by `devcontainer_config.githooks`, so hook content has exactly one source
+instead of being duplicated between the two `.git/hooks/*` files.
+
+- **pre-commit** execs `make hooks-run`, which is `make lint`: private files
+  untracked, no nested repos, JSON parses, shellcheck, markdown, US English
+  spelling, and a secrets scan of whatever is currently staged.
+- **pre-push** execs `make hooks-run-push`, which runs `lint` first and then
+  scans every commit in the pushed range, not just the tip. Git hands the
+  hook one `<local ref> <local sha> <remote ref> <remote sha>` line per ref
+  being pushed on stdin; `devcontainer_config.githooks.ranges_from_push_refs`
+  turns that into one `<a>..<b>` range per ref (an all-zero remote id, a
+  branch the remote has never seen, becomes every commit reachable from the
+  local tip that is not already reachable from a remote-tracking ref this
+  checkout knows about, so a branch forked from `main` scans only its own new
+  commits, not `main`'s history too; an all-zero local id, a delete,
+  contributes nothing to scan), and each range is scanned with the same
+  detectors staged mode uses. The whole range is scanned, not just the tip,
+  because a credential introduced early and removed later still reaches the
+  remote in history the moment the commit that added it is pushed; scanning
+  only the tip would miss it.
+
+Installing is idempotent: a second `make hooks-install` leaves the hooks
+byte-identical, and it refuses to overwrite a hook it did not write, in case
+a developer already has their own pre-commit or pre-push hook. To check for
+drift, whether an installed hook still matches what `make hooks-install`
+would write, without rewriting it, run:
+
+```sh
+PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.cli hooks-check
+```
+
+`make hooks-uninstall` removes both hooks; running that command (or any of
+the other patterns the Bypass denial section below lists) through Claude
+Code's `Bash` tool is itself a denied bypass.
+
+On the remote engine the workspace is cloned into a volume, so the container
+has its own `.git` directory, one `make hooks-install` on the host never
+touches. Without a second install, a commit made from a container terminal
+-- where most work in this repository happens -- would run no secret scan at
+all, the unguarded path becoming the common one instead of the exception.
+postCreate closes that gap: after the workspace and its `.git` directory are
+in place, it runs the identical `make hooks-install` the host uses, so the
+container renders the same hook content from the same
+`devcontainer_config.githooks` module rather than a second copy. A failed
+install aborts postCreate rather than continuing with no hooks in place: a
+container that reached the prompt with no guard would run `git commit` with
+no secret scan, at the moment a developer is least likely to be reading the
+setup log.
+
+## Bypass denial
+
+Section 3.6.2 ("Boundaries, and what each defends") of
+`repos/spec/devcontainer-platform.md` names the threat this control
+answers: not a secret reaching the repository, but an agent or a human
+disabling the controls above under time pressure. Section 4.6.1 ("Bypass
+denial") of the same document fixes the denied surface. A `PreToolUse`
+hook on the `Bash` matcher, `.claude/hooks/deny_bypass.py`, registered in
+`.claude/settings.json`, denies every structurally recognized attempt made
+through Claude Code's `Bash` tool to run one of the following, naming the
+rule and the fix instead of only refusing. This hook intercepts only
+commands issued through that tool; a command a human (or an agent working
+outside Claude Code) types directly into a host or container terminal is
+not intercepted here at all, and stays covered, if at all, only by the git
+hooks the previous section describes:
+
+- `git commit --no-verify`, its `-n` alias (bare or bundled with another
+  short option, for example `-vn`), and `git commit --no-gpg-sign`.
+- `git push --no-verify`.
+- Any `HUSKY=`, `SKIP=` or `PRE_COMMIT_ALLOW_NO_CONFIG=` assignment,
+  whatever the value, whether written inline before the program or behind
+  `env`, wherever in a chained command they appear.
+- `git add -f` / `--force` of a path `.gitignore` excludes.
+- `rm` or `chmod` targeting anything under `.git/hooks`.
+- `make hooks-uninstall`, including the `make -C <dir> hooks-uninstall`
+  spelling.
+
+Evaluation is structural: a command line chained with `&&`, `||`, `;`, a
+pipe, a bare `&` background operator, simply a newline (the ordinary shape
+of a multi-line Bash-tool command), or a statement wrapped in a subshell
+`( )` or a brace group `{ }`, is denied when any segment matches, not only
+the first, and a denial is decided from the tokenized program, arguments
+and leading assignments, never a substring search over the raw text. The
+program name is compared by its basename, so `/usr/bin/git commit
+--no-verify` and `/bin/rm .git/hooks/pre-commit` are denied the same as
+the unprefixed spellings. A bare-word launcher ahead of the program
+(`sudo`, `env`, `command`, `nohup`, `time`, `doas`, `nice`, `ionice`,
+`setsid`, any number of them chained) and a shell reserved word that would
+otherwise be misread as the program after a `;` inside a compound
+statement (`then`, `else`, `elif`, `do`, `done`, `fi`, `while`, `until`,
+`case`, `esac`, `in`, `function`, `if`, `!`) are both walked past the same
+way, so `sudo git commit --no-verify` and `if true; then git commit
+--no-verify; fi` deny exactly as the unprefixed, unwrapped spelling does.
+
+Known limitations, so this section does not claim broader coverage than
+the hook delivers: a denied command nested inside a quoted string this
+hook cannot re-parse -- `bash -c "<command>"`, `sh -c "<command>"` and
+`eval "<command>"` -- is not recovered from that string; a `git -c
+core.hooksPath=<path>` global config assignment is walked past without
+its value being inspected; a launcher combined with its own flags (`sudo
+-u root`, `env -i`, `nice -n 10`) is not walked past, only the bare word
+is; and a wrapper that requires a positional argument before the command
+it runs (`timeout <n>`, `stdbuf <opts>`, `xargs`) is not treated as a
+launcher at all. Each of these is documented here, in the module
+docstring, as a hardening candidate for a follow-up unit, not asserted as
+covered.
+
+`git push --dry-run` is permitted: under `push`, `-n` means dry run, a
+rehearsal that changes nothing, not the `commit` alias for `--no-verify`.
+The same two characters are read in the context of the subcommand they
+follow rather than matched blindly, so `git commit -n` is denied while
+`git push -n` is not.
+
+The default is deny for anything the hook cannot understand: an
+untokenizable command line, an event on stdin that is not valid JSON or
+carries no command, or a `git add -f` whose ignore check cannot run, all
+deny rather than allow.
+
+A denial that looks wrong is not worked around with a different spelling
+of the same bypass. Fix the underlying problem the flag was reaching for
+(a genuinely broken hook, a signing key that needs configuring), or
+escalate to a human operator, who can evaluate whether the denied action
+is legitimate; only a human, not this hook and not the agent it stopped,
+approves running a command it lists above.
 
 ## Creating the container (remote)
 
@@ -342,11 +541,194 @@ The config is read from the laptop while the checkout comes from origin, so the
 build refuses to run when `.devcontainer` has uncommitted changes, otherwise
 the container would not contain the config that built it. `FORCE=1` overrides.
 
+The build's last act is the hostcreds push the Secrets model section below
+describes, and because it is last, a credential that fails to resolve aborts
+the build with the container otherwise complete: fix the credential
+(`make creds-init` names what is missing), re-run `make push-creds` alone, and
+no rebuild is needed. `make verify-container` re-checks the pushed state
+inside the container at any time, on either engine.
+
 asdf was removed entirely (it managed zero tools; Python/Node come from
 features). If a future project needs asdf, that support must be reintroduced
 deliberately, nothing references it anymore.
 
+## Certificate lifecycle
+
+A remote engine is reached over mTLS: the docker daemon authenticates the
+laptop's client certificate, and the laptop authenticates the daemon's server
+certificate, both signed by a certificate authority created once per
+instance. Three lifetimes govern that material (`CERT_CA_DAYS`,
+`CERT_SERVER_DAYS`, `CERT_CLIENT_DAYS`; defaults and validation are
+documented in `docs/environment-files.md`'s "Certificate lifetimes"
+section, the single place they are defined). Certificate material is
+persisted under `certs.DEFAULT_CERTS_ROOT` / `instances.certs_root()`:
+`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/` when
+`DOCKER_CONFIG` is unset (`docs/environment-files.md`'s "Instances"
+section, `DOCKER_CONFIG` row, the single place that default is defined);
+`<certs-root>` stands for that root in the table below:
+
+| Material | Default lifetime | Persisted at |
+|---|---|---|
+| CA (`ca-key.pem`, `ca.pem`) | 3650 days | `<certs-root>/<instance>/ca/` |
+| Server (key, certificate) | 365 days | Nowhere: generated and published to Parameter Store in one step, never written under `<certs-root>/<instance>/` |
+| Client (`key.pem`, `cert.pem`) | 90 days | `<certs-root>/<instance>/` |
+
+The client certificate's ninety-day lifetime is the one an operator actually
+lives with day to day, and it is sustainable only because rotating it is
+cheap: `make cert-status` reports a `RENEW` row, naming the exact
+`gd-cert-lifecycle INSTANCE=<name>` invocation that clears it, once a
+client certificate is inside its warning window (`CERT_WARN_DAYS`, default
+14 days); running that invocation's "Rotate client certificate" operation
+(`.agents/skills/gd-cert-lifecycle/SKILL.md`) issues a fresh
+client key and certificate from the same CA and installs them atomically.
+
+**Rotating a client certificate touches nothing on the instance.** The daemon
+holds only `ca.pem` and accepts any client certificate that chains to it, so
+a replacement signed by the same CA is accepted the moment it is presented:
+no Parameter Store entry is written, the daemon is never restarted, no
+`terragrunt apply` runs, and the docker context needs no update since it
+already points at `cert.pem`/`key.pem` by path. The CA itself is never
+reissued by a rotation -- reissuing it would invalidate every certificate it
+already signed, including the server certificate the daemon is already
+serving, which would take the instance off the air until a new server key is
+published and the daemon restarted. This is also why a client rotation is
+not a substitute for revoking access: Docker supports neither CRL nor OCSP,
+so the superseded client certificate stays cryptographically valid until its
+own `notAfter` passes; removing the principal's `ssm:StartSession` grant is
+what actually renders a certificate inert, because a certificate
+authenticates but IAM authorizes, and a certificate is useless without the
+tunnel it authenticates inside.
+
+## Transport
+
+The security group behind a remote instance carries zero ingress rules
+(spec Section 5.6): no packet from the network reaches the docker daemon,
+only the loopback listener `127.0.0.1:DOCKER_TLS_PORT` on the instance
+itself. Reaching that listener from the laptop is two independent factors
+stacked on top of each other, each answering a different question (spec
+Section 3.6.2), and neither substitutes for the other:
+
+- **The SSM port forward**
+  (`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`,
+  E6-F2-S1-T1) maps the loopback listener to a local port on the laptop with
+  `aws ssm start-session --document-name AWS-StartPortForwardingSession` --
+  no SSH element anywhere in the argument vector. `ssm:StartSession` scoped
+  to that document decides *who may open the tunnel at all*, and, since
+  Docker supports neither CRL nor OCSP, revoking it is the only revocation
+  mechanism this platform has.
+- **mTLS over that tunnel** (`transport.ensure_context`/`transport.handshake`,
+  E6-F2-S1-T2) decides *who may command the daemon once the tunnel is
+  open*. An SSM grant alone is coarse: without the client certificate,
+  anyone whose policy permits `ssm:StartSession` would drive the engine.
+
+Once the forward answers, `transport.ensure_context` creates or updates the
+docker context `<repo-slug>-<instance>` (`general-dev-<instance>` in this
+repository; spec Section 9) to address `tcp://127.0.0.1:<the allocated
+port>` and carry the `ca`, `cert` and `key` files spec Section 5.5 fixes
+under `<certs-root>/<instance>/`. An
+existing context is updated in place rather than deleted and recreated; an
+existing context whose endpoint is `ssh://` is refused by name and left
+completely untouched. Nothing creates such a context any more, but one may
+survive on a machine that used the transport removed at cutover, and silently
+rewriting it would destroy the only record of what that machine was pointed at.
+VS Code Dev Containers needs no transport of its own: it follows the active
+docker context, so pointing the context at the forward points the editor at it
+too.
+
+`transport.handshake` then completes a `docker version` handshake against
+that context, retried until it answers and bounded by
+`DOCKER_HANDSHAKE_TIMEOUT` (`docs/environment-files.md`), reporting the
+daemon's API version -- which must be at least 1.44 for mTLS on a TCP
+listener with a rootless daemon (spec Section 6) -- and whether it reports
+running rootless.
+
+**One build path, and a selector kept for the next one.** `make connect-start`
+reads `DEVCONTAINER_TRANSPORT` from the environment
+(`docs/environment-files.md`) and dispatches on it. Since the cutover there is
+one accepted value, `ssm`, which is also the default; any other value, including
+the `ssh` that used to be the default, exits non-zero naming the variable, the
+offending value and the accepted value. The selector is kept rather than
+removed because it is the seam a future transport is added at, and because a
+caller who exports the old value out of habit is told so instead of being
+silently redirected. Unset, or the explicit value `ssm`, runs
+
+```sh
+PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.forwards \
+  open --instance-id <id> --context <context> --profile <profile> --region <region>
+```
+
+which is the same connection the operator targets make with, real values
+substituted from `config.env` and the instance's per-instance id store --
+the `instance-id` file under
+`<certs-root>/<instance>/`, written by `make instance-link` and recorded
+automatically by `make instance-deploy` at apply time -- that the
+`Makefile`'s own `connect` target issues for that value;
+`transport.resolve_transport` reads the identical
+`DEVCONTAINER_TRANSPORT` inside the transport's own connect handler too,
+refusing before touching AWS or docker at all unless it is `ssm`. This
+path establishes the SSM forward exactly as `start` does, then ties in the
+two calls `start` alone never makes -- `transport.ensure_context` and
+`transport.handshake` -- and activates the resulting context with
+`docker context use` before confirming the handshake. The daemon is
+managed by `devcontainer_config.forwards`, not run in the foreground: the
+connect recipe spawns the command above as a detached process (unbuffered
+stdout streaming into a per-instance log), polls for its `Connected:`
+announcement -- printed only after the handshake answered -- records the
+daemon's pid, command, log and forwarded port beside the instance's
+certificate material, and returns once all of that is confirmed; a child
+that dies first or never announces surfaces with its log tail, and nothing
+is retried behind a failure. The forward stays open after the command
+returns, so a subsequent `make build` reaches the `tcp://` context
+directly; the lifecycle targets manage it afterwards --
+`make connect-status` (per instance or `ALL=1`), `make connect-stop`
+(SIGINT first, then the port-closed verification), `make connect-refresh`
+(re-runs the recorded command, for an expired SSO session or a dropped
+tunnel) and `make connect-list`. `--certs-root`
+defaults to `certs.DEFAULT_CERTS_ROOT` -- the same `<certs-root>` root
+`make cert-status` and the certificate material above use -- and only
+needs overriding for a test fixture or an alternate checkout layout.
+The transport installs no SSH configuration block, spawns no `ssh` process,
+and names no `AWS-StartSSHSession` document; it requires no key on the
+instance, and the instance is provisioned without one. The `--context`
+value (and the `REMOTE_DOCKER_CONTEXT` the Makefile derives it from,
+`config.env`, operator-overridable) must carry the `<repo-slug>-` prefix
+`instances.docker_context_prefix` derives from `repo.repo_slug`
+(`general-dev-` in this repository, not a literal to copy into a fork):
+`transport.instance_from_context_name` raises `InvalidContextNameError` on
+any context name that does not start with it, since that prefix is the
+single place the bare instance name is recovered for certificate lookup.
+
+**The SAN requirement, and its symptom.** TLS validates the name the
+*client* used to dial the daemon, and the client dials `127.0.0.1` through
+the loopback forward, so the server certificate must carry `IP:127.0.0.1`
+and `DNS:localhost` -- never the instance's own hostname or private
+address. A server certificate issued for either of those produces a
+handshake failure that names neither the forward nor the SANs: a real
+example, captured against a deliberately mis-issued certificate, reads
+`tls: failed to verify certificate: x509: certificate is valid for
+10.0.0.5, not 127.0.0.1` -- prose that reads like a tunnel, security-group
+or daemon problem before it reads like a certificate one.
+`transport.diagnose_handshake_failure` exists to close that gap: it
+recognizes that shape (and the related `x509: cannot validate certificate
+for 127.0.0.1 because it doesn't contain any IP SANs`) and states the SAN
+requirement, both required values, and the `gd-cert-lifecycle
+INSTANCE=<name>` invocation that reissues the server certificate, instead
+of surfacing the bare TLS error. A connection failure -- the forward not
+established, the daemon not listening -- is translated into a distinct
+diagnosis naming the forward instead, so the two causes are never
+conflated.
+
 ## Secrets model
+
+Two halves, deliberately separate. Configuration -- `shell.env` and the
+AWS profile map -- is per-developer setup with no credential in it,
+published to Parameter Store so a fresh remote clone-in-volume can
+bootstrap itself. Credentials never touch Parameter Store at all: each one
+is resolved on the developer's machine, from a source only that machine
+holds, and pushed over the active docker context straight into the
+container.
+
+The configuration half (unchanged):
 
 ```text
 cdevcontainer setup-devcontainer          push-secrets.sh                postCreate (remote)
@@ -370,6 +752,56 @@ aws-profile-map.json                           /devcontainer/<project>/…      
 - The instance role can only **read** `/devcontainer/*` parameters; writes
   happen from the laptop with SSO credentials.
 
+The credential half (hostcreds):
+
+```text
+hostcreds.map.json (host)         make push-creds (host)                container
+        │                                │                                  │
+        ▼                                ▼                                  ▼
+keychain / git credential fill /    one <NAME>.env fragment per        ~/.hostcreds/ (mode 700),
+aws configure export-credentials    credential at mode 0600, piped     fragments at mode 600; a
+resolved only on the host           over docker exec stdin,            git entry also seeds
+                                   never on an argument                ~/.git-credentials; the
+                                                                       startup block sources
+                                                                       every fragment
+```
+
+- `.devcontainer/hostcreds.map.json` names each credential and its source;
+  the values themselves live only in the macOS keychain, git's own
+  credential helper and the developer's AWS SSO session. The container
+  resolves nothing: `make push-creds`, which `make build` and `make up`
+  run, resolves every entry on the host and writes one `<NAME>.env`
+  fragment per credential into the container's `~/.hostcreds/`. Any entry
+  that cannot be resolved aborts the push, so a container never ships a
+  subset of the manifest.
+- The push rides the active docker context, so it is identical on either
+  engine: local and remote differ only in which context is active, and the
+  fragments, the mode checks and the git seeding are byte-for-byte the
+  same either way. The remote engine needs no extra credential path of
+  its own.
+- postCreate appends the hostcreds startup block to `~/.bashrc` and
+  `~/.zshenv` (rendered by `devcontainer_config.cli shell-block`,
+  marker-guarded, required -- the provisioning-flow table above marks it
+  so). Every shell afterwards sources each fragment in sorted order,
+  exporting the credential under its manifest name; an `aws-export` entry
+  exports the three standard AWS variables plus the raw document under the
+  entry's own name (see environment-files.md), and past its expiry
+  prints one notice line on stderr naming `make push-creds` and exports
+  nothing.
+- A rebuild wipes the credentials by design: `~/.hostcreds` lives in the
+  container's own filesystem, not a volume, so a rebuilt container starts
+  with none -- and the build that created it has already pushed a fresh
+  set as its last step. `make verify-container` re-checks the whole state
+  inside the container (store and fragment modes, the startup block in
+  both rc files, silent shell startup, and `git ls-remote` /
+  `aws sts get-caller-identity` for whichever sources the manifest names),
+  on either engine.
+
+The full manifest reference -- sources, labels, defaults, reserved names,
+the scanner integration -- is `docs/environment-files.md`'s "Host
+credentials (hostcreds)" section; the ordered setup sequence, with a
+verification step after each stage, is `docs/environment-setup.md`.
+
 ## cdevcontainer contract
 
 - `.devcontainer/` contents began as a snapshot copied from the tool's catalog
@@ -382,3 +814,81 @@ aws-profile-map.json                           /devcontainer/<project>/…      
   `push-secrets.sh` so the remote copies match.
 - The tool appends the four secret-file entries to `.gitignore` if missing
   (already present here).
+
+## Plugin and skills
+
+Section 11 of `repos/spec/devcontainer-platform.md` records the Claude Code plugin as
+an inbound integration: "Marketplace at `.claude/plugins/devcontainer`", failing
+as "A malformed manifest fails skill lint". The plugin lives at
+`.claude/plugins/devcontainer/`, a directory holding `.claude-plugin/plugin.json`
+(the plugin manifest, `name: devcontainer`) and `.claude-plugin/marketplace.json`
+(a marketplace whose single `plugins` entry sources that same directory). Neither
+manifest enumerates skills: the skill set is discovered from the plugin's
+`skills/` directory, so the manifests never drift from what is actually present
+there.
+
+`.claude/settings.json` registers the plugin directory as a `directory`-sourced
+marketplace under `extraKnownMarketplaces.devcontainer` and enables the plugin
+from it via `enabledPlugins["devcontainer@devcontainer"]`. This is additive to
+the `PreToolUse` bypass-denial hook registration the previous section describes;
+both keys coexist in the same file.
+
+With the marketplace registered and the plugin enabled, Claude Code resolves
+each skill directory under `.claude/plugins/devcontainer/skills/` as the
+slash command `/devcontainer:gd-<name>`. That directory is not a real
+directory: it is a relative symlink to `../../../.agents/skills`, the
+canonical, agent-agnostic skills home, where every skill lives at
+`.agents/skills/<name>/SKILL.md` under a `gd-`-prefixed name and
+cross-references between skills use the bare `gd-<name>` form. Other agents
+read `.agents/skills/` directly; nothing copies skill bodies anywhere, so no
+surface can drift from the canonical roster.
+
+The canonical roster table lives in `docs/skills.md`: one row per skill
+directory under `.agents/skills/`, with the per-skill summaries.
+`tests/test_skill_lint.py`'s `check_plugin` asserts that table's row set and
+the directory set are equal, so the table cannot drift from what is actually
+installed, and enforces the rest of the structural contract in the same
+run:
+
+- `plugin.json`'s `name` equals the plugin directory name, and
+  `marketplace.json` has exactly one `plugins` entry whose `source` resolves
+  to that same directory.
+- `.claude/settings.json` registers the plugin directory as a `directory`
+  marketplace and enables it in `enabledPlugins`.
+- Every `SKILL.md` opens with a `---`-delimited frontmatter block holding a
+  non-empty `description` no longer than 500 characters (opencode caps
+  descriptions at 1024; the lint enforces both limits), and a `name`
+  matching its directory and the `^gd-[a-z0-9]+(-[a-z0-9]+)*$` pattern.
+- Every skill that declares `Interview backend: <backend>` restricts
+  `<backend>` to one of `answers.BACKENDS`, and gives a `## Questions` table
+  with header `| Field | Prompt |` whose `Field` column, as a set, equals
+  `answers.required_fields({"backend": <backend>, "aws_config_enabled": True,
+  "host_proxy": True})` -- the comparison always runs with the AWS and
+  host-proxy branches enabled, regardless of what the skill's own backend or
+  interview flow would actually ask, so `aws_profiles` and `host_proxy_url`
+  are always expected fields in every skill's table. A required field the
+  table omits and a declared field that is not a real `answers` field each
+  produce their own finding; a declared field that is a real `answers` field
+  but is not required for `<backend>` produces a third finding, distinct
+  from the invented-field case.
+- Every skill's `## Checks` table, when its header line matches exactly
+  `| Check | Prevents | Failure message | Remedy |`, must have a unique
+  `Check` name, a unique `Failure message`, and a non-empty `Remedy` in
+  every row. A `SKILL.md` with no `## Checks` table, or one whose header is
+  misspelled or reordered, is treated as having no such table and produces
+  no finding; the `Prevents` column's content is never validated.
+- Every bare `gd-<name>` reference, in any `SKILL.md`, in `docs/skills.md`,
+  or in this document, names a skill present in the roster.
+
+The roster, grouped into the seven families `gd-help` maps in prose:
+
+| Family | Skills |
+|---|---|
+| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-doctor` |
+| project- | `gd-project-onboard` |
+| instance- | `gd-instance-create`, `gd-instance-fleet`, `gd-instance-list`, `gd-instance-destroy` |
+| container- | `gd-container-local`, `gd-container-remote`, `gd-container-verify`, `gd-container-lifecycle` |
+| creds- | `gd-creds-setup`, `gd-creds-rotate`, `gd-creds-doctor` |
+| cert- | `gd-cert-lifecycle` |
+| skills- | `gd-skills-install`, `gd-skills-remove`, `gd-skills-scope` |
+| cross-cutting | `gd-quality`, `gd-help` |

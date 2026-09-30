@@ -1,0 +1,417 @@
+[
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "long-form",
+    "command": "git commit --no-verify -m \"release notes\"",
+    "reason_contains": ["git-commit-no-verify", "escalate"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "bare-n",
+    "command": "git commit -n -m \"release notes\"",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "bundled-short-option",
+    "command": "git commit -vn -m \"release notes\"",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "chained-and",
+    "command": "npm run build && git commit -n -m \"release notes\"",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "chained-or",
+    "command": "git status || git commit -n -m \"release notes\"",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "dash-c-dir",
+    "command": "git -C . commit --no-verify -m \"release notes\"",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "git-dir-equals",
+    "command": "git --git-dir=.git commit --no-verify -m \"release notes\"",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "work-tree-equals",
+    "command": "git --work-tree=. commit --no-verify -m \"release notes\"",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-gpg-sign",
+    "spelling": "long-form",
+    "command": "git commit --no-gpg-sign -m \"release notes\"",
+    "reason_contains": ["git-commit-no-gpg-sign", "signing"]
+  },
+  {
+    "rule": "git-commit-no-gpg-sign",
+    "spelling": "chained-pipe",
+    "command": "git commit --no-gpg-sign -m \"release notes\" | cat",
+    "reason_contains": ["git-commit-no-gpg-sign"]
+  },
+  {
+    "rule": "git-push-no-verify",
+    "spelling": "long-form",
+    "command": "git push --no-verify origin main",
+    "reason_contains": ["git-push-no-verify"]
+  },
+  {
+    "rule": "git-push-no-verify",
+    "spelling": "chained-semicolon",
+    "command": "make lint;git push --no-verify origin main",
+    "reason_contains": ["git-push-no-verify"]
+  },
+  {
+    "rule": "git-push-no-verify",
+    "spelling": "dash-c-dir",
+    "command": "git -C . push --no-verify",
+    "reason_contains": ["git-push-no-verify"]
+  },
+  {
+    "rule": "env-husky-disable",
+    "spelling": "inline-assignment",
+    "command": "HUSKY=0 git commit -m \"release notes\"",
+    "reason_contains": ["env-husky-disable", "HUSKY"]
+  },
+  {
+    "rule": "env-husky-disable",
+    "spelling": "env-prefixed",
+    "command": "env HUSKY=0 git commit -m \"release notes\"",
+    "reason_contains": ["env-husky-disable"]
+  },
+  {
+    "rule": "env-skip-hooks",
+    "spelling": "inline-assignment",
+    "command": "SKIP=pre-commit git commit -m \"release notes\"",
+    "reason_contains": ["env-skip-hooks", "SKIP"]
+  },
+  {
+    "rule": "env-skip-hooks",
+    "spelling": "env-prefixed-empty-value",
+    "command": "env SKIP= git commit -m \"release notes\"",
+    "reason_contains": ["env-skip-hooks"]
+  },
+  {
+    "rule": "env-pre-commit-allow-no-config",
+    "spelling": "inline-assignment",
+    "command": "PRE_COMMIT_ALLOW_NO_CONFIG=1 git commit -m \"release notes\"",
+    "reason_contains": ["env-pre-commit-allow-no-config"]
+  },
+  {
+    "rule": "env-pre-commit-allow-no-config",
+    "spelling": "env-prefixed",
+    "command": "env PRE_COMMIT_ALLOW_NO_CONFIG=1 git commit -m \"release notes\"",
+    "reason_contains": ["env-pre-commit-allow-no-config"]
+  },
+  {
+    "rule": "git-add-force-ignored",
+    "spelling": "short-flag",
+    "command": "git add -f shell.env",
+    "reason_contains": ["git-add-force-ignored", "gitignored"]
+  },
+  {
+    "rule": "git-add-force-ignored",
+    "spelling": "long-flag",
+    "command": "git add --force shell.env",
+    "reason_contains": ["git-add-force-ignored"]
+  },
+  {
+    "rule": "git-add-force-ignored",
+    "spelling": "dash-c-dir",
+    "command": "git -C . add -f shell.env",
+    "reason_contains": ["git-add-force-ignored"]
+  },
+  {
+    "rule": "git-add-force-ignored",
+    "spelling": "bundled-force-then-letter",
+    "command": "git add -fA shell.env",
+    "reason_contains": ["git-add-force-ignored"]
+  },
+  {
+    "rule": "git-add-force-ignored",
+    "spelling": "bundled-letter-then-force",
+    "command": "git add -Af shell.env",
+    "reason_contains": ["git-add-force-ignored"]
+  },
+  {
+    "rule": "git-add-force-ignored",
+    "spelling": "bundled-dry-run-then-force",
+    "command": "git add -nf shell.env",
+    "reason_contains": ["git-add-force-ignored"]
+  },
+  {
+    "rule": "rm-git-hooks",
+    "spelling": "direct-path",
+    "command": "rm .git/hooks/pre-commit",
+    "reason_contains": ["rm-git-hooks", ".git/hooks"]
+  },
+  {
+    "rule": "rm-git-hooks",
+    "spelling": "force-flag",
+    "command": "rm -f .git/hooks/pre-push",
+    "reason_contains": ["rm-git-hooks"]
+  },
+  {
+    "rule": "chmod-git-hooks",
+    "spelling": "direct-path",
+    "command": "chmod 644 .git/hooks/pre-commit",
+    "reason_contains": ["chmod-git-hooks", ".git/hooks"]
+  },
+  {
+    "rule": "make-hooks-uninstall",
+    "spelling": "direct",
+    "command": "make hooks-uninstall",
+    "reason_contains": ["make-hooks-uninstall"]
+  },
+  {
+    "rule": "make-hooks-uninstall",
+    "spelling": "dash-c-dir",
+    "command": "make -C . hooks-uninstall",
+    "reason_contains": ["make-hooks-uninstall"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "newline-chained",
+    "command": "make lint\ngit commit --no-verify -m x",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "ampersand-chained",
+    "command": "echo hi & git commit --no-verify -m x",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "path-prefixed-binary",
+    "command": "/usr/bin/git commit --no-verify -m x",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-push-no-verify",
+    "spelling": "newline-chained",
+    "command": "cd repo\ngit push --no-verify",
+    "reason_contains": ["git-push-no-verify"]
+  },
+  {
+    "rule": "git-push-no-verify",
+    "spelling": "ampersand-chained",
+    "command": "echo hi & git push --no-verify",
+    "reason_contains": ["git-push-no-verify"]
+  },
+  {
+    "rule": "git-add-force-ignored",
+    "spelling": "newline-chained",
+    "command": "echo x\ngit add -f secret.env",
+    "reason_contains": ["git-add-force-ignored"]
+  },
+  {
+    "rule": "git-add-force-ignored",
+    "spelling": "ampersand-chained",
+    "command": "echo x & git add -f secret.env",
+    "reason_contains": ["git-add-force-ignored"]
+  },
+  {
+    "rule": "env-husky-disable",
+    "spelling": "newline-chained",
+    "command": "echo x\nHUSKY=0 git commit -m y",
+    "reason_contains": ["env-husky-disable"]
+  },
+  {
+    "rule": "env-husky-disable",
+    "spelling": "ampersand-chained",
+    "command": "echo x & HUSKY=0 git commit -m y",
+    "reason_contains": ["env-husky-disable"]
+  },
+  {
+    "rule": "rm-git-hooks",
+    "spelling": "newline-chained",
+    "command": "echo x\nrm .git/hooks/pre-commit",
+    "reason_contains": ["rm-git-hooks"]
+  },
+  {
+    "rule": "rm-git-hooks",
+    "spelling": "ampersand-chained",
+    "command": "echo x & rm .git/hooks/pre-commit",
+    "reason_contains": ["rm-git-hooks"]
+  },
+  {
+    "rule": "rm-git-hooks",
+    "spelling": "path-prefixed-binary",
+    "command": "/bin/rm .git/hooks/pre-commit",
+    "reason_contains": ["rm-git-hooks"]
+  },
+  {
+    "rule": "make-hooks-uninstall",
+    "spelling": "newline-chained",
+    "command": "echo x\nmake hooks-uninstall",
+    "reason_contains": ["make-hooks-uninstall"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "subshell-grouped",
+    "command": "(git commit --no-verify -m x)",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "brace-grouped",
+    "command": "{ git commit --no-verify -m x; }",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "chained-then-subshell",
+    "command": "echo a; (git commit --no-verify -m x)",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-push-no-verify",
+    "spelling": "subshell-grouped",
+    "command": "(git push --no-verify)",
+    "reason_contains": ["git-push-no-verify"]
+  },
+  {
+    "rule": "git-push-no-verify",
+    "spelling": "brace-grouped",
+    "command": "{ git push --no-verify; }",
+    "reason_contains": ["git-push-no-verify"]
+  },
+  {
+    "rule": "env-husky-disable",
+    "spelling": "subshell-grouped",
+    "command": "(HUSKY=0 git commit -m x)",
+    "reason_contains": ["env-husky-disable"]
+  },
+  {
+    "rule": "env-husky-disable",
+    "spelling": "brace-grouped",
+    "command": "{ HUSKY=0 git commit -m x; }",
+    "reason_contains": ["env-husky-disable"]
+  },
+  {
+    "rule": "rm-git-hooks",
+    "spelling": "subshell-grouped",
+    "command": "(rm .git/hooks/pre-commit)",
+    "reason_contains": ["rm-git-hooks"]
+  },
+  {
+    "rule": "rm-git-hooks",
+    "spelling": "brace-grouped",
+    "command": "{ rm .git/hooks/pre-commit; }",
+    "reason_contains": ["rm-git-hooks"]
+  },
+  {
+    "rule": "make-hooks-uninstall",
+    "spelling": "subshell-grouped",
+    "command": "(make hooks-uninstall)",
+    "reason_contains": ["make-hooks-uninstall"]
+  },
+  {
+    "rule": "make-hooks-uninstall",
+    "spelling": "brace-grouped",
+    "command": "{ make hooks-uninstall; }",
+    "reason_contains": ["make-hooks-uninstall"]
+  }
+,
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "sudo-prefixed",
+    "command": "sudo git commit --no-verify -m x",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "command-prefixed",
+    "command": "command git commit --no-verify -m x",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "nohup-prefixed",
+    "command": "nohup git commit --no-verify -m x",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "time-prefixed",
+    "command": "time git commit --no-verify -m x",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "env-sudo-chained",
+    "command": "env sudo git commit --no-verify -m x",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "rm-git-hooks",
+    "spelling": "sudo-prefixed",
+    "command": "sudo rm .git/hooks/pre-commit",
+    "reason_contains": ["rm-git-hooks"]
+  },
+  {
+    "rule": "chmod-git-hooks",
+    "spelling": "sudo-prefixed",
+    "command": "sudo chmod 000 .git/hooks/pre-commit",
+    "reason_contains": ["chmod-git-hooks"]
+  },
+  {
+    "rule": "make-hooks-uninstall",
+    "spelling": "sudo-prefixed",
+    "command": "sudo make hooks-uninstall",
+    "reason_contains": ["make-hooks-uninstall"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "if-then-fi",
+    "command": "if true; then git commit --no-verify -m x; fi",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-push-no-verify",
+    "spelling": "for-do-done",
+    "command": "for i in 1; do git push --no-verify; done",
+    "reason_contains": ["git-push-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "if-condition",
+    "command": "if git commit --no-verify -m x; then :; fi",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "else-branch",
+    "command": "if false; then :; else git commit --no-verify -m x; fi",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "elif-branch",
+    "command": "if false; then :; elif git commit --no-verify -m x; then :; fi",
+    "reason_contains": ["git-commit-no-verify"]
+  },
+  {
+    "rule": "git-push-no-verify",
+    "spelling": "while-do-done",
+    "command": "while true; do git push --no-verify; done",
+    "reason_contains": ["git-push-no-verify"]
+  },
+  {
+    "rule": "git-commit-no-verify",
+    "spelling": "bang-negated",
+    "command": "! git commit --no-verify -m x",
+    "reason_contains": ["git-commit-no-verify"]
+  }
+]

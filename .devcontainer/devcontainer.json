@@ -67,7 +67,12 @@
       "version": "latest"
     },
     "ghcr.io/devcontainers-extra/features/apt-packages:1.0.6": {
-      "packages": "tmux,vim,bc,nmap,sipcalc,netcat-openbsd"
+      "packages": "tmux,vim,bc,nmap,sipcalc,netcat-openbsd,jq"
+    },
+    "ghcr.io/devcontainers/features/terraform:1": {
+      "version": "latest",
+      "terragrunt": "latest",
+      "tflint": "latest"
     }
   },
   "customizations": {

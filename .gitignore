@@ -22,6 +22,28 @@
 !/LICENSE
 !/shell.env.example
 !/devcontainer-environment-variables.json.example
+!/pyproject.toml
+!/tests/
+# Tracked so plugin tasks can `git add` a module under .claude/plugins/ with
+# no -f flag needed. .claude/settings.local.json stays ignored: its own
+# later, more specific entry below still wins over this broader re-include.
+!/.claude/
+# The agent-agnostic canonical skills home (.agents/skills/<name>/SKILL.md,
+# every name gd-*-prefixed). The plugin's skills/ entry at
+# .claude/plugins/devcontainer/skills is a relative symlink into it, not a
+# copy, so exactly one copy of every skill body exists.
+!/.agents/
+# The Terraform module (provider/aws) and the shared Terragrunt layer under
+# remote-instances/ (its README, root.hcl and _envcommon/) (E5, spec
+# Sections 5.6, 5.7) are tracked, while a per-instance deployment scaffold
+# is not: `make instance-init` appends remote-instances/<name>/ to this
+# file, keeping every scaffold local to its checkout until the developer
+# promotes it deliberately by deleting that appended line. Both re-includes
+# are directory-only; see tests/gitignore_check.py for why a `git
+# check-ignore` query for either needs the directory form only while
+# nothing exists at that path for git to stat.
+!/provider/
+!/remote-instances/
 # The folder is tracked so it exists in a fresh clone; what you clone into
 # it is not. VS Code still finds those repositories, because its scan walks
 # directories rather than consulting .gitignore.
@@ -38,8 +60,8 @@
 /shell.env
 /devcontainer-environment-variables.json
 .devcontainer/aws-profile-map.json
+.devcontainer/hostcreds.map.json
 .devcontainer/devcontainer-lock.json
-.devcontainer/ssh-private-key
 .claude/settings.local.json
 
 # Environment files
@@ -48,3 +70,21 @@ devcontainer-environment-variables.json
 
 # Python bytecode
 __pycache__/
+
+# Terraform / Terragrunt working directories. `terraform init` downloads
+# provider binaries here -- hundreds of megabytes of them -- and nothing in
+# this cache belongs in version control. Without this rule a routine
+# `terraform init` followed by `git add -A` stages those binaries, and the
+# only thing that catches it is the secret scanner refusing to decode them.
+.terraform/
+
+# Terragrunt download and module caches under per-instance directories.
+remote-instances/*/.terragrunt-cache/
+
+# Per-instance scaffolds are local-only; promote deliberately by moving the directory into tracked scope.
+remote-instances/*/.terraform.lock.hcl
+
+# Host-side uv project environments must never live in this bind-mounted
+# workspace (see Makefile UV_PROJECT_ENVIRONMENT); ignored in case a bare
+# `uv run` creates one anyway.
+.venv/

@@ -1,0 +1,73 @@
+[project]
+name = "general-dev"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+# This project declares no `[project.scripts]` and no `[build-system]`. The
+# build backend this file previously declared existed for exactly one
+# purpose: installing the secret-catalog console script (and the package
+# discovery that made `devcontainer_config` importable to an install). That
+# CLI was removed with the secret catalog it fronted, replaced by the
+# hostcreds mechanism, which ships no console script -- its CLI entry is
+# `python3 -m devcontainer_config.cli` (the form `make creds-init`,
+# `make lint-secrets` and the postCreate startup-block render all invoke),
+# resolved through PYTHONPATH the same way every other module in this
+# package is. `[tool.uv] package = false` (below) still keeps `uv run` and
+# `uv sync` from ever attempting to build this project or fetch a backend,
+# so `make test` and `make validate` stay hermetic and network-free
+# (AC-10.14).
+
+[tool.uv]
+# `package = false` keeps `uv run`/`uv sync` from ever attempting to build
+# or install this project, so `make test` and `make validate` stay
+# hermetic (AC-10.14): the dev toolchain (pytest, ruff, mypy, ...) is
+# installed from the dependency group below and the source tree is put on
+# PYTHONPATH by pytest's `pythonpath` setting instead of an install.
+package = false
+
+[dependency-groups]
+# pyyaml is a test-only dependency: tests/test_ci_workflow.py parses
+# .github/workflows/ci.yml with yaml.safe_load instead of grepping it, so a
+# job comment-out, a wrong-key nesting, or a step whose command merely
+# mentions a target string cannot pass a contract test that never runs it.
+# Nothing under .claude/plugins/devcontainer/scripts/devcontainer_config
+# imports it (spec Section 3.4 keeps new source on the standard library).
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "bandit",
+    "pyyaml",
+]
+
+# pythonpath is required because devcontainer_config lives inside the plugin
+# tree at .claude/plugins/devcontainer/scripts, not on a conventional source
+# path such as src/ or the repository root (E1-F2-S1-T1 created the package
+# there). pytest resolves pythonpath at collection time, so every test that
+# does `import devcontainer_config` resolves it without a ModuleNotFoundError.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".claude/plugins/devcontainer/scripts"]
+
+# devcontainer_config exists at this path (E1-F2-S1-T1 created the package).
+# coverage resolves `source` at run time and measures its statements against
+# this entry, not a typo or a placeholder for source that has yet to land.
+[tool.coverage.run]
+branch = true
+source = [".claude/plugins/devcontainer/scripts/devcontainer_config"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true

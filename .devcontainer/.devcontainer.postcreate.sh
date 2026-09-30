@@ -39,9 +39,15 @@ TMUX_CONF="${WORK_DIR}/.devcontainer/tmux.conf"
 PROJECT_SETUP="${WORK_DIR}/.devcontainer/project-setup.sh"
 AWS_PROFILE_MAP_FILE="${WORK_DIR}/.devcontainer/aws-profile-map.json"
 CLAUDE_SETTINGS_FILE="${WORK_DIR}/.devcontainer/claude-settings.json"
+OPENCODE_CONFIG_FILE="${WORK_DIR}/.devcontainer/opencode.json"
 REPOS_PATH="${WORK_DIR}/${DEVCONTAINER_REPOS_DIR}"
 RESMON_DISKS="${WORK_DIR}/.devcontainer/resmon-disks.py"
 VSCODE_SETTINGS_SYNC="${WORK_DIR}/.devcontainer/vscode-settings-sync.py"
+
+# Where devcontainer_config lives (Makefile:15 holds the same value for
+# 'make hooks-install' and friends). Named once here so configure_shell_env
+# does not hardcode this path inline.
+DEVCONTAINER_SCRIPTS_DIR="${WORK_DIR}/.claude/plugins/devcontainer/scripts"
 
 USER_BIN="${USER_HOME}/.local/bin"
 
@@ -51,6 +57,15 @@ WARNINGS=()
 is_cicd() { [ "${CICD,,}" = "true" ]; }
 
 export PATH="${DEVCONTAINER_EXTRA_PATH}:${USER_BIN}:${PATH}"
+
+# The hostcreds credential-startup block, rendered by devcontainer_config
+# rather than hand-written here (the same render-once-in-Python rule the
+# hooks and every other generated text in this script follow). The block is
+# shell-agnostic -- one text serves bash and zsh -- so it is rendered once
+# and appended to both startup files configure_shell_env wires below.
+render_hostcreds_shell_block() {
+  PYTHONPATH="${DEVCONTAINER_SCRIPTS_DIR}" python3 -m devcontainer_config.cli shell-block
+}
 
 configure_shell_env() {
   [ -f "${SHELL_ENV}" ] || exit_with_error "shell.env not found at ${SHELL_ENV}"
@@ -68,6 +83,28 @@ configure_shell_env() {
     echo "source \"${SHELL_ENV}\""
     echo "${path_prepend}"
   } > "${ZSH_ENV}"
+
+  # A container whose shells silently lack their pushed credentials is worse
+  # than a container that failed to create, so a non-zero render is fatal
+  # through exit_with_error rather than warned about or skipped.
+  local startup_block
+  startup_block="$(render_hostcreds_shell_block)" || exit_with_error "$(printf '%s\n' \
+    "devcontainer_config.cli failed to render the hostcreds startup block." \
+    "Rerun 'PYTHONPATH=${DEVCONTAINER_SCRIPTS_DIR} python3 -m devcontainer_config.cli shell-block'" \
+    "from ${WORK_DIR} to see the underlying error.")"
+
+  # Idempotent: a rebuild or a manual rerun of this function must not
+  # duplicate the block. The rendered block's own first line is its marker
+  # (devcontainer_config.hostcreds.MARKER); grepping each target startup
+  # file for that line before appending, the same 'grep -q ... || <action>'
+  # guard style used elsewhere in this file, is what makes a second run a
+  # no-op instead of a second copy. One marker guards both files because
+  # the same block text is appended to each.
+  local startup_marker
+  startup_marker="$(printf '%s\n' "${startup_block}" | head -n 1)"
+
+  grep -qF -- "${startup_marker}" "${BASH_RC}" || printf '%s\n' "${startup_block}" >> "${BASH_RC}"
+  grep -qF -- "${startup_marker}" "${ZSH_ENV}" || printf '%s\n' "${startup_block}" >> "${ZSH_ENV}"
 
   log_section_done "Shell environment"
 }
@@ -247,6 +284,45 @@ configure_claude_settings() {
   done < <(jq -r 'keys[]' "${CLAUDE_SETTINGS_FILE}")
 
   log_section_done "Claude Code settings"
+}
+
+# opencode, the one CLI here no devcontainer feature ships. Installed as the
+# container user into the prefix configure_npm_global_ownership just handed
+# over, so the package and its bin symlink are user-owned from the start and
+# self-update never needs the handover to be re-run. The committed config
+# carries no credential: it injects the z.ai coding plan key through
+# {env:ZAI_API_KEY}, which the hostcreds startup block exports from the
+# fragment 'make push-creds' wrote for the manifest's keychain entry.
+configure_opencode() {
+  if ! container_user_has npm; then
+    log_section_skipped "opencode" \
+      "npm is not installed, add the node feature to devcontainer.json"
+    return 0
+  fi
+  [ -s "${OPENCODE_CONFIG_FILE}" ] \
+    || exit_with_error "opencode config not found at ${OPENCODE_CONFIG_FILE}"
+  jq empty "${OPENCODE_CONFIG_FILE}" > /dev/null 2>&1 \
+    || exit_with_error "${OPENCODE_CONFIG_FILE} is not valid JSON"
+  grep -q '{env:ZAI_API_KEY}' "${OPENCODE_CONFIG_FILE}" \
+    || exit_with_error "$(printf '%s\n' \
+      "${OPENCODE_CONFIG_FILE} does not reference {env:ZAI_API_KEY}." \
+      "The key reaches opencode only through that interpolation; a config without" \
+      "it would carry no credential path at all.")"
+
+  local user_path="${CONTAINER_USER_PATH:-${PATH}}"
+  local target="${USER_HOME}/.config/opencode/opencode.json"
+  log_section "opencode" "npm install, config -> ${target}"
+
+  as_container_user "PATH='${user_path}' npm install --global opencode-ai" \
+    || exit_with_error "npm install --global opencode-ai failed, so opencode is not installed"
+  as_container_user "PATH='${user_path}' opencode --version" > /dev/null \
+    || exit_with_error "opencode is installed but does not run"
+
+  install -d -m 755 -o "${CONTAINER_USER}" -g "${CONTAINER_USER}" "$(dirname "${target}")"
+  install -m 644 -o "${CONTAINER_USER}" -g "${CONTAINER_USER}" "${OPENCODE_CONFIG_FILE}" "${target}"
+  grep -q '{env:ZAI_API_KEY}' "${target}" \
+    || exit_with_error "the installed ${target} does not match ${OPENCODE_CONFIG_FILE}"
+  log_section_done "opencode"
 }
 
 configure_tmux_commands() {
@@ -447,9 +523,39 @@ configure_git() {
     return 0
   fi
   log_section "Git configuration" "identity and credential helper"
+  # Named, not left to `set -u`. Each of these comes from shell.env, and an
+  # incomplete one is an ordinary operator mistake; without these guards the
+  # script dies with "GIT_USER: unbound variable" and a line number, which
+  # names neither the variable's source nor the fix. Checked here rather than
+  # in main() so a CICD run, or a container with no git, is not required to
+  # set variables it never uses.
+  local name
+  for name in GIT_USER GIT_USER_EMAIL GIT_PROVIDER_URL; do
+    [ -n "${!name:-}" ] || exit_with_error "$(printf '%s\n' \
+      "${name} is not set in the environment." \
+      "It comes from shell.env; add it there, or to this instance's shell.env in" \
+      "Parameter Store, then rebuild.")"
+  done
   configure_git_shared "${CONTAINER_USER}" "${GIT_USER}" "${GIT_USER_EMAIL}"
   configure_git_credential_helper "${CONTAINER_USER}" "${GIT_PROVIDER_URL}"
   log_section_done "Git configuration"
+}
+
+install_git_hooks() {
+  [ -d "${WORK_DIR}/.git" ] || exit_with_error "$(printf '%s\n' \
+    "no .git directory at ${WORK_DIR}, so hooks cannot be installed." \
+    "confirm the workspace was cloned into place before postCreate runs, then retry.")"
+
+  log_section "Git hooks" "pre-commit and pre-push, via 'make hooks-install'"
+  (cd "${WORK_DIR}" && make hooks-install) || exit_with_error "$(printf '%s\n' \
+    "'make hooks-install' failed in ${WORK_DIR}." \
+    "rerun 'make hooks-install' from ${WORK_DIR} once the failure above is resolved.")"
+  # This script runs as root (postcreate-wrapper.sh's 'sudo -E ... bash'), so the
+  # hooks 'make hooks-install' just wrote land root-owned inside a workspace that
+  # belongs to CONTAINER_USER. Every other root-side workspace writer in this file
+  # restores ownership the same way (declare_unclaimed_path, configure_repo_detection).
+  chown -R "${CONTAINER_USER}:${CONTAINER_USER}" "${WORK_DIR}/.git/hooks"
+  log_section_done "Git hooks"
 }
 
 declare_unclaimed_path() {
@@ -550,6 +656,7 @@ main() {
   configure_npm_global_ownership
   configure_claude_aliases
   configure_claude_settings
+  configure_opencode
   configure_tmux_commands
   configure_resmon_disks
   configure_vscode_settings_sync
@@ -557,6 +664,7 @@ main() {
   configure_aws_profiles
   validate_proxy
   configure_git
+  install_git_hooks
   configure_repo_detection
   fix_ownership
   report_warnings

@@ -96,7 +96,28 @@ rdc_exec_probe() {
 rdc_cred_user() { printf '%s' "$1" | sed -n 1p; }
 rdc_cred_secret() { printf '%s' "$1" | sed -n 2p; }
 
+# Shell-escape a value for interpolation inside a single-quoted string: each '
+# becomes '\'' (close the quoting, a literal quote, reopen). The seed heredocs
+# below are expanded before the container's sh parses them, so every
+# credential-bearing value must pass through this first or a quote inside it
+# terminates the quoting and the rest of the value runs as shell.
+rdc_sh_escape() {
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+}
+
 rdc_backend() {
+  if [ -n "${ENGINE:-}" ]; then
+    # ENGINE names the engine this whole run addresses, so classification is
+    # decided by it directly -- 'local' is the local engine, anything else a
+    # remote instance's -- and never by the machine-wide active context,
+    # which another terminal may have switched while this one runs.
+    # rd_engine_context has already failed fast when ENGINE names nothing.
+    case "$(rd_engine_context)" in
+      "$LOCAL_DOCKER_CONTEXT") printf 'local\n' ;;
+      *) printf 'remote\n' ;;
+    esac
+    return 0
+  fi
   if [ "$(docker context show)" = "$REMOTE_DOCKER_CONTEXT" ]; then
     printf 'remote\n'
   else
@@ -404,10 +425,14 @@ rdc_remote_host() {
   printf '%s' "$1" | sed -e 's|^[a-z]*://||' -e 's|^[^@]*@||' -e 's|[:/].*$||'
 }
 
+# This machine's stored credential for a git host, as two lines (username,
+# then password), or no output when nothing is stored. Each answer line is
+# split on its FIRST '=' only -- field splitting on '=' would truncate a
+# username or password that itself carries '='.
 rdc_git_credentials() {
   printf 'protocol=https\nhost=%s\n\n' "$1" \
     | GIT_TERMINAL_PROMPT=0 git credential fill 2> /dev/null \
-    | awk -F= '$1=="username"{u=$2} $1=="password"{p=$2} END{if (u && p) printf "%s\n%s\n", u, p}'
+    | awk '{ key = $0; if (!sub(/=.*/, "", key)) next; value = $0; sub(/^[^=]*=/, "", value); if (key == "username") u = value; else if (key == "password") p = value } END { if (u && p) printf "%s\n%s\n", u, p }'
 }
 
 rdc_seed_volume() {
@@ -426,11 +451,18 @@ rdc_seed_volume() {
   rd_log "creating volume ${volume}"
   rd_docker volume create "$volume" > /dev/null
   rd_log "cloning ${url} (${branch}) into ${volume}"
+  # Values are escaped for the heredoc below: it is expanded before the seed container's sh parses it, so a raw single quote in any of them would terminate the quoting around it and run as shell inside the seed container.
+  local esc_user esc_secret esc_host esc_branch esc_url
+  esc_user="$(rdc_sh_escape "$git_user")"
+  esc_secret="$(rdc_sh_escape "$git_secret")"
+  esc_host="$(rdc_sh_escape "$host")"
+  esc_branch="$(rdc_sh_escape "$branch")"
+  esc_url="$(rdc_sh_escape "$url")"
   docker run --rm -i -v "${volume}:/workspaces" "$CLONE_IMAGE" sh -s <<SEED || {
 set -e
 umask 077
-printf 'https://%s:%s@%s\n' '${git_user}' '${git_secret}' '${host}' > /root/.git-credentials
-git -c credential.helper=store clone --branch '${branch}' '${url}' '${CONTAINER_WORKSPACE}'
+printf 'https://%s:%s@%s\n' '${esc_user}' '${esc_secret}' '${esc_host}' > /root/.git-credentials
+git -c credential.helper=store clone --branch '${esc_branch}' '${esc_url}' '${CONTAINER_WORKSPACE}'
 rm -f /root/.git-credentials
 chown -R ${CONTAINER_UID_GID} /workspaces
 SEED
@@ -453,9 +485,13 @@ SEED
   rd_ok "checkout seeded at ${CONTAINER_WORKSPACE}"
 }
 
-rdc_push_git_creds() {
-  local id host creds git_user git_secret
-  id="$(rdc_require_container)"
+# The git half of a creds push: seed ~/.git-credentials with this machine's
+# credential for origin's host and make git's own store helper the one
+# helper, then prove the container can reach that host with it. Split out of
+# rdc_push_creds so the manifest decides whether it runs: it runs only when
+# the hostcreds manifest names a git-source credential.
+rdc_seed_git_credentials() {
+  local id="$1" host creds git_user git_secret written
   host="$(rdc_remote_host "$(git -C "$REPO_ROOT" remote get-url origin)")"
   creds="$(rdc_git_credentials "$host")"
   [ -n "$creds" ] || rd_die \
@@ -463,13 +499,26 @@ rdc_push_git_creds() {
   git_user="$(rdc_cred_user "$creds")"
   git_secret="$(rdc_cred_secret "$creds")"
 
-  local written=0
+  written=0
+  # Values are escaped for the heredoc below: it is expanded before the container's sh parses it, so a raw single quote in any of them would terminate the quoting around it and run as shell inside the container.
+  local esc_user esc_secret esc_host
+  esc_user="$(rdc_sh_escape "$git_user")"
+  esc_secret="$(rdc_sh_escape "$git_secret")"
+  esc_host="$(rdc_sh_escape "$host")"
   docker exec -i -u "$CONTAINER_USER" "$id" sh -s <<CREDS || written=$?
 set -e
 umask 077
-printf 'https://%s:%s@%s\n' '${git_user}' '${git_secret}' '${host}' > "\$HOME/.git-credentials"
+printf 'https://%s:%s@%s\n' '${esc_user}' '${esc_secret}' '${esc_host}' > "\$HOME/.git-credentials"
 chmod 600 "\$HOME/.git-credentials"
-git config --global credential.helper store
+# --replace-all, not a plain set: the Dev Containers extension copies the
+# host's ~/.gitconfig into the container when a window attaches, and adds its
+# own forwarding helper next to whatever postCreate left, so credential.helper
+# can hold several values by the time this runs. A plain set then fails with
+# "cannot overwrite multiple values" and the build errors out after the
+# container is otherwise complete. Exactly one helper, store, is the intended
+# state: the credential this script writes is the one the container uses, with
+# or without a window attached, and the ls-remote probe below proves it works.
+git config --global --replace-all credential.helper store
 CREDS
   [ "$written" -eq 0 ] || rd_fail "The credential could not be written into the container" \
     "Nothing inside it was changed, so its git access is whatever it was before." \
@@ -486,8 +535,184 @@ CREDS
       "" \
       "Then re-authenticate and run this again:" \
       "  ${RD_BOLD}gh auth login${RD_RESET}  (or whatever helper this machine uses)" \
-      "  ${RD_BOLD}make push-git-creds${RD_RESET}"
+      "  ${RD_BOLD}make push-creds${RD_RESET}"
   rd_ok "container authenticates to ${host} on its own (verified with git ls-remote)"
+}
+
+# The hostcreds push, the generalization of the old git-only credential
+# push: resolve EVERY credential the manifest names on this machine (the container has no
+# keychain, no git credential helper and no aws session of its own, and the
+# point of the mechanism is that it never gains any), write one <NAME>.env
+# fragment per credential into the container's ~/.hostcreds/, and seed
+# ~/.git-credentials when the manifest names a git-source credential. A
+# resolved value rides only file descriptors: each fragment is piped from
+# the host-side file over docker's stdin, never placed on a docker exec's
+# argv.
+rdc_push_creds() {
+  # One subshell owns the fragment directory's EXIT trap: rdc_build_remote
+  # arms a script-level EXIT trap to remove its override config, and a trap
+  # armed here at function scope would silently replace that one and leak
+  # its file. rd_fail's message and exit status cross the subshell boundary
+  # unchanged.
+  (
+    local id frag_dir names name git_hosts
+    id="$(rdc_require_container)"
+
+    frag_dir="$(mktemp -d)"
+    trap 'rm -rf "$frag_dir"' EXIT
+
+    rd_log "resolving hostcreds fragments on this machine"
+    if ! names="$(PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" \
+        python3 -m devcontainer_config.cli creds-fragments --output-dir "$frag_dir")"; then
+      rd_fail "hostcreds could not be resolved on this machine" \
+        "The message above already names the credential that failed and its remedy." \
+        "" \
+        "A keychain item that is missing is created by:  ${RD_BOLD}make creds-init${RD_RESET}" \
+        "Then push again:  ${RD_BOLD}make push-creds${RD_RESET}"
+    fi
+
+    # Idempotent: an existing store directory from an earlier push is
+    # reused rather than recreated, so a re-run cannot disturb it. Its 700
+    # mode is enforced on every push, not only at creation: the fragments
+    # are only as private as the directory holding them, and one widened
+    # since the last push would slip past a creation-time-only chmod.
+    docker exec -u "$CONTAINER_USER" "$id" sh -c 'umask 077; mkdir -p "$HOME/.hostcreds"; chmod 700 "$HOME/.hostcreds"'
+
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      # The CLI validates every printed name against the manifest's own
+      # [A-Z][A-Z0-9_]* rule; re-checking the same shape here keeps a
+      # corrupted name from turning the exec below into a path traversal
+      # (defense in depth). Anchored at both ends: a glob's trailing *
+      # matches anything, so 'TO; rm -rf x' would have passed the case
+      # form, while single-character names were rejected by it.
+      printf '%s' "$name" | grep -qE '^[A-Z][A-Z0-9_]*$' \
+        || rd_fail "creds-fragments printed ${name}, which is not a credential name" \
+          "A credential name matches [A-Z][A-Z0-9_]*; anything else cannot safely index ~/.hostcreds."
+      # The fragment rides stdin (< file), never argv: a value on a docker
+      # exec's argv would sit in the host's process table for the life of
+      # the call, where any other local user can read it. The umask rides
+      # with the exec: docker's default 0022 would land the file at 0644,
+      # failing the mode check below with the value world-readable in the
+      # meantime.
+      docker exec -i -u "$CONTAINER_USER" "$id" \
+        sh -c "umask 077; cat > \"\$HOME/.hostcreds/${name}.env\"" < "${frag_dir}/${name}.env" \
+        || rd_fail "The fragment for ${name} could not be written into the container" \
+          "Nothing else inside it was changed." \
+          "" \
+          "The container has to be running for this:  ${RD_BOLD}make start${RD_RESET}"
+      # Trust nothing: prove the file landed with the private mode the
+      # umask above gives it, rather than trusting the exec's exit status.
+      rdc_exec_probe "$id" sh -c "[ \"\$(stat -c %a \"\$HOME/.hostcreds/${name}.env\")\" = 600 ]" \
+        || rd_fail "the fragment ${name}.env in the container's hostcreds store is missing or not mode 600" \
+          "It was written moments ago, so the container's filesystem is misbehaving." \
+          "" \
+          "Re-run:  ${RD_BOLD}make push-creds${RD_RESET}"
+    done <<< "$names"
+
+    # The git-source hosts from the same manifest, printed by the same CLI:
+    # hostnames are labels, never values, so printing them is safe, and a
+    # non-empty answer is what gates the ~/.git-credentials seeding above.
+    git_hosts="$(PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" \
+      python3 -m devcontainer_config.cli creds-fragments --print-git-hosts)" \
+      || rd_fail "The hostcreds manifest could not be read for its git hosts" \
+        "The message above names the problem; the same manifest resolved a moment ago."
+    if [ -n "$git_hosts" ]; then
+      rdc_seed_git_credentials "$id"
+    else
+      rd_log "no git-source credential in the manifest, leaving ~/.git-credentials alone"
+    fi
+
+    rd_ok "pushed $(printf '%s\n' "$names" | sed '/^$/d' | wc -l | tr -d ' ') credential fragment(s) into ~/.hostcreds"
+  )
+}
+
+# One verification check: run the command through docker exec, print one
+# PASS or FAIL line, and answer 0 or 1. The caller counts failures and
+# decides the exit, so one FAIL never hides the checks after it (a plain
+# rd_fail here would exit at the first finding instead).
+rdc_verify_one() {
+  local id="$1" label="$2"
+  shift 2
+  if rdc_exec_probe "$id" "$@" > /dev/null 2>&1; then
+    rd_ok "PASS ${label}"
+    return 0
+  fi
+  printf '%s[FAIL]%s %s\n' "$RD_RED" "$RD_RESET" "${label}" >&2
+  return 1
+}
+
+# 'make verify-container': structural plus functional checks of the pushed
+# credentials, all through docker exec against the ACTIVE context, so local
+# and remote containers verify identically -- no engine-specific paths
+# anywhere. Prints one PASS/FAIL line per check; exits non-zero if any check
+# failed.
+rdc_verify_container() {
+  local id failures=0 startup_stderr git_hosts
+  id="$(rdc_require_container)"
+  rd_log "verifying pushed credentials inside the container"
+
+  rdc_verify_one "$id" "the hostcreds store directory exists with mode 700" \
+    sh -c '[ "$(stat -c %a "$HOME/.hostcreds")" = 700 ]' \
+    || failures=$(( failures + 1 ))
+
+  rdc_verify_one "$id" "every hostcreds fragment in the store is mode 600" \
+    sh -c 'for f in "$HOME"/.hostcreds/*.env; do [ -e "$f" ] || continue; [ "$(stat -c %a "$f")" = 600 ] || exit 1; done' \
+    || failures=$(( failures + 1 ))
+
+  rdc_verify_one "$id" "startup block present in ~/.bashrc and ~/.zshenv" \
+    sh -c 'grep -qF "# hostcreds-credential-startup-block" "$HOME/.bashrc" && grep -qF "# hostcreds-credential-startup-block" "$HOME/.zshenv"' \
+    || failures=$(( failures + 1 ))
+
+  # Only hostcreds-shaped stderr counts as a failure here: zsh may grumble
+  # about the terminal docker exec does not give it, and a fragment's own
+  # expiry notice reports a credential state, not a startup break. The
+  # command's exit status is deliberately not the criterion (hence the
+  # captured-then-inspected stderr); the check's contract is "startup
+  # prints no hostcreds error".
+  startup_stderr="$(rdc_exec_probe "$id" zsh -ic 'exit 0' 2>&1)" || true
+  if printf '%s' "$startup_stderr" | grep -q hostcreds; then
+    printf '%s[FAIL]%s %s\n' "$RD_RED" "$RD_RESET" "shell startup prints a hostcreds error" >&2
+    failures=$(( failures + 1 ))
+  else
+    rd_ok "PASS shell startup prints no hostcreds error"
+  fi
+
+  # git: only when the manifest names a git-source credential, decided by
+  # the same --print-git-hosts mode the push used.
+  git_hosts="$(PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" \
+    python3 -m devcontainer_config.cli creds-fragments --print-git-hosts)" \
+    || rd_fail "The hostcreds manifest could not be read for its git hosts" \
+      "The message above names the problem."
+  if [ -n "$git_hosts" ]; then
+    rdc_verify_one "$id" "git authenticates to origin on its own (ls-remote)" \
+      sh -c "cd '${CONTAINER_WORKSPACE}' && GIT_TERMINAL_PROMPT=0 git ls-remote origin > /dev/null 2>&1" \
+      || failures=$(( failures + 1 ))
+  else
+    rd_log "no git-source credential in the manifest, skipping the git check"
+  fi
+
+  # aws: only when an aws-export fragment is present. The probe greps for
+  # the variable NAME inside the store (a presence check); no value is ever
+  # printed. zsh -c sources ~/.zshenv, which is where the startup block
+  # exports the session the fragment carries.
+  if rdc_exec_probe "$id" sh -c 'grep -l AWS_ACCESS_KEY_ID "$HOME"/.hostcreds/*.env > /dev/null 2>&1'; then
+    rdc_verify_one "$id" "aws sts get-caller-identity answers with the pushed session" \
+      zsh -c 'aws sts get-caller-identity --output text --no-cli-pager > /dev/null 2>&1' \
+      || failures=$(( failures + 1 ))
+  else
+    rd_log "no aws-export fragment in the store, skipping the aws check"
+  fi
+
+  if [ "$failures" -gt 0 ]; then
+    rd_fail "${failures} pushed-credential check(s) failed in the container" \
+      "Each FAIL line above names its check." \
+      "" \
+      "Re-push every credential, then check again:" \
+      "  ${RD_BOLD}make push-creds${RD_RESET}" \
+      "  ${RD_BOLD}make verify-container${RD_RESET}"
+  fi
+  rd_ok "every pushed-credential check passed in the container"
 }
 
 : "${VSCODE_CLI:=code}"
@@ -651,12 +876,39 @@ rdc_reopen() {
   fi
 
   rd_require_cmd "$VSCODE_CLI" "Install the VS Code 'code' command: Command Palette > Shell Command: Install 'code' command in PATH"
+  # The authority must name the engine this run addresses, not whichever
+  # context is machine-wide active: under ENGINE those differ, and a window
+  # opened against the active context attaches to the wrong engine's
+  # container. Unset, rd_engine_context prints nothing and the active context
+  # is exactly what it always was.
+  local authority_context
+  authority_context="$(rd_engine_context)"
+  [ -n "$authority_context" ] || authority_context="$(docker context show)"
   authority="$(printf '{"containerName":"/%s","settings":{"context":"%s"}}' \
-    "$name" "$(docker context show)" | od -A n -t x1 | tr -d ' \n')"
+    "$name" "$authority_context" | od -A n -t x1 | tr -d ' \n')"
   workspace="$(rdc_workspace_folder)"
   rd_log "opening ${workspace} in '${name}'"
   "$VSCODE_CLI" --folder-uri "vscode-remote://attached-container+${authority}${workspace}"
   rd_ok "VS Code opening the workspace directly, no Attach step needed"
+}
+
+rdc_exec_shell() {
+  # An interactive shell inside the container, on whichever engine the active
+  # context points at. This is the replacement for the host shell the cutover
+  # removed: the container is where work happens, and the host deliberately has
+  # no human access path left.
+  #
+  # Named rdc_exec_shell, not rdc_exec: that name is already taken above by the
+  # non-interactive helper rdc_check and others use to run a single command in
+  # a container and capture its output.
+  local id
+  id="$(rdc_require_container)" || exit $?
+  docker exec -it "$id" "$CONTAINER_SHELL" \
+    || rd_fail "The shell '${CONTAINER_SHELL}' could not be started in the container" \
+      "The container is running; the shell itself failed to start." \
+      "" \
+      "If the image does not ship that shell, name one it does have:" \
+      "  ${RD_BOLD}CONTAINER_SHELL=/bin/bash make exec${RD_RESET}"
 }
 
 rdc_up() {
@@ -667,16 +919,18 @@ rdc_up() {
 
   if ! docker info > /dev/null 2>&1; then
     if [ "$backend" = "remote" ]; then
-      rd_log "remote engine is not answering, refreshing the tunnel"
-      "${RD_DIR}/docker-tunnel.sh" > /dev/null \
-        || rd_fail "The tunnel could not be refreshed, so the remote engine stays unreachable" \
+      rd_log "remote engine is not answering, refreshing the port forward"
+      PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" python3 -m devcontainer_config.transport connect \
+        --instance-id "$REMOTE_INSTANCE_ID" --context "$REMOTE_DOCKER_CONTEXT" \
+        --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null \
+        || rd_fail "The port forward could not be refreshed, so the remote engine stays unreachable" \
           "The reason is in the output above." \
           "" \
           "If it is an authentication failure:" \
           "  ${RD_BOLD}aws sso login --profile ${REMOTE_AWS_PROFILE}${RD_RESET}, then ${RD_BOLD}make up${RD_RESET}" \
           "" \
           "If the instance is stopped, start it, then ${RD_BOLD}make connect${RD_RESET}."
-      rd_ok "tunnel refreshed"
+      rd_ok "port forward refreshed"
     else
       local diagnosis
       diagnosis="$(rd_engine_diagnosis "$(docker context show)")"
@@ -711,7 +965,7 @@ rdc_up() {
       ;;
   esac
 
-  rdc_push_git_creds
+  rdc_push_creds
   rdc_status
   rdc_reopen
 }
@@ -750,14 +1004,22 @@ rdc_build_remote() {
 
   rdc_seed_volume "$volume" "$branch" "$url"
 
+  # The override carries the resolved Parameter Store prefix into the
+  # container, not just the volume mount. Without it the create-time bootstrap
+  # falls back to /devcontainer/$(basename "$(pwd)") -- the workspace folder
+  # name -- and an instance whose name differs from the project folder reads a
+  # different environment's secrets entirely. Observed: instance 'sandbox'
+  # bootstrapped from /devcontainer/general-dev/shell.env.
   RDC_OVERRIDE_CONFIG="$(mktemp "${TMPDIR:-/tmp}/devcontainer-override.XXXXXX")"
   trap 'rm -f "$RDC_OVERRIDE_CONFIG"' EXIT
   rdc_read_configuration \
     | jq --arg mount "source=${volume},target=${CONTAINER_WORKSPACES_ROOT},type=volume" \
       --arg configdir "${REPO_ROOT}/.devcontainer" \
+      --arg ssmprefix "${DEVCONTAINER_SSM_PREFIX}" \
       '.configuration
        | del(.configFilePath)
        | .workspaceMount = $mount
+       | .containerEnv = ((.containerEnv // {}) + {DEVCONTAINER_SSM_PREFIX: $ssmprefix})
        | if .build.dockerfile then
            .build.dockerfile = "\($configdir)/\(.build.dockerfile)"
            | .build.context = (if .build.context then "\($configdir)/\(.build.context)" else $configdir end)
@@ -803,7 +1065,7 @@ rdc_build() {
     rdc_build_local
   fi
 
-  rdc_push_git_creds
+  rdc_push_creds
   rd_ok "container is up"
   rdc_status
 }
@@ -859,10 +1121,61 @@ rdc_rebuild() {
 
 RDC_COMMAND="${1:-}"
 
-# Anything aimed at the remote engine needs the EC2 identity before docker is
-# even reachable; local commands must not, so this cannot live in rd_load_config.
-if command -v docker > /dev/null 2>&1 && [ "$(rdc_backend)" = "remote" ]; then
-  rd_require_remote_config
+# Resolve before classifying, not after. rdc_backend answers "is the active
+# docker context this instance's context", and only the resolver knows what
+# that context is. Asking first compared the active context against whatever
+# config.env defaulted REMOTE_DOCKER_CONTEXT to, so every instance whose name
+# did not happen to match that default was classified `local`: `make build`
+# then took the bind-mount path and asked the remote engine to mount a path
+# that exists only on this laptop.
+#
+# The quiet form is deliberate. A repository that configures no instances at
+# all is a legitimately local one, not an error, and it must still be able to
+# build against its local engine.
+if command -v docker > /dev/null 2>&1; then
+  # ENGINE, when set, names one engine explicitly. Resolving it here -- and
+  # exporting its context as DOCKER_CONTEXT, the variable docker reads ahead
+  # of the machine-wide current context -- is what aims every docker call in
+  # this process at that one engine: rd_docker's and the plain ones alike,
+  # and every child process (the devcontainer CLI included) that inherits the
+  # environment. No `docker context use`, so state other terminals share is
+  # never touched. rd_engine_context has already failed fast when ENGINE
+  # names nothing; a direct call, not a command substitution, so the export
+  # lands in this shell.
+  if [ -n "${ENGINE:-}" ]; then
+    DOCKER_CONTEXT="$(rd_engine_context)"
+    export DOCKER_CONTEXT
+  fi
+
+  # Resolve once, here, and let every downstream reader use the result. The
+  # two names below were previously derived from PROJECT_NAME independently
+  # by this script and by push-secrets.sh, which meant two callers could
+  # address different instances while each believed it was addressing "the"
+  # one. Assigning them from the single resolved block removes that split
+  # without rewriting every use site.
+  if rd_resolve_instance_quiet; then
+    REMOTE_DOCKER_CONTEXT="$DOCKER_CONTEXT"
+    DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
+    export REMOTE_DOCKER_CONTEXT DEVCONTAINER_SSM_PREFIX
+  fi
+
+  # Re-assert the ENGINE pin. The resolver's export loop now skips
+  # DOCKER_CONTEXT under ENGINE, but that skip is lib.sh's promise, not this
+  # script's assumption: anything that ever exports DOCKER_CONTEXT between the
+  # pin above and here would silently re-aim the plain docker calls and child
+  # processes at a different engine than rd_docker's --context. One cheap,
+  # idempotent re-derivation closes that window for good.
+  if [ -n "${ENGINE:-}" ]; then
+    DOCKER_CONTEXT="$(rd_engine_context)"
+    export DOCKER_CONTEXT
+  fi
+
+  # Anything aimed at the remote engine needs the EC2 identity before docker
+  # is even reachable; local commands must not, so this cannot live in
+  # rd_load_config.
+  if [ "$(rdc_backend)" = "remote" ]; then
+    rd_require_remote_config
+  fi
 fi
 
 case "$RDC_COMMAND" in
@@ -876,8 +1189,10 @@ case "$RDC_COMMAND" in
   reopen) rdc_require_docker && rdc_reopen ;;
   vscode-server) rdc_require_docker && rdc_seed_vscode_server ;;
   up) rdc_up ;;
-  push-git-creds) rdc_require_docker && rdc_push_git_creds ;;
+  exec) rdc_require_docker && rdc_exec_shell ;;
+  push-creds) rdc_require_docker && rdc_push_creds ;;
+  verify) rdc_require_docker && rdc_verify_container ;;
   clean) rdc_require_docker && rdc_clean ;;
   rebuild) rdc_require_docker && rdc_rebuild ;;
-  *) rd_die "usage: $(basename "$0") <up|status|start|stop|restart|rename|reopen|vscode-server|check|build|push-git-creds|clean|rebuild>" ;;
+  *) rd_die "usage: $(basename "$0") <up|exec|status|start|stop|restart|rename|reopen|vscode-server|check|build|push-creds|verify|clean|rebuild>" ;;
 esac

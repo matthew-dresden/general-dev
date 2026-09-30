@@ -1,6 +1,6 @@
 ---
 name: gd-skills-install
-description: Installs this roster's canonical skills into an agent's skill surface -- verifies the agent reads .agents/skills directly or wires the documented relative symlink, never copies files -- and verifies the install by resolving every gd-* name to its SKILL.md through the agent's own surface; the make target it will drive lands in U3.
+description: Installs this roster's canonical skills into an agent's skill surface -- verifies the agent reads .agents/skills directly or wires the documented relative symlink, never copies files -- and verifies the install by resolving every name to its SKILL.md through the agent's own surface; drives the make skills-install target.
 ---
 
 # gd-skills-install
@@ -18,8 +18,10 @@ This skill never copies or renders a skill body into another location: a
 copied skill is a second source of truth, which is the failure this roster
 layout exists to prevent.
 
-The two agents this repository ships wiring for are the standing example of
-the `flow: opencode/claude agent setup pointers` flow of `docs/skills.md`'s
+This is a native-Mac operation: every scope below runs on this machine and
+touches no devcontainer, docker or AWS state. The two agents this
+repository ships wiring for are the standing example of the
+`flow: opencode/claude agent setup pointers` flow of `docs/skills.md`'s
 Flows section: opencode reads `.agents/skills` directly (the canonical
 home needs no pointer), and Claude Code consumes the roster through the
 plugin's `skills/` relative symlink described above. Wiring any other
@@ -30,9 +32,35 @@ canonical home, never copy it -- and resolves every `gd-` name afterward.
 
 | Step | What this skill runs | Notes |
 |---|---|---|
-| Discover the agent surface | None (read) | Identify where the target agent looks for skill directories. |
-| Wire | The `skills-install` make target the U3 work unit adds (forthcoming) | This is the target this skill will drive once it lands; until then this skill performs the wiring by stating the exact symlink or configuration for the operator to apply, then verifying it. |
+| Discover the agent surface | `make skills-list SCOPE=global AGENT=<agent>` (read) | Report the current state per agent: installed (with the resolved target), native (project), or not installed. |
+| Wire | `make skills-install AGENT=<agent> SCOPE=<scope>` | `SCOPE=global` (the default) creates one `general-dev-skills` symlink in the agent's user-level skill directory, pointing absolutely at this checkout's `.agents/skills`; `SCOPE=project` verifies -- and, for Claude Code, wires -- the in-repo adapters; `SCOPE=runtime` prints the agent's one-shot incantation and changes nothing. |
 | Verify | None (read) | Resolve every `gd-*` name in the roster (`docs/skills.md`) to a `SKILL.md` through the agent's own surface; report any name that does not resolve. |
+
+### Scope semantics
+
+| Scope | What `make skills-install` does |
+|---|---|
+| `global` | Symlink named `general-dev-skills` in `~/.config/opencode/skills` (opencode) or `~/.claude/skills` (Claude Code), absolute target, recorded in the output. Refuses any existing entry of that name that is not already our symlink. |
+| `project` | The repository itself: opencode is native (`.agents/skills`, nothing to wire); Claude Code's tracked `.claude/plugins/devcontainer/skills` relative symlink is verified and, if missing, wired with the documented relative target. |
+| `runtime` | No filesystem change. Prints a one-shot incantation instead -- see below. |
+
+### The runtime incantation
+
+`make skills-install SCOPE=runtime` prints, never executes, the one-shot
+incantation for the selected agent:
+
+- opencode: an `OPENCODE_CONFIG` incantation whose JSON carries a
+  `skills.paths` override. Because an `OPENCODE_CONFIG` file REPLACES the
+  project config rather than merging with it, the printed JSON embeds the
+  provider/model block read from `.devcontainer/opencode.json` at
+  generation time -- a bare skills-only override would launch opencode
+  with no provider at all.
+- Claude Code: a `--settings` one-shot whose JSON enables this checkout's
+  plugin marketplace path. Printed only when the installed build
+  advertises the flag (decided from `claude --help` at run time); a build
+  without it gets an explicit unsupported message with the manual fallback
+  (the global symlink, or the marketplace/plugin entries added to
+  `~/.claude/settings.json` by hand).
 
 ## Checks
 
@@ -46,6 +74,7 @@ canonical home, never copy it -- and resolves every `gd-` name afterward.
 | Condition | Behavior |
 |---|---|
 | The agent cannot follow a symlink | State that fact and stop; ask the operator to choose between the agent's own indirection mechanism and not installing. Never fall back to copying. |
+| An existing global entry named `general-dev-skills` is not our symlink | The target refuses and names the path: move or delete the entry by hand if it is genuinely yours, then re-run. Never replace an entry the target did not create. |
 | An action the skill took did not verify | Re-run the resolution check and report the disagreement; never report an install complete from the wiring step's exit code alone. |
 | The operator aborts | No canonical file is ever modified, so an abort leaves the roster untouched; the agent surface is left exactly as found. |
 

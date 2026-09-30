@@ -74,6 +74,11 @@ QUALITY
   make test               host    Run the hermetic pytest suite in tests/. No docker, no AWS, no network.
   make validate           host    The green-baseline contract automation depends on. Runs lint then test.
 
+SKILLS  wire this repo's .agents/skills roster into an agent on this Mac; no devcontainer involved
+  make skills-install     host    Wire an agent to the canonical skills home: global symlink (default), project verify/wire, or the runtime one-shot incantation (printed, never run). AGENT=opencode|claude|both SCOPE=global|project|runtime
+  make skills-remove      host    Delete only a general-dev-skills symlink resolving inside this repo; refuses everything else. AGENT=opencode|claude|both SCOPE=global|project|runtime
+  make skills-list        host    Show each agent scope: installed (target), native (project), or not installed. AGENT=opencode|claude|both SCOPE=global|project|runtime
+
 OPTIONS
   ENGINE=local|<name>             Address one engine explicitly (ENGINE=x make <target>, or make <target> ENGINE=x): parallel terminals can drive local and remote engines concurrently, without switching contexts. Unset follows the active context.
   CONTAINER=<name>                Pick one instance when several clones of this repo exist. 'make status' lists them.

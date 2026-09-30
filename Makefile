@@ -141,6 +141,16 @@ LOCAL_CONTEXT = $(shell source $(CONFIG) && echo $$LOCAL_DOCKER_CONTEXT)
 REMOTE_CONTEXT = $(shell source $(CONFIG) && echo $$REMOTE_DOCKER_CONTEXT)
 
 UVX ?= uvx
+# The skills targets' selectors (U3), defaulted here once so `make
+# skills-install` with no variables behaves like the documented default
+# (both agents, global scope) and the cli subcommands receive a value even
+# when the caller sets neither -- the recipes pass "$(AGENT)"/"$(SCOPE)"
+# unconditionally, and an empty value would be an argparse usage error
+# instead of the default. Both values are validated (with the valid sets
+# named) by the cli's argparse choices=, so a typo like AGENT=code fails
+# fast with the accepted values rather than acting on a guess.
+AGENT ?= both
+SCOPE ?= global
 # Every `uv run` this Makefile performs (PYTEST, and the hooks that exec it)
 # must keep its virtual environment OUTSIDE the repository. The workspace
 # directory is bind-mounted into the devcontainer as-is, and a host-OS
@@ -187,7 +197,8 @@ PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
 .PHONY: help connect disconnect status exec shell start stop restart rename check build push-creds creds-init verify-container clean rebuild push-secrets \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-workspace lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
-        keybindings validate test cert-status list-instances instance-init instance-plan instance-deploy instance-status instance-stop instance-start instance-destroy instance-link
+        keybindings validate test cert-status list-instances instance-init instance-plan instance-deploy instance-status instance-stop instance-start instance-destroy instance-link \
+        skills-install skills-remove skills-list
 
 help:
 	@printf '\n\033[1m%s\033[0m devcontainer control.   Backend follows the active docker context.\n' "$(notdir $(CURDIR))"
@@ -255,6 +266,10 @@ help:
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make hooks-run-push"   "host"   "Exactly what pre-push runs: lint, then a secrets scan of every commit in the pushed range."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make test"             "host"   "Run the hermetic pytest suite in tests/. No docker, no AWS, no network."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make validate"         "host"   "The green-baseline contract automation depends on. Runs lint then test."
+	@printf '\n\033[1mSKILLS\033[0m  wire this repo'"'"'s .agents/skills roster into an agent on this Mac; no devcontainer involved\n'
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make skills-install"   "host"   "Wire an agent to the canonical skills home: global symlink (default), project verify/wire, or the runtime one-shot incantation (printed, never run). AGENT=opencode|claude|both SCOPE=global|project|runtime"
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make skills-remove"    "host"   "Delete only a general-dev-skills symlink resolving inside this repo; refuses everything else. AGENT=opencode|claude|both SCOPE=global|project|runtime"
+	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "make skills-list"      "host"   "Show each agent scope: installed (target), native (project), or not installed. AGENT=opencode|claude|both SCOPE=global|project|runtime"
 	@printf '\n\033[1mOPTIONS\033[0m\n'
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "ENGINE=local|<name>"   ""       "Address one engine explicitly (ENGINE=x make <target>, or make <target> ENGINE=x): parallel terminals can drive local and remote engines concurrently, without switching contexts. Unset follows the active context."
 	@printf '  \033[1;36m%-23s\033[0m %-7s %s\n' "CONTAINER=<name>"      ""       "Pick one instance when several clones of this repo exist. 'make status' lists them."
@@ -867,3 +882,20 @@ hooks-install:
 hooks-uninstall:
 	@rm -f .git/hooks/pre-commit .git/hooks/pre-push
 	@printf '\033[0;32m[DONE]\033[0m removed pre-commit and pre-push hooks\n'
+
+# The skills surface (U3): thin delegations to the devcontainer_config.cli
+# subcommands of the same name, exactly like the instance-* layer. The
+# engine -- symlink creation, refusals, listing and the printed (never
+# executed) runtime incantations -- lives in
+# devcontainer_config.skills_install; this layer only passes the AGENT and
+# SCOPE selectors (defaulted above, validated with their accepted sets by
+# the cli's argparse choices=). Native-Mac operations: no devcontainer,
+# docker or AWS involvement anywhere under these targets.
+skills-install:
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli skills-install --agent "$(AGENT)" --scope "$(SCOPE)"
+
+skills-remove:
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli skills-remove --agent "$(AGENT)" --scope "$(SCOPE)"
+
+skills-list:
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli skills-list --agent "$(AGENT)" --scope "$(SCOPE)"

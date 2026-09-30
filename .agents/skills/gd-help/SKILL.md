@@ -27,7 +27,7 @@ members.
 | container- | `gd-container-local`, `gd-container-remote`, `gd-container-verify`, `gd-container-lifecycle` | `make build`, `make start`, `make restart`, `make reopen`, `make status`, `make check`, `make clean`, `make rebuild`, `make rename` |
 | creds- | `gd-creds-setup`, `gd-creds-rotate`, `gd-creds-doctor` | `make creds-init`, `make push-creds`, `make verify-container` |
 | cert- | `gd-cert-lifecycle` | `make cert-ca`, `make cert-client`, `make cert-publish`, `make cert-install`, `make cert-status` |
-| skills- | `gd-skills-install`, `gd-skills-remove`, `gd-skills-scope` | the U3 skills-management make targets (forthcoming) |
+| skills- | `gd-skills-install`, `gd-skills-remove`, `gd-skills-scope` | `make skills-install`, `make skills-remove`, `make skills-list` (AGENT= and SCOPE= selectors) |
 | (cross-cutting) | `gd-quality`, `gd-help` | `make validate`, `make lint`, `make test` |
 
 ## Resolution rules

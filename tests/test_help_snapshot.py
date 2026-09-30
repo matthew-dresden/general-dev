@@ -60,6 +60,7 @@ from pathlib import Path
 
 import pytest
 from conftest import _makefile_text
+from devcontainer_config import helpline
 from devcontainer_config.repo import find_root
 from test_makefile_contract import _phony_targets
 
@@ -402,20 +403,23 @@ def test_make_help_output_matches_its_snapshot(normalized_help_output: str) -> N
     _compare_snapshot(expected, normalized_help_output, "tests/data/make-help.txt")
 
 
-def test_no_help_line_exceeds_180_visible_characters(normalized_help_output: str) -> None:
-    """No `make help` line renders longer than 180 visible characters.
+def test_no_help_line_exceeds_the_description_cap(raw_help_output: str) -> None:
+    """No rendered `make help` line runs past the description column's cap.
 
-    The normalization already stripped ANSI, so these are visible lengths --
-    the same measurement the Makefile's wrapping rule itself applies. This is
-    the assertion that makes the rule contractual rather than incidental to
-    the current row texts.
+    Measured on the real output with ANSI stripped -- the machine-true
+    lengths, since the wrap decision is made on the real text. The fixture's
+    normalized text is deliberately not measured here: substituting
+    `<LOCAL_DOCKER_CONTEXT>`/`<REMOTE_DOCKER_CONTEXT>` for the real context
+    names can inflate a wrapped line past the cap on paper without any
+    rendered line exceeding it.
     """
+    max_line = helpline.INSTRUCTION_COLUMN + helpline.DESCRIPTION_MAX
     overlong = [
         (number, line)
-        for number, line in enumerate(normalized_help_output.splitlines(), start=1)
-        if len(line) > 180
+        for number, line in enumerate(_strip_ansi(raw_help_output).splitlines(), start=1)
+        if len(line) > max_line
     ]
-    assert not overlong, f"help lines past the 180-character limit: {overlong}"
+    assert not overlong, f"help lines past the {max_line}-character limit: {overlong}"
 
 
 def test_wrapped_rows_align_their_description_at_the_instruction_column(

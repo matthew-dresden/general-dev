@@ -922,12 +922,15 @@ def test_header_notes_render_through_one_helper_at_the_instruction_column() -> N
     assert int(width.group(1)) == helpline.INSTRUCTION_COLUMN
 
 
-# The 180-character rule (the wrapped help row): every two-column row renders
-# through the one `row()` helper defined in the recipe -- short rows via its
-# printf, long rows via devcontainer_config.helpline -- and the helper's
-# literal constants are pinned to the module's geometry so the two renderers
-# cannot drift. The literal fragments below are read out of the recipe text,
-# never duplicated as expectations about rendered output.
+# The description-column cap (the wrapped help row): every two-column row
+# renders through the one `row()` helper defined in the recipe -- rows with
+# a description at or under the cap via its printf, longer rows via
+# devcontainer_config.helpline -- and the helper's literal constants are
+# pinned to the module's geometry so the two renderers cannot drift. The
+# legend entries render through `row` too, with an empty target, so their
+# names sit in the scope column and their descriptions in the description
+# column. The literal fragments below are read out of the recipe text, never
+# duplicated as expectations about rendered output.
 
 
 def test_help_rows_render_through_one_helper() -> None:
@@ -936,37 +939,64 @@ def test_help_rows_render_through_one_helper() -> None:
     One printf occurrence proves no row bypasses the helper (the format lives
     only inside `row()`'s short-row branch); the ENGINE OPTIONS row's `row()`
     call pins that the wrapping-motivating OPTIONS row routes through it too,
-    and the first row's call pins that the helper predates every row.
+    a legend entry's call pins that the legend uses the same columns as the
+    table it describes, and the first row's call pins that the helper
+    predates every row.
     """
     recipe = _help_recipe_body(_makefile_text())
     row_format = "printf '  \\033[1;36m%-23s\\033[0m %-7s %s\\n'"
     assert recipe.count(row_format) == 1, (
         "the two-column printf must exist only inside the row() helper; a row "
-        "rendering through its own printf bypasses the 180-character rule"
+        "rendering through its own printf bypasses the description-column cap"
     )
     assert 'row "ENGINE=local|<name>"' in recipe
+    assert 'row "" "both"' in recipe
     assert 'row "make up"' in recipe
 
 
 def test_help_row_helper_constants_match_the_helpline_module() -> None:
     """`row()`'s literal threshold and column widths equal helpline's geometry.
 
-    The shell helper decides inline-versus-wrapped from its own literals
-    (34-column instruction start, 180-character limit) and the module wraps
-    from the same geometry; reading both sides here is what keeps a change to
-    one from silently outdating the other.
+    The shell helper decides inline-versus-wrapped from its own literals (the
+    120-character description cap) and the module wraps from the same
+    geometry; reading both sides here is what keeps a change to one from
+    silently outdating the other.
     """
     recipe = _help_recipe_body(_makefile_text())
-    threshold = re.search(re.escape('$$((34 + $${#3}))" -le ') + r"(\d+)", recipe)
-    assert threshold is not None, "row() carries no visible-length threshold to pin"
-    assert int(threshold.group(1)) == helpline.LINE_LIMIT
-    indent = re.search(re.escape("$$((") + r"(\d+)" + re.escape(" + $${#3}))"), recipe)
-    assert indent is not None, "row() carries no instruction-column literal to pin"
-    assert int(indent.group(1)) == helpline.INSTRUCTION_COLUMN
+    threshold = re.search(re.escape('"$${#3}" -le ') + r"(\d+)", recipe)
+    assert threshold is not None, "row() carries no description-length threshold to pin"
+    assert int(threshold.group(1)) == helpline.DESCRIPTION_MAX
     widths = re.search(r"printf '  \\033\[1;36m%-(\d+)s\\033\[0m %-(\d+)s", recipe)
     assert widths is not None, "row() carries no two-column printf to pin"
     assert int(widths.group(1)) == helpline.TARGET_WIDTH
     assert int(widths.group(2)) == helpline.SCOPE_WIDTH
+
+
+def test_help_column_titles_pin_the_value_columns() -> None:
+    """The column titles are flush left, over the columns they name.
+
+    TARGET starts at column 0 -- the section headers' column, per the help
+    header's design -- while SCOPE and WHAT IT DOES sit exactly over the
+    scope and description columns the rows render at, so the titles govern
+    the table all the way down. The prerequisites table's TARGETS /
+    REQUIREMENTS titles follow the same rule for its own geometry.
+    """
+    recipe = _help_recipe_body(_makefile_text())
+    titles = re.search(
+        r"printf '\\n\\033\[1m%-(\d+)s\\033\[0m %-(\d+)s %s\\n' \"TARGET\" \"SCOPE\"",
+        recipe,
+    )
+    assert titles is not None, "no TARGET/SCOPE column-title row found to pin"
+    # TARGET's field spans from column 0 to one separator short of where the
+    # scope column begins: the rows' two-space indent plus the target field.
+    assert int(titles.group(1)) == 2 + helpline.TARGET_WIDTH
+    assert int(titles.group(2)) == helpline.SCOPE_WIDTH
+    prerequisite_titles = re.search(
+        r"printf '\\033\[1m%-(\d+)s\\033\[0m %s\\n' \"TARGETS\"",
+        recipe,
+    )
+    assert prerequisite_titles is not None, "no TARGETS column-title row found to pin"
+    assert int(prerequisite_titles.group(1)) == 2 + helpline.TARGET_WIDTH
     assert "devcontainer_config.helpline" in recipe, (
         "rows past the limit must wrap through devcontainer_config.helpline"
     )

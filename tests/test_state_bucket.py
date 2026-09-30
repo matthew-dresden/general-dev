@@ -24,6 +24,7 @@ time and no test touches AWS, the network or a real file outside
 
 from __future__ import annotations
 
+import json
 import subprocess
 import uuid
 from pathlib import Path
@@ -313,7 +314,7 @@ def test_missing_head_bucket_binary_raises(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_main_prints_the_form_and_exits_zero(
+def test_main_init_form_prints_the_form_and_exits_zero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root = _root_with_root_hcl(tmp_path)
@@ -323,22 +324,37 @@ def test_main_prints_the_form_and_exits_zero(
     runner.queue(_ok(f"{account}\n"))
     runner.queue(_ok(""))
     monkeypatch.setattr(state_bucket, "subprocess_runner", runner)
+    monkeypatch.setenv("REMOTE_AWS_REGION", "us-east-1")
 
-    exit_code = state_bucket.main([str(root), instance, "us-east-1"])
+    exit_code = state_bucket.main(["init-form", str(root), instance])
 
     assert exit_code == 0
     assert capsys.readouterr().out.strip() == "plain"
 
 
-def test_main_rejects_any_argument_count_other_than_three(
+def test_main_init_form_without_the_region_names_the_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _root_with_root_hcl(tmp_path)
+    monkeypatch.delenv("REMOTE_AWS_REGION", raising=False)
+
+    exit_code = state_bucket.main(["init-form", str(root), _instance_name()])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "export REMOTE_AWS_REGION=" in captured.err
+    assert "us-east-1" in captured.err
+
+
+def test_main_rejects_unknown_commands_and_wrong_argument_counts(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    for arguments in ([], ["a"], ["a", "b"], ["a", "b", "c", "d"]):
-        exit_code = state_bucket.main(arguments)
-        assert exit_code == 2
-        captured = capsys.readouterr()
-        assert captured.out == ""
-        assert "REPO_ROOT INSTANCE_NAME REGION" in captured.err
+    assert state_bucket.main(["frobnicate"]) == 2
+    assert state_bucket.main([]) == 2
+    assert state_bucket.main(["delete", "a", "b"]) == 1
+    captured = capsys.readouterr()
+    assert "usage:" in captured.err
+    assert "takes exactly" in captured.err
 
 
 def test_main_reports_probe_failures_on_stderr_and_exits_one(
@@ -348,10 +364,259 @@ def test_main_reports_probe_failures_on_stderr_and_exits_one(
     runner = _FakeRunner()
     runner.queue(_err("AccessDenied"))
     monkeypatch.setattr(state_bucket, "subprocess_runner", runner)
+    monkeypatch.setenv("REMOTE_AWS_REGION", "us-east-1")
 
-    exit_code = state_bucket.main([str(root), _instance_name(), "us-east-1"])
+    exit_code = state_bucket.main(["init-form", str(root), _instance_name()])
 
     assert exit_code == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "AccessDenied" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Listing and deletion: the pattern derives from root.hcl's own template.
+# ---------------------------------------------------------------------------
+
+
+def _bucket_listing_name(instance: str, region: str, account: str) -> str:
+    return f"tg-state-{instance}-{region}-{account}-9d81aa"
+
+
+def test_bucket_name_pattern_matches_the_composed_name(tmp_path: Path) -> None:
+    import re
+
+    root = _root_with_root_hcl(tmp_path)
+    pattern = state_bucket.bucket_name_pattern(root)
+    assert pattern.fullmatch(_bucket_listing_name("inst-x", "us-east-1", "1" * 12))
+    assert pattern.fullmatch(_bucket_listing_name("weird_name-2", "eu-west-9", "9" * 12))
+    assert not pattern.fullmatch("tg-state-other-suffix-3734c3")
+    assert not pattern.fullmatch("someone-elses-bucket")
+
+
+def test_list_buckets_reports_configured_and_orphaned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root_with_root_hcl(tmp_path)
+    (root / "remote-instances" / "inst-x").mkdir()
+    (root / "remote-instances" / "inst-x" / "terragrunt.hcl").write_text(
+        "# configured\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("REMOTE_AWS_REGION", "us-east-1")
+    account = "1" * 12
+    ours = _bucket_listing_name("inst-x", "us-east-1", account)
+    orphan = _bucket_listing_name("inst-gone", "us-east-1", account)
+    other = "some-other-repos-bucket"
+    runner = _FakeRunner()
+    runner.queue(_ok(f"{account}\n"))  # the configured instances' account lookup
+    runner.queue(_ok(json.dumps({"Buckets": [{"Name": orphan}, {"Name": other}, {"Name": ours}]})))
+
+    listings = state_bucket.list_buckets(root, runner)
+
+    assert [(listing.name, listing.configured) for listing in listings] == [
+        (ours, True),
+        (orphan, False),
+    ]
+    ours_listing = listings[0]
+    assert ours_listing.instance == "inst-x" and ours_listing.account_id == account
+    assert listings[1].instance == "" and listings[1].region == ""
+
+
+def test_list_buckets_raises_on_a_failed_or_unparseable_aws_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root_with_root_hcl(tmp_path)
+    monkeypatch.setenv("REMOTE_AWS_REGION", "us-east-1")
+    runner = _FakeRunner()
+    runner.queue(_err("AccessDenied"))
+    with pytest.raises(StateBucketError, match="account id lookup failed"):
+        state_bucket.list_buckets(root, runner)
+    runner = _FakeRunner()
+    runner.queue(_ok(f"{_account_id()}\n"))
+    runner.queue(_ok("not json"))
+    with pytest.raises(StateBucketError, match="not valid JSON"):
+        state_bucket.list_buckets(root, runner)
+
+
+def test_delete_bucket_purges_every_version_then_deletes(tmp_path: Path) -> None:
+    account = "1" * 12
+    bucket = _bucket_listing_name("inst-x", "us-east-1", account)
+    versions = json.dumps(
+        {
+            "Versions": [{"Key": "inst-x/terraform.tfstate", "VersionId": "v1"}],
+            "DeleteMarkers": [{"Key": "inst-x/terraform.tfstate.tflock", "VersionId": "v2"}],
+        }
+    )
+    runner = _FakeRunner()
+    runner.queue(_ok(""))  # head-bucket: exists
+    runner.queue(_ok(versions))  # list-object-versions
+    runner.queue(_ok(json.dumps({})))  # delete-objects batch
+    runner.queue(_ok(""))  # delete-bucket
+
+    message = state_bucket.delete_bucket(bucket, "us-east-1", runner)
+
+    assert "deleted" in message and "2 version(s)" in message
+    calls = runner.calls
+    assert calls[0] == ("aws", "s3api", "head-bucket", "--bucket", bucket, "--region", "us-east-1")
+    assert calls[2][0:3] == ("aws", "s3api", "delete-objects")
+    assert calls[3] == (
+        "aws",
+        "s3api",
+        "delete-bucket",
+        "--bucket",
+        bucket,
+        "--region",
+        "us-east-1",
+    )
+
+
+def test_delete_bucket_reports_an_absent_bucket_without_touching_anything(tmp_path: Path) -> None:
+    account = "1" * 12
+    bucket = _bucket_listing_name("inst-x", "us-east-1", account)
+    runner = _FakeRunner()
+    runner.queue(
+        _err(
+            "An error occurred (404) when calling the HeadBucket operation: Not Found",
+            returncode=1,
+        )
+    )
+
+    message = state_bucket.delete_bucket(bucket, "us-east-1", runner)
+
+    assert "already absent" in message
+    assert len(runner.calls) == 1
+
+
+def test_delete_bucket_surfaces_a_failed_purge(tmp_path: Path) -> None:
+    account = "1" * 12
+    bucket = _bucket_listing_name("inst-x", "us-east-1", account)
+    runner = _FakeRunner()
+    runner.queue(_ok(""))  # head-bucket: exists
+    runner.queue(_ok(json.dumps({"Versions": [{"Key": "k", "VersionId": "v"}]})))
+    runner.queue(_err("AccessDenied"))
+
+    with pytest.raises(StateBucketError, match="purging") as exc_info:
+        state_bucket.delete_bucket(bucket, "us-east-1", runner)
+
+    assert "AccessDenied" in str(exc_info.value)
+    assert len(runner.calls) == 3, "the delete must not run when the purge failed"
+
+
+def test_delete_instance_bucket_refuses_an_invalid_name_before_any_aws_call(
+    tmp_path: Path,
+) -> None:
+    root = _root_with_root_hcl(tmp_path)
+    runner = _FakeRunner()
+
+    with pytest.raises(StateBucketError, match="invalid instance name"):
+        state_bucket.delete_instance_bucket(root, "../escape", "us-east-1", runner)
+
+    assert runner.calls == []
+
+
+def test_delete_matching_buckets_scopes_to_the_region(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root_with_root_hcl(tmp_path)
+    monkeypatch.setenv("REMOTE_AWS_REGION", "us-east-1")
+    account = "1" * 12
+    east = _bucket_listing_name("inst-a", "us-east-1", account)
+    west = _bucket_listing_name("inst-b", "us-west-2", account)
+    runner = _FakeRunner()
+    runner.queue(_ok(f"{account}\n"))  # the listing's account lookup
+    runner.queue(_ok(json.dumps({"Buckets": [{"Name": east}, {"Name": west}]})))
+    runner.queue(_ok(""))  # head: east exists
+    runner.queue(_ok(json.dumps({})))  # purge: empty
+    runner.queue(_ok(""))  # delete east
+    runner.queue(
+        _err(
+            "An error occurred (301) when calling the HeadBucket operation: Moved Permanently",
+            returncode=1,
+        )
+    )  # head: west lives in another region
+
+    messages = state_bucket.delete_matching_buckets(root, "us-east-1", runner)
+
+    assert len(messages) == 2
+    assert east in messages[0] and "deleted" in messages[0]
+    assert west in messages[1] and "skipped" in messages[1] and "different region" in messages[1]
+
+
+def test_main_list_and_delete_all_run_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import subprocess
+
+    from gitfixtures import generated_root, init_repo
+
+    root = generated_root(tmp_path)
+    init_repo(root)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/org/general-dev.git",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    instances_dir = root / "remote-instances"
+    instances_dir.mkdir()
+    (instances_dir / "root.hcl").write_text(ROOT_HCL, encoding="utf-8")
+    account = "1" * 12
+    bucket = _bucket_listing_name("x", "us-east-1", account)
+    runner = _FakeRunner()
+    runner.queue(_ok(f"{account}\n"))  # list's account lookup
+    runner.queue(_ok(json.dumps({"Buckets": [{"Name": bucket}]})))
+    monkeypatch.setattr(state_bucket, "subprocess_runner", runner)
+    monkeypatch.setenv("REMOTE_AWS_REGION", "us-east-1")
+    monkeypatch.chdir(root)
+
+    assert state_bucket.main(["list"]) == 0
+    out = capsys.readouterr().out
+    assert bucket in out and "orphaned" in out
+
+    runner.queue(_ok(f"{account}\n"))  # delete-all's account lookup
+    runner.queue(_ok(json.dumps({"Buckets": [{"Name": bucket}]})))  # delete-all's own listing
+    runner.queue(_ok(""))  # head: exists
+    runner.queue(_ok(json.dumps({})))  # purge: empty
+    runner.queue(_ok(""))  # delete
+    assert state_bucket.main(["delete-all"]) == 0
+    out = capsys.readouterr().out
+    assert "deleted" in out
+
+
+def test_main_delete_without_the_region_names_the_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import subprocess
+
+    from gitfixtures import generated_root, init_repo
+
+    root = generated_root(tmp_path)
+    init_repo(root)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/org/general-dev.git",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(state_bucket, "subprocess_runner", _FakeRunner())
+    monkeypatch.delenv("REMOTE_AWS_REGION", raising=False)
+    monkeypatch.chdir(root)
+
+    exit_code = state_bucket.main(["delete", "x"])
+
+    assert exit_code == 1
+    assert "export REMOTE_AWS_REGION=" in capsys.readouterr().err

@@ -265,9 +265,12 @@ bucket stands outside the instance lifecycle:
 `make instance-destroy` removes the instance's Parameter Store parameters,
 docker context, certificates and recorded id; its state *key* survives the
 destroy (the record of what existed), and the bucket is never touched.
-After an instance is destroyed, deleting its state bucket by hand is a
-separate, manual step -- and one worth pausing over, since it takes that
-instance's whole state history with it.
+Two targets manage the buckets instead: `make bucket-list` shows every
+bucket the fleet's template matches, marking the ones a configured
+instance owns, and `make bucket-delete INSTANCE=<name>` purges every
+version and deletes one; `ALL=1` deletes every bucket in `REMOTE_AWS_REGION`
+and additionally requires `CONFIRM=delete` -- worth pausing over, since it
+takes every instance's whole state history with it.
 
 ## The make targets, and the Terragrunt underneath them
 

@@ -1027,8 +1027,9 @@ def test_help_column_titles_pin_the_value_columns() -> None:
 # The guard line the REMOTE_AWS_REGION_GUARD define must carry, exactly as
 # the Makefile source spells it (the $$ is make's escape for the shell's $).
 _REGION_GUARD_LINE = (
-    ': "$${REMOTE_AWS_REGION:?REMOTE_AWS_REGION must be set '
-    '(no default: root.hcl names the state bucket from it)}"'
+    ': "$${REMOTE_AWS_REGION:?REMOTE_AWS_REGION is required and has no default '
+    '(root.hcl names each state bucket from it). Set it with: '
+    'export REMOTE_AWS_REGION=<region>}"'
 )
 
 # The targets that name a region and must therefore expand the guard.

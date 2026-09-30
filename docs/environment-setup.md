@@ -390,9 +390,14 @@ instance's lifecycle: one bucket per instance
 (`tg-state-<instance-name>-<region>-<account-id>-<suffix>`, derived in
 `remote-instances/root.hcl` from the instance's name, the region, the
 account and a committed suffix), holding the instance's state key
-(`<name>/terraform.tfstate`). No destroy target deletes it; after an
-instance is gone, deleting its bucket by hand is a separate, deliberate
-step.
+(`<name>/terraform.tfstate`). No destroy target deletes it. Two targets
+manage the buckets instead: `make bucket-list` (requires
+`REMOTE_AWS_REGION`) shows every bucket the fleet's template matches and
+marks the ones a configured instance owns, and `make bucket-delete
+INSTANCE=<name>` purges every version and deletes one; `ALL=1` deletes
+every bucket in `REMOTE_AWS_REGION` and additionally requires
+`CONFIRM=delete`, because it takes every instance's state history with
+it.
 
 ### Working with several engines at once
 

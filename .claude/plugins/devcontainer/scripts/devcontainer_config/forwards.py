@@ -192,10 +192,16 @@ def child_argv(
 
     The interpreter is this module's own (`sys.executable`), so the daemon
     runs under the same Python the make recipe invoked this module with; the
-    transport is invoked as a module, the same form the make recipes use.
+    transport is invoked as a module, the same form the make recipes use,
+    with unbuffered stdout (`-u`): the readiness poll reads the daemon's
+    log, and a block-buffered "Connected:" announcement would sit in the
+    child's stdout buffer indefinitely -- the plugin's inherited stderr
+    lines would reach the log first, and the poll would time out on a
+    forward that was actually open.
     """
     return (
         python or sys.executable,
+        "-u",
         "-m",
         _TRANSPORT_MODULE,
         _TRANSPORT_COMMAND,

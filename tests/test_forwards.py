@@ -417,7 +417,14 @@ def test_stop_reports_nothing_to_stop_without_a_record(tmp_path: Path) -> None:
     assert "nothing to stop" in message
 
 
-def test_stop_cleans_a_stale_record_without_signalling(tmp_path: Path) -> None:
+def test_stop_signals_a_stale_records_group_to_catch_orphaned_members(tmp_path: Path) -> None:
+    """A dead wrapper does not mean a dead tunnel: the group is signalled anyway.
+
+    The wrapper can die while its session-manager-plugin -- still inside the
+    daemon's process group -- keeps the port listening, so the stop path
+    signals the group best-effort even for a stale record, then verifies the
+    port actually closed before removing anything.
+    """
     _record(tmp_path, "x", pid=999999999, port=51368)
     sent: list[tuple[int, int]] = []
 
@@ -430,7 +437,7 @@ def test_stop_cleans_a_stale_record_without_signalling(tmp_path: Path) -> None:
     )
 
     assert "was not running" in message
-    assert sent == []
+    assert sent == [(999999999, signal.SIGINT)]
     assert forwards.read_record("x") is None
 
 

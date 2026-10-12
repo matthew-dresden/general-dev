@@ -63,7 +63,7 @@ operator (or the named skill) to run, never a run of this skill's own
 | Engine verdict | Invoke `gd-instance-list` | Carried forward as the single `ENGINE` summary line (`## Report shape`), never restated. |
 | Configuration | The `shell.env` credential-shape scan of `## Findings` | Read-only; the remedy names `make creds-init` and a hand edit of `shell.env`. |
 | Secrets | The four hostcreds checks of `## Findings` | Read-only; remedies name `make init`, `make creds-init`, `make push-creds` and `make verify-container`. |
-| Container state | `make status` and `make check` | The two dispatch reads `## Findings`' container-state group is built on; remedies name `make up`, `make build` and `make clean FORCE=1` for the operator. |
+| Container state | `make status` and `make check` | The two dispatch reads `## Findings`' container-state group is built on; remedies name `make up`, `make build` and `make clean FORCE=1` for the operator. When the question spans engines rather than the active one, `make list-containers` is the fleet read `gd-container-verify`'s own map carries. |
 | Drift | The host-against-container hooks comparison; the other three rows report `NOT RUN` | Remedies name `make hooks-install` and `make push-secrets` for whoever owns the repair. |
 
 ## Findings
@@ -181,7 +181,7 @@ local backend: the three drift rows with no owning module yet report
 container-state row below prints `rdc_check`'s own local-branch result
 verbatim, exactly as `## Findings`' container-state group states, never the
 computed "0 commits ahead" only a remote run's `dirty`/`ahead` check ever
-produces (`container.sh:265-270`). The `ENGINE` line is a single summary
+produces (`container.sh:381-386`). The `ENGINE` line is a single summary
 line this skill derives from `gd-instance-list`'s own per-check `##
 Verdict` table; it never reproduces that table's own rows here, since doing
 so a second time is exactly the duplication Section 3 forbids. The line

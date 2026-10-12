@@ -3,10 +3,12 @@
 `make connect-start` opens an engine's forward as a detached daemon
 and returns as soon as the connection is confirmed, instead of holding the
 terminal: this module spawns the transport's `connect` command in a
-new session (its stdout and stderr stream into a per-instance log), waits
+new session (its stdout and stderr stream into a per-instance log), empties
+that log first so it carries only the current attempt's lines, waits
 by polling for the transport's own "Connected:" announcement, which is
 printed only after the docker context was created or updated and answered a
-handshake through the tunnel, and records the daemon's pid, command,
+handshake through the tunnel, verifies the forwarded port actually accepts
+a connection, and records the daemon's pid, command,
 log path and forwarded port in a per-instance JSON record. The record lives
 beside the instance's certificate material (`instances.certs_dir`), so
 `make instance-destroy`'s cleanup removes it with everything else the
@@ -35,11 +37,15 @@ instance.
 Readiness and shutdown are poll-based, never a fixed wait: the caller
 injects the clock and the limits, and the timeouts are configurable through
 `FORWARD_OPEN_TIMEOUT_SECONDS` and `FORWARD_STOP_TIMEOUT_SECONDS` (read in
-exactly one place, through `hostprobe.read_positive_seconds`). Every
+exactly one place, through `hostprobe.read_positive_seconds`). Readiness
+rests on two independent confirmations, either of which alone is enough to
+reject a forward: the "Connected:" marker can only be read from the current
+attempt's own log (every spawn empties the log first), and the recorded
+port must accept a real TCP connection before success is declared. Every
 unexpected answer -- a child that dies before announcing readiness, a port
-that never closes, an unreadable record -- is raised with the log tail or
-the probe's own output, so nothing is hidden and nothing is retried behind
-a failure.
+that never closes or never opens, an unreadable record -- is raised with
+the log tail or the probe's own output, so nothing is hidden and nothing is
+retried behind a failure.
 """
 
 from __future__ import annotations
@@ -104,6 +110,13 @@ STOP_TIMEOUT_ENV_VAR = "FORWARD_STOP_TIMEOUT_SECONDS"
 # for the tests that pin the escalation order.
 SIGKILL_POLL_LIMIT = 10
 
+# The post-marker port verification: after the readiness line is seen, the
+# recorded port must accept a TCP connection before the open declares
+# success -- belt and braces so no stale or premature readiness line can
+# ever produce a false "is open". A few probes at the open cadence bound the
+# wait; a genuine forward answers on the first.
+_PORT_VERIFY_POLL_LIMIT = 6
+
 # How long a single port probe may block before it counts as "cannot
 # answer" rather than listening or closed.
 PORT_PROBE_SECONDS = 0.5
@@ -117,9 +130,10 @@ class ForwardError(RuntimeError):
 
     Raised when a child dies before announcing readiness (the message
     carries the log tail), when a stopped daemon's port refuses to close,
-    when a record is unreadable, or when the instance name or its inputs
-    are invalid. No caller catches this to retry it: every raise is final
-    for the operation that hit it.
+    when the forwarded port never accepts a connection after the readiness
+    line, when a record is unreadable, or when the instance name or its
+    inputs are invalid. No caller catches this to retry it: every raise is
+    final for the operation that hit it.
     """
 
 
@@ -364,7 +378,10 @@ def _default_spawner(argv: Sequence[str], log_file: Path) -> subprocess.Popen[by
     opened: a first-ever forward on a machine has no per-instance state
     directory yet (`~/.docker/certs/<name>/` springs into existence with the
     daemon, not before it), and an append-open without it would end the open
-    with a bare traceback instead of a daemon.
+    with a bare traceback instead of a daemon. The append-open itself is
+    safe only because every spawn goes through `_spawn_until_ready`, which
+    has just emptied the log: the per-attempt semantics live there, in the
+    one place both the open and the refresh path pass through.
     """
     log_file.parent.mkdir(parents=True, exist_ok=True)
     handle = open(log_file, "ab")
@@ -391,6 +408,12 @@ def _poll_open(
     poll_limit: int,
 ) -> None:
     """Wait for the readiness marker, polling the process and the log.
+
+    The log is read whole, which is only sound because `_spawn_until_ready`
+    emptied it before the child started: everything in it was written by
+    this attempt, so the marker can only ever be the current daemon's own
+    announcement, never a previous daemon's line left behind by an
+    append-open.
 
     Raises ForwardError with the log tail if the child exits first or the
     limit is exhausted; in the exhausted case the child is stopped before
@@ -433,6 +456,39 @@ def _stop_child(process: subprocess.Popen[bytes]) -> None:
         process.wait()
 
 
+def _spawn_until_ready(
+    argv: Sequence[str],
+    log_file: Path,
+    *,
+    spawner: Spawner,
+    poll_clock: Callable[[float], None],
+    poll_seconds: float,
+    poll_limit: int,
+) -> subprocess.Popen[bytes]:
+    """Empty the daemon log, spawn the child, and wait for its readiness marker.
+
+    The log is emptied HERE, before the child starts, and this is the one
+    place every spawn passes through: `open_forward` and `refresh_forward`
+    both come here, whatever spawner is injected. A daemon log is
+    per-attempt diagnostics -- the JSON record is the durable state -- so
+    truncating at spawn means a readiness poll can only ever be satisfied
+    by a line the current attempt wrote. Without this, a re-open after a
+    `connect-stop` (which removes the record but leaves the log) found the
+    previous daemon's `Connected:` line still in the appended log and
+    declared the new tunnel open before it existed.
+
+    The child starts only after the truncation, so no line it writes can be
+    lost to the reset.
+    """
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_bytes(b"")
+    process = spawner(argv, log_file)
+    _poll_open(
+        process, log_file, poll_clock=poll_clock, poll_seconds=poll_seconds, poll_limit=poll_limit
+    )
+    return process
+
+
 def instance_from_context_name(root: Path, context: str) -> str:
     """The bare instance name a full docker context name carries.
 
@@ -463,6 +519,49 @@ def _recorded_port(root: Path, instance: str, runner: CommandRunner | None) -> i
         ) from exc
 
 
+def _default_port_probe(port: int) -> bool:
+    """The production port verification: one bounded TCP connect to 127.0.0.1:`port`.
+
+    Delegates to `transport.tcp_ready_probe`, the same probe the transport's
+    own wait_ready applies, rather than a second connect implementation.
+    Injected as a parameter on the open and refresh paths, so the unit suite
+    substitutes a fake instead of patching this module.
+    """
+    return transport.tcp_ready_probe(port)(PORT_PROBE_SECONDS)
+
+
+def _verify_port_ready(
+    port: int,
+    process: subprocess.Popen[bytes],
+    log_file: Path,
+    *,
+    probe: Callable[[int], bool],
+    poll_clock: Callable[[float], None],
+    poll_seconds: float,
+) -> None:
+    """Confirm `port` accepts a connection before the open declares success.
+
+    Belt and braces behind the readiness marker: the marker is read from
+    this attempt's own log, but a transport that announced early, or a
+    tunnel that dropped between announcement and use, would still leave a
+    port that refuses connections -- the exact state the CI run hit when a
+    stale line declared a forward open that was still establishing. A few
+    probes at the open cadence bound the wait; on exhaustion the child is
+    stopped (the same no-orphan rule the exhausted poll applies) and the
+    failure names the port.
+    """
+    for _ in range(_PORT_VERIFY_POLL_LIMIT):
+        if probe(port):
+            return
+        poll_clock(poll_seconds)
+    _stop_child(process)
+    raise ForwardError(
+        f"the forward daemon announced readiness, but the forwarded port {port} never "
+        f"accepted a connection within {_PORT_VERIFY_POLL_LIMIT} probes at {poll_seconds}s "
+        f"intervals; the daemon was stopped. Its log, {log_file}:\n{_log_tail(log_file)}"
+    )
+
+
 def open_forward(
     instance_id: str,
     context: str,
@@ -477,15 +576,20 @@ def open_forward(
     poll_clock: Callable[[float], None] = time_sleep,
     poll_seconds: float = OPEN_POLL_SECONDS,
     poll_limit: int = _OPEN_POLL_LIMIT_DEFAULT,
+    port_probe: Callable[[int], bool] | None = None,
 ) -> str:
     """Open one forward daemon and confirm it before returning.
 
     Spawns the transport's connect command detached (the ssm transport for
     the default kind, the ssh transport for an SSH engine), polls for its
     "Connected:" announcement (printed only after the docker context
-    answered a handshake through the tunnel), records the daemon -- pid,
-    full command, log, and the forwarded port the context now carries --
-    and returns a message naming what is open. Idempotent: a forward whose
+    answered a handshake through the tunnel), verifies the forwarded port
+    the context now carries actually accepts a connection, records the
+    daemon -- pid, full command, log, and that port -- and returns a message
+    naming what is open. The daemon log is emptied before the child starts,
+    so the readiness poll can only ever see this attempt's own lines: a
+    previous daemon's marker, left in the log by a stop that does not touch
+    the log, can never satisfy a new open. Idempotent: a forward whose
     daemon is alive and whose port answers is left untouched and reported;
     a stale record (daemon dead) is replaced by the new daemon and noted.
 
@@ -503,8 +607,10 @@ def open_forward(
         ForwardError: the docker context name carries no valid instance
             name, the engine values are missing or invalid, the child died
             before announcing readiness, readiness was not announced within
-            the limit, or the forwarded port could not be read from the
-            docker context afterwards.
+            the limit, the forwarded port could not be read from the
+            docker context, or the port never accepted a connection (the
+            daemon is stopped first). A failed open writes no record: the
+            previous state, stale or absent, is left as it was.
     """
     instance = instance_from_context_name(root, context)
     _validated(instance)
@@ -538,12 +644,20 @@ def open_forward(
         identifier = instance_id
         argv = list(child_argv(instance_id, context, profile, region))
     spawn = spawner if spawner is not None else _default_spawner
+    verify = port_probe if port_probe is not None else _default_port_probe
     log_file = log_path(instance)
-    process = spawn(argv, log_file)
-    _poll_open(
-        process, log_file, poll_clock=poll_clock, poll_seconds=poll_seconds, poll_limit=poll_limit
+    process = _spawn_until_ready(
+        argv,
+        log_file,
+        spawner=spawn,
+        poll_clock=poll_clock,
+        poll_seconds=poll_seconds,
+        poll_limit=poll_limit,
     )
     port = _recorded_port(root, instance, runner)
+    _verify_port_ready(
+        port, process, log_file, probe=verify, poll_clock=poll_clock, poll_seconds=poll_seconds
+    )
     record = ForwardRecord(
         pid=process.pid,
         instance=instance,
@@ -716,13 +830,17 @@ def refresh_forward(
     poll_clock: Callable[[float], None] = time_sleep,
     poll_seconds: float = OPEN_POLL_SECONDS,
     open_poll_limit: int = _OPEN_POLL_LIMIT_DEFAULT,
+    port_probe: Callable[[int], bool] | None = None,
 ) -> str:
     """Stop and re-open one forward from its own recorded command.
 
     An expired SSO session or a dropped tunnel is fixed by re-running the
     exact command the daemon was opened with -- stored in the record, so
     refresh never re-resolves ids, contexts, profiles or regions and can
-    never re-open a different tunnel than the one that expired.
+    never re-open a different tunnel than the one that expired. The re-open
+    passes through the same spawn, log reset, readiness poll and port
+    verification `open_forward` uses, so the fresh daemon is confirmed by
+    the same two independent answers before the record is rewritten.
 
     Raises:
         ForwardError: there is no record to refresh, or the stop or the
@@ -738,15 +856,19 @@ def refresh_forward(
     argv = list(record.argv)
     log_file = log_path(instance)
     spawn = spawner if spawner is not None else _default_spawner
-    process = spawn(argv, log_file)
-    _poll_open(
-        process,
+    verify = port_probe if port_probe is not None else _default_port_probe
+    process = _spawn_until_ready(
+        argv,
         log_file,
+        spawner=spawn,
         poll_clock=poll_clock,
         poll_seconds=poll_seconds,
         poll_limit=open_poll_limit,
     )
     port = _recorded_port(root, instance, runner)
+    _verify_port_ready(
+        port, process, log_file, probe=verify, poll_clock=poll_clock, poll_seconds=poll_seconds
+    )
     fresh = dataclasses.replace(record, pid=process.pid, port=port, started_at=_now())
     _write_record(fresh)
     return (

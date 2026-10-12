@@ -22,7 +22,7 @@ status until a developer promotes it deliberately by deleting that line.
 `remote-instances/<name>/engine.json` (the manifest
 `devcontainer_config.instances.validate_engine_values` validates, so the
 write side can never produce a manifest the read side refuses), appends the
-same `.gitignore` entry, and runs no aws/docker command at all -- an SSH
+same `.gitignore` entry, and runs no aws/docker command at all. An SSH
 engine has no AMI to resolve, no CIDRs to allocate and no deployment to
 apply.
 
@@ -54,14 +54,14 @@ is a Terragrunt/backend concern, never an instance-lifecycle one.
 anything that is not an ssh-kind instance, refuses while a project container
 still exists on the engine's docker context, and only then stops the
 engine's forward, removes its docker context (an absent one is the desired
-state, never a failure), deletes its certificate-material directory -- the
-forward record and the log live there, so they die with it -- and removes
+state, never a failure), deletes its certificate-material directory (the
+forward record and the log live there, so they die with it), and removes
 `remote-instances/<name>`, the registration itself. Like `cleanup` it
 attempts every removal even after an earlier one failed and raises the
 failures together at the end.
 
 `state` is kind-aware: an EC2 instance answers the probes it always answered,
-while an SSH engine -- no AWS, no Parameter Store, no certificates behind it
+while an SSH engine (no AWS, no Parameter Store, no certificates behind it
 -- skips the EC2 describe and the describe-parameters probe entirely and
 instead answers one reachability probe, a plain `ssh ... docker version`
 through the engine's own manifest values. An ssh row's `ec2_state` and
@@ -716,9 +716,9 @@ def scaffold_engine(
     """Write `remote-instances/<name>/engine.json` for a new SSH engine.
 
     The SSH engine kind's counterpart of `scaffold`, refusing everything
-    `scaffold` refuses -- a name that fails `instances.validate_name`, a
+    `scaffold` refuses: a name that fails `instances.validate_name`, a
     docker context name that would exceed `DOCKER_CONTEXT_NAME_LIMIT`, a
-    directory that already exists -- plus anything
+    directory that already exists, plus anything
     `instances.validate_engine_values` refuses, so the manifest written is
     one the read side accepts verbatim. The defaults for `port` and
     `docker_addr` are this module's sourcing of `instances`' constants, so
@@ -787,7 +787,7 @@ class InstanceState:
 
     A `None` probe field means the probe could not answer (its reason is in
     `lookup_error`) or does not apply (no recorded id, no certificate file,
-    or -- for the EC2-only probes on an SSH engine -- no EC2 surface behind
+    or, for the EC2-only probes on an SSH engine, no EC2 surface behind
     the instance at all). `lookup_error` is a sanitized one-line reason for
     the first probe that failed, or None when every probe answered. `state`
     never raises for an aws/docker failure: a listing of many instances
@@ -889,8 +889,8 @@ def _engine_reach_argv(values: dict[str, object], timeout_seconds: float) -> lis
     budget (`:g` formatting so the default renders as `5`, a form ssh
     accepts), and the remote command is a docker version call: the probe
     answers for the docker path an engine exists to serve, not merely for an
-    ssh login. The values come from `instances.engine_manifest` -- already
-    validated -- so no unvalidated value reaches an ssh argument vector.
+    ssh login. The values come from `instances.engine_manifest`, already
+    validated, so no unvalidated value reaches an ssh argument vector.
     """
     return [
         SSH_EXECUTABLE,
@@ -912,7 +912,7 @@ def _engine_reachable(runner: Runner, values: dict[str, object]) -> tuple[bool |
     """The SSH engine's reachability answer, and why the probe could not run.
 
     Returns `(True, None)` when the engine's docker answered, `(False, None)`
-    when ssh ran and failed -- an unreachable engine is an answer, not a
+    when ssh ran and failed; an unreachable engine is an answer, not a
     probe error, and a listing reports it without turning the exit code --
     and `(None, reason)` when the probe could not run at all: ssh missing
     from PATH, or a timeout value the configuration reader refuses. The
@@ -959,8 +959,8 @@ def _state_kind(root: Path, name: str, record: Callable[[object], None]) -> str:
     """The instance's engine kind, folding a corrupt manifest into the probe record.
 
     A manifest that exists but cannot be read or parsed is a probe failure,
-    not a kind flip: the row keeps the ssh kind its manifest declares -- so
-    no EC2 probe ever runs against an engine that has no EC2 surface -- and
+    not a kind flip: the row keeps the ssh kind its manifest declares, so
+    no EC2 probe ever runs against an engine that has no EC2 surface, and
     carries the reason in `lookup_error` through `record`.
     """
     try:
@@ -1350,8 +1350,8 @@ def _remove_docker_context(
 
     A nonzero `docker context inspect` counts as "the context is absent,
     nothing to remove" only when docker's own answer says so (`no such
-    context`, or `context <name> not found`); any other failure -- a stopped
-    or unreachable daemon, say -- is recorded as a failed operation, so a
+    context`, or `context <name> not found`); any other failure (a stopped
+    or unreachable daemon, say) is recorded as a failed operation, so a
     teardown never reports success while the context survives. Shared by
     `cleanup` and `engine_remove`, which refuse contexts in different ways
     but must remove the one they do remove identically.
@@ -1385,7 +1385,7 @@ def _remove_certificate_directory(name: str, *, failures: list[str], messages: l
     """Delete the instance's certificate-material directory, tolerating absence.
 
     `instances.certs_dir(name)` in full: the client certificate, the recorded
-    `instance-id` file and -- for an SSH engine that ever opened a forward --
+    `instance-id` file and, for an SSH engine that ever opened a forward,
     the forward record and its log, which live in the same directory. Shared
     by `cleanup` and `engine_remove` for the same reason the context removal
     is.
@@ -1418,7 +1418,7 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
 
     A nonzero `docker context inspect` counts as "the context is absent,
     nothing to remove" only when docker's own answer says so (`no such
-    context`, or `context <name> not found`); any other failure -- a stopped
+    context`, or `context <name> not found`); any other failure (a stopped
     or unreachable daemon, say -- is recorded as a failed operation, so
     cleanup never reports success while the context survives.
 

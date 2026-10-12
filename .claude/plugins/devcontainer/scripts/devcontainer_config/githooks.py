@@ -82,7 +82,7 @@ _HOOK_TARGETS: dict[str, str] = {
 # Named once and reused by both `hook_body` (to write it) and
 # `install_hooks` (to recognize it on an existing file), so the two never
 # drift into checking for different text.
-_AUTHOR_MARKER = "# Written by devcontainer_config.githooks -- do not hand-edit."
+_AUTHOR_MARKER = "# Written by devcontainer_config.githooks; do not hand-edit."
 
 _HOOK_TEMPLATE = (
     "#!/usr/bin/env sh\n"

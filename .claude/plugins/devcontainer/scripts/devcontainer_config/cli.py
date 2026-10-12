@@ -748,7 +748,7 @@ _ENGINE_INIT_DOCKER_ADDR_HELP = (
     f"(default: {instances.DEFAULT_ENGINE_DOCKER_ADDR}). Linux endpoints "
     "usually serve an absolute Unix socket path; a Windows endpoint needs a "
     "tcp destination, because Windows OpenSSH cannot forward to named pipes "
-    "or Unix sockets -- enable Docker Desktop's 'Expose daemon on "
+    "or Unix sockets: enable Docker Desktop's 'Expose daemon on "
     "tcp://localhost:2375 without TLS' and pass tcp://localhost:2375."
 )
 
@@ -811,8 +811,8 @@ def _instance_row_values(row: instance_ops.InstanceState, root: Path) -> tuple[s
     """One table row for `row`, every unanswerable probe rendered as a dash.
 
     The STATE column is kind-aware: an SSH engine row carries the
-    reachability probe's answer (`ok`/`unreachable`) -- the one liveness
-    question its kind has -- while an EC2 row carries the EC2 power state.
+    reachability probe's answer (`ok`/`unreachable`), the one liveness
+    question its kind has, while an EC2 row carries the EC2 power state.
     The EC2-only probes an ssh engine never ran (`ec2_state`,
     `params_present`) stay None there, which renders as the same dash an
     unanswerable probe gets.
@@ -895,7 +895,7 @@ def _run_engine_init(args: argparse.Namespace) -> int:
     The engine-kind counterpart of `_run_instance_init`, over
     `instance_ops.scaffold_engine`: field-level refusals reach this handler
     only as `ScaffoldError`s (the engine wraps them), which `main` converts
-    into exit 1 -- there is no failure this handler reports as anything but
+    into exit 1; there is no failure this handler reports as anything but
     that exception.
     """
     root = repo.find_root(Path.cwd())
@@ -1071,7 +1071,7 @@ def _run_engine_remove(args: argparse.Namespace) -> int:
     The engine-kind counterpart of `_run_instance_cleanup`, over
     `instance_ops.engine_remove`. `stop_forward` is passed explicitly --
     read from the `forwards` module at call time, the same seam discipline
-    as the runner -- because stopping a daemon means signalling a process
+    as the runner, because stopping a daemon means signalling a process
     group, which no runner-shaped fake can stand in for. Every refusal and
     every aggregated removal failure reaches this handler only as an
     `EngineRemoveError`, which `main` converts into exit 1.
@@ -1157,7 +1157,7 @@ def _print_address_block(root: Path, name: str) -> None:
     The block is kind-specific, keyed on `instances.read_kind`: an EC2
     instance prints exactly the six rows it always printed (Terragrunt
     directory, state key, docker context, parameter prefix, certificate
-    directory -- every line the existing consumers pin), while an SSH
+    directory; every line the existing consumers pin), while an SSH
     engine prints `ENGINE_`-prefixed lines from its manifest instead of the
     Terragrunt/state/Parameter Store rows that do not exist for it. The
     `ENGINE_` prefix is what lets the shell export loop consume the block

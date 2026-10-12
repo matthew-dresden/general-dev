@@ -255,7 +255,7 @@ class HostCredsValueDetector:
     record stays a pure comparison, exactly like the field-comparing
     detector above it.
 
-    Returns the credential's name plus the word "value" -- never any part
+    Returns the credential's name plus the word "value", never any part
     of the value itself, not even a prefix -- so a finding names which
     credential leaked while a redacted render cannot disclose what it
     leaked. The name is a label, not a secret, but it travels the same
@@ -792,7 +792,7 @@ def _committed_text(root: Path, path: str, object_name: str) -> str | None:
     --quiet <object_name>` first, tolerating only that subcommand's own exit code
     1 ("this object does not resolve", no stderr printed), and `git show
     <object_name>` second, only once the probe confirms the object exists. This
-    tells "`path` does not resolve at `object_name`" -- a legitimate, empty-result
+    tells "`path` does not resolve at `object_name`" (a legitimate, empty-result
     outcome for an unborn branch or a template that was never added there --
     apart from every other git failure (an unreadable repository, a corrupt
     object, `root` not being a work tree at all), which still raises
@@ -1135,7 +1135,7 @@ def _grouped_findings(
 
     Both `run_staged_scan` and `scan_range` reduce to the same thing --
     "for each path, scan its numbered lines and pair every finding with
-    that path" -- and differ only in how they collect `lines_by_path`
+    that path"), and differ only in how they collect `lines_by_path`
     (`staged_blob` per staged path, versus `added_lines` grouped per commit).
     This is that shared reduction, written once so the two modes cannot
     each grow their own slightly different version of it.

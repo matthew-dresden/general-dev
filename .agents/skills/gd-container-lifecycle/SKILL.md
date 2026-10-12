@@ -56,31 +56,31 @@ behind is exactly the case where the exit code and the truth disagree.
 ## Inventory
 
 Before asking anything, this skill reads state through the Section 3.3
-primitives, reusing `make status` (`rdc_status`, `container.sh:184-219`) as
+primitives, reusing `make status` (`rdc_status`, `container.sh:205-247`) as
 it stands rather than re-deriving the container id, its image or its
 volumes a second way:
 
 1. **Does a container exist at all?** `make status` reports "Container
    none, create with Dev Containers: Clone Repository in Container
-   Volume..." (`container.sh:204-206`) exactly when `rdc_container_ids`
-   (`container.sh:119-121`) finds none. When it does, this skill states
+   Volume..." (`container.sh:226-228`) exactly when `rdc_container_ids`
+   (`container.sh:140-142`) finds none. When it does, this skill states
    there is nothing to destroy and stops -- the same outcome a real
    `make clean` invocation reaches on its own no-container branch
-   (`rdc_clean`, `container.sh:813-822`), which also removes an orphaned
+   (`rdc_clean`, `container.sh:1214-1228`), which also removes an orphaned
    workspace volume named by `rdc_workspace_volume`
-   (`container.sh:318-320`) if one survived a previous run, so this skill
+   (`container.sh:1220-1223`) if one survived a previous run, so this skill
    names that same possibility rather than only the container's own
    absence. When more than one container carries the project's label,
-   `make status` prints one block per id it finds (`container.sh:209-217`),
+   `make status` prints one block per id it finds (`container.sh:230-240`),
    and this skill cannot name a single container, image and volume set for
    `## Confirmation` until `CONTAINER=<name>` disambiguates which one --
-   the same requirement `rdc_require_container` (`container.sh:123-158`)
+   the same requirement `rdc_require_container` (`container.sh:144-179`)
    already enforces for `rdc_clean` itself, reused here rather than a
    second resolution scheme (Section 3.3's own `CONTAINER=` support).
 2. **What will be destroyed.** Once a container exists, `make status`'s own
    `Container`, `Image` and `Volumes` lines are this half of the inventory
    as-is: the `Volumes` line is already the *private* volumes alone, since
-   `rdc_project_volumes` (`container.sh:168-182`), the function `rdc_status`
+   `rdc_project_volumes` (`container.sh:189-203`), the function `rdc_status`
    calls to build it, already excludes every name in `SHARED_VOLUMES`
    (`container.sh:13`, default `minikube-config vscode`, overridable, never
    hardcoded here) and every mount under `VSCODE_SERVER_DIRNAME`
@@ -98,12 +98,12 @@ volumes a second way:
    Shared volumes and the base image are kept." (`Makefile:72`).
 4. **Guard pre-flight, before confirmation is ever asked.** With a
    container confirmed present, this skill also runs `make check`
-   (`rdc_check`, `container.sh:265-297`) as part of this same inventory
+   (`rdc_check`, `container.sh:372-400`) as part of this same inventory
    read, the identical reuse `gd-env-doctor`'s own "Container state"
    finding already makes of this primitive, rather than waiting for
    `rdc_clean`'s own internal call to discover the same guard later. On a
    local backend this always reports "local backend, the container shares
-   this working tree, nothing to check" (`container.sh:267-269`) and the
+   this working tree, nothing to check" (`container.sh:403-405`) and the
    inventory proceeds straight to confirmation; on a remote backend a
    non-empty result here is `## Guards`' first row failing, reported and
    stopped on before confirmation is ever asked, since there is nothing
@@ -148,28 +148,28 @@ unpushed-work and uncommitted-config guards." (`Makefile`'s `OPTIONS`
 section, spec Section 14.1). This skill sets `FORCE` on neither guard,
 ever; every remedy below is stated to the operator, who runs it themselves.
 Every "local backend"/"remote backend" split below reads the identical
-`rdc_backend` result (`container.sh:99-105`, spec Section 3.3) `rdc_check`'s
-own `[ "$(rdc_backend)" != "remote" ]` (`container.sh:267`) and
+`rdc_backend` result (`container.sh:108-126`, spec Section 3.3) `rdc_check`'s
+own `[ "$(rdc_backend)" != "remote" ]` (`container.sh:403`) and
 `rdc_build_prereqs`'s own `[ "$(rdc_backend)" = "remote" ]`
-(`container.sh:328`) already branch on; this skill resolves it no
+(`container.sh:1164`) already branch on; this skill resolves it no
 differently than the target it is about to run.
 
 | Guard | Protects | Satisfied properly by | What `FORCE=1` discards |
 |---|---|---|---|
-| Unpushed commits (checked on the host and inside the container's own checkout) and uncommitted changes (checked inside the container's own checkout) | Commits or changes made from inside the container (an editor session, or a terminal opened with `make exec`) that exist nowhere else, checked by `rdc_check` (`container.sh:265-297`) whenever `rdc_clean` runs it (`container.sh:826-830`) -- for both `make clean` on its own and for `make rebuild`'s own leading call to `rdc_clean` (`container.sh:851-858`). Meaningful on the remote backend only: on local the container bind-mounts the host's working tree directly rather than holding an independent clone, so `rdc_check` reports "local backend, the container shares this working tree, nothing to check" and returns before this guard has anything of its own to check (`container.sh:267-269`). A second, host-side instance of the same underlying concern -- commits on this machine's own checkout that are not on `origin/<branch>` -- is checked separately by `rdc_build_prereqs` (`container.sh:338-350`) before `make rebuild`'s `build` half runs; `make clean` alone never reaches it, since `rdc_clean` never calls `rdc_build_prereqs`. | Push from inside the container: `docker exec -u ${CONTAINER_USER} <container-name> git -C ${CONTAINER_WORKSPACE} push` -- the exact command `rdc_check`'s own remedy states (`container.sh:290-293`). For the host-side instance, push this machine's own branch: `git push origin <branch>` (`container.sh:346-347`). | `rdc_clean` never even calls `rdc_check` under `FORCE=1` (`container.sh:826-829`), so whichever `rdc_check` would have listed is discarded unseen: the unpushed commits (`ahead`, `container.sh:279`), the uncommitted changes (`dirty`, `container.sh:278`), or both, exactly as `rdc_check`'s own combined `rd_fail` names them (`container.sh:284-296`). The host-side instance is likewise skipped entirely under `FORCE=1` (`container.sh:340`), discarding the same guarantee that every commit on this machine reached origin before the container is rebuilt from origin. |
-| Uncommitted `.devcontainer` configuration | The guarantee that the container's own configuration matches what git records, checked by `rdc_build_prereqs` (`container.sh:352-362`), which `rdc_build` calls (`container.sh:789`) and which `rdc_rebuild` also calls directly, before `rdc_clean` ever runs (`container.sh:851-852`) -- the same order `make rebuild`'s own `make help` line already promises: "Prerequisites are checked before anything is destroyed" (`Makefile:69`). Remote backend only (`container.sh:328`); never reached by `make clean` alone, since `rdc_clean` never calls `rdc_build_prereqs`. The container is cloned fresh from origin at build time, but its `Dockerfile`/`devcontainer.json`/feature configuration is read from the local `.devcontainer` directory on the operator's own machine at that same moment (`container.sh:352-353`); an edit there that is not yet committed is baked into the rebuilt container while nothing on origin ever reproduces it. | Commit and push the `.devcontainer` change before rebuilding -- `rdc_build_prereqs`'s own stated remedy (`container.sh:358-361`). | The check is skipped entirely under `FORCE=1` (`container.sh:354`), so the rebuilt container is built from `.devcontainer` content that exists only on this operator's own machine, with nothing in git ever able to reproduce it. |
+| Unpushed commits (checked on the host and inside the container's own checkout) and uncommitted changes (checked inside the container's own checkout) | Commits or changes made from inside the container (an editor session, or a terminal opened with `make exec`) that exist nowhere else, checked by `rdc_check` (`container.sh:372-400`) whenever `rdc_clean` runs it (`container.sh:1184-1188`) -- for both `make clean` on its own and for `make rebuild`'s own leading call to `rdc_clean` (`container.sh:1235`). Meaningful on the remote backend only: on local the container bind-mounts the host's working tree directly rather than holding an independent clone, so `rdc_check` reports "local backend, the container shares this working tree, nothing to check" and returns before this guard has anything of its own to check (`container.sh:403-405`). A second, host-side instance of the same underlying concern -- commits on this machine's own checkout that are not on `origin/<branch>` -- is checked separately by `rdc_build_prereqs` (`container.sh:450-461`) before `make rebuild`'s `build` half runs; `make clean` alone never reaches it, since `rdc_clean` never calls `rdc_build_prereqs`. | Push from inside the container: `docker exec -u ${CONTAINER_USER} <container-name> git -C ${CONTAINER_WORKSPACE} push` -- the exact command `rdc_check`'s own remedy states (`container.sh:394-397`). For the host-side instance, push this machine's own branch: `git push origin <branch>` (`container.sh:460-461`). | `rdc_clean` never even calls `rdc_check` under `FORCE=1` (`container.sh:1184-1189`), so whichever `rdc_check` would have listed is discarded unseen: the unpushed commits (`ahead`, `container.sh:382`), the uncommitted changes (`dirty`, `container.sh:381`), or both, exactly as `rdc_check`'s own combined `rd_fail` names them (`container.sh:392-399`). The host-side instance is likewise skipped entirely under `FORCE=1` (`container.sh:453`), discarding the same guarantee that every commit on this machine reached origin before the container is rebuilt from origin. |
+| Uncommitted `.devcontainer` configuration | The guarantee that the container's own configuration matches what git records, checked by `rdc_build_prereqs` (`container.sh:465-475`), which `rdc_build` calls (`container.sh:1149`) and which `rdc_rebuild` also calls directly, before `rdc_clean` ever runs (`container.sh:1231`) -- the same order `make rebuild`'s own `make help` line already promises: "Prerequisites are checked before anything is destroyed" (`Makefile:69`). Remote backend only (`container.sh:1164`); never reached by `make clean` alone, since `rdc_clean` never calls `rdc_build_prereqs`. The container is cloned fresh from origin at build time, but its `Dockerfile`/`devcontainer.json`/feature configuration is read from the local `.devcontainer` directory on the operator's own machine at that same moment (`container.sh:466-467`); an edit there that is not yet committed is baked into the rebuilt container while nothing on origin ever reproduces it. | Commit and push the `.devcontainer` change before rebuilding -- `rdc_build_prereqs`'s own stated remedy (`container.sh:468-474`). | The check is skipped entirely under `FORCE=1` (`container.sh:466`), so the rebuilt container is built from `.devcontainer` content that exists only on this operator's own machine, with nothing in git ever able to reproduce it. |
 
 For `make rebuild`, this skill pre-flights the second row in `## Inventory`
 step 4 by invoking `make build` against the already-existing container
 before ever asking for confirmation: `rdc_build` runs `rdc_build_prereqs`
-first and its own already-exists refusal second (`container.sh:788-798`),
+first and its own already-exists refusal second (`container.sh:1150-1159`),
 so on an existing container this call either surfaces the same guard
 `make rebuild` would have hit, or refuses harmlessly with `rdc_build`'s own
-"already exists on this engine" message (`container.sh:792-798`) once the
+"already exists on this engine" message (`container.sh:1153-1159`) once the
 guard passes -- never building a second container and never destroying
 anything either way. The same `make build` call can also surface a missing
 prerequisite unrelated to either guard (`rd_require_cmd`,
-`container.sh:323-326`: the devcontainer CLI, git, jq or python3 absent);
+`container.sh:434-438`: the devcontainer CLI, git, jq or python3 absent);
 this skill reports that condition the way Section 4.1.4's own table already
 does for "Missing prerequisite," never mistaking it for one of the two
 guards above.
@@ -204,8 +204,8 @@ After `make clean` or `make rebuild` runs, this skill re-reads state with
 the same primitives `## Inventory` used and reports success only from that
 fresh reading, never from `rdc_clean`'s or `rdc_build`'s own exit code.
 `rdc_clean`'s own trailing `rd_ok "torn down, shared volumes (...) ... were
-kept"` (`container.sh:848`) is printed once every removal call above it
-(`container.sh:836-847`: `rd_docker rm -f`, `rd_docker volume rm`,
+kept"` (`container.sh:1212`) is printed once every removal call above it
+(`container.sh:1196-1210`: `rd_docker rm -f`, `rd_docker volume rm`,
 `rd_docker rmi`) itself returns zero; what a zero exit there cannot rule out
 is exactly Section 4.2.2's own condition -- a docker call that exits zero
 while the resource it targeted is still reachable a moment later (a stale
@@ -219,7 +219,7 @@ itself claims.
 - **After `make clean`:** the fresh `make status` must show no container
   for the project, and, when `CONTAINER` was unset, no orphaned workspace
   volume either (mirroring `rdc_clean`'s own orphan-volume branch,
-  `container.sh:813-822`). The survived half is confirmed by that same
+  `container.sh:1214-1228`). The survived half is confirmed by that same
   fresh read still naming the `SHARED_VOLUMES` volumes; the base image
   needs no separate check, since nothing in `## Guards` or `rdc_clean` ever
   removes a cached layer, only the one image tag the destroyed container
@@ -227,7 +227,7 @@ itself claims.
 - **After `make rebuild`:** the fresh `make status` must show a new
   container, built from the same image and configuration `## Inventory`
   read before this run started. `rdc_build`'s own trailing `rdc_status`
-  call (`container.sh:806-808`) already prints this, but this skill
+  call (`container.sh:1172-1174`) already prints this, but this skill
   performs its own read anyway rather than relying on that call, for the
   identical reason stated above.
 - **When the fresh read disagrees** -- an artifact `## Inventory` named as
@@ -245,7 +245,7 @@ itself claims.
 |---|---|
 | A precondition check fails | Both rows in `## Guards` are this skill's own precondition checks. The unpushed-work row is pre-flighted during `## Inventory` before confirmation is ever asked, for both operations; the uncommitted-config row is pre-flighted during `## Inventory` too, but only when the requested operation is `rebuild`, using the `make build` technique `## Guards` states. On either guard's failure at any point (pre-flight or the target's own later, identical check): stop, list the commits or the `.devcontainer` diff, name the exact remedy, state exactly what `FORCE=1` would discard, and never set `FORCE` on the operator's behalf. No confirmation is asked while a guard is unresolved, and `## Verification and report` never runs. |
 | An action the skill took did not verify | After `make clean` or `make rebuild` runs, this skill re-reads state (`## Verification and report`) and reports success only from that fresh reading. When the fresh read finds an inventoried artifact still present, this skill reports the artifact that survived and the exact command that removes it, and does not report the teardown as complete -- never retried silently a second time. |
-| A step needs the operator (SSO, `sudo`, a key) | Every dispatch case this skill uses (`check`, `build`, `clean`, `rebuild`) is itself gated on `rdc_require_docker` (`container.sh:107-117`, invoked from the dispatch `case` at `container.sh:874-881`) before running; an unreachable engine there reports the same diagnosis `rd_engine_diagnosis` produces (Section 3.1), and this skill states it unchanged -- an operator action (start the engine), waited on, then re-verified with a fresh `make status` before this skill's own inventory proceeds, never assumed to have succeeded. A remote `rebuild`'s own `rdc_ensure_secrets_current` step (`container.sh:365-401`) needs a valid AWS credential to publish `shell.env`; a failure there is reported and waited on the same way (`aws sso login`), before `rdc_clean` or `rdc_build` ever run. Within `## Guards` itself, the operator action this row names is pushing from inside the container, pushing this machine's own branch, or committing and pushing `.devcontainer` -- each stated exactly, waited on, and never assumed to have succeeded; the operator resolves it and re-invokes this skill for a fresh inventory and pre-flight rather than this skill polling or retrying on its own. |
+| A step needs the operator (SSO, `sudo`, a key) | Every dispatch case this skill uses (`check`, `build`, `clean`, `rebuild`) is itself gated on `rdc_require_docker` (`container.sh:128-138`, invoked from the dispatch `case` at `container.sh:1304-1319`) before running; an unreachable engine there reports the same diagnosis `rd_engine_diagnosis` produces (Section 3.1), and this skill states it unchanged -- an operator action (start the engine), waited on, then re-verified with a fresh `make status` before this skill's own inventory proceeds, never assumed to have succeeded. A remote `rebuild`'s own `rdc_ensure_secrets_current` step (`container.sh:365-401`) needs a valid AWS credential to publish `shell.env`; a failure there is reported and waited on the same way (`aws sso login`), before `rdc_clean` or `rdc_build` ever run. Within `## Guards` itself, the operator action this row names is pushing from inside the container, pushing this machine's own branch, or committing and pushing `.devcontainer` -- each stated exactly, waited on, and never assumed to have succeeded; the operator resolves it and re-invokes this skill for a fresh inventory and pre-flight rather than this skill polling or retrying on its own. |
 | A gate is reached (Section 4.4) | This skill reaches no Section 4.4 gate: it creates and destroys no AWS resource and runs no `terragrunt apply` or `terragrunt destroy`. GATE-DESTROY governs instance destruction, which `## Scope` places entirely outside this skill; a request meaning that instead is told the boundary and asked which was meant, rather than this skill silently proceeding at the smaller scope it can actually reach. |
 | An answer fails validation | The confirmation is the one thing this skill ever asks (Section 4.2's own roster row: "Asks: Confirmation, always"). Anything other than an explicit, unambiguous affirmative -- silence, an empty answer, an ambiguous one -- is treated as a decline, never as consent (`## Confirmation`). This is also this document's own Error Handling Contract row for a declined or ambiguous confirmation, and it is reported the same way the row below states. |
 | The operator aborts | Whether by an explicit decline, an unclear answer, or aborting mid-interaction before a decision is reached, this skill runs neither `make clean` nor `make rebuild`: it reports that nothing was destroyed, and the inventory already read in `## Inventory` remains the current, unchanged state of the machine -- verified against a fresh `make status` read matching the one taken before confirmation was asked. |

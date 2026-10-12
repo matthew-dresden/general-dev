@@ -55,9 +55,9 @@ from dataclasses import dataclass
 from typing import Any
 
 # spec Section 7.3: "DOCKER_HANDSHAKE_TIMEOUT | 30 | Seconds to await the API".
-# The only wait in this module -- whether the docker daemon behind the active
+# The only wait in this module, whether the docker daemon behind the active
 # context answers a version call (spec Section 7.2's own example of a
-# readiness condition) -- is bounded by this variable, read fresh on every
+# readiness condition), is bounded by this variable, read fresh on every
 # probe rather than cached at import time, so a caller (or a test) that sets
 # it before probing observes its own value. Public (not underscore-prefixed)
 # because `devcontainer_config.transport.handshake` (E6-F2-S1-T2) reads the
@@ -271,7 +271,7 @@ class _ToolSpec:
 # tool (`.devcontainer/remote-docker/container.sh`'s jq requirement already
 # lists "'brew install jq' or 'apt-get install jq'"). uv's second command,
 # `curl -LsSf https://astral.sh/uv/install.sh | sh`, is Astral's own
-# standalone installer script for uv -- NOT a repo citation: this repository
+# standalone installer script for uv, NOT a repo citation: this repository
 # documents only the macOS `brew install uv` step (Makefile PREREQUISITES
 # block); the devcontainer itself installs uv from the `astral-sh/uv`
 # release tarball (`docs/devcontainer.md`), and CI installs it via the
@@ -282,8 +282,8 @@ class _ToolSpec:
 # value points at docker's own official install page instead of a repo
 # citation; that URL is shared with, and never drifts from,
 # `_DOCKER_INSTALL_URL`, which every docker-absent remedy in this module
-# also reads from. git is the same story for a command -- README.md:71 names
-# it a laptop prerequisite with no command either -- but this repository
+# also reads from. git is the same story for a command: README.md:71 names
+# it a laptop prerequisite with no command either, but this repository
 # does document where it usually comes from:
 # `docs/environment-files.md:157` lists git under "Xcode command line
 # tools | usually preinstalled", not a command an operator runs by hand, so

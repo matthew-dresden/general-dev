@@ -61,7 +61,7 @@ export PATH="${DEVCONTAINER_EXTRA_PATH}:${USER_BIN}:${PATH}"
 # The hostcreds credential-startup block, rendered by devcontainer_config
 # rather than hand-written here (the same render-once-in-Python rule the
 # hooks and every other generated text in this script follow). The block is
-# shell-agnostic -- one text serves bash and zsh -- so it is rendered once
+# shell-agnostic, so one text serves bash and zsh, and it is rendered once
 # and appended to both startup files configure_shell_env wires below.
 render_hostcreds_shell_block() {
   PYTHONPATH="${DEVCONTAINER_SCRIPTS_DIR}" python3 -m devcontainer_config.cli shell-block

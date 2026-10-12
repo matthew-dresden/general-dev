@@ -142,8 +142,8 @@ _PROG = "devcontainer_config"
 EXIT_USAGE_ERROR = 2
 
 _LINT_SECRETS_DESCRIPTION = (
-    "Scans the content staged for the next commit -- the git index, never "
-    "the working-tree copy -- by default or with --staged. With --range "
+    "Scans the content staged for the next commit (the git index, never "
+    "the working-tree copy) by default or with --staged. With --range "
     "<a>..<b> it instead scans every commit in that range, oldest first, so "
     "a secret introduced earlier in the range and removed later is still "
     "reported. Either mode exits 1 if any detector finds something, 0 "
@@ -176,8 +176,8 @@ _HOOKS_CHECK_DESCRIPTION = (
 )
 
 _HOOKS_PRE_PUSH_DESCRIPTION = (
-    "Reads git's pre-push hook stdin contract -- one '<local ref> <local "
-    "sha> <remote ref> <remote sha>' line per ref being pushed -- derives "
+    "Reads git's pre-push hook stdin contract, one '<local ref> <local "
+    "sha> <remote ref> <remote sha>' line per ref being pushed, derives "
     "the pushed range for each ref, and scans every commit in each range for "
     "secrets. This is what 'make hooks-run-push' execs; it is not meant to "
     "be run by hand outside a pre-push hook."
@@ -187,8 +187,8 @@ _RESOLVE_INSTANCE_DESCRIPTION = (
     "Resolves which instance INSTANCE/DEFAULT_REMOTE_INSTANCE/the sole "
     "configured directory selects (spec Section 4.1.1) and prints the "
     "resolved name plus the statically derivable half of its Section 9 "
-    "addressing block -- Terragrunt directory, state key, docker context, "
-    "parameter prefix, certificate directory -- as one KEY=value line per "
+    "addressing block (Terragrunt directory, state key, docker context, "
+    "parameter prefix, certificate directory) as one KEY=value line per "
     "artifact on stdout, so the shell layer reads values instead of "
     "re-deriving them. Prints nothing to stdout and exits 1 on any "
     "resolution failure, with the operator-facing text on stderr."
@@ -222,7 +222,7 @@ _CREDS_FRAGMENTS_DESCRIPTION = (
     "(mode 0600, created O_EXCL). Prints exactly the written names, one "
     "per line, so the caller can pipe each fragment into the container "
     "over stdin. Fails fast: any credential that cannot be resolved "
-    "aborts the run with exit 1, named on stderr -- a container must "
+    "aborts the run with exit 1, named on stderr; a container must "
     "never ship a subset of the manifest. With --print-git-hosts, prints "
     "only the git-source hostnames and writes nothing. No value is ever "
     "printed."
@@ -273,7 +273,7 @@ _SKILLS_INSTALL_DESCRIPTION = (
     "Wire an agent's skill surface to this checkout's canonical .agents/"
     "skills home. SCOPE=global creates the general-dev-skills symlink in "
     "the agent's user-level skill directory (absolute target, recorded); "
-    "SCOPE=project verifies -- and, for Claude Code, wires -- the in-repo "
+    "SCOPE=project verifies, and for Claude Code wires, the in-repo "
     "adapters; SCOPE=runtime prints the agent's one-shot incantation "
     "(OPENCODE_CONFIG for opencode, --settings for Claude Code) and never "
     "executes it. Never copies a skill body: a copy would be a second "
@@ -436,8 +436,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "configured instance's engine."
         ),
         description=(
-            "One probe per engine -- the local engine and every instance under "
-            "remote-instances/ -- filtering on the project label devcontainer.json "
+            "One probe per engine, the local engine and every instance under "
+            "remote-instances/, filtering on the project label devcontainer.json "
             "stamps its containers with. A failing probe degrades per engine: the "
             "row reports the failure and the listing keeps going, and the exit "
             "code is 1 when any engine failed to answer."
@@ -449,7 +449,7 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help=(
             "LOCAL_DOCKER_CONTEXT, read by the Makefile from "
-            ".devcontainer/remote-docker/config.env -- the one place it is parsed"
+            ".devcontainer/remote-docker/config.env, the one place it is parsed"
         ),
     )
     container_list_parser.add_argument("--json", action="store_true", help=_INSTANCE_JSON_HELP)
@@ -814,7 +814,7 @@ def _run_instance_list(args: argparse.Namespace) -> int:
 
 
 def _print_container_table(rows: Sequence[containers.EngineContainers]) -> None:
-    """The aligned table: one header row, then one row per container -- or per
+    """The aligned table: one header row, then one row per container, or per
     engine that holds none or could not answer.
 
     Every column is padded to the widest value it carries, the same shape
@@ -1037,7 +1037,7 @@ def _run_resolve_instance(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# hostcreds: creds-init, creds-fragments, shell-block -- the CLI half of
+# hostcreds: creds-init, creds-fragments, shell-block, the CLI half of
 # 'make push-creds' and the postCreate startup-block render, around
 # devcontainer_config.hostcreds (which owns the manifest contract, the
 # resolvers and the renderers used here).

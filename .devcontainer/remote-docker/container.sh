@@ -108,8 +108,8 @@ rdc_sh_escape() {
 rdc_backend() {
   if [ -n "${ENGINE:-}" ]; then
     # ENGINE names the engine this whole run addresses, so classification is
-    # decided by it directly -- 'local' is the local engine, anything else a
-    # remote instance's -- and never by the machine-wide active context,
+    # decided by it directly ('local' is the local engine, anything else a
+    # remote instance's) and never by the machine-wide active context,
     # which another terminal may have switched while this one runs.
     # rd_engine_context has already failed fast when ENGINE names nothing.
     case "$(rd_engine_context)" in
@@ -241,7 +241,7 @@ rdc_status() {
 
 # NAME, when set, is the name build/up/rename gives the container. Docker
 # accepts [a-zA-Z0-9][a-zA-Z0-9_.-]* and nothing else, so anything outside
-# that shape is refused here -- before any build runs -- rather than
+# that shape is refused here, before any build runs, rather than
 # surfacing as docker's own error after minutes of image build. A name
 # another container already answers to is refused the same way: renaming
 # onto it would steal the name the other container is running under.
@@ -273,7 +273,7 @@ rdc_validate_requested_name() {
 # The NAME= half of build/up: give a just-created (or just-started) container
 # the requested name, treating already-named as success so repeated
 # 'make up NAME=x' is idempotent. Unset NAME changes nothing. Validation
-# runs only when a rename is actually needed -- the collision check would
+# runs only when a rename is actually needed; the collision check would
 # otherwise fire on the container that already carries the name.
 rdc_apply_requested_name() {
   [ -n "${NAME:-}" ] || return 0
@@ -304,7 +304,7 @@ rdc_rename() {
 # container on this engine, CONTAINER=<name> to pick it when several clones
 # put more than one here. RDC_ALL (make's ALL=1) is the fleet form: every
 # container the project label owns on this engine, and CONTAINER alongside
-# it is refused -- the same one-or-the-other rule the instance targets
+# it is refused, the same one-or-the-other rule the instance targets
 # enforce for INSTANCE and ALL.
 rdc_selected_ids() {
   if [ "${RDC_ALL:-0}" != "1" ]; then
@@ -518,7 +518,7 @@ rdc_remote_host() {
 
 # This machine's stored credential for a git host, as two lines (username,
 # then password), or no output when nothing is stored. Each answer line is
-# split on its FIRST '=' only -- field splitting on '=' would truncate a
+# split on its FIRST '=' only; field splitting on '=' would truncate a
 # username or password that itself carries '='.
 rdc_git_credentials() {
   printf 'protocol=https\nhost=%s\n\n' "$1" \
@@ -735,7 +735,7 @@ rdc_verify_one() {
 
 # 'make verify-container': structural plus functional checks of the pushed
 # credentials, all through docker exec against the ACTIVE context, so local
-# and remote containers verify identically -- no engine-specific paths
+# and remote containers verify identically, with no engine-specific paths
 # anywhere. Prints one PASS/FAIL line per check; exits non-zero if any check
 # failed.
 rdc_verify_container() {
@@ -1059,7 +1059,7 @@ rdc_up() {
       ;;
   esac
 
-  # NAME= names the container on the up path too -- idempotently, so
+  # NAME= names the container on the up path too, idempotently, so
   # 'make up NAME=x' on an already-named container is not an error. The
   # no-container branch named its build through rdc_build already.
   rdc_apply_requested_name
@@ -1104,8 +1104,8 @@ rdc_build_remote() {
 
   # The override carries the resolved Parameter Store prefix into the
   # container, not just the volume mount. Without it the create-time bootstrap
-  # falls back to /devcontainer/$(basename "$(pwd)") -- the workspace folder
-  # name -- and an instance whose name differs from the project folder reads a
+  # falls back to /devcontainer/$(basename "$(pwd)"), the workspace folder
+  # name, and an instance whose name differs from the project folder reads a
   # different environment's secrets entirely. Observed: instance 'sandbox'
   # bootstrapped from /devcontainer/general-dev/shell.env.
   RDC_OVERRIDE_CONFIG="$(mktemp "${TMPDIR:-/tmp}/devcontainer-override.XXXXXX")"
@@ -1250,9 +1250,9 @@ RDC_COMMAND="${1:-}"
 # all is a legitimately local one, not an error, and it must still be able to
 # build against its local engine.
 if command -v docker > /dev/null 2>&1; then
-  # ENGINE, when set, names one engine explicitly. Resolving it here -- and
+  # ENGINE, when set, names one engine explicitly. Resolving it here and
   # exporting its context as DOCKER_CONTEXT, the variable docker reads ahead
-  # of the machine-wide current context -- is what aims every docker call in
+  # of the machine-wide current context, is what aims every docker call in
   # this process at that one engine: rd_docker's and the plain ones alike,
   # and every child process (the devcontainer CLI included) that inherits the
   # environment. No `docker context use`, so state other terminals share is
@@ -1272,7 +1272,7 @@ if command -v docker > /dev/null 2>&1; then
   # without rewriting every use site. REMOTE_DOCKER_CONTEXT comes from the
   # same block too: the resolver's export loop translates the block's
   # DOCKER_CONTEXT line into it, so the resolved instance's context reaches
-  # backend classification without ever being exported as DOCKER_CONTEXT --
+  # backend classification without ever being exported as DOCKER_CONTEXT;
   # an export that would have re-aimed every plain docker call at the
   # resolved instance's engine even when the active context named another.
   if rd_resolve_instance_quiet; then

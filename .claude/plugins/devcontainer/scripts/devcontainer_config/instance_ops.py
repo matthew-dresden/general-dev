@@ -92,7 +92,7 @@ DEFAULT_VOLUME_SIZE_GB = 30
 # The docker context name length limit the scaffold must respect: the
 # context name is `docker_context(root, name)` (the repo slug plus the
 # instance name), and a name that would exceed this bound is refused at
-# scaffold time -- when choosing a shorter name is still cheap -- rather
+# scaffold time, when choosing a shorter name is still cheap, rather
 # than at `docker context create` time, when the directory already exists.
 DOCKER_CONTEXT_NAME_LIMIT = 63
 
@@ -127,8 +127,8 @@ _EC2_STATE_QUERY = "Reservations[0].Instances[0].State.Name"
 
 # The committed `.gitignore` rule every scaffold's per-instance entry is
 # appended below: the blanket lock-file ignore marks the per-instance block,
-# and each new scaffold's own directory entry lands under it -- and under
-# any earlier scaffold's entry -- so the entries stay contiguous and the
+# and each new scaffold's own directory entry lands under it, and under
+# any earlier scaffold's entry, so the entries stay contiguous and the
 # rest of the file is untouched. Derived from `instances.INSTANCES_DIR_NAME`
 # so the anchor can never drift from the directory this module addresses.
 GITIGNORE_SCAFFOLD_ANCHOR = f"{instances.INSTANCES_DIR_NAME}/*/.terraform.lock.hcl"
@@ -310,7 +310,7 @@ def _invalid_name_message(name: str) -> str:
         f"ERROR: invalid instance name {name!r}\n"
         "An instance name must be a non-empty path segment of at most "
         f"{instances.MAX_INSTANCE_NAME_LENGTH} characters: letters, digits, "
-        "hyphens and underscores only -- it keys a Terragrunt directory, a "
+        "hyphens and underscores only; it keys a Terragrunt directory, a "
         "docker context and a Parameter Store prefix at once, and instance "
         "names are project names (e.g. acme).\n"
         "Choose a valid instance name and retry."
@@ -470,7 +470,7 @@ def _render_terragrunt_hcl(
         f'  ami           = "{ami}"',
         "",
         f"  # {DEFAULT_INSTANCE_TYPE}: 4 vCPU / 8 GiB Graviton4, the cheapest 4 vCPU /",
-        "  # 8 GiB ARM instance in us-east-1 (~$0.12/hr) -- the default for a real",
+        "  # 8 GiB ARM instance in us-east-1 (~$0.12/hr), the default for a real",
         "  # engine. t4g.medium is the proven cheapest size for a throwaway test",
         "  # engine.",
         f'  instance_type = "{DEFAULT_INSTANCE_TYPE}"',
@@ -1048,8 +1048,8 @@ def _parse_parameter_names(stdout: str) -> list[str]:
 
 # docker's own wording when `context inspect` names a context that does not
 # exist: `no such context: <name>` (or `context <name> not found` on some
-# versions). Any other nonzero inspect -- a stopped or unreachable daemon,
-# say -- is a failure, not evidence the context is gone.
+# versions). Any other nonzero inspect, a stopped or unreachable daemon
+# for instance, is a failure, not evidence the context is gone.
 _CONTEXT_ABSENT_PATTERN = re.compile(
     r"no such context|context\s+not found|context\s+\"[^\"]+\"\s*:\s*context not found",
     re.IGNORECASE,

@@ -193,7 +193,7 @@ PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer
 PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
 
 .DEFAULT_GOAL := help
-.PHONY: help connect-start disconnect status exec shell start stop restart rename check build push-creds creds-init verify-container clean rebuild push-secrets \
+.PHONY: help connect-start disconnect status exec shell start stop restart rename check build push-creds creds-init verify-container clean rebuild push-secrets list-containers \
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-workspace lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test cert-status list-instances instance-init instance-plan instance-deploy instance-status instance-stop instance-start instance-destroy instance-link \
@@ -248,6 +248,7 @@ help:
 	row "make disconnect"       "host"   "What 'make local' calls. Only changes where new commands and windows point."; \
 	note "INSTANCES" "one remote engine per project under remote-instances/; instance names are project names (e.g. acme)"; \
 	row "make list-instances"   "host"   "List every instance with live status: EC2 state, id, params, certs, forward, context."; \
+	row "make list-containers"  "host"   "Every container this project owns, local engine plus every instance's, with per-engine reachability."; \
 	row "make instance-init"    "host"   "Scaffold <project>'s directory; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= for the AMI/AZ lookup only; the deployment region is REMOTE_AWS_REGION]"; \
 	row "make instance-deploy"  "remote" "Converge: provision, link id, trust chain if missing, push secrets. Refuses instance replacement without CONFIRM=replace. INSTANCE= | ALL=1"; \
 	row "make instance-status"  "host"   "One instance's live state, or every instance with ALL=1. INSTANCE=<instance-name> | ALL=1"; \
@@ -566,6 +567,16 @@ exec:
 # configured instance, so INSTANCE= and ALL=1 are simply irrelevant to it.
 list-instances:
 	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-list
+
+# The containers-side counterpart of list-instances: every container this
+# project's label owns, on the local engine and on every configured
+# instance's engine, one probe per engine. An engine that cannot answer
+# (docker absent, a remote forward that is not open) degrades to a row and
+# the listing keeps going; the exit code is 1 when any engine failed, so a
+# script consuming it can tell an incomplete sweep from a complete one.
+# No-argument member like list-instances: INSTANCE= and ALL=1 are irrelevant.
+list-containers:
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli container-list --local-context "$(LOCAL_CONTEXT)"
 
 # Writes remote-instances/<name>/terragrunt.hcl and its guidance. Never
 # deploys; the cli prints the guidance messages verbatim. AMI= and REGION=

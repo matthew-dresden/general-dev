@@ -78,6 +78,14 @@ with a check of its own: it refuses an id outside the `i-`-plus-lowercase-hex
 shape as a usage error before the store is written, because a typo'd id would
 misdirect every power and status operation at once.
 
+`container-list` is the containers-side counterpart of `instance-list`, a
+thin handler over `devcontainer_config.containers` (the engine `make
+list-containers` also drives): one probe per engine -- the local engine,
+named by the `--local-context` value the Makefile reads from config.env,
+plus every configured instance's context -- and the same
+`--json`-one-object-per-row and per-row-degradation contracts the instance
+listing established.
+
 `skills-install`, `skills-remove` and `skills-list` are the skills surface
 (U3): thin handlers over `devcontainer_config.skills_install`, the engine
 the `make skills-install`, `make skills-remove` and `make skills-list`
@@ -109,7 +117,7 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
-from devcontainer_config import hostcreds, instance_ops, instances, repo, skills_install
+from devcontainer_config import containers, hostcreds, instance_ops, instances, repo, skills_install
 from devcontainer_config.githooks import (
     HOOK_NAMES,
     GitHooksError,
@@ -420,6 +428,32 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     instance_list_parser.add_argument("--json", action="store_true", help=_INSTANCE_JSON_HELP)
     instance_list_parser.set_defaults(handler=_run_instance_list)
+
+    container_list_parser = subparsers.add_parser(
+        "container-list",
+        help=(
+            "List this project's containers on the local engine and every "
+            "configured instance's engine."
+        ),
+        description=(
+            "One probe per engine -- the local engine and every instance under "
+            "remote-instances/ -- filtering on the project label devcontainer.json "
+            "stamps its containers with. A failing probe degrades per engine: the "
+            "row reports the failure and the listing keeps going, and the exit "
+            "code is 1 when any engine failed to answer."
+        ),
+    )
+    container_list_parser.add_argument(
+        "--local-context",
+        metavar="CONTEXT",
+        required=True,
+        help=(
+            "LOCAL_DOCKER_CONTEXT, read by the Makefile from "
+            ".devcontainer/remote-docker/config.env -- the one place it is parsed"
+        ),
+    )
+    container_list_parser.add_argument("--json", action="store_true", help=_INSTANCE_JSON_HELP)
+    container_list_parser.set_defaults(handler=_run_container_list)
 
     instance_status_parser = subparsers.add_parser(
         "instance-status",
@@ -777,6 +811,73 @@ def _run_instance_list(args: argparse.Namespace) -> int:
             summary += f", {failed_count} with probe errors"
         print(summary)
     return _report_probe_failures(rows)
+
+
+def _print_container_table(rows: Sequence[containers.EngineContainers]) -> None:
+    """The aligned table: one header row, then one row per container -- or per
+    engine that holds none or could not answer.
+
+    Every column is padded to the widest value it carries, the same shape
+    `_print_instance_table` gives the instance fleet, so the two listings
+    read as one surface.
+    """
+    header = ("CONTAINER", "STATE", "IMAGE", "CREATED", "ENGINE")
+    values: list[tuple[str, str, str, str, str]] = []
+    for row in rows:
+        if row.containers is None:
+            values.append(("-", "unreachable", "-", "-", row.engine))
+        elif not row.containers:
+            values.append(("-", "none", "-", "-", row.engine))
+        else:
+            values.extend((c.name, c.state, c.image, c.created, row.engine) for c in row.containers)
+    widths = [
+        max(len(h), *(len(v[column]) for v in values)) if values else len(h)
+        for column, h in enumerate(header)
+    ]
+    print("  ".join(h.ljust(w) for h, w in zip(header, widths, strict=True)).rstrip())
+    for value in values:
+        print("  ".join(v.ljust(w) for v, w in zip(value, widths, strict=True)).rstrip())
+
+
+def _report_container_probe_failures(rows: Sequence[containers.EngineContainers]) -> int:
+    """One stderr line per engine whose probe failed; exit 1 if any did.
+
+    The listing always prints first, so one unreachable engine names itself
+    without suppressing what the other engines answered -- the same
+    per-row degradation `_report_probe_failures` gives the instance fleet.
+    """
+    failed = [row for row in rows if row.lookup_error is not None]
+    for row in failed:
+        assert row.lookup_error is not None  # filtered above
+        print(f"ERROR: {row.engine} (context {row.context}): {row.lookup_error}", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def _run_container_list(args: argparse.Namespace) -> int:
+    """List this project's containers on every engine, or one JSON object per row.
+
+    The runner is `containers.subprocess_runner`, read from the module at
+    call time so a hermetic test substitutes a fake there -- the same seam
+    the instance handlers use. --json keeps stdout to exactly one
+    single-line JSON object per engine row (no summary); the aligned table
+    and the summary line are the human mode's output only. The exit code is
+    1 when any engine failed to answer, the degradation contract
+    `_report_probe_failures` established for the instance listing.
+    """
+    root = repo.find_root(Path.cwd())
+    rows = containers.list_containers(root, args.local_context, runner=containers.subprocess_runner)
+    if args.json:
+        for row in rows:
+            print(json.dumps(asdict(row)))
+        return _report_container_probe_failures(rows)
+    _print_container_table(rows)
+    failed_count = sum(1 for row in rows if row.lookup_error is not None)
+    total = sum(len(row.containers) for row in rows if row.containers is not None)
+    summary = f"{total} container(s) listed across {len(rows)} engine(s)"
+    if failed_count:
+        summary += f", {failed_count} with probe errors"
+    print(summary)
+    return _report_container_probe_failures(rows)
 
 
 def _run_instance_status(args: argparse.Namespace) -> int:

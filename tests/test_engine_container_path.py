@@ -29,7 +29,11 @@ config-payload.sh (behavioral): `write_config_payload` applies the exact
 transform push-secrets.sh has always published -- HOST_PROXY forced off,
 BASH_ENV repointed, proxy/asdf/localscripts lines and comments and blanks
 stripped, the profile map copied verbatim -- and push-secrets.sh consumes
-that one transform instead of carrying its own copy.
+that one transform instead of carrying its own copy. With no caller-provided
+sources it renders from the repository's own shell.env and profile map,
+byte-identical to the render an explicit pin produces, and an explicit pin
+still wins over the defaults -- the properties that keep container.sh's ssh
+seed safe without any caller setup.
 
 push-secrets.sh (static): the ssh branch resolves first, delivers over
 stdin (`cat >`), verifies the files landed, and never touches Parameter
@@ -531,21 +535,46 @@ def test_status_backend_line_is_kind_aware_and_never_reads_the_ec2_id_for_ssh() 
 
 
 def _run_write_config_payload(
-    tmp_path: Path, source_env: Path, profile_map: Path, project_name: str
+    tmp_path: Path,
+    source_env: Path | None,
+    profile_map: Path | None,
+    project_name: str,
+    *,
+    repo_root: Path | None = None,
+    dest_name: str = "payload-dest",
 ) -> subprocess.CompletedProcess:
-    dest = tmp_path / "payload-dest"
+    """Render a payload the way a caller of the helper would.
+
+    `source_env` and `profile_map` pin the sources explicitly; `None` leaves
+    them unset so the helper's own defaults answer, which is the shape the
+    ssh seed's call takes. `repo_root` points the helper at a fixture
+    repository the defaults resolve against, set before the helper is
+    sourced because that is when its defaults evaluate. The child
+    environment is stripped of the three variables either way, so nothing
+    this machine leaks can pose as a caller-provided value.
+    """
+    dest = tmp_path / dest_name
+    pin_lines = ""
+    if source_env is not None:
+        pin_lines += f'SHELL_ENV_SOURCE="{source_env}"\n'
+    if profile_map is not None:
+        pin_lines += f'PROFILE_MAP_SOURCE="{profile_map}"\n'
+    root_line = f'REPO_ROOT="{repo_root}"\n' if repo_root is not None else ""
     script = (
         "set -euo pipefail\n"
         f'source "{_LIB_SH}"\n'
+        f"{root_line}"
         f'source "{_CONFIG_PAYLOAD_SH}"\n'
-        f'SHELL_ENV_SOURCE="{source_env}"\n'
-        f'PROFILE_MAP_SOURCE="{profile_map}"\n'
+        f"{pin_lines}"
         f'PROJECT_NAME="{project_name}"\n'
         f'write_config_payload "{dest}"\n'
     )
     assert _BASH_BIN is not None
     env = dict(os.environ)
     env.pop("CONTAINER_WORKSPACES_ROOT", None)
+    env.pop("SHELL_ENV_SOURCE", None)
+    env.pop("PROFILE_MAP_SOURCE", None)
+    env.pop("REPO_ROOT", None)
     return subprocess.run(
         [_BASH_BIN, "-c", script],
         capture_output=True,
@@ -555,9 +584,15 @@ def _run_write_config_payload(
     )
 
 
-def _write_fixture_sources(tmp_path: Path) -> tuple[Path, Path]:
-    source_env = tmp_path / "shell.env"
-    source_env.write_text(
+def _fixture_env_text(marker: str | None = None) -> str:
+    """The fixture shell.env every payload test renders from.
+
+    `marker`, when given, rides an ordinary pass-through export, so two
+    fixture trees rendered from this one template can be told apart in the
+    output -- the property the override test observes.
+    """
+    marker_line = f"export FIXTURE_MARKER='{marker}'\n" if marker is not None else ""
+    return (
         "# a leading comment\n"
         "\n"
         "export HOST_PROXY='true'\n"
@@ -572,14 +607,36 @@ def _write_fixture_sources(tmp_path: Path) -> tuple[Path, Path]:
         'export PATH="$HOME/.localscripts/bin:$PATH"\n'
         "export BASH_ENV='/local/path/shell.env'\n"
         "export LOCAL_DOCKER_CONTEXT='orbstack'\n"
-        "export REMOTE_AWS_REGION='us-east-1'\n",
-        encoding="utf-8",
+        "export REMOTE_AWS_REGION='us-east-1'\n"
+        f"{marker_line}"
     )
+
+
+_FIXTURE_PROFILE_MAP = '{"profiles": [{"name": "dev", "region": "us-east-1"}]}\n'
+
+
+def _write_fixture_sources(tmp_path: Path) -> tuple[Path, Path]:
+    source_env = tmp_path / "shell.env"
+    source_env.write_text(_fixture_env_text(), encoding="utf-8")
     profile_map = tmp_path / "aws-profile-map.json"
-    profile_map.write_text(
-        '{"profiles": [{"name": "dev", "region": "us-east-1"}]}\n', encoding="utf-8"
-    )
+    profile_map.write_text(_FIXTURE_PROFILE_MAP, encoding="utf-8")
     return source_env, profile_map
+
+
+def _write_fixture_repo(tmp_path: Path, *, name: str) -> tuple[Path, Path, Path]:
+    """A repository-shaped fixture tree, the layout the helper's source
+    defaults name: `<root>/shell.env` and
+    `<root>/.devcontainer/aws-profile-map.json`. The tree's content carries
+    the `name` as its marker, so a render can be pinned to one tree or
+    another. Returns the root, the shell.env path and the profile map path.
+    """
+    root = tmp_path / f"repo-{name}"
+    (root / ".devcontainer").mkdir(parents=True, exist_ok=True)
+    source_env = root / "shell.env"
+    source_env.write_text(_fixture_env_text(name), encoding="utf-8")
+    profile_map = root / ".devcontainer" / "aws-profile-map.json"
+    profile_map.write_text(_FIXTURE_PROFILE_MAP, encoding="utf-8")
+    return root, source_env, profile_map
 
 
 def test_config_payload_applies_the_remote_transform(tmp_path: Path) -> None:
@@ -631,6 +688,69 @@ def test_config_payload_fails_fast_on_a_missing_source(tmp_path: Path) -> None:
     )
     assert result.returncode != 0, "a missing profile map must fail the render"
     assert "aws-profile-map.json not found" in result.stderr, f"stderr={result.stderr[:400]!r}"
+
+
+def test_config_payload_defaults_to_the_repository_sources(tmp_path: Path) -> None:
+    """With no caller-provided sources, the payload renders from the
+    repository's own shell.env and profile map -- byte-identical to the
+    render an explicit pin of the same files produces.
+
+    This is the shape container.sh's ssh seed call takes: REPO_ROOT is the
+    only thing it has, SHELL_ENV_SOURCE and PROFILE_MAP_SOURCE are unset,
+    and the helper's own defaults must answer for both files. It is the
+    exact gap the first real `make build ENGINE=<ssh engine>` fell into.
+    """
+    root, source_env, profile_map = _write_fixture_repo(tmp_path, name="defaulted")
+    explicit = _run_write_config_payload(
+        tmp_path, source_env, profile_map, "general-dev", repo_root=root
+    )
+    defaulted = _run_write_config_payload(
+        tmp_path, None, None, "general-dev", repo_root=root, dest_name="payload-defaulted"
+    )
+    assert explicit.returncode == 0, (
+        f"the pinned render must succeed; stderr={explicit.stderr[:400]!r}"
+    )
+    assert defaulted.returncode == 0, (
+        f"the defaulted render must succeed; stderr={defaulted.stderr[:400]!r}"
+    )
+
+    pinned_env = (tmp_path / "payload-dest" / "shell.env").read_text(encoding="utf-8")
+    defaulted_env = (tmp_path / "payload-defaulted" / "shell.env").read_text(encoding="utf-8")
+    assert defaulted_env == pinned_env, (
+        "the defaulted render must be byte-identical to the pinned one"
+    )
+    assert "export FIXTURE_MARKER='defaulted'" in defaulted_env, (
+        "the defaulted render must carry the repository tree's own content"
+    )
+
+    pinned_map = tmp_path / "payload-dest" / ".devcontainer" / "aws-profile-map.json"
+    defaulted_map = tmp_path / "payload-defaulted" / ".devcontainer" / "aws-profile-map.json"
+    assert defaulted_map.read_bytes() == pinned_map.read_bytes(), (
+        "the defaulted profile map must come from the repository tree, verbatim"
+    )
+
+
+def test_config_payload_explicit_sources_win_over_the_defaults(tmp_path: Path) -> None:
+    """A caller that pins the sources renders from them, not from the tree
+    REPO_ROOT names: the `:=` defaults may only fill an unset variable."""
+    root_a, _shell_a, _map_a = _write_fixture_repo(tmp_path, name="repo-a")
+    _root_b, source_b, map_b = _write_fixture_repo(tmp_path, name="repo-b")
+    result = _run_write_config_payload(tmp_path, source_b, map_b, "general-dev", repo_root=root_a)
+    assert result.returncode == 0, (
+        f"the overridden render must succeed; stderr={result.stderr[:400]!r}"
+    )
+
+    transformed = (tmp_path / "payload-dest" / "shell.env").read_text(encoding="utf-8")
+    assert "export FIXTURE_MARKER='repo-b'" in transformed, (
+        "the pinned source's content must reach the payload"
+    )
+    assert "repo-a" not in transformed, (
+        "the tree REPO_ROOT names must not leak into an overridden render"
+    )
+    copied = tmp_path / "payload-dest" / ".devcontainer" / "aws-profile-map.json"
+    assert copied.read_bytes() == map_b.read_bytes(), (
+        "the pinned profile map is the one copied through"
+    )
 
 
 def test_push_secrets_consumes_the_one_shared_transform() -> None:

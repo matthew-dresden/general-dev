@@ -12,9 +12,12 @@
 # moves everywhere at once instead of drifting into two flavors that place
 # different environments on the same engine.
 
-# Sourced AFTER lib.sh, whose rd_die carries every failure below, and by a
-# caller that has set SHELL_ENV_SOURCE, PROFILE_MAP_SOURCE and PROJECT_NAME
-# (both consumers do, right after rd_load_config).
+# Sourced AFTER lib.sh, whose rd_die carries every failure below. The caller
+# provides PROJECT_NAME (both consumers do, right after rd_load_config);
+# SHELL_ENV_SOURCE and PROFILE_MAP_SOURCE MAY be pinned by the caller to
+# render from somewhere else, and otherwise default here to the repository's
+# own shell.env and .devcontainer/aws-profile-map.json, so neither consumer
+# has to set them before rendering.
 
 # The in-container workspace root the BASH_ENV rewrite points at. The same
 # variable, with the same default, that container.sh derives its
@@ -22,6 +25,15 @@
 # path agree by construction; a checkout that moves the workspace root moves
 # both at once.
 : "${CONTAINER_WORKSPACES_ROOT:=/workspaces}"
+
+# The sources the payload renders from: the repository's own configuration
+# unless the caller pinned otherwise, the same defaults push-secrets.sh
+# assigns. REPO_ROOT is derived here exactly the way both consumers derive
+# it, so a sourcing script need not have assigned it yet; RD_DIR exists
+# because lib.sh is always sourced first.
+: "${REPO_ROOT:=$(cd "${RD_DIR}/../.." && pwd)}"
+: "${SHELL_ENV_SOURCE:=${REPO_ROOT}/shell.env}"
+: "${PROFILE_MAP_SOURCE:=${REPO_ROOT}/.devcontainer/aws-profile-map.json}"
 
 # Render the transformed payload under `dest_dir`:
 #

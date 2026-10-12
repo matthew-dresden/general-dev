@@ -235,22 +235,28 @@ jobs:
           make list-instances 2>&1 || true
           docker ps
 
-      # Fixture cleanup only, and deliberately best-effort: the job's verdict
-      # belongs to the lifecycle steps above, so a failure here would only
-      # bury the real signal under a second red step. The `docker rm -f` EOF
-      # one run surfaced is a daemon-side transient while force-removing a
-      # container that still holds the run's ssh forward sessions, not
-      # something the repository's code made wrong, and any container that
-      # survives outlives nothing on a fresh per-run runner. Warn, keep the
-      # artifacts visible for triage, and succeed.
+      # Fixture cleanup only, and deliberately best-effort THROUGHOUT: the
+      # job's verdict belongs to the lifecycle steps above, so a failure
+      # here would only bury the real signal under a second red step. Every
+      # command in this step -- the presence probe, the force removal, and
+      # the surviving-fixture listing -- tolerates its own failure behind a
+      # one-line warning naming what survived, and the step always exits 0:
+      # the daemon-side transients the runs surfaced (a `docker rm -f` EOF,
+      # then a listing that failed on the same wedged daemon AFTER the
+      # removal's warning line) are not something the repository's code
+      # made wrong, and any container that survives outlives nothing on a
+      # fresh per-run runner. The listing still runs, so the fixture's end
+      # state stays visible for triage either way.
       - name: Stop the sshd container
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          if docker ps -a --format '{{.Names}}' | grep -qx ssh-engine-ci; then
+          if names="$(docker ps -a --format '{{.Names}}' 2>/dev/null)" && printf '%s\n' "$names" | grep -qx ssh-engine-ci; then
             if ! docker rm -f ssh-engine-ci; then
-              echo "WARNING: the sshd fixture container 'ssh-engine-ci' could not be removed; it will vanish with this ephemeral runner" >&2
-              docker ps -a --filter name=ssh-engine-ci
+              echo "WARNING: the sshd fixture container 'ssh-engine-ci' could not be removed; it survives until this ephemeral runner is discarded" >&2
             fi
+          fi
+          if ! docker ps -a --filter name=ssh-engine-ci; then
+            echo "WARNING: the surviving-fixture listing could not be read; the sshd fixture's end state is unknown and vanishes with this ephemeral runner" >&2
           fi

@@ -8,10 +8,14 @@ the test queues to the log, aliveness and signal delivery are injected so
 no real process is ever probed or signalled, and the port probe is a
 callable the test owns. The transport's readiness marker -- the line it
 prints only after the docker context answered a handshake through the
-tunnel -- is the one confirmation the open path accepts, and the tests pin
-both its acceptance and every failure around it: a child that dies first,
-a poll limit exhausted (with the child stopped, never orphaned), a stop
-whose port refuses to close, and a record that cannot be parsed.
+tunnel -- is the confirmation the open path accepts, but never on its own:
+every spawn empties the log first, so only the current attempt's lines are
+readable, and the recorded port must answer a real TCP probe before
+success. The tests pin both confirmations and every failure around them: a
+child that dies first, a poll limit exhausted (with the child stopped,
+never orphaned), a stale line that must not satisfy a new attempt, a port
+that never answers, a stop whose port refuses to close, and a record that
+cannot be parsed.
 """
 
 from __future__ import annotations
@@ -165,6 +169,7 @@ def test_open_spawns_the_transport_confirms_and_records(tmp_path: Path) -> None:
             tmp_path,
             spawner=spawner,
             poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
         )
 
     assert "pid 777" in message and "51368" in message
@@ -206,6 +211,7 @@ def test_open_polls_until_the_readiness_marker_arrives(tmp_path: Path) -> None:
             tmp_path,
             spawner=spawner,
             poll_clock=write_marker_later,
+            port_probe=lambda _port: True,
         )
 
     assert "is open" in message
@@ -253,6 +259,7 @@ def test_open_replaces_a_stale_record_and_says_so(tmp_path: Path) -> None:
             tmp_path,
             spawner=spawner,
             poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
         )
 
     assert "stale record" in message
@@ -325,6 +332,151 @@ def test_open_raises_when_the_forwarded_port_cannot_be_read(tmp_path: Path) -> N
                 spawner=spawner,
                 poll_clock=lambda _seconds: None,
             )
+
+
+# ---------------------------------------------------------------------------
+# Stale-log regression: readiness can only be satisfied by the current
+# attempt. A connect-stop removes the record but leaves the daemon log; an
+# open that appended to it and scanned it whole declared the new forward
+# open on the previous daemon's `Connected:` line while the tunnel was
+# still establishing, and the container check that followed hit a refused
+# connection. The fix under test: every spawn empties the log first, and
+# the recorded port must answer a real probe before success.
+# ---------------------------------------------------------------------------
+
+
+def _context_port_stub(_command: object, _timeout: float | None) -> CommandResult:
+    """The port read the regression tests drive: a context carrying tcp://127.0.0.1:51368."""
+    return CommandResult(
+        exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+    )
+
+
+def test_open_is_never_satisfied_by_a_stale_logs_readiness_line(tmp_path: Path) -> None:
+    """A pre-seeded `Connected:` line with a silent child cannot fake an open.
+
+    The stale line sits in the log exactly as a previous daemon left it
+    after its stop; this attempt's child writes nothing and serves nothing.
+    The open must keep polling and fail -- never return success on content
+    an earlier attempt wrote.
+    """
+    tmp_path = _git_root(tmp_path)
+    log = forwards.log_path("x")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(READINESS_LINE, encoding="utf-8")
+    spawner = _Spawner(announce=False)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", _context_port_stub)
+        with pytest.raises(ForwardError, match="announced no readiness"):
+            forwards.open_forward(
+                "i-abc",
+                "general-dev-x",
+                "profile",
+                "us-east-1",
+                tmp_path,
+                spawner=spawner,
+                poll_clock=lambda _seconds: None,
+                poll_limit=3,
+            )
+
+
+def test_second_open_is_satisfied_only_by_the_new_attempts_own_line(tmp_path: Path) -> None:
+    """Truncate semantics across two opens of one instance.
+
+    The first daemon's readiness line survives its stop in the log; the
+    second open must begin from an emptied log -- pinned by what the spawn
+    finds in the file -- and succeed only once its own attempt has written
+    the marker, never on the leftover line.
+    """
+    tmp_path = _git_root(tmp_path)
+    log = forwards.log_path("x")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(READINESS_LINE, encoding="utf-8")
+    contents_at_spawn: list[str] = []
+    new_attempt_wrote: list[bool] = []
+
+    class _RecordingSpawner(_Spawner):
+        def __call__(self, argv: object, log_path: Path) -> _FakePopen:
+            contents_at_spawn.append(log_path.read_text(encoding="utf-8"))
+            return super().__call__(argv, log_path)
+
+    def write_the_new_line(_seconds: float) -> None:
+        new_attempt_wrote.append(True)
+        log.write_text(READINESS_LINE, encoding="utf-8")
+
+    spawner = _RecordingSpawner(announce=False)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", _context_port_stub)
+        message = forwards.open_forward(
+            "i-abc",
+            "general-dev-x",
+            "profile",
+            "us-east-1",
+            tmp_path,
+            spawner=spawner,
+            poll_clock=write_the_new_line,
+            port_probe=lambda _port: True,
+        )
+
+    assert "is open" in message
+    assert contents_at_spawn == [""], "the second spawn must begin from an emptied log"
+    assert new_attempt_wrote, "success must wait for the new attempt's own line"
+
+
+def test_refresh_is_satisfied_only_by_the_new_attempts_own_line(tmp_path: Path) -> None:
+    """Refresh re-runs the recorded argv and polls the same log, so the same
+    per-attempt guarantee must hold there: the replaced daemon's leftover
+    line can never satisfy the refresh's own readiness wait."""
+    tmp_path = _git_root(tmp_path)
+    _record(tmp_path, "x", pid=999999999, port=51368)
+    log = forwards.log_path("x")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(READINESS_LINE, encoding="utf-8")
+    spawner = _Spawner(announce=False)
+    new_attempt_wrote: list[bool] = []
+
+    def write_the_new_line(_seconds: float) -> None:
+        new_attempt_wrote.append(True)
+        log.write_text(READINESS_LINE, encoding="utf-8")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", _context_port_stub)
+        message = forwards.refresh_forward(
+            "x",
+            tmp_path,
+            spawner=spawner,
+            poll_clock=write_the_new_line,
+            port_probe=lambda _port: True,
+        )
+
+    assert "refreshed forward" in message
+    assert new_attempt_wrote, "the refresh must wait for the new attempt's own line"
+
+
+def test_open_fails_when_the_port_never_answers_despite_the_marker(tmp_path: Path) -> None:
+    """The belt behind the belt: even a fresh, current-attempt readiness line
+    cannot declare a port that refuses connections open. The daemon is
+    stopped (never orphaned) and no record is written."""
+    tmp_path = _git_root(tmp_path)
+    spawner = _Spawner(pid=555)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", _context_port_stub)
+        with pytest.raises(ForwardError, match="never accepted a connection"):
+            forwards.open_forward(
+                "i-abc",
+                "general-dev-x",
+                "profile",
+                "us-east-1",
+                tmp_path,
+                spawner=spawner,
+                poll_clock=lambda _seconds: None,
+                port_probe=lambda _port: False,
+            )
+
+    assert spawner.process.terminated, "a port that never answers must not orphan the daemon"
+    assert forwards.read_record("x") is None, "a failed open writes no record"
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +648,7 @@ def test_refresh_respawns_the_recorded_command_and_re_records(tmp_path: Path) ->
             tmp_path,
             spawner=spawner,
             poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
         )
 
     assert "refreshed forward" in message and "pid 8888" in message
@@ -548,6 +701,7 @@ def test_main_open_prints_the_message_and_exits_zero(
 
     monkeypatch.setattr(forwards, "_context_port_runner", runner)
     monkeypatch.setattr(forwards, "_default_spawner", spawner)
+    monkeypatch.setattr(forwards, "_default_port_probe", lambda _port: True)
     monkeypatch.chdir(root)
     exit_code = forwards.main(
         [
@@ -754,6 +908,7 @@ def test_open_forward_ssh_kind_records_the_endpoint_and_engine_kind(tmp_path: Pa
             engine=_SSH_ENGINE,
             spawner=spawner,
             poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
         )
 
     assert _SSH_ENDPOINT in message
@@ -791,6 +946,7 @@ def test_open_forward_ssh_kind_reads_the_manifest_when_no_values_are_given(
             engine=None,
             spawner=spawner,
             poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
         )
 
     assert spawner.argv is not None
@@ -827,6 +983,7 @@ def test_main_open_accepts_the_ssh_flag_form(
 
     monkeypatch.setattr(forwards, "_context_port_runner", runner)
     monkeypatch.setattr(forwards, "_default_spawner", spawner)
+    monkeypatch.setattr(forwards, "_default_port_probe", lambda _port: True)
     monkeypatch.chdir(root)
 
     exit_code = forwards.main(

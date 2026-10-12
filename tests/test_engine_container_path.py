@@ -23,7 +23,11 @@ files over a stdin heredoc with `rdc_sh_escape`d values and a chown, only
 under the ssh guard, and the EC2 clone heredoc carries no payload write; the
 up-path refresh drives the forwards CLI in both branches -- the ssh flag
 form for ssh, the instance-id form for ssm -- with no aws sso login text in
-the ssh branch and no foreground `transport connect` anywhere.
+the ssh branch and no foreground `transport connect` anywhere; and the
+dispatch prelude clears DEVCONTAINER_SSM_PREFIX for ssh (the ssh block
+carries no PARAMETER_PREFIX, and dereferencing it under set -u ended every
+command before its dispatch), assigning and exporting it on the EC2 arm
+alone.
 
 config-payload.sh (behavioral): `write_config_payload` applies the exact
 transform push-secrets.sh has always published -- HOST_PROXY forced off,
@@ -37,9 +41,13 @@ seed safe without any caller setup.
 
 push-secrets.sh (static): the ssh branch resolves first, delivers over
 stdin (`cat >`), verifies the files landed, and never touches Parameter
-Store; the workspace path comes from the shared derivation, not a re-derived
-`/devcontainer/<project>`; the CONTAINER_USER default lives here, next to
-the execs that dereference it, not only in container.sh.
+Store; nothing on the run's path before that branch reads the EC2-only
+PARAMETER_PREFIX (the Linux bash refuses `${unset%/}` on an unset variable
+under set -u where macOS's stock bash 3.2 expands it to empty, the mask
+that let the assignment ship above the branch); the workspace path comes
+from the shared derivation, not a re-derived `/devcontainer/<project>`;
+the CONTAINER_USER default lives here, next to the execs that dereference
+it, not only in container.sh.
 
 push-secrets.sh (behavioral, the ssh delivery run for real): with a
 stand-in resolver exporting KIND=ssh, a docker stub that records every argv
@@ -529,6 +537,45 @@ def test_status_backend_line_is_kind_aware_and_never_reads_the_ec2_id_for_ssh() 
     assert "$REMOTE_INSTANCE_ID" in ec2_branch, "the EC2 Backend line keeps the instance id"
 
 
+def test_dispatch_prelude_clears_the_ssm_prefix_for_an_ssh_engine() -> None:
+    """The dispatch prelude must not dereference the EC2-only prefix for ssh.
+
+    `make status ENGINE=<ssh engine>` runs under `set -u`, and the resolver's
+    ssh block carries no PARAMETER_PREFIX line, so the prelude's
+    `DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"` ended every command
+    before its dispatch (the integration run's exact
+    `line 1406: PARAMETER_PREFIX: unbound variable`). The split mirrors the
+    resolver's treatment of REMOTE_INSTANCE_ID for an unlinked instance: the
+    ssh arm clears the variable entirely -- a leaked EC2 value must not
+    survive -- and only the EC2 arm assigns and exports it.
+    """
+    text = _container_text()
+    prelude_at = text.index("if rd_resolve_instance_quiet; then")
+    # The inner fi is four-space indented, so the first `\n  fi\n` from the
+    # prelude on is the prelude's own two-space fi; the boundary newline is
+    # also the one ending the inner fi's line, so the slice must carry the
+    # match itself to include that inner line.
+    end_at = text.index("\n  fi\n", prelude_at) + len("\n  fi\n")
+    prelude = text[prelude_at:end_at]
+    ssh_at = prelude.index('[ "$(rd_engine_kind)" = "ssh" ]')
+    else_at = prelude.index("\n    else\n")
+    ssh_arm = prelude[ssh_at:else_at]
+    assert "unset DEVCONTAINER_SSM_PREFIX" in ssh_arm, (
+        "the ssh arm must clear the variable, not default it"
+    )
+    ssh_code = "\n".join(line for line in ssh_arm.splitlines() if not line.strip().startswith("#"))
+    assert "PARAMETER_PREFIX" not in ssh_code, (
+        "the ssh arm must never dereference the prefix the ssh block omits"
+    )
+    ec2_arm = prelude[else_at : prelude.index("\n    fi\n")]
+    assert 'DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"' in ec2_arm, (
+        "the EC2 arm keeps the resolved-prefix assignment"
+    )
+    assert "export DEVCONTAINER_SSM_PREFIX" in ec2_arm, (
+        "the EC2 arm still exports the prefix for the downstream readers"
+    )
+
+
 # ---------------------------------------------------------------------------
 # config-payload.sh: the transform, behaviorally.
 # ---------------------------------------------------------------------------
@@ -847,6 +894,27 @@ def test_push_secrets_ssh_branch_never_touches_parameter_store() -> None:
         assert "put-parameter" not in scoped
         assert "rd_aws" not in scoped
         assert "rd_check_aws_auth" not in scoped
+
+    # PARAMETER_PREFIX is the Parameter Store address itself, and the ssh
+    # block the resolver prints carries no such line. A reference anywhere on
+    # the run's path before this branch ends ended the run under set -u on
+    # the Linux bash the CI suite runs (5.2 refuses `${unset%/}` on an unset
+    # variable; macOS's stock bash 3.2 silently expands it to empty), which
+    # is the exact mask that let `SSM_PREFIX="${PARAMETER_PREFIX%/}"` ship
+    # above the branch. The EC2 publish may read it only after the branch
+    # has exited. Each negative pin reads code, not the comments that
+    # explain the rule.
+    def _code(region: str) -> str:
+        return "\n".join(line for line in region.splitlines() if not line.strip().startswith("#"))
+
+    assert "PARAMETER_PREFIX" not in _code(text[:branch_at]), (
+        "nothing before the ssh branch may read PARAMETER_PREFIX"
+    )
+    assert "PARAMETER_PREFIX" not in _code(branch)
+    assert "PARAMETER_PREFIX" not in _code(delivery)
+    assert "PARAMETER_PREFIX" in _code(text[branch_end:]), (
+        "the EC2 publish keeps its prefix, read below the ssh branch alone"
+    )
     # And the EC2 branch keeps its publish path: the aws requirement and the
     # put-parameter helper still follow the ssh branch.
     assert text.index("rd_require_cmd aws") > branch_end
@@ -931,6 +999,9 @@ def _fake_docker_bin(bin_dir: Path) -> None:
 # Every variable the delivery run must default or resolve on its own: the
 # assertions have to be able to tell the script's own defaults (and the
 # stand-in resolver's block) from whatever this machine's environment leaks.
+# PARAMETER_PREFIX belongs here even though the ssh run must never read it:
+# stripping it is what keeps a machine that leaks the EC2 prefix from
+# masking a delivery the resolver's ssh block gave no address for.
 _DELIVERY_RUN_UNSET = (
     "CONTAINER_USER",
     "CONTAINER",
@@ -950,6 +1021,7 @@ _DELIVERY_RUN_UNSET = (
     "ENGINE_USER",
     "ENGINE_DOCKER_ADDR",
     "ENGINE_ENDPOINT",
+    "PARAMETER_PREFIX",
 )
 
 

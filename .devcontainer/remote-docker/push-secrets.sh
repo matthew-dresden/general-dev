@@ -21,7 +21,6 @@ REPO_ROOT="$(cd "${RD_DIR}/../.." && pwd)"
 PROJECT_NAME="${PROJECT_NAME:-$(basename "$REPO_ROOT")}"
 SHELL_ENV_SOURCE="${SHELL_ENV_SOURCE:-${REPO_ROOT}/shell.env}"
 PROFILE_MAP_SOURCE="${PROFILE_MAP_SOURCE:-${REPO_ROOT}/.devcontainer/aws-profile-map.json}"
-SSM_PREFIX="${PARAMETER_PREFIX%/}"
 # The user every docker exec in the ssh delivery runs as, the same default
 # container.sh gives its own execs. The delivery branch dereferences it under
 # set -u, so it must exist here and not only in container.sh.
@@ -112,6 +111,15 @@ if [ "${KIND:-}" = "ssh" ]; then
   rd_ok "Configuration delivered to the running '${PROJECT_NAME}' container (SSH engine: no Parameter Store involved)."
   exit 0
 fi
+
+# The Parameter Store prefix is the EC2 publish's address alone, and the
+# resolver's ssh block carries no PARAMETER_PREFIX line: assigning it before
+# the ssh branch dereferenced an unset variable under set -u and ended the
+# run there. The Linux bash CI runs refuses `${unset%/}` on an unset
+# variable, where macOS's stock bash 3.2 silently expands it to empty. The
+# ssh branch has exited above, so this assignment runs only where the
+# resolver printed the prefix.
+SSM_PREFIX="${PARAMETER_PREFIX%/}"
 
 rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
 rd_check_aws_auth

@@ -1,7 +1,7 @@
 {
   "cli_version": "2.2.0",
   "template_name": "<your-template-name>",
-  "template_path": "<absolute path to your saved cdevcontainer template, or omit>",
+  "template_path": "<path to a saved environment template, or omit>",
   "containerEnv": {
     "DEVELOPER_NAME": "<Your Name>",
     "GIT_USER": "<your-git-username>",

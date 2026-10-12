@@ -1,0 +1,8 @@
+general-dev
+Copyright 2026 Matthew Dresden
+
+This product includes software derived from caylent-solutions/devcontainer
+(https://github.com/caylent-solutions/devcontainer), copied at tag 2.3.0
+under the Apache License 2.0 and modified since; files derived from that
+upstream are redistributed under the same license, which this repository's
+LICENSE carries in full.

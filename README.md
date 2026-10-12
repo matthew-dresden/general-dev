@@ -1,8 +1,7 @@
 # general-dev
 
-Personal general-purpose development workspace built on the
-[Caylent devcontainer](https://github.com/caylent-solutions/devcontainer)
-(`cdevcontainer` CLI). The same repo runs in two modes:
+Personal general-purpose development workspace. The same repo runs in two
+modes:
 
 - **Local**. VS Code Dev Containers on the laptop's Docker engine (OrbStack).
 - **Remote**. VS Code Dev Containers against a Docker engine on EC2, reached
@@ -48,7 +47,7 @@ does now. The identifiers match Section 0 of the platform specification.
 | `repos/` | Where project repositories are cloned. Only its `.gitkeep` is tracked |
 | `.agents/skills/` | Canonical agent-agnostic skills home (roster prefixed `gd-`); wired into an agent on this Mac by the `skills-*` make targets |
 | `.vscode/settings.json` | Workspace git-repo detection (nested clones) |
-| `docs/devcontainer.md` | Deep dive: setup flow, secrets, cdevcontainer contract |
+| `docs/devcontainer.md` | Deep dive: setup flow, secrets, the devcontainer file contract |
 | `docs/environment-setup.md` | Ordered runbook: fresh machine to verified container, one verification per step |
 | `docs/skills.md` | The skill roster: families, flows, coverage guarantee, and installing it for an agent |
 | `CLAUDE.md` | Engineering standards for AI-assisted work in this repo |
@@ -74,10 +73,9 @@ each host tool and stating any command it cannot run itself, and
 `gd-container-local` builds and opens the container. Both reach the same
 container the make targets produce.
 
-`cdevcontainer setup-devcontainer` generates the three gitignored
-configuration files if you would rather not use `make init`; it does not
-create the hostcreds manifest, so copy that from its example (or run
-`make init`) and store its keychain items with `make creds-init`. Start the
+`make init` creates all four gitignored configuration files, hostcreds
+manifest included, from their committed examples. Fill them in (First-time
+setup below), store each keychain item with `make creds-init`, start the
 host proxy if `HOST_PROXY=true` (see `nix-family-os/README.md`), then VS Code
 → **Reopen in Container**.
 
@@ -284,15 +282,14 @@ Every project gets its own container + volume on the shared engine.
 
 ## Caveats
 
-- This repo's `.devcontainer` diverges from the upstream cdevcontainer catalog:
-  asdf support is removed, minikube is disabled, and the postcreate wrapper
-  gained the SSM secret bootstrap. Choosing "replace" during a future
-  `cdevcontainer setup-devcontainer` would clobber these changes, review the
-  git diff and merge back. (Candidate for upstreaming to the catalog.)
-- `cdevcontainer` regenerates `shell.env` with an asdf `PATH` line; it is dead
-  but harmless. Re-run `make push-secrets` after regenerating it; rotating a
-  credential is `make creds-init` plus `make push-creds`, never a `shell.env`
-  edit.
+- This repo's `.devcontainer` began as a snapshot copied from an upstream
+  catalog and has since diverged substantially: asdf support is removed,
+  minikube is disabled, and the postcreate wrapper gained the SSM secret
+  bootstrap. It is self-managed now -- nothing regenerates it, so changes
+  here stay. (Provenance and license attribution: `NOTICE`.)
+- Rotating a credential is `make creds-init` plus `make push-creds`, never a
+  `shell.env` edit; after any `shell.env` change, re-run `make push-secrets`
+  so the remote copies match.
 - Credentials live only in the macOS keychain, git's own credential helper
   and the AWS SSO session -- named in the gitignored hostcreds manifest --
   plus the fragments `make push-creds` writes inside the container. Parameter

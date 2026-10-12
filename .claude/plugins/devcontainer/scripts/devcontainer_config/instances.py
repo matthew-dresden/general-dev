@@ -139,6 +139,35 @@ MAX_ENGINE_PORT = 65535
 _TCP_ADDR_PREFIX = "tcp://"
 _SCHEME_SEPARATOR = "://"
 
+# The one refusal rule for a `docker_addr` value that is neither an absolute
+# Unix socket path nor a `tcp://` URL. Declared once because
+# `validate_engine_values` states it twice -- once for a value that is not a
+# non-empty string and once for one that is a string but starts with
+# neither accepted form -- and two independently written copies of the same
+# sentence would drift.
+_DOCKER_ADDR_RULE = (
+    "The docker address must be either an absolute Unix socket path "
+    "(starting with '/') or a 'tcp://<host>:<port>' URL."
+)
+
+# Characters refused in a manifest `host` or `user` value, beyond
+# non-emptiness. Whitespace would split the `ssh://<user>@<host>:<port>`
+# destination the endpoint composes into separate argv words; '@' would be
+# parsed as the user/host separator; and ':' in a host would make it an
+# IPv6 literal, which the endpoint composition cannot express yet.
+_IDENTITY_FIELD_NOTE = (
+    "Whitespace, '@' and ':' are refused: whitespace would split the "
+    "ssh destination, '@' would be parsed as the user/host separator, and "
+    "':' would be parsed as an IPv6 literal or a port, and IPv6 literal "
+    "hosts are not supported yet."
+)
+
+
+def _has_forbidden_identity_character(value: str) -> bool:
+    """Whether `value` carries any character `_IDENTITY_FIELD_NOTE` refuses."""
+    return any(character.isspace() for character in value) or "@" in value or ":" in value
+
+
 # spec Section 5.5: certificate material lives under `~/.docker/certs/<name>/`
 # by default, but honors `DOCKER_CONFIG` (the real docker CLI's own
 # environment variable for relocating `~/.docker`) when an operator has
@@ -495,9 +524,11 @@ def validate_engine_values(payload: object) -> dict[str, object]:
     Raises:
         EngineManifestError: the payload is not a JSON object, or any
             field breaks its rule: `kind` must equal `ENGINE_KIND_SSH`;
-            `host` and `user` must be non-empty strings, and `host` must
+            `host` and `user` must be non-empty strings, `host` must
             be a bare hostname or address with no URL scheme (a value
-            containing the scheme separator is refused); `port`, when
+            containing the scheme separator is refused), and neither may
+            contain whitespace, '@' or ':' (':' in a host would be an IPv6
+            literal, which is not supported yet); `port`, when
             present, must be an integer (a boolean is not) within
             `MIN_ENGINE_PORT`..`MAX_ENGINE_PORT`; `docker_addr`, when
             present, must be either an absolute Unix socket path
@@ -526,9 +557,13 @@ def validate_engine_values(payload: object) -> dict[str, object]:
             "The host must be a bare hostname or address, with no URL scheme "
             f"(a value containing {_SCHEME_SEPARATOR!r} is refused).",
         )
+    if _has_forbidden_identity_character(host):
+        raise _field_refusal("host", _IDENTITY_FIELD_NOTE)
     user = payload.get("user")
     if not isinstance(user, str) or not user:
         raise _field_refusal("user", "The user must be a non-empty string.")
+    if _has_forbidden_identity_character(user):
+        raise _field_refusal("user", _IDENTITY_FIELD_NOTE)
     port = payload.get("port", DEFAULT_ENGINE_PORT)
     if isinstance(port, bool) or not isinstance(port, int):
         raise _field_refusal(
@@ -543,20 +578,11 @@ def validate_engine_values(payload: object) -> dict[str, object]:
         )
     docker_addr = payload.get("docker_addr", DEFAULT_ENGINE_DOCKER_ADDR)
     if not isinstance(docker_addr, str) or not docker_addr:
-        raise _field_refusal(
-            "docker_addr",
-            "The docker address must be either an absolute Unix socket path "
-            f"(starting with {_TCP_ADDR_PREFIX[0]!r}) or a "
-            "'tcp://<host>:<port>' URL.",
-        )
+        raise _field_refusal("docker_addr", _DOCKER_ADDR_RULE)
     if docker_addr.startswith(_TCP_ADDR_PREFIX):
         docker_addr = _validated_tcp_addr(docker_addr)
     elif not docker_addr.startswith("/"):
-        raise _field_refusal(
-            "docker_addr",
-            "The docker address must be either an absolute Unix socket path "
-            "(starting with '/') or a 'tcp://<host>:<port>' URL.",
-        )
+        raise _field_refusal("docker_addr", _DOCKER_ADDR_RULE)
     return {
         "kind": ENGINE_KIND_SSH,
         "host": host,

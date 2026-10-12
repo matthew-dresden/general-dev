@@ -274,7 +274,13 @@ rdc_validate_requested_name() {
     "" \
     "Pick a name matching that shape, or drop NAME to keep the generated" \
     "<${PROJECT_NAME}>-<devcontainerId> name."
-  if rd_docker inspect "$NAME" > /dev/null 2>&1; then
+  # The collision probe is plain docker, quiet, never rd_docker: an unused
+  # name -- the normal, expected answer here -- is docker exiting non-zero,
+  # and rd_docker's translator would report that as a failure and end the
+  # whole run before the build this check guards ever started. The dispatch
+  # prelude exports DOCKER_CONTEXT under ENGINE, so this probes the engine
+  # the run addresses, the same way rdc_require_container's named branch does.
+  if docker inspect -f '{{.Id}}' "$NAME" 2> /dev/null; then
     rd_fail "A container named '${NAME}' already exists on this engine" \
       "Two containers cannot share a name, and renaming this one onto it would" \
       "leave the other one unaddressable." \

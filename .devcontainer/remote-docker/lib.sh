@@ -61,8 +61,8 @@ rd_load_config() {
 # rd_load_config: local-engine commands must keep working on a machine where
 # none of it is configured.
 # The region and profile every AWS call needs, and nothing more. An operation
-# that reaches AWS but never names the instance over the wire -- publishing
-# this instance's TLS material, which the resolver addresses by name -- must
+# that reaches AWS but never names the instance over the wire (publishing
+# this instance's TLS material, which the resolver addresses by name) must
 # require only these, or an unrelated placeholder blocks work that does not
 # depend on it.
 rd_require_aws_config() {
@@ -95,7 +95,7 @@ rd_check_prereqs() {
 # The single place any shell caller turns INSTANCE / DEFAULT_REMOTE_INSTANCE
 # into a concrete instance and its addressing block. Every remote entry point
 # calls this exactly once, at its own start, and then reads the exported
-# values -- rather than each script deriving a context name or parameter
+# values, rather than each script deriving a context name or parameter
 # prefix from PROJECT_NAME on its own, which is how two callers end up
 # addressing different instances while believing they agree.
 #
@@ -128,7 +128,7 @@ rd_resolve_instance_quiet() {
   resolver_env=()
 
   # ENGINE names one engine explicitly; when it names a remote instance, that
-  # instance -- not the four-step default order -- is the one whose address
+  # instance, not the four-step default order, is the one whose address
   # block this run consumes, so REMOTE_DOCKER_CONTEXT, the Parameter Store
   # prefix and the recorded id all belong to the engine rd_engine_context aims
   # docker at. The variable is injected only for that case: an unconditional
@@ -144,7 +144,7 @@ rd_resolve_instance_quiet() {
   # stderr has already reached the caller and must not be eval'd.
   # DOCKER_CONTEXT is the one line translated rather than exported: the
   # block's value names the resolved instance's engine, which is exactly
-  # what REMOTE_DOCKER_CONTEXT means -- the name backend classification
+  # what REMOTE_DOCKER_CONTEXT means, the name backend classification
   # compares the active context against. Exporting it as DOCKER_CONTEXT
   # would re-aim every plain docker call, and `docker context show` itself,
   # at the resolved instance's engine even when the machine-wide active
@@ -152,7 +152,7 @@ rd_resolve_instance_quiet() {
   # container-level targets as remote against the operator's explicit
   # `make local`. The pin under ENGINE survives by the same translation: the
   # process's DOCKER_CONTEXT stays whatever the prelude pinned (or unset),
-  # and REMOTE_DOCKER_CONTEXT -- informational, never a pin -- carries the
+  # and REMOTE_DOCKER_CONTEXT, informational and never a pin, carries the
   # block's value.
   while IFS= read -r line; do
     if [ "${line%%=*}" = "DOCKER_CONTEXT" ]; then
@@ -173,7 +173,7 @@ EOF_BLOCK
   # only id writer (devcontainer_config.instance_ops.link_id), and CERTS_DIR
   # in the resolved block is exactly the directory it lives under. Export the
   # recorded id as REMOTE_INSTANCE_ID so every remote consumer reads the
-  # store rather than a stale shell.env value -- and clear the variable when
+  # store rather than a stale shell.env value, and clear the variable when
   # nothing is recorded, so a leftover shell.env export can never misdirect
   # an operation at a dead instance; rd_require_remote_config is what turns
   # that absence into the make instance-link remedy.
@@ -206,7 +206,7 @@ rd_resolve_instance() {
     "What is configured:       ${RD_BOLD}make list-instances${RD_RESET}"
 }
 
-# INSTANCE and ENGINE both name an engine when both are set -- INSTANCE the
+# INSTANCE and ENGINE both name an engine when both are set: INSTANCE the
 # instance every remote operation resolves its address block from, ENGINE the
 # engine every docker call is pinned to. When they name different engines, a
 # run would resolve one instance's addresses while aiming docker at another,
@@ -222,7 +222,7 @@ rd_resolve_instance() {
 # caller provided.
 rd_require_engine_instance_agreement() {
   # ${RD_INSTANCE_CALLER-...}, dash only: the capture is exported even when
-  # the caller named nothing, and that empty value is meaningful -- it is
+  # the caller named nothing, and that empty value is meaningful; it is
   # the "no caller choice to disagree with" case, not one the :- form may
   # read as never-captured.
   local named="${RD_INSTANCE_CALLER-${INSTANCE:-}}"
@@ -262,7 +262,7 @@ rd_run() {
 # switching contexts underneath the others. 'local' names this machine's
 # engine (LOCAL_DOCKER_CONTEXT); anything else must name an instance directory
 # under remote-instances/, and its context is the same <repo-slug>-<name> form
-# every other consumer derives -- computed through instances.docker_context,
+# every other consumer derives, computed through instances.docker_context,
 # never a second shell copy of that rule.
 #
 # Resolved once per process, guarded by RD_ENGINE_CONTEXT_RESOLVED the same

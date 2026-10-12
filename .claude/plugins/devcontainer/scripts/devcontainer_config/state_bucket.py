@@ -39,7 +39,7 @@ from devcontainer_config.instance_ops import Runner, subprocess_runner
 # below starts with it.
 AWS_EXECUTABLE = "aws"
 
-# The `${local.NAME}` token grammar root.hcl's template uses -- the same
+# The `${local.NAME}` token grammar root.hcl's template uses, the same
 # interpolation Terragrunt resolves at run time.
 _INTERPOLATION_TOKEN = re.compile(r"\$\{local\.([A-Za-z0-9_]+)\}")
 
@@ -50,7 +50,7 @@ _INTERPOLATION_TOKEN = re.compile(r"\$\{local\.([A-Za-z0-9_]+)\}")
 _TEMPLATE_PATTERN = re.compile(r'^\s*state_bucket_name\s*=\s*"([^"]*)"', re.MULTILINE)
 _SUFFIX_PATTERN = re.compile(r'^\s*state_bucket_suffix\s*=\s*"([^"]*)"', re.MULTILINE)
 
-# Terragrunt's own error wording for a backend bucket that is not there --
+# Terragrunt's own error wording for a backend bucket that is not there,
 # "An error occurred (404) when calling the HeadBucket operation: Not Found"
 # from the aws CLI this module probes with. The parenthesized code and the
 # service's own error name are matched exactly, so a request id that

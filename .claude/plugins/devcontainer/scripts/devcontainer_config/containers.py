@@ -60,7 +60,7 @@ class EngineContainers:
     `containers` is None exactly when `lookup_error` is set: the probe
     failed (docker absent, context unknown, engine unreachable) and the row
     reports the failure instead of an empty listing, which would read as
-    "no containers" -- a different, wrong answer.
+    "no containers", a different and wrong answer.
     """
 
     engine: str

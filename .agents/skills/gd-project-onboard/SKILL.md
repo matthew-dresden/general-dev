@@ -1,18 +1,18 @@
 ---
 name: gd-project-onboard
-description: Takes a fresh clone of this repository to ready-for-setup -- creates the four gitignored configuration files from their committed examples with make init, binds Shift+Enter with make keybindings, and ends by naming the env-setup skill for the chosen backend; configures nothing else itself.
+description: Takes a fresh clone of this repository to ready-for-setup by creating the four gitignored configuration files from their committed examples with make init, binds Shift+Enter with make keybindings, and ends by naming the env-setup skill for the chosen backend; configures nothing else itself.
 ---
 
 # gd-project-onboard
 
 This skill is the first run on a new checkout: it creates the private
 configuration files every later skill reads, and nothing more. It decides
-nothing about what those files contain -- `render` and `verify`
+nothing about what those files contain; `render` and `verify`
 (`.claude/plugins/devcontainer/scripts/devcontainer_config/`) own the file
 contracts, and `make init` performs the copy from the committed `.example`
 files, refusing to overwrite anything already on disk. When a file already
 exists, this skill reports that fact and moves on; it never merges, edits or
-re-renders an existing file -- re-rendering is `gd-env-setup-local`'s and
+re-renders an existing file, and re-rendering is `gd-env-setup-local`'s and
 `gd-env-setup-remote`'s concern, with the existing files moved aside first.
 
 ## Invocation map

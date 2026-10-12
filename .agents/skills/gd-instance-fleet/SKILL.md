@@ -1,6 +1,6 @@
 ---
 name: gd-instance-fleet
-description: Runs one operation across every configured instance at once through the ALL=1 make targets -- status, stop, start and (behind its own confirmation) destroy -- reading make list-instances first and reporting a per-instance result table; never widens a single-instance request into a fleet run on its own.
+description: Runs one operation across every configured instance at once through the ALL=1 make targets, whether status, stop, start and (behind its own confirmation) destroy, reading make list-instances first and reporting a per-instance result table; never widens a single-instance request into a fleet run on its own.
 ---
 
 # gd-instance-fleet
@@ -9,7 +9,7 @@ This skill exists for the moment an operator says "all of them": stopping
 every instance before a weekend, starting the fleet on Monday morning, or
 reporting live state across the board. The make targets below already
 implement the per-instance loop; this skill decides nothing about how to
-talk to EC2 -- it sequences the targets, reads their per-instance results,
+talk to EC2; it sequences the targets, reads their per-instance results,
 and reports one line per instance. `devcontainer_config.instances` owns
 discovery, so the set "every configured instance" is always what that module
 enumerates, never a list this skill maintains itself.
@@ -17,7 +17,7 @@ enumerates, never a list this skill maintains itself.
 Fleet runs multiply blast radius, so the asymmetry between read, start and
 stop against destroy is stated rather than implied: the first three report
 and continue per instance, while `make instance-destroy ALL=1` requires the
-target's own `CONFIRM=destroy` and is treated as a Section 4.4 gate -- the
+target's own `CONFIRM=destroy` and is treated as a Section 4.4 gate: the
 operator confirms the fleet, in their own words, before this skill runs it.
 
 ## Invocation map

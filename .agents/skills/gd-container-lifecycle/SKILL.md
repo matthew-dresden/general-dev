@@ -47,7 +47,9 @@ behind is exactly the case where the exit code and the truth disagree.
 | Operation | What this skill runs | Confirmation |
 |---|---|---|
 | Inventory and pre-flight | `make status`, `make check`, and, when the request is a rebuild, `make build` against the already-existing container | None: reads and a harmless refusal (`## Inventory` step 4). |
+| Inventory across engines | `make status ALL=1` and `make check ALL=1` | None: reads, one engine after the other, fail-fast on the first engine that cannot answer. |
 | Tear down | `make clean` | Confirmation, always (`## Confirmation`). |
+| Tear down the fleet | `make clean ALL=1 CONFIRM=destroy` | Confirmation, always, and the make-level gate enforces it: without `CONFIRM=destroy` the target refuses and states the exact confirming command. `FORCE=1` still separately bypasses each container's unpushed-work guard. |
 | Rebuild in place | `make rebuild` | Confirmation, always. |
 | Rebuild from scratch | `make build-no-cache` or `make rebuild-no-cache` | The same confirmation gate as rebuild: both replace the container and its image, and are for when a feature or base image changed (`make help`'s own BUILD rows). |
 

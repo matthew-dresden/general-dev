@@ -55,17 +55,17 @@ BUILD                             every target blocks until the container is up 
   make rebuild            both    clean, then build. Prerequisites are checked before anything is destroyed.
   make build-no-cache     both    build with the image rebuilt from scratch.
   make rebuild-no-cache   both    rebuild with the image rebuilt from scratch. Use when a feature or base image changed.
-  make clean              both    Destroy the container, its private volumes and its image. Shared volumes and the base image are kept.
+  make clean              both    Destroy the container, its private volumes and its image; the image is kept when a sibling still uses it. ALL=1 needs CONFIRM=destroy.
 
 LIFECYCLE
-  make status             both    Backend, container, image and volumes. Read-only, so start here when something looks wrong.
+  make status             both    Backend, container, image and volumes. Read-only, so start here. ALL=1 reads every engine, one after the other.
   make reopen             both    Open the container in VS Code. Local opens the folder; remote names the container to attach to.
   make exec               both    Interactive shell inside the container. CONTAINER_SHELL picks which one.
   make vscode-server      both    Fetch the VS Code server this machine needs inside the container. reopen does it for you.
-  make start / stop       both    Start or stop the container. The checkout survives either way.
-  make restart            both    Restart in place. Fixes a wedged container without rebuilding anything.
+  make start / stop       both    Start or stop the container. The checkout survives either way. ALL=1 for every engine.
+  make restart            both    Restart in place. Fixes a wedged container without rebuilding anything. ALL=1 for every engine.
   make rename NAME=x      both    Give the container a readable name. New ones are <repo>-<devcontainerId>, which is too long to pick from a list.
-  make check              both    Remote: report uncommitted or unpushed work in the volume, non-zero when dirty. Local: a no-op, the container shares this folder.
+  make check              both    Remote: report uncommitted or unpushed work in the volume, non-zero when dirty. Local: a no-op. ALL=1 for every engine.
 
 SECRETS AND CERTIFICATES
   make push-creds         both    Resolve every hostcreds manifest entry on this machine and push it into the container. Git entries also seed ~/.git-credentials.
@@ -97,7 +97,7 @@ SKILLS                            wire this repo's .agents/skills roster into an
 
 OPTIONS
   ENGINE=local|<name>             Address one engine explicitly (ENGINE=x make <target> or make <target> ENGINE=x): drive local and remote engines in parallel; unset follows the active context.
-  CONTAINER=<name>                Pick one instance when several clones of this repo exist. 'make status' lists them.
+  CONTAINER=<name>                Pick one container when several clones of this repo share an engine. 'make list-containers' lists them.
   NAME=<x>                        Name the container build/up creates at creation; make rename NAME=x does the same after the fact.
   FORCE=1                         Proceed past the unpushed-work and uncommitted-config guards.
   SKIP_SECRETS_CHECK=1            Do not compare shell.env against Parameter Store, and do not publish it.

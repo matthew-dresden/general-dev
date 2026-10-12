@@ -1234,13 +1234,18 @@ rdc_build_remote() {
   # falls back to /devcontainer/$(basename "$(pwd)"), the workspace folder
   # name, and an instance whose name differs from the project folder reads a
   # different environment's secrets entirely. Observed: instance 'sandbox'
-  # bootstrapped from /devcontainer/general-dev/shell.env.
+  # bootstrapped from /devcontainer/general-dev/shell.env. The reference is
+  # guarded because the dispatch prelude leaves DEVCONTAINER_SSM_PREFIX
+  # unset for an ssh engine, where there is no prefix to resolve, and this
+  # remote path builds for both kinds: the ssh container takes the empty
+  # value, which its postCreate never reads, because the seed volume wrote
+  # the payload files its file-present branch checks first.
   RDC_OVERRIDE_CONFIG="$(mktemp "${TMPDIR:-/tmp}/devcontainer-override.XXXXXX")"
   trap 'rm -f "$RDC_OVERRIDE_CONFIG"' EXIT
   rdc_read_configuration \
     | jq --arg mount "source=${volume},target=${CONTAINER_WORKSPACES_ROOT},type=volume" \
       --arg configdir "${REPO_ROOT}/.devcontainer" \
-      --arg ssmprefix "${DEVCONTAINER_SSM_PREFIX}" \
+      --arg ssmprefix "${DEVCONTAINER_SSM_PREFIX:-}" \
       '.configuration
        | del(.configFilePath)
        | .workspaceMount = $mount
@@ -1403,8 +1408,19 @@ if command -v docker > /dev/null 2>&1; then
   # an export that would have re-aimed every plain docker call at the
   # resolved instance's engine even when the active context named another.
   if rd_resolve_instance_quiet; then
-    DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
-    export DEVCONTAINER_SSM_PREFIX
+    if [ "$(rd_engine_kind)" = "ssh" ]; then
+      # An ssh engine has no Parameter Store behind it, so its resolved block
+      # carries no PARAMETER_PREFIX and the assignment below would
+      # dereference an unset variable under set -u, ending every command
+      # before its dispatch (`make status ENGINE=<ssh engine>` died exactly
+      # there). Clear the variable entirely, the way the resolver clears
+      # REMOTE_INSTANCE_ID for an unlinked instance: no EC2 value may
+      # survive, from this run or a leaked one, for an ssh engine.
+      unset DEVCONTAINER_SSM_PREFIX
+    else
+      DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
+      export DEVCONTAINER_SSM_PREFIX
+    fi
   fi
 
   # Re-assert the ENGINE pin. The resolver's export loop now translates its

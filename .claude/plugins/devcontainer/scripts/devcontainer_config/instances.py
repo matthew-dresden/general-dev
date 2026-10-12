@@ -1,9 +1,9 @@
 """Instance discovery, naming, and the Section 9 addressing table (spec Section 4.5).
 
 Section 4.5 assigns this module exactly one job: "discovery, naming, and the
-addressing table in Section 9." Section 9's table has six rows -- Terragrunt
+addressing table in Section 9." Section 9's table has six rows (Terragrunt
 directory, state key, docker context, parameter prefix, certificate
-directory, forwarded port -- and this module is the only place any of them
+directory, forwarded port), and this module is the only place any of them
 is derived. Before this module existed, every consumer that needed one of
 those six values (a skill, a Makefile recipe, a Python module) built its own
 copy of the interpolation, and a second instance an operator added silently
@@ -44,7 +44,7 @@ binary (AC-TEST-004): no docker, no AWS, no network.
 
 The engine-kind notion is the newest row of this module's contract: an
 instance is either the EC2 kind (a Terragrunt-managed remote instance, the
-kind every derivation above was written for) or the SSH kind -- a generic
+kind every derivation above was written for) or the SSH kind, a generic
 SSH endpoint with Docker, declared wholly by a
 `remote-instances/<name>/engine.json` manifest, with no AWS, no Terragrunt,
 no Parameter Store and no certificates behind it. `read_kind` is the
@@ -112,7 +112,7 @@ STATE_KEY_FILENAME = "terraform.tfstate"
 # The third engine kind: a generic SSH endpoint with Docker. An instance
 # directory whose `ENGINE_MANIFEST_FILENAME` manifest is present is an SSH
 # engine; a directory without one is an EC2 instance (a terragrunt.hcl
-# directory, or -- for backward compatibility of `discover` -- a directory
+# directory, or (for backward compatibility of `discover`) a directory
 # with neither file). The manifest is the WHOLE declaration of an SSH
 # engine: no AWS, no Terragrunt, no Parameter Store, no certificates, so
 # none of the EC2 addressing rows below (state key, parameter prefix,
@@ -125,7 +125,7 @@ ENGINE_KIND_EC2 = "ec2"
 # The engine manifest's defaults and bounds. Declared once here, the module
 # that owns addressing, so `instance_ops.scaffold_engine`'s write side and
 # `cli`'s argparse defaults source these constants rather than restating
-# the literals -- a changed default port or docker socket then moves
+# the literals: a changed default port or docker socket then moves
 # everywhere at once.
 DEFAULT_ENGINE_PORT = 22
 DEFAULT_ENGINE_DOCKER_ADDR = "/var/run/docker.sock"
@@ -142,9 +142,9 @@ _SCHEME_SEPARATOR = "://"
 
 # The one refusal rule for a `docker_addr` value that is neither an absolute
 # Unix socket path nor a `tcp://` URL. Declared once because
-# `validate_engine_values` states it twice -- once for a value that is not a
+# `validate_engine_values` states it twice, once for a value that is not a
 # non-empty string and once for one that is a string but starts with
-# neither accepted form -- and two independently written copies of the same
+# neither accepted form, and two independently written copies of the same
 # sentence would drift.
 _DOCKER_ADDR_RULE = (
     "The docker address must be either an absolute Unix socket path "
@@ -262,8 +262,8 @@ class Resolution:
     `instance` is `None` only when the local backend is active (spec
     Section 4.1.1's edge case): there is no instance to choose on that
     backend, and `INSTANCE`, if set, names nothing on it. `warning` is set
-    only for that one edge case -- `INSTANCE` set while the local backend is
-    active -- carrying the text a caller prints to stderr; every other
+    only for that one edge case, `INSTANCE` set while the local backend is
+    active, carrying the text a caller prints to stderr; every other
     resolution either raises or returns a `Resolution` with `warning=None`.
     """
 
@@ -310,7 +310,7 @@ def discover(root: Path) -> tuple[str, ...]:
     filtered out by the `is_dir()` check alone; `_envcommon/` is a
     directory but shared configuration, not an instance, and is filtered
     out by name (AC-FUNC-004). Returns an empty tuple, never an error, when
-    `remote-instances/` itself does not exist yet -- `resolve` is what
+    `remote-instances/` itself does not exist yet, so `resolve` is what
     turns "nothing configured" into `NoInstancesConfiguredError` on a
     remote backend, not this function, so a caller that only wants a
     listing is not forced to handle an exception for the empty case.
@@ -343,7 +343,7 @@ def docker_context_prefix(root: Path) -> str:
 
     `<repo-slug>` is `repo.repo_slug(root)`, the identical value
     `remote-instances/root.hcl`'s own `local.repo_slug` derives (the state
-    bucket name, spec Section 5.7, depends on the same value) -- never a
+    bucket name, spec Section 5.7, depends on the same value), never a
     literal, so a fork of this repository under a different name gets its
     own, non-colliding docker context prefix without editing this module.
     In this repository, `repo_slug` resolves to `general-dev`, matching
@@ -412,7 +412,7 @@ def certs_dir(name: str) -> Path:
 def engine_manifest_path(root: Path, name: str) -> Path:
     """`remote-instances/<name>/engine.json`, an SSH engine's whole declaration.
 
-    The directory is `terragrunt_dir(root, name)` -- Section 9's directory
+    The directory is `terragrunt_dir(root, name)`, Section 9's directory
     row, the one per-instance path every engine kind shares (an EC2
     instance keeps its terragrunt.hcl there, an SSH engine its manifest) --
     so the path is composed from that single derivation rather than a
@@ -479,7 +479,7 @@ def _validated_tcp_addr(value: str) -> str:
 
     The host must be non-empty, must not itself carry ':' (a ':' in the host
     part would make it an IPv6 literal, which the forward and endpoint
-    composition cannot express yet -- the same limit the `host` field
+    composition cannot express yet, the same limit the `host` field
     refuses, stated the same way), and the port must be digits within the
     same `MIN_ENGINE_PORT`..`MAX_ENGINE_PORT` bound the `port` field obeys,
     so a docker endpoint derived from this value later can never be
@@ -523,7 +523,7 @@ def validate_engine_values(payload: object) -> dict[str, object]:
     written) drive it, so a manifest can never be written that this module
     would refuse to read. Every violation fails fast naming the field and
     the rule; nothing is repaired, defaulted silently or partially
-    returned -- either the whole payload is valid, or nothing comes back.
+    returned; either the whole payload is valid, or nothing comes back.
 
     Returns:
         A dict with all five fields: `kind` (always `ENGINE_KIND_SSH` --
@@ -804,8 +804,8 @@ def recorded_instance_id(root: Path, name: str) -> str | None:
     documents for its own `root`: the store addresses the operator's
     certificate-material directory, not the repository.
 
-    A missing store file -- or a missing certificate-material directory
-    around it -- is the ordinary not-yet-linked state and returns None
+    A missing store file, or a missing certificate-material directory
+    around it, is the ordinary not-yet-linked state and returns None
     rather than raising; only a real read error (permissions, for example)
     propagates.
     """

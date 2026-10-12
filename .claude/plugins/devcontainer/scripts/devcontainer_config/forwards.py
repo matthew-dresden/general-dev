@@ -4,9 +4,9 @@
 and returns as soon as the connection is confirmed, instead of holding the
 terminal: this module spawns the transport's `connect` command in a
 new session (its stdout and stderr stream into a per-instance log), waits
-by polling for the transport's own "Connected:" announcement -- which is
+by polling for the transport's own "Connected:" announcement, which is
 printed only after the docker context was created or updated and answered a
-handshake through the tunnel -- and records the daemon's pid, command,
+handshake through the tunnel, and records the daemon's pid, command,
 log path and forwarded port in a per-instance JSON record. The record lives
 beside the instance's certificate material (`instances.certs_dir`), so
 `make instance-destroy`'s cleanup removes it with everything else the
@@ -65,7 +65,7 @@ _TRANSPORT_MODULE = "devcontainer_config.transport"
 _TRANSPORT_SSH_MODULE = "devcontainer_config.transport_ssh"
 _TRANSPORT_COMMAND = "connect"
 
-# The ssm transport kind -- the default, and what every record written
+# The ssm transport kind, the default, and what every record written
 # before the field existed reads back as. The ssh kind is
 # `instances.ENGINE_KIND_SSH` (the same "ssh" string the engine manifest and
 # the resolved address block use).
@@ -239,8 +239,8 @@ def child_argv(
     values in `engine` (a validated manifest dict, from
     `instances.engine_manifest` or the caller). For the ssh form, the first
     positional slot carries the INSTANCE NAME (the `--name` value) rather
-    than an EC2 id, and `profile`/`region` are unused -- an ssh engine opens
-    no AWS session -- but stay positional so every caller passes the same
+    than an EC2 id, and `profile`/`region` are unused (an ssh engine opens
+    no AWS session), but stay positional so every caller passes the same
     five leading arguments for either kind.
     """
     if kind == instances.ENGINE_KIND_SSH:
@@ -836,7 +836,7 @@ def _parse_open_flags(rest: Sequence[str]) -> tuple[dict[str, str], str]:
 
     The kind is decided by which form's identifying flag is present:
     `--instance-id` selects the ssm form, `--name` the ssh form, and mixing
-    the two -- or supplying neither -- is refused before anything is
+    the two, or supplying neither, is refused before anything is
     spawned. Missing flags of the chosen form are refused the same way.
 
     Raises:

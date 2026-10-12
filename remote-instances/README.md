@@ -20,9 +20,8 @@ for the sizing and state-model decisions the defaults encode.
 
 ## What a per-instance directory contains
 
-Decision D6 (spec `devcontainer-platform.md` Section 13) separates the
-module from its deployments: an instance is configured by writing an
-`inputs` block, never by editing the module. Adding an instance is
+The module is deliberately separate from its deployments: an instance
+is configured by writing an `inputs` block, never by editing the module. Adding an instance is
 `make instance-init INSTANCE=<name>`, which creates a directory under
 `remote-instances/` holding exactly one scaffolded file, `terragrunt.hcl`,
 and nothing else (Section 9); the only thing that changes outside the new
@@ -137,7 +136,7 @@ reused network) this file's two variants are drawn from.
 
 ## Artifacts namespaced by instance name
 
-An instance name keys every artifact below (spec Section 9). Adding a second
+An instance name keys every artifact below. Adding a second
 instance under a different directory whose `inputs` block also sets
 `instance_name` and `name_prefix` to that new directory's name produces none
 of these values in common with the first, with no edit to either existing
@@ -173,7 +172,7 @@ one directory while this table points at another.
 (Terragrunt, the security submodule's inline IAM policy, `E6`'s transport
 and certificate modules). Deriving the value programmatically -- turning
 an instance name into any one of these seven strings or paths -- is a
-separate concern spec Section 4.5 assigns to exactly one Python module:
+separate concern owned by exactly one Python module:
 `.claude/plugins/devcontainer/scripts/devcontainer_config/instances.py`.
 A script or skill that needs one of these values calls into that module
 (or shells out to its `resolve-instance` entry point) instead of

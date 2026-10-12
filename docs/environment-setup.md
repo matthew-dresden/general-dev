@@ -20,6 +20,32 @@ the keychain, never runs an AWS login of its own. Each value moves once,
 from the place only this machine holds it into the container, and the
 container's shell startup does the rest.
 
+## The whole sequence at a glance
+
+```mermaid
+flowchart TD
+  clone["1. clone the repository"] --> init["2. make init\n(four private files\nfrom examples)"]
+  init --> fill["3. fill the three\nconfiguration files"]
+  fill --> creds["4. author the hostcreds\nmanifest + 5. make creds-init"]
+  creds --> keys["6. make keybindings\n(once per machine)"]
+  keys --> engine{"local or remote?"}
+  engine -- "local" --> localp["7. make local"]
+  engine -- "remote" --> remotep["point at the instance\n(make remote INSTANCE=...)"]
+  localp --> build["8. make build"]
+  remotep --> build
+  build --> open["9. open VS Code"]
+  open --> verify["10. verify\n(make status,\nmake verify-container)"]
+```
+
+Which branch to take:
+
+> **Do I need the remote half at all?**
+> Only if work should survive the laptop sleeping, being offline, or being
+> a different laptop. The local engine alone covers everything else, and
+> the two run side by side later -- switching is `make local` /
+> `make remote INSTANCE=<name>`, and `ENGINE=` addresses either without
+> switching. See "Working with several engines at once" below.
+
 ## Prerequisites
 
 The tooling is macOS-first: the keychain credential source, the OrbStack

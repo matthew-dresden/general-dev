@@ -8,16 +8,24 @@ laptop disconnects, sleeps, or shuts down.
 
 ## Architecture
 
-```text
-laptop                                        EC2 (us-east-1, no inbound ports)
-──────                                        ─────────────────────────────────
-docker CLI / VS Code ── SSM port forward ── dockerd TLS listener (loopback)
-                          (IAM auth, mTLS)     └─ dockerd (data on the data volume)
-                                                  └─ devcontainer per project
-                                                     └─ source in named volume
-aws ssm put-parameter ───────────────────────► SSM Parameter Store
-      (push-secrets.sh)                          └─ read at container create via
-                                                    instance role (IMDSv2)
+```mermaid
+flowchart LR
+  subgraph laptop["laptop"]
+    cli["docker CLI / VS Code"]
+    ssm["session-manager-plugin"]
+  end
+  subgraph ec2["EC2 (no inbound ports)"]
+    fwd["SSM agent"]
+    tls["dockerd TLS listener\n(loopback only)"]
+    dockerd["rootless dockerd\n(data on the data volume)"]
+    ctr["devcontainer per project\n(source in named volume)"]
+  end
+  ps["SSM Parameter Store"]
+
+  cli -- "client certificate (mTLS)" --> ssm
+  ssm -- "port forward (IAM-authorized session)" --> fwd
+  fwd --> tls --> dockerd --> ctr
+  ps -- "read at container create\nvia instance role (IMDSv2)" --> ctr
 ```
 
 - **No inbound access:** the security group has zero inbound rules. All
@@ -31,6 +39,47 @@ aws ssm put-parameter ───────────────────�
 - **Secrets:** never in git. `push-secrets.sh` publishes the local gitignored
   `shell.env` / `aws-profile-map.json` to SSM Parameter Store per project; the
   postcreate wrapper fetches them on the instance via the instance role.
+
+### Questions this design answers
+
+A short exchange on the decisions the architecture forces; each answer links
+the section that goes deeper.
+
+<details>
+<summary>Why does <code>docker context show</code> name a port on <code>127.0.0.1</code>?</summary>
+
+The context's endpoint is `tcp://127.0.0.1:<port>`: the forward's local
+half. The daemon itself is on the instance, bound to its own loopback, and
+the certificate the client presents is what authenticates you -- the port
+number is only where the tunnel answers. See
+[Transport](../../docs/devcontainer.md) in the deep dive.
+
+</details>
+
+<details>
+<summary>What happens when the forward drops?</summary>
+
+Containers keep running (`shutdownAction: "none"`); only your laptop's
+route to the engine is gone. `make connect-status` names the daemon's
+state, `make connect-refresh` reopens it from the recorded command, and
+`make remote` is the one-step version that also points docker at it. If
+the SSO session expired, the refresh says so: `aws sso login --profile
+<profile>`, then refresh again. See the "Daily workflow, connect &
+disconnect" section below.
+
+</details>
+
+<details>
+<summary>Where do the certificates live, and who reads them?</summary>
+
+Under `~/.docker/certs/<instance>/` on the laptop, one directory per
+instance: the client certificate `make connect-start` presents, the
+recorded EC2 id, and the trust chain. `make cert-status` reports client
+and CA expiry per instance; renewal is `make cert-client`, and the server
+half is `make cert-publish` + `make cert-install`. See
+[Certificate lifecycle](../../docs/devcontainer.md).
+
+</details>
 
 ## Prerequisites (laptop)
 

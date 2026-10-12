@@ -56,7 +56,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from devcontainer_config import instances, repo, transport
+from devcontainer_config import instances, repo, transport, transport_ssh
 from devcontainer_config.hostprobe import CommandResult, CommandRunner, read_positive_seconds
 
 # The transport commands this module spawns and manages. The child composes
@@ -521,7 +521,10 @@ def open_forward(
             )
         except instances.InstancesError as exc:
             raise ForwardError(f"the ssh engine values are unusable: {exc}") from exc
-        identifier = f"ssh://{validated['user']}@{validated['host']}:{validated['port']}"
+        # The endpoint string is composed once, by the ssh transport's own
+        # composer over the same validated values, rather than a third,
+        # independently drifting f-string copy here.
+        identifier = transport_ssh.engine_endpoint(validated)
         argv = list(child_argv(instance, context, "", "", kind=kind, engine=validated))
     else:
         identifier = instance_id

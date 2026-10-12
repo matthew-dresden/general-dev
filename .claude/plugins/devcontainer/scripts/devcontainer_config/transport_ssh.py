@@ -35,10 +35,15 @@ confirm the whole path with a `docker version` handshake whose API floor and
 rootless-probe semantics are identical to `transport.handshake`'s. It then
 prints a `Connected:` line shaped like the ssm transport's -- the readiness
 marker `devcontainer_config.forwards` polls for, so the daemon lifecycle
-works unchanged -- and runs until interrupted, tearing the ssh child down
-cleanly on SIGINT/SIGTERM; every failure path after the launch stops the
-forward before the error propagates, never orphaning a child holding the
-allocated port.
+works unchanged -- and runs until interrupted. The two interrupt paths are
+deliberately different, and the module traps exactly one of them: SIGINT is
+handled in this process, where the interrupted wait tears the ssh child down
+cleanly; SIGTERM is never trapped here, and reaches the ssh child through
+the daemon lifecycle's process-group signal (`forwards.stop_forward` signals
+the daemon's whole group, SIGINT first, then SIGTERM, then SIGKILL), so the
+child dies with the daemon without this module carrying a second signal
+handler. Every failure path after the launch stops the forward before the
+error propagates, never orphaning a child holding the allocated port.
 
 Nothing here waits on time. The module contains no `time.sleep` call
 anywhere, the same rule `transport.py`'s own suite enforces: readiness is

@@ -383,6 +383,11 @@ _MANIFEST_REFUSALS: tuple[tuple[str, Callable[[dict[str, object]], object], str]
         "docker_addr",
     ),
     (
+        "docker_addr tcp host is an IPv6 literal",
+        lambda values: {**values, "docker_addr": "tcp://::1:2375"},
+        "docker_addr",
+    ),
+    (
         "host carries whitespace",
         lambda values: {**values, "host": f"{values['host']} extra.example.invalid"},
         "host",
@@ -464,6 +469,32 @@ def test_engine_manifest_refuses_an_ipv6_literal_host_naming_the_limit(
     message = str(exc_info.value)
     assert "IPv6" in message
     assert "not supported yet" in message
+
+
+def test_engine_manifest_refuses_an_ipv6_literal_tcp_host_naming_the_limit(
+    tmp_path: Path,
+) -> None:
+    """The ':' refusal for a tcp docker_addr's host part states the same limit.
+
+    `rpartition` splits `tcp://<host>:<port>` at the last ':', so an IPv6
+    literal destination parses through with a colon-carrying host part; the
+    refusal must state the same deliberate limit the `host` field states,
+    not surface it as a mysterious forward failure at transport time.
+    """
+    instances = _import_instances()
+    root = generated_root(tmp_path)
+    name = _instance_name()
+    payload = _valid_manifest_payload()
+    payload["docker_addr"] = f"tcp://::1:{_engine_port()}"
+    _write_manifest(root, name, payload)
+
+    with pytest.raises(instances.EngineManifestError) as exc_info:
+        instances.engine_manifest(root, name)
+
+    message = str(exc_info.value)
+    assert "field 'docker_addr'" in message, message
+    assert "IPv6" in message, message
+    assert "not supported yet" in message, message
 
 
 def test_engine_endpoint_is_ssh_user_host_port(tmp_path: Path) -> None:

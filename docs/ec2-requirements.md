@@ -71,7 +71,7 @@ shared secret prefix, and can write no parameter at all. Do not widen either
 every requirement in the table above. Record the security group's and the
 instance profile's identifiers: hand both back per Section 4. On the
 requester's side, option B is what sets their `var.create_security_group`
-and `var.create_iam_role` -- always together, never one without the other --
+and `var.create_iam_role`, always together and never one without the other,
 to false.
 
 ### 2.3 The instance and its volumes
@@ -86,7 +86,7 @@ to false.
 | Termination protection | Enabled by default (`DisableApiTermination` = true). A long-lived instance keeps it; an ephemeral one that is created, asserted against and destroyed in a single session sets it false, because `terragrunt destroy` cannot otherwise remove the instance it created | `var.disable_api_termination` (default `true`) |
 | Stop protection | Enabled by default (`DisableApiStop` = true). Both this and termination protection must be false for a destroy to succeed: the EC2 API reports the termination flag first and this one only on the next attempt, so clearing one leaves the instance undestroyable | `var.disable_api_stop` (default `true`) |
 | Instance metadata service | IMDSv2 required (`HttpTokens` = required), metadata endpoint enabled, hop limit exactly 2 | fixed |
-| Name tag | `var.name_prefix` is a prefix, not a literal Name value: the instance, the VPC and the internet gateway carry it unchanged, and every other resource above carries it with a fixed suffix appended -- root volume `-root`, data volume `-data`, subnet and route table `-public`, security group `-instance-sg`, IAM role `-instance-role`, instance profile `-instance-profile` | `var.name_prefix`, for example `EXAMPLE-devcontainer-remote` |
+| Name tag | `var.name_prefix` is a prefix, not a literal Name value: the instance, the VPC and the internet gateway carry it unchanged, and every other resource above carries it with a fixed suffix appended: root volume `-root`, data volume `-data`, subnet and route table `-public`, security group `-instance-sg`, IAM role `-instance-role`, instance profile `-instance-profile` | `var.name_prefix`, for example `EXAMPLE-devcontainer-remote` |
 | Additional tags | As given, if any | `var.tags`, for example `{"Environment": "EXAMPLE"}` |
 
 The metadata hop limit is exactly 2, not the default of 1: a container
@@ -107,7 +107,7 @@ have already run costs more time than doing them first would have.
    <daemon-user>` (`var.docker_daemon_user`, default `dockerd`), run once the
    user account exists. Without lingering, systemd tears down that user's
    own service manager, and the rootless docker daemon running under it, the
-   moment nobody is logged in as that user -- which for a dedicated daemon
+   moment nobody is logged in as that user, which for a dedicated daemon
    account with no interactive login is immediately after boot. The daemon
    appears to have installed correctly and then is simply gone, with nothing
    in its own log explaining why: the process that killed it was systemd
@@ -174,8 +174,8 @@ have already run costs more time than doing them first would have.
    an archive for the wrong architecture installs cleanly and fails only when
    first executed. The instance needs a client for the
    `ssm:GetParameter` grant its role already carries on
-   `/devcontainer/<instance>/*` -- it reads its own TLS material (Section 4)
-   and its secrets from Parameter Store over IMDSv2 with it -- and Ubuntu
+   `/devcontainer/<instance>/*`: it reads its own TLS material (Section 4)
+   and its secrets from Parameter Store over IMDSv2 with it, and Ubuntu
    24.04 publishes no `awscli` apt candidate.
 3. Add the Docker apt repository's signing key and source list, from the
    base URL and release channel given (`var.docker_repo_base_url`, default
@@ -285,7 +285,7 @@ Once every item above verifies (Section 5), send the requester:
 - **The AWS region** the instance runs in (for example `us-east-1`).
 - **If you followed option B in Section 2.1** (an existing network): the
   VPC identifier and the subnet identifier. These become the requester's
-  `var.vpc_id` and `var.subnet_id` inputs respectively -- the identifiers
+  `var.vpc_id` and `var.subnet_id` inputs respectively; the identifiers
   their own automation needs whenever it does not create the network itself.
 - **If you followed option B in Section 2.2** (an existing security group
   and IAM role): the security group identifier and the instance profile
@@ -328,7 +328,7 @@ corresponding provisioning or configuration item above did not take effect.
 | Package prerequisites installed | On the host: `dpkg-query -W -f='${Status}\n' ca-certificates curl gnupg uidmap dbus-user-session iptables \| grep -c '^install ok installed$'` | `6` |
 | Rootful daemon disabled | On the host: `systemctl is-active docker.service; systemctl is-enabled docker.service` | Both report `inactive` / `disabled` (non-zero exit is expected here) |
 | Daemon user lingering | On the host: `loginctl show-user <daemon-user> --property=Linger` | `Linger=yes` |
-| AppArmor profile loaded | On the host: `cat /sys/kernel/security/apparmor/profiles \| grep rootlesskit` | `/usr/bin/rootlesskit (unconfined)` -- the profile grants `userns` rather than confining the binary, so `unconfined` is the correct, loaded state |
+| AppArmor profile loaded | On the host: `cat /sys/kernel/security/apparmor/profiles \| grep rootlesskit` | `/usr/bin/rootlesskit (unconfined)`: the profile grants `userns` rather than confining the binary, so `unconfined` is the correct, loaded state |
 | cgroup v2 delegation | On the host: `cat /sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/cgroup.controllers` | Includes `cpuset` and `io` alongside `cpu`, `memory` and `pids` |
 | TLS directory permissions | On the host: `stat -c "%a %U %G" /home/<daemon-user>/tls` | `700 <daemon-user> <daemon-user>` |
 | Data-root directory ownership | On the host: `stat -c "%U:%G" <data-root>` | `<daemon-user>:<daemon-user>`, whether or not a second data volume was provisioned |

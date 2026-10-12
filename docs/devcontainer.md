@@ -152,8 +152,8 @@ EC2 reference, troubleshooting) live in
   engine: remote mounts the checkout volume at `/workspaces`, local bind-mounts
   only the repository below it, leaving `/workspaces` itself on the container's
   overlay. Unset, `RESMON_DISK_MOUNTS` therefore resolves to the shallowest mount
-  at or under `/workspaces` — `/workspaces` on one engine, `/workspaces/<repo>`
-  on the other — and `RESMON_WORKSPACES` moves where that is searched. Reportable
+  at or under `/workspaces`: `/workspaces` on one engine, `/workspaces/<repo>`
+  on the other. `RESMON_WORKSPACES` moves where that is searched. Reportable
   means the source names one filesystem, not that it names a device file: the
   extension keeps the filesystems whose source string appears in
   `resmon.disk.drives`, a local bind mount reports a driver name (`mac` for
@@ -238,7 +238,7 @@ EC2 reference, troubleshooting) live in
   usable server is removed first, unless a process is running from it: a VS Code
   window attached to a local container it created itself mounts the host's
   server cache at `/vscode` and writes a symlink to it into the volume, which
-  dangles in every container built without that mount — invisible to `test -e`,
+  dangles in every container built without that mount, invisible to `test -e`,
   which follows links, yet enough to make the final `mv` refuse and fail the
   seed on every attach. `SKIP_VSCODE_SERVER_SEED=1` opens
   the window without it. It then prunes builds nothing needs: VS Code never
@@ -378,8 +378,8 @@ developer's machine for origin's host, obtained through
 libsecret, gh, store), written to `~/.git-credentials` at mode 600 inside
 the container. The step resets `credential.helper` with
 `git config --replace-all`, because the Dev Containers extension copies the
-host's `~/.gitconfig` into the container when a window attaches -- which a
-rebuild usually has one already attached to the previous container -- and that
+host's `~/.gitconfig` into the container when a window attaches (a rebuild
+usually has one already attached to the previous container), and that
 copy leaves several helper values in place, against which a plain
 `git config` set fails with "cannot overwrite multiple values" after the
 container is otherwise complete. One helper, `store`, is the intended state,
@@ -435,8 +435,8 @@ Code's `Bash` tool is itself a denied bypass.
 
 On the remote engine the workspace is cloned into a volume, so the container
 has its own `.git` directory, one `make hooks-install` on the host never
-touches. Without a second install, a commit made from a container terminal
--- where most work in this repository happens -- would run no secret scan at
+touches. Without a second install, a commit made from a container terminal,
+where most work in this repository happens, would run no secret scan at
 all, the unguarded path becoming the common one instead of the exception.
 postCreate closes that gap: after the workspace and its `.git` directory are
 in place, it runs the identical `make hooks-install` the host uses, so the
@@ -492,8 +492,8 @@ way, so `sudo git commit --no-verify` and `if true; then git commit
 
 Known limitations, so this section does not claim broader coverage than
 the hook delivers: a denied command nested inside a quoted string this
-hook cannot re-parse -- `bash -c "<command>"`, `sh -c "<command>"` and
-`eval "<command>"` -- is not recovered from that string; a `git -c
+hook cannot re-parse (`bash -c "<command>"`, `sh -c "<command>"` and
+`eval "<command>"`), is not recovered from that string; a `git -c
 core.hooksPath=<path>` global config assignment is walked past without
 its value being inspected; a launcher combined with its own flags (`sudo
 -u root`, `env -i`, `nice -n 10`) is not walked past, only the bare word
@@ -589,7 +589,7 @@ a replacement signed by the same CA is accepted the moment it is presented:
 no Parameter Store entry is written, the daemon is never restarted, no
 `terragrunt apply` runs, and the docker context needs no update since it
 already points at `cert.pem`/`key.pem` by path. The CA itself is never
-reissued by a rotation -- reissuing it would invalidate every certificate it
+reissued by a rotation, because reissuing it would invalidate every certificate it
 already signed, including the server certificate the daemon is already
 serving, which would take the instance off the air until a new server key is
 published and the daemon restarted. This is also why a client rotation is
@@ -612,8 +612,8 @@ Section 3.6.2), and neither substitutes for the other:
 - **The SSM port forward**
   (`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`,
   E6-F2-S1-T1) maps the loopback listener to a local port on the laptop with
-  `aws ssm start-session --document-name AWS-StartPortForwardingSession` --
-  no SSH element anywhere in the argument vector. `ssm:StartSession` scoped
+  `aws ssm start-session --document-name AWS-StartPortForwardingSession`,
+  with no SSH element anywhere in the argument vector. `ssm:StartSession` scoped
   to that document decides *who may open the tunnel at all*, and, since
   Docker supports neither CRL nor OCSP, revoking it is the only revocation
   mechanism this platform has.
@@ -639,8 +639,8 @@ too.
 `transport.handshake` then completes a `docker version` handshake against
 that context, retried until it answers and bounded by
 `DOCKER_HANDSHAKE_TIMEOUT` (`docs/environment-files.md`), reporting the
-daemon's API version -- which must be at least 1.44 for mTLS on a TCP
-listener with a rootless daemon -- and whether it reports
+daemon's API version, which must be at least 1.44 for mTLS on a TCP
+listener with a rootless daemon, and whether it reports
 running rootless.
 
 **One build path, and a selector kept for the next one.** `make connect-start`
@@ -659,34 +659,34 @@ PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.f
 ```
 
 which is the same connection the operator targets make with, real values
-substituted from `config.env` and the instance's per-instance id store --
+substituted from `config.env` and the instance's per-instance id store,
 the `instance-id` file under
 `<certs-root>/<instance>/`, written by `make instance-link` and recorded
-automatically by `make instance-deploy` at apply time -- that the
+automatically by `make instance-deploy` at apply time, and that the
 `Makefile`'s own `connect` target issues for that value;
 `transport.resolve_transport` reads the identical
 `DEVCONTAINER_TRANSPORT` inside the transport's own connect handler too,
 refusing before touching AWS or docker at all unless it is `ssm`. This
 path establishes the SSM forward exactly as `start` does, then ties in the
-two calls `start` alone never makes -- `transport.ensure_context` and
-`transport.handshake` -- and activates the resulting context with
+two calls `start` alone never makes, `transport.ensure_context` and
+`transport.handshake`, and activates the resulting context with
 `docker context use` before confirming the handshake. The daemon is
 managed by `devcontainer_config.forwards`, not run in the foreground: the
 connect recipe spawns the command above as a detached process (unbuffered
 stdout streaming into a per-instance log), polls for its `Connected:`
-announcement -- printed only after the handshake answered -- records the
+announcement, printed only after the handshake answered, records the
 daemon's pid, command, log and forwarded port beside the instance's
 certificate material, and returns once all of that is confirmed; a child
 that dies first or never announces surfaces with its log tail, and nothing
 is retried behind a failure. The forward stays open after the command
 returns, so a subsequent `make build` reaches the `tcp://` context
-directly; the lifecycle targets manage it afterwards --
+directly; the lifecycle targets manage it afterwards:
 `make connect-status` (per instance or `ALL=1`), `make connect-stop`
 (SIGINT first, then the port-closed verification), `make connect-refresh`
 (re-runs the recorded command, for an expired SSO session or a dropped
 tunnel) and `make connect-list`. `--certs-root`
-defaults to `certs.DEFAULT_CERTS_ROOT` -- the same `<certs-root>` root
-`make cert-status` and the certificate material above use -- and only
+defaults to `certs.DEFAULT_CERTS_ROOT`, the same `<certs-root>` root
+`make cert-status` and the certificate material above use, and only
 needs overriding for a test fixture or an alternate checkout layout.
 The transport installs no SSH configuration block, spawns no `ssh` process,
 and names no `AWS-StartSSHSession` document; it requires no key on the
@@ -702,27 +702,27 @@ single place the bare instance name is recovered for certificate lookup.
 **The SAN requirement, and its symptom.** TLS validates the name the
 *client* dials the daemon with, and the client dials `127.0.0.1` through
 the loopback forward, so the server certificate must carry `IP:127.0.0.1`
-and `DNS:localhost` -- never the instance's own hostname or private
+and `DNS:localhost`, never the instance's own hostname or private
 address. A server certificate issued for either of those produces a
 handshake failure that names neither the forward nor the SANs: a real
 example, captured against a deliberately mis-issued certificate, reads
 `tls: failed to verify certificate: x509: certificate is valid for
-10.0.0.5, not 127.0.0.1` -- prose that reads like a tunnel, security-group
+10.0.0.5, not 127.0.0.1`: prose that reads like a tunnel, security-group
 or daemon problem before it reads like a certificate one.
 `transport.diagnose_handshake_failure` exists to close that gap: it
 recognizes that shape (and the related `x509: cannot validate certificate
 for 127.0.0.1 because it doesn't contain any IP SANs`) and states the SAN
 requirement, both required values, and the `gd-cert-lifecycle
 INSTANCE=<name>` invocation that reissues the server certificate, instead
-of surfacing the bare TLS error. A connection failure -- the forward not
-established, the daemon not listening -- is translated into a distinct
+of surfacing the bare TLS error. A connection failure, whether the forward
+not established or the daemon not listening, is translated into a distinct
 diagnosis naming the forward instead, so the two causes are never
 conflated.
 
 ## Secrets model
 
-Two halves, deliberately separate. Configuration -- `shell.env` and the
-AWS profile map -- is per-developer setup with no credential in it,
+Two halves, deliberately separate. Configuration, meaning `shell.env` and
+the AWS profile map, is per-developer setup with no credential in it,
 published to Parameter Store so a fresh remote clone-in-volume can
 bootstrap itself. Credentials never touch Parameter Store at all: each one
 is resolved on the developer's machine, from a source only that machine
@@ -804,7 +804,7 @@ resolved only on the host           over docker exec stdin,            git entry
   its own.
 - postCreate appends the hostcreds startup block to `~/.bashrc` and
   `~/.zshenv` (rendered by `devcontainer_config.cli shell-block`,
-  marker-guarded, required -- the provisioning-flow table above marks it
+  marker-guarded, required; the provisioning-flow table above marks it
   so). Every shell afterwards sources each fragment in sorted order,
   exporting the credential under its manifest name; an `aws-export` entry
   exports the three standard AWS variables plus the raw document under the
@@ -813,15 +813,15 @@ resolved only on the host           over docker exec stdin,            git entry
   nothing.
 - A rebuild wipes the credentials by design: `~/.hostcreds` lives in the
   container's own filesystem, not a volume, so a rebuilt container starts
-  with none -- and the build that created it has already pushed a fresh
+  with none; the build that created it has already pushed a fresh
   set as its last step. `make verify-container` re-checks the whole state
   inside the container (store and fragment modes, the startup block in
   both rc files, silent shell startup, and `git ls-remote` /
   `aws sts get-caller-identity` for whichever sources the manifest names),
   on either engine.
 
-The full manifest reference -- sources, labels, defaults, reserved names,
-the scanner integration -- is `docs/environment-files.md`'s "Host
+The full manifest reference (sources, labels, defaults, reserved names,
+the scanner integration) is `docs/environment-files.md`'s "Host
 credentials (hostcreds)" section; the ordered setup sequence, with a
 verification step after each stage, is `docs/environment-setup.md`.
 
@@ -884,7 +884,7 @@ run:
   `<backend>` to one of `answers.BACKENDS`, and gives a `## Questions` table
   with header `| Field | Prompt |` whose `Field` column, as a set, equals
   `answers.required_fields({"backend": <backend>, "aws_config_enabled": True,
-  "host_proxy": True})` -- the comparison always runs with the AWS and
+  "host_proxy": True})`; the comparison always runs with the AWS and
   host-proxy branches enabled, regardless of what the skill's own backend or
   interview flow would actually ask, so `aws_profiles` and `host_proxy_url`
   are always expected fields in every skill's table. A required field the

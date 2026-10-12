@@ -1,15 +1,15 @@
 # general-dev
 
 A reusable devcontainer platform: one repository that creates and manages
-one to many separate development containers -- on this laptop's Docker
-engine, on remote EC2 engines, or both at once -- with the projects you
-work on cloned inside the workspace as plain nested repositories.
+one to many separate development containers, whether on this laptop's
+Docker engine, on remote EC2 engines, or on both at once. The projects you
+work on are cloned inside the workspace as plain nested repositories.
 
 What that buys you, and why you would use it:
 
 - **Many containers, two kinds of engine.** A container per clone, per
-  branch under review, or per project -- named at creation (`make build
-  NAME=x`), listed across every engine at once (`make list-containers`),
+  branch under review, or per project. Name one at creation (`make build
+  NAME=x`), list them across every engine at once (`make list-containers`),
   and addressed per engine (`ENGINE=local` or `ENGINE=<instance>`) so
   parallel terminals never switch the docker context underneath each other.
 - **Work survives the laptop.** Local containers bind-mount this checkout;
@@ -20,8 +20,8 @@ What that buys you, and why you would use it:
   only shell this workspace offers.
 - **Every operation is automated.** Provisioning an engine, its
   certificates and secrets, building, naming, starting, stopping, checking,
-  fleet operations and teardown -- the whole lifecycle for engines and
-  containers alike is driven by make targets, one command each; `make help`
+  fleet operations and teardown: the whole lifecycle for engines and
+  containers alike runs through make targets, one command each. `make help`
   lists them all, and the `gd-*` skills drive those same targets when an
   agent runs them for you.
 
@@ -51,7 +51,7 @@ make keybindings      # Shift+Enter = newline in VS Code terminals
 
 Keybindings are resolved by the VS Code window, which runs on your machine
 even when the workspace is a container, so this one step cannot come from
-`devcontainer.json` -- reload the window afterwards.
+`devcontainer.json`; reload the window afterwards.
 
 **The skill route:** `gd-env-setup-local` prepares this machine, checking
 each host tool and stating any command it cannot run itself, and
@@ -97,8 +97,8 @@ make exec INSTANCE=<project>             # a shell inside the container
 `make instance-init` writes the one file a new instance needs and never
 deploys; `make instance-deploy` applies it and is safe to re-run, and prints
 the follow-on chain above when it finishes. Then VS Code → **Dev Containers:
-Attach to Running Container…** -- the same way back after any disconnect; the
-container never stopped (`shutdownAction: "none"`).
+Attach to Running Container…**. The same step is the way back after any
+disconnect; the container never stopped (`shutdownAction: "none"`).
 
 **The skill route:** `gd-env-setup-remote` performs the same provisioning and
 certificate steps and verifies each one before continuing, `gd-cert-lifecycle`
@@ -153,7 +153,7 @@ git clone https://github.com/<org>/<another-project>
 ```
 
 Each clone shows up as its own repo in Source Control the moment you clone
-it, with nothing to add anywhere -- even though `repos/` is gitignored. To
+it, with nothing to add anywhere, even though `repos/` is gitignored. To
 run a *different* project as its own remote devcontainer instead: push it to
 GitHub, then from that repo's root run `make push-secrets` and `make build`
 (both derive the project name from the directory); every project gets its
@@ -171,12 +171,12 @@ make clones under clones visible: the Definition section of
   configured for the z.ai coding plan with GLM 5.3 flagship and GLM 5.3
   Flash; its config still injects the key through `{env:ZAI_API_KEY}`, and the
   variable itself is supplied by the hostcreds startup block from a
-  `ZAI_API_KEY` manifest entry -- never committed, never in `shell.env`.
+  `ZAI_API_KEY` manifest entry, never committed and never in `shell.env`.
 - The skills suite: `make skills-install`, `make skills-remove` and
   `make skills-list` wire, unwire and report this repo's `.agents/skills`
   roster in an agent on this Mac, selected by `AGENT=opencode|claude|both`
-  and `SCOPE=global|project|runtime` -- `make skills-install AGENT=claude
-  SCOPE=global`, for instance, symlinks the roster into `~/.claude/skills`.
+  and `SCOPE=global|project|runtime`. For example, `make skills-install
+  AGENT=claude SCOPE=global` symlinks the roster into `~/.claude/skills`.
   Symlinks, never copies; see [docs/skills.md](docs/skills.md).
 - `make verify-container` re-checks the pushed credentials inside the
   container: fragment modes, the startup block, silent shell startup, and
@@ -206,7 +206,7 @@ make clones under clones visible: the Definition section of
   `shell.env` edit; after any `shell.env` change, re-run `make push-secrets`
   so the remote copies match.
 - Credentials live only in the macOS keychain, git's own credential helper
-  and the AWS SSO session -- named in the gitignored hostcreds manifest --
+  and the AWS SSO session, all named in the gitignored hostcreds manifest,
   plus the fragments `make push-creds` writes inside the container. Parameter
   Store (`/devcontainer/<project>/…`) holds the credential-free `shell.env`
   and profile map. None of it is ever in git.

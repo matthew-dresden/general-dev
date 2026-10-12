@@ -55,10 +55,9 @@ EC2 reference, troubleshooting) live in
   shells out to it by relying on it being on `PATH` for the non-root
   `vscode` user (work unit `E5-F3-S1-T2`, operator ruling signed at commit
   `9a38c703adda210e27c2c34607cb1a09a4d63378`).
-- The IaC engine is Terraform, per D14, spec `devcontainer-platform.md`
-  Section 13, licensed BUSL-1.1; the installed Terraform and Terragrunt
-  versions satisfy the spec Section 6 floors, `>= 1.10` and `>= 1.1.3`
-  respectively.
+- The IaC engine is Terraform, licensed BUSL-1.1; the installed
+  Terraform and Terragrunt versions satisfy the floors `>= 1.10` and
+  `>= 1.1.3` respectively.
 - Features contribute VS Code extensions of their own, merged with the
   `customizations.vscode.extensions` list: the container image's
   `devcontainer.metadata` label records which feature added which. The aws-cli
@@ -268,7 +267,10 @@ EC2 reference, troubleshooting) live in
   `git submodule` command stays a no-op, and the files are generated rather
   than committed so a rebuild recreates them. `DEVCONTAINER_REPOS_DIR` and
   `DEVCONTAINER_REPO_SCAN_IGNORE` control the directory and the folders the
-  walk prunes.
+  walk prunes. That walk is a snapshot of what exists when the container is
+  built: `repos/` is declared as a whole directory, so anything cloned there
+  later is still picked up immediately, while a repository cloned later
+  *inside another clone* waits for the next window open.
 
 ## Provisioning flow (postCreate)
 
@@ -447,11 +449,10 @@ setup log.
 
 ## Bypass denial
 
-Section 3.6.2 ("Boundaries, and what each defends") of
-`repos/spec/devcontainer-platform.md` names the threat this control
-answers: not a secret reaching the repository, but an agent or a human
-disabling the controls above under time pressure. Section 4.6.1 ("Bypass
-denial") of the same document fixes the denied surface. A `PreToolUse`
+The threat this control answers is not a secret reaching the repository,
+but an agent or a human disabling the controls above under time pressure.
+The hook contract ("Bypass
+denial") fixes the denied surface. A `PreToolUse`
 hook on the `Bash` matcher, `.claude/hooks/deny_bypass.py`, registered in
 `.claude/settings.json`, denies every structurally recognized attempt made
 through Claude Code's `Bash` tool to run one of the following, naming the
@@ -602,7 +603,7 @@ tunnel it authenticates inside.
 ## Transport
 
 The security group behind a remote instance carries zero ingress rules
-(spec Section 5.6): no packet from the network reaches the docker daemon,
+: no packet from the network reaches the docker daemon,
 only the loopback listener `127.0.0.1:DOCKER_TLS_PORT` on the instance
 itself. Reaching that listener from the laptop is two independent factors
 stacked on top of each other, each answering a different question (spec
@@ -623,8 +624,8 @@ Section 3.6.2), and neither substitutes for the other:
 
 Once the forward answers, `transport.ensure_context` creates or updates the
 docker context `<repo-slug>-<instance>` (`general-dev-<instance>` in this
-repository; spec Section 9) to address `tcp://127.0.0.1:<the allocated
-port>` and carry the `ca`, `cert` and `key` files spec Section 5.5 fixes
+repository) to address `tcp://127.0.0.1:<the allocated
+port>` and carry the `ca`, `cert` and `key` files the layout fixes
 under `<certs-root>/<instance>/`. An
 existing context is updated in place rather than deleted and recreated; an
 existing context whose endpoint is `ssh://` is refused by name and left
@@ -639,7 +640,7 @@ too.
 that context, retried until it answers and bounded by
 `DOCKER_HANDSHAKE_TIMEOUT` (`docs/environment-files.md`), reporting the
 daemon's API version -- which must be at least 1.44 for mTLS on a TCP
-listener with a rootless daemon (spec Section 6) -- and whether it reports
+listener with a rootless daemon -- and whether it reports
 running rootless.
 
 **One build path, and a selector kept for the next one.** `make connect-start`
@@ -728,7 +729,29 @@ is resolved on the developer's machine, from a source only that machine
 holds, and pushed over the active docker context straight into the
 container.
 
-The configuration half (unchanged):
+```mermaid
+flowchart LR
+  subgraph laptop["laptop (the only place credentials resolve)"]
+    manifest["hostcreds.map.json\n(names sources, holds no values)"]
+    keychain["macOS keychain"]
+    gitcred["git credential helper"]
+    sso["aws SSO session\n(aws configure export-credentials)"]
+  end
+  ps["SSM Parameter Store\n(shell.env + profile map,\nno credentials)"]
+  subgraph container["container"]
+    frag["~/.hostcreds/*.env\n(fragments, mode 600)"]
+    startup["shell startup block\nexports each named variable"]
+  end
+
+  manifest -- "make creds-init stores\nwhat it names" --> keychain
+  manifest --> gitcred
+  manifest --> sso
+  keychain & gitcred & sso -- "make push-creds: resolve on the laptop,\npipe over docker stdin\n(never on a command line)" --> frag
+  frag --> startup
+  ps -- "postCreate fetch\n(remote builds, instance role)" --> container
+```
+
+The configuration half:
 
 ```text
 make init                                 push-secrets.sh                postCreate (remote)
@@ -815,8 +838,8 @@ verification step after each stage, is `docs/environment-setup.md`.
 
 ## Plugin and skills
 
-Section 11 of `repos/spec/devcontainer-platform.md` records the Claude Code plugin as
-an inbound integration: "Marketplace at `.claude/plugins/devcontainer`", failing
+The Claude Code plugin is an inbound integration: "Marketplace at
+`.claude/plugins/devcontainer`", failing
 as "A malformed manifest fails skill lint". The plugin lives at
 `.claude/plugins/devcontainer/`, a directory holding `.claude-plugin/plugin.json`
 (the plugin manifest, `name: devcontainer`) and `.claude-plugin/marketplace.json`

@@ -313,6 +313,7 @@ help:
 	printf '\n\033[1mOPTIONS\033[0m\n'; \
 	row "ENGINE=local|<name>"   ""       "Address one engine explicitly (ENGINE=x make <target> or make <target> ENGINE=x): drive local and remote engines in parallel; unset follows the active context."; \
 	row "CONTAINER=<name>"      ""       "Pick one instance when several clones of this repo exist. 'make status' lists them."; \
+	row "NAME=<x>"              ""       "Name the container build/up creates at creation; make rename NAME=x does the same after the fact."; \
 	row "FORCE=1"               ""       "Proceed past the unpushed-work and uncommitted-config guards."; \
 	row "SKIP_SECRETS_CHECK=1"  ""       "Do not compare shell.env against Parameter Store, and do not publish it."; \
 	row "NO_CACHE=1"            ""       "What the no-cache targets set. Works with build and rebuild directly."

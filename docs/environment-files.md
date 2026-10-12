@@ -175,10 +175,9 @@ for whatever is missing.
 ## Secrets
 
 `shell.env` carries identity and configuration -- git identity, AWS profile
-selection, proxy settings -- and carries no credential. It is still
+selection, proxy settings -- and carries no credential. It is
 published to Parameter Store by `make push-secrets` so a remote container
-can bootstrap itself; that mechanism is unchanged. What changed is what the
-file is allowed to hold: every credential is named in the hostcreds
+can bootstrap itself. Every credential is named in the hostcreds
 manifest and resolved from the developer's own machine, never stored in
 `shell.env`.
 
@@ -408,18 +407,18 @@ error -- see `docs/devcontainer.md`'s "Transport" section.
 `gd-env-setup-remote` share for their own, simpler "does the engine answer" check.
 
 `DEVCONTAINER_TRANSPORT` selects the transport for the `make connect-start` entry
-point. Since the cutover there is one transport, so the selector has one
+point. There is one transport, so the selector has one
 accepted value, `ssm`, which is also the default. It is kept rather than
 removed because it is the seam a future transport is added at, and because a
-caller that still exports the old value gets told so rather than being
+caller that exports a stale value gets told so rather than being
 silently redirected.
 
 It has two independent readers: the Makefile's `connect` recipe, which reads
 the variable from the environment and dispatches on it, and `transport.py`'s
 `resolve_transport`, which the module's own `connect` subcommand calls. Both
 dispatch the same way. Unset selects `ssm`. The literal `ssm` selects it
-explicitly. Any other non-empty value, including the `ssh` that used to be the
-default, exits non-zero before any transport starts, printing an `ERROR:` line
+explicitly. Any other non-empty value, including a leftover `ssh`, exits
+non-zero before any transport starts, printing an `ERROR:` line
 to stderr naming the variable, the offending value and the accepted value. No
 branch silently defaults.
 

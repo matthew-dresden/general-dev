@@ -42,6 +42,26 @@ other. Every command this needs is issued through an injected
 share, so this module's own unit suite never shells out to a real `docker`
 binary (AC-TEST-004): no docker, no AWS, no network.
 
+The engine-kind notion is the newest row of this module's contract: an
+instance is either the EC2 kind (a Terragrunt-managed remote instance, the
+kind every derivation above was written for) or the SSH kind -- a generic
+SSH endpoint with Docker, declared wholly by a
+`remote-instances/<name>/engine.json` manifest, with no AWS, no Terragrunt,
+no Parameter Store and no certificates behind it. `read_kind` is the
+discriminator (`ENGINE_KIND_SSH` when the manifest exists, else
+`ENGINE_KIND_EC2`, so `discover`'s listing semantics are unchanged);
+`validate_engine_values` is the manifest's single validation surface, used
+by both the read side (`engine_manifest`) and the write side
+(`instance_ops.scaffold_engine`) so neither can accept what the other
+refuses; and `engine_endpoint` composes the canonical
+`ssh://<user>@<host>:<port>` string the transport work of a later unit will
+derive a docker context endpoint from. The kind-specific address block a
+resolved SSH engine prints (see `devcontainer_config.cli`
+`_print_address_block`) carries `ENGINE_`-prefixed lines instead of the
+Terragrunt/state/Parameter Store rows precisely because the shell export
+loop that consumes the block exports every `KEY=value` line generically:
+new keys need no shell change.
+
 `resolve` implements the instance-resolution order spec Section 4.1.1 fixes,
 evaluated once per call: `INSTANCE` from the environment, then
 `DEFAULT_REMOTE_INSTANCE` from the environment, then the sole directory
@@ -62,6 +82,7 @@ answer by the time it calls `resolve`.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -86,6 +107,37 @@ _ENVCOMMON_DIR_NAME = "_envcommon"
 
 # spec Section 9: "State key | <name>/terraform.tfstate".
 STATE_KEY_FILENAME = "terraform.tfstate"
+
+# The third engine kind: a generic SSH endpoint with Docker. An instance
+# directory whose `ENGINE_MANIFEST_FILENAME` manifest is present is an SSH
+# engine; a directory without one is an EC2 instance (a terragrunt.hcl
+# directory, or -- for backward compatibility of `discover` -- a directory
+# with neither file). The manifest is the WHOLE declaration of an SSH
+# engine: no AWS, no Terragrunt, no Parameter Store, no certificates, so
+# none of the EC2 addressing rows below (state key, parameter prefix,
+# forwarded port) applies to it, and its own addressable values are the
+# five manifest fields validated by `validate_engine_values`.
+ENGINE_MANIFEST_FILENAME = "engine.json"
+ENGINE_KIND_SSH = "ssh"
+ENGINE_KIND_EC2 = "ec2"
+
+# The engine manifest's defaults and bounds. Declared once here, the module
+# that owns addressing, so `instance_ops.scaffold_engine`'s write side and
+# `cli`'s argparse defaults source these constants rather than restating
+# the literals -- a changed default port or docker socket then moves
+# everywhere at once.
+DEFAULT_ENGINE_PORT = 22
+DEFAULT_ENGINE_DOCKER_ADDR = "/var/run/docker.sock"
+MIN_ENGINE_PORT = 1
+MAX_ENGINE_PORT = 65535
+
+# The `tcp://` scheme an engine manifest's `docker_addr` may carry instead
+# of an absolute Unix socket path, and the generic scheme separator whose
+# presence in a `host` value marks it as a URL rather than a bare hostname
+# (a docker endpoint is composed from the host later, so a scheme inside
+# the host would produce a malformed one).
+_TCP_ADDR_PREFIX = "tcp://"
+_SCHEME_SEPARATOR = "://"
 
 # spec Section 5.5: certificate material lives under `~/.docker/certs/<name>/`
 # by default, but honors `DOCKER_CONFIG` (the real docker CLI's own
@@ -161,6 +213,16 @@ class AmbiguousInstanceError(InstancesError):
 
 class ForwardedPortNotRecordedError(InstancesError):
     """Raised when `forwarded_port` finds no docker context recording an allocation."""
+
+
+class EngineManifestError(InstancesError):
+    """Raised when an SSH engine's manifest is missing, unparsable or invalid.
+
+    Every refusal `validate_engine_values` makes raises this one class, so a
+    caller (the resolve-instance block, or `instance_ops.scaffold_engine`,
+    which wraps it in its own `ScaffoldError`) needs no per-field handling;
+    the message names the offending field and the rule it broke.
+    """
 
 
 @dataclass(frozen=True)
@@ -310,6 +372,242 @@ def certs_dir(name: str) -> Path:
     """
     validate_name(name)
     return certs_root() / name
+
+
+# ---------------------------------------------------------------------------
+# The SSH engine kind: manifest reading, validation and the endpoint string.
+# ---------------------------------------------------------------------------
+
+
+def engine_manifest_path(root: Path, name: str) -> Path:
+    """`remote-instances/<name>/engine.json`, an SSH engine's whole declaration.
+
+    The directory is `terragrunt_dir(root, name)` -- Section 9's directory
+    row, the one per-instance path every engine kind shares (an EC2
+    instance keeps its terragrunt.hcl there, an SSH engine its manifest) --
+    so the path is composed from that single derivation rather than a
+    second, independently drifting copy of `INSTANCES_DIR_NAME` join.
+    """
+    return terragrunt_dir(root, name) / ENGINE_MANIFEST_FILENAME
+
+
+def _parsed_manifest(root: Path, name: str) -> object:
+    """`engine.json`'s parsed payload, failing fast when absent or unparsable.
+
+    The one read-and-parse seam both `read_kind` (which must refuse a
+    corrupt manifest at first touch) and `engine_manifest` (which goes on
+    to validate the fields) drive, so a file that is not valid JSON is
+    reported once, here, with the file path and the JSON error, instead of
+    each caller re-implementing the failure.
+
+    Raises:
+        EngineManifestError: the manifest is missing, unreadable, or not
+            valid JSON (the message carries `json`'s own error text).
+    """
+    manifest = engine_manifest_path(root, name)
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise EngineManifestError(
+            f"ERROR: no engine manifest at {manifest}\n"
+            f"Instance {name!r} has no {ENGINE_MANIFEST_FILENAME}, so there is no "
+            "SSH engine declaration to read.\n"
+            f"Scaffold one first: engine-init with the instance name {name!r}."
+        ) from exc
+    except OSError as exc:
+        raise EngineManifestError(
+            f"ERROR: could not read the engine manifest at {manifest}\n"
+            f"{exc}\n"
+            "Resolve the read error above, then retry."
+        ) from exc
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise EngineManifestError(
+            f"ERROR: the engine manifest at {manifest} is not valid JSON\n"
+            f"{exc}\n"
+            "Fix the JSON syntax named above, then retry."
+        ) from exc
+
+
+def _field_refusal(field: str, rule: str) -> EngineManifestError:
+    """The one refusal shape every manifest field violation takes.
+
+    The message names the offending field and states the rule it broke --
+    the fail-fast contract every `validate_engine_values` refusal shares,
+    so a caller sees which manifest line to fix without reading the module.
+    """
+    return EngineManifestError(
+        f"ERROR: invalid engine manifest field {field!r}\n"
+        f"{rule}\n"
+        "Fix the field named above, then retry."
+    )
+
+
+def _validated_tcp_addr(value: str) -> str:
+    """`value` as a `tcp://<host>:<port>` docker address, or a refusal.
+
+    The host must be non-empty and the port must be digits within the same
+    `MIN_ENGINE_PORT`..`MAX_ENGINE_PORT` bound the `port` field obeys, so a
+    docker endpoint derived from this value later can never be malformed at
+    transport time when the manifest already said so here.
+    """
+    remainder = value[len(_TCP_ADDR_PREFIX) :]
+    host, separator, port_text = remainder.rpartition(":")
+    if not separator or not host:
+        raise _field_refusal(
+            "docker_addr",
+            "A 'tcp://<host>:<port>' docker address must carry <host>:<port> after the scheme.",
+        )
+    if not port_text.isdigit():
+        raise _field_refusal(
+            "docker_addr",
+            "The port in a 'tcp://<host>:<port>' docker address must be digits.",
+        )
+    port = int(port_text)
+    if not MIN_ENGINE_PORT <= port <= MAX_ENGINE_PORT:
+        raise _field_refusal(
+            "docker_addr",
+            f"The port in a 'tcp://<host>:<port>' docker address must be between "
+            f"{MIN_ENGINE_PORT} and {MAX_ENGINE_PORT}.",
+        )
+    return value
+
+
+def validate_engine_values(payload: object) -> dict[str, object]:
+    """One engine manifest payload, validated, with every default applied.
+
+    The single validation surface for the manifest's five fields: both the
+    read side (`engine_manifest`, on a payload `json` parsed off disk) and
+    the write side (`instance_ops.scaffold_engine`, before anything is
+    written) drive it, so a manifest can never be written that this module
+    would refuse to read. Every violation fails fast naming the field and
+    the rule; nothing is repaired, defaulted silently or partially
+    returned -- either the whole payload is valid, or nothing comes back.
+
+    Returns:
+        A dict with all five fields: `kind` (always `ENGINE_KIND_SSH` --
+        the only kind this manifest form describes), `host`, `user`,
+        `port` and `docker_addr`, the last two filled with their defaults
+        (`DEFAULT_ENGINE_PORT`, `DEFAULT_ENGINE_DOCKER_ADDR`) when the
+        payload omitted them.
+
+    Raises:
+        EngineManifestError: the payload is not a JSON object, or any
+            field breaks its rule: `kind` must equal `ENGINE_KIND_SSH`;
+            `host` and `user` must be non-empty strings, and `host` must
+            be a bare hostname or address with no URL scheme (a value
+            containing the scheme separator is refused); `port`, when
+            present, must be an integer (a boolean is not) within
+            `MIN_ENGINE_PORT`..`MAX_ENGINE_PORT`; `docker_addr`, when
+            present, must be either an absolute Unix socket path
+            (starting with '/') or a `tcp://<host>:<port>` URL.
+    """
+    if not isinstance(payload, dict):
+        raise EngineManifestError(
+            "ERROR: an engine manifest must be one JSON object\n"
+            f"The payload parsed is {type(payload).__name__}, not an object with "
+            "'kind', 'host' and 'user' fields.\n"
+            "Rewrite the manifest as a JSON object, then retry."
+        )
+    kind = payload.get("kind")
+    if kind != ENGINE_KIND_SSH:
+        raise _field_refusal(
+            "kind",
+            f"The kind must be the string {ENGINE_KIND_SSH!r}: the only engine kind "
+            "this manifest form describes.",
+        )
+    host = payload.get("host")
+    if not isinstance(host, str) or not host:
+        raise _field_refusal("host", "The host must be a non-empty string.")
+    if _SCHEME_SEPARATOR in host:
+        raise _field_refusal(
+            "host",
+            "The host must be a bare hostname or address, with no URL scheme "
+            f"(a value containing {_SCHEME_SEPARATOR!r} is refused).",
+        )
+    user = payload.get("user")
+    if not isinstance(user, str) or not user:
+        raise _field_refusal("user", "The user must be a non-empty string.")
+    port = payload.get("port", DEFAULT_ENGINE_PORT)
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise _field_refusal(
+            "port",
+            f"The port must be an integer between {MIN_ENGINE_PORT} and {MAX_ENGINE_PORT}.",
+        )
+    if not MIN_ENGINE_PORT <= port <= MAX_ENGINE_PORT:
+        raise _field_refusal(
+            "port",
+            f"The port must be between {MIN_ENGINE_PORT} and {MAX_ENGINE_PORT}; "
+            f"this one is {port}.",
+        )
+    docker_addr = payload.get("docker_addr", DEFAULT_ENGINE_DOCKER_ADDR)
+    if not isinstance(docker_addr, str) or not docker_addr:
+        raise _field_refusal(
+            "docker_addr",
+            "The docker address must be either an absolute Unix socket path "
+            f"(starting with {_TCP_ADDR_PREFIX[0]!r}) or a "
+            "'tcp://<host>:<port>' URL.",
+        )
+    if docker_addr.startswith(_TCP_ADDR_PREFIX):
+        docker_addr = _validated_tcp_addr(docker_addr)
+    elif not docker_addr.startswith("/"):
+        raise _field_refusal(
+            "docker_addr",
+            "The docker address must be either an absolute Unix socket path "
+            "(starting with '/') or a 'tcp://<host>:<port>' URL.",
+        )
+    return {
+        "kind": ENGINE_KIND_SSH,
+        "host": host,
+        "user": user,
+        "port": port,
+        "docker_addr": docker_addr,
+    }
+
+
+def read_kind(root: Path, name: str) -> str:
+    """`ENGINE_KIND_SSH` when `name`'s engine manifest exists, else `ENGINE_KIND_EC2`.
+
+    The engine-kind notion the resolver layer addresses an instance
+    through: a `remote-instances/<name>/engine.json` manifest declares an
+    SSH engine; its absence means the EC2 kind, whether the directory
+    carries a terragrunt.hcl or (for backward compatibility of `discover`,
+    which lists every directory regardless of contents) neither file. A
+    manifest that exists but is not valid JSON fails fast here, at first
+    touch, rather than surfacing later as a parse error in a consumer that
+    already acted on the kind.
+    """
+    validate_name(name)
+    if not engine_manifest_path(root, name).exists():
+        return ENGINE_KIND_EC2
+    _parsed_manifest(root, name)
+    return ENGINE_KIND_SSH
+
+
+def engine_manifest(root: Path, name: str) -> dict[str, object]:
+    """`name`'s engine manifest, validated, with every default applied.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        EngineManifestError: the manifest is missing, unreadable, not
+            valid JSON, or breaks a field rule (the message names the
+            field and the rule).
+    """
+    validate_name(name)
+    return validate_engine_values(_parsed_manifest(root, name))
+
+
+def engine_endpoint(root: Path, name: str) -> str:
+    """`ssh://<user>@<host>:<port>`, the canonical endpoint string for an SSH engine.
+
+    The value a docker context will eventually point at is derived from
+    this string by the transport work of a later unit; this is the one
+    place the endpoint itself is composed, from the manifest's own
+    validated fields.
+    """
+    values = engine_manifest(root, name)
+    return f"ssh://{values['user']}@{values['host']}:{values['port']}"
 
 
 def _recorded_local_port(runner: CommandRunner, context_name: str) -> int | None:

@@ -18,6 +18,13 @@ one SSM read that pins the default AMI (skipped entirely when the caller
 supplies one). Writing the directory also appends `remote-instances/<name>/`
 to the repository `.gitignore`, so the scaffold stays invisible to git
 status until a developer promotes it deliberately by deleting that line.
+`scaffold_engine` is the SSH engine kind's counterpart: it writes only
+`remote-instances/<name>/engine.json` (the manifest
+`devcontainer_config.instances.validate_engine_values` validates, so the
+write side can never produce a manifest the read side refuses), appends the
+same `.gitignore` entry, and runs no aws/docker command at all -- an SSH
+engine has no AMI to resolve, no CIDRs to allocate and no deployment to
+apply.
 
 `link_id`/`unlink_id`/`recorded_id` are the per-instance id store: a file
 named `instance-id` inside the instance's certificate-material directory
@@ -615,6 +622,110 @@ def scaffold(
         ami=resolved_ami,
         messages=messages,
     )
+
+
+@dataclass(frozen=True)
+class EngineScaffoldResult:
+    """What `scaffold_engine` wrote and decided, for the caller to render.
+
+    The same `path`-plus-`messages` shape `ScaffoldResult` renders from,
+    minus the EC2-only fields (`vpc_cidr`, `ami`) an SSH engine has no
+    counterpart for: an SSH engine's declaration is one manifest with no
+    network allocation and no image to pin, and inventing empty values for
+    fields it does not have would make the result a lie.
+    """
+
+    path: Path
+    messages: tuple[str, ...]
+
+
+def _engine_exists_message(directory: Path, name: str) -> str:
+    """The existing-directory refusal for an SSH engine scaffold.
+
+    The same refusal `scaffold` makes, naming the manifest an edit would
+    go to instead of the terragrunt.hcl an EC2 scaffold's message names.
+    """
+    return (
+        f"ERROR: {directory} already exists\n"
+        f"An engine directory is scaffolded once; scaffolding over it could "
+        f"silently replace edits already made to {name!r}'s engine manifest.\n"
+        f"Edit the existing {directory / instances.ENGINE_MANIFEST_FILENAME} "
+        "instead, or remove the directory deliberately first if a fresh "
+        "scaffold is truly intended."
+    )
+
+
+def scaffold_engine(
+    root: Path,
+    name: str,
+    *,
+    host: str,
+    port: int = instances.DEFAULT_ENGINE_PORT,
+    user: str,
+    docker_addr: str = instances.DEFAULT_ENGINE_DOCKER_ADDR,
+    runner: Runner,
+) -> EngineScaffoldResult:
+    """Write `remote-instances/<name>/engine.json` for a new SSH engine.
+
+    The SSH engine kind's counterpart of `scaffold`, refusing everything
+    `scaffold` refuses -- a name that fails `instances.validate_name`, a
+    docker context name that would exceed `DOCKER_CONTEXT_NAME_LIMIT`, a
+    directory that already exists -- plus anything
+    `instances.validate_engine_values` refuses, so the manifest written is
+    one the read side accepts verbatim. The defaults for `port` and
+    `docker_addr` are this module's sourcing of `instances`' constants, so
+    a changed default moves everywhere at once. Writing the directory
+    appends the same `remote-instances/<name>/` `.gitignore` entry
+    `scaffold` appends (reusing `_append_scaffold_ignore`), and runs before
+    anything is created, so a checkout whose `.gitignore` predates the
+    per-instance block is refused with nothing written. No aws or docker
+    command is ever issued: an SSH engine has no AMI to resolve, no CIDRs
+    to allocate, and no Terragrunt deployment to apply.
+
+    `runner` is accepted for call-site uniformity with `scaffold` (the CLI
+    wiring passes it everywhere) and is deliberately unused on this path.
+
+    Returns:
+        An `EngineScaffoldResult` whose `messages` a caller prints
+        verbatim.
+
+    Raises:
+        ScaffoldError: the name is invalid, the context name would be too
+            long, the directory already exists, a manifest field breaks
+            its rule, or `.gitignore` is missing or lacks the
+            per-instance scaffold block's anchor rule.
+    """
+    try:
+        instances.validate_name(name)
+    except instances.InvalidInstanceNameError as exc:
+        raise ScaffoldError(_invalid_name_message(name)) from exc
+    context = instances.docker_context(root, name)
+    if len(context) > DOCKER_CONTEXT_NAME_LIMIT:
+        raise ScaffoldError(_context_length_message(context))
+    directory = instances.terragrunt_dir(root, name)
+    if directory.exists():
+        raise ScaffoldError(_engine_exists_message(directory, name))
+    try:
+        values = instances.validate_engine_values(
+            {
+                "kind": instances.ENGINE_KIND_SSH,
+                "host": host,
+                "user": user,
+                "port": port,
+                "docker_addr": docker_addr,
+            }
+        )
+    except instances.EngineManifestError as exc:
+        raise ScaffoldError(str(exc)) from exc
+    _append_scaffold_ignore(root, name)
+    manifest_path = instances.engine_manifest_path(root, name)
+    directory.mkdir(parents=True)
+    manifest_path.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
+    messages = (
+        f"created {manifest_path}",
+        f"engine endpoint {instances.engine_endpoint(root, name)}",
+    )
+    return EngineScaffoldResult(path=manifest_path, messages=messages)
 
 
 # ---------------------------------------------------------------------------

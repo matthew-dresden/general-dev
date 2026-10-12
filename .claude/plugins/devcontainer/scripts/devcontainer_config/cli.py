@@ -421,6 +421,32 @@ def _build_parser() -> argparse.ArgumentParser:
     instance_init_parser.add_argument("--ami", metavar="AMI_ID", help=_AMI_HELP)
     instance_init_parser.set_defaults(handler=_run_instance_init)
 
+    engine_init_parser = subparsers.add_parser(
+        "engine-init",
+        help="Scaffold remote-instances/<name>/engine.json for a new SSH engine; never connects.",
+        description=_ENGINE_INIT_DESCRIPTION,
+    )
+    engine_init_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    engine_init_parser.add_argument(
+        "--host", metavar="HOST", required=True, help=_ENGINE_INIT_HOST_HELP
+    )
+    engine_init_parser.add_argument(
+        "--user", metavar="USER", required=True, help=_ENGINE_INIT_USER_HELP
+    )
+    engine_init_parser.add_argument(
+        "--port",
+        type=int,
+        default=instances.DEFAULT_ENGINE_PORT,
+        help=_ENGINE_INIT_PORT_HELP,
+    )
+    engine_init_parser.add_argument(
+        "--docker-addr",
+        metavar="ADDR",
+        default=instances.DEFAULT_ENGINE_DOCKER_ADDR,
+        help=_ENGINE_INIT_DOCKER_ADDR_HELP,
+    )
+    engine_init_parser.set_defaults(handler=_run_engine_init)
+
     instance_list_parser = subparsers.add_parser(
         "instance-list",
         help="List every configured instance with its live state (spec Section 4.5).",
@@ -602,6 +628,15 @@ REMOTE_AWS_REGION, which has no default. Pass --ami to pin one by hand
 instead.
 """
 
+_ENGINE_INIT_DESCRIPTION = """Scaffold remote-instances/<name>/engine.json for a new SSH engine.
+
+Writes the one manifest a generic SSH endpoint with Docker requires: a
+host, a user, and optional port and docker-socket values. No AWS, no
+Terragrunt, no Parameter Store, no certificates -- the manifest is the
+whole declaration, validated before anything is written. Never connects:
+the transport that would consume it is a later unit.
+"""
+
 _INSTANCE_LIST_DESCRIPTION = """List every configured instance with its live state.
 
 Prints one aligned row per instance -- EC2 power state, recorded id,
@@ -674,6 +709,18 @@ _INSTANCE_INIT_REGION_HELP = (
 
 _AMI_HELP = (
     "Pin this AMI id instead of resolving Canonical's current Ubuntu 24.04 arm64 image from SSM."
+)
+
+_ENGINE_INIT_HOST_HELP = "The SSH engine's host: a bare hostname or address, with no URL scheme."
+
+_ENGINE_INIT_USER_HELP = "The user the SSH engine is reached as."
+
+_ENGINE_INIT_PORT_HELP = f"The engine's SSH port (default: {instances.DEFAULT_ENGINE_PORT})."
+
+_ENGINE_INIT_DOCKER_ADDR_HELP = (
+    "The docker socket on the engine: an absolute Unix socket path or a "
+    "'tcp://<host>:<port>' URL "
+    f"(default: {instances.DEFAULT_ENGINE_DOCKER_ADDR})."
 )
 
 _INSTANCE_JSON_HELP = (
@@ -780,6 +827,30 @@ def _run_instance_init(args: argparse.Namespace) -> int:
     root = repo.find_root(Path.cwd())
     result = instance_ops.scaffold(
         root, args.name, region=args.region, ami=args.ami, runner=instance_ops.subprocess_runner
+    )
+    for message in result.messages:
+        print(message)
+    return 0
+
+
+def _run_engine_init(args: argparse.Namespace) -> int:
+    """Scaffold the one manifest a new SSH engine requires; print the guidance verbatim.
+
+    The engine-kind counterpart of `_run_instance_init`, over
+    `instance_ops.scaffold_engine`: field-level refusals reach this handler
+    only as `ScaffoldError`s (the engine wraps them), which `main` converts
+    into exit 1 -- there is no failure this handler reports as anything but
+    that exception.
+    """
+    root = repo.find_root(Path.cwd())
+    result = instance_ops.scaffold_engine(
+        root,
+        args.name,
+        host=args.host,
+        port=args.port,
+        user=args.user,
+        docker_addr=args.docker_addr,
+        runner=instance_ops.subprocess_runner,
     )
     for message in result.messages:
         print(message)
@@ -1005,11 +1076,34 @@ def _run_hooks_pre_push(args: argparse.Namespace) -> int:
 def _print_address_block(root: Path, name: str) -> None:
     """The statically derivable half of `name`'s Section 9 addressing block, one line each.
 
+    The block is kind-specific, keyed on `instances.read_kind`: an EC2
+    instance prints exactly the six rows it always printed (Terragrunt
+    directory, state key, docker context, parameter prefix, certificate
+    directory -- every line the existing consumers pin), while an SSH
+    engine prints `ENGINE_`-prefixed lines from its manifest instead of the
+    Terragrunt/state/Parameter Store rows that do not exist for it. The
+    `ENGINE_` prefix is what lets the shell export loop consume the block
+    unchanged: it exports every `KEY=value` line generically, so the new
+    keys need no shell change.
+
     `forwarded_port` is deliberately excluded: it needs a real docker
     context (AC-FUNC-009 names only "the statically derivable half"), and
     this entry point's own suite runs with no docker, no AWS and no network
     (AC-TEST-004).
     """
+    kind = instances.read_kind(root, name)
+    if kind == instances.ENGINE_KIND_SSH:
+        values = instances.engine_manifest(root, name)
+        print(f"INSTANCE={name}")
+        print(f"KIND={kind}")
+        print(f"DOCKER_CONTEXT={instances.docker_context(root, name)}")
+        print(f"CERTS_DIR={instances.certs_dir(name)}")
+        print(f"ENGINE_HOST={values['host']}")
+        print(f"ENGINE_PORT={values['port']}")
+        print(f"ENGINE_USER={values['user']}")
+        print(f"ENGINE_DOCKER_ADDR={values['docker_addr']}")
+        print(f"ENGINE_ENDPOINT={instances.engine_endpoint(root, name)}")
+        return
     print(f"INSTANCE={name}")
     print(f"TERRAGRUNT_DIR={instances.terragrunt_dir(root, name)}")
     print(f"STATE_KEY={instances.state_key(name)}")

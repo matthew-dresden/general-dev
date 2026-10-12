@@ -224,5 +224,5 @@ EOF
     insteadOf = git@${git_provider_url}:
 EOF
 
-  log_success "Git credential helper configured, run 'make push-git-creds' to supply credentials"
+  log_success "Git credential helper configured, run 'make push-creds' to supply credentials"
 }

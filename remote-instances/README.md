@@ -4,7 +4,7 @@ Terragrunt deployment layer for the remote devcontainer instances. This
 directory has no deployment of its own: it is the shared configuration every
 deployment includes, plus one directory per instance. The `make help`
 INSTANCES group drives an instance's whole lifecycle against these
-directories -- `make instance-init` scaffolds the one file a new instance
+directories: `make instance-init` scaffolds the one file a new instance
 needs, `make instance-plan` and `make instance-deploy` run the underlying
 Terragrunt against it, `make instance-stop`/`instance-start` power the EC2
 instance, and `make instance-destroy` tears it down and cleans up. The
@@ -34,7 +34,7 @@ file below for you to edit. Re-running the target on an existing directory
 is refused, so scaffolding can never silently replace edits already made.
 
 A per-instance directory holds exactly one file, `terragrunt.hcl`, with three
-parts -- this file is the contract `make instance-init` scaffolds and what a
+parts. This file is the contract `make instance-init` scaffolds and what a
 user edits to change the deployment:
 
 - **`include "root"`**, resolving [`root.hcl`](./root.hcl). It supplies the
@@ -157,21 +157,21 @@ layer enforces that agreement:
 
 The docker context row's Pattern is `<repo-slug>-<name>`,
 `devcontainer_config.repo.repo_slug` (derived from the git remote's URL)
-prepended to the instance name -- never a literal, so a fork of this
+prepended to the instance name, never a literal, so a fork of this
 repository under a different name gets its own, non-colliding prefix
 without editing any of this table's owners. `general-dev-<name>` above is
 this repository's own worked example, not a fixed pattern to copy into a
 fork. The certificates row's on-disk material root and this table's
 addressing value are the same derivation,
-`devcontainer_config.instances.certs_root` --
-`devcontainer_config.certs.DEFAULT_CERTS_ROOT` is sourced from it -- so an
+`devcontainer_config.instances.certs_root`, from which
+`devcontainer_config.certs.DEFAULT_CERTS_ROOT` is sourced, so an
 operator who has set `DOCKER_CONFIG` never has certificates written under
 one directory while this table points at another.
 
 "Owned by" above names what creates or manages each artifact at runtime
 (Terragrunt, the security submodule's inline IAM policy, `E6`'s transport
-and certificate modules). Deriving the value programmatically -- turning
-an instance name into any one of these seven strings or paths -- is a
+and certificate modules). Deriving the value programmatically, turning
+an instance name into any one of these seven strings or paths, is a
 separate concern owned by exactly one Python module:
 `.claude/plugins/devcontainer/scripts/devcontainer_config/instances.py`.
 A script or skill that needs one of these values calls into that module
@@ -219,8 +219,8 @@ acme      running  i-0abc123def456  yes     yes    49231    general-dev-acme
 sandbox   stopped  -                no      no     -        absent
 ```
 
-A dash means the probe could not answer -- no recorded id yet, no
-certificate material yet, or an AWS or docker surface that did not reply --
+A dash means the probe could not answer, whether for no recorded id yet,
+no certificate material yet, or an AWS or docker surface that did not reply,
 rather than a confirmed no; a failed probe is also reported on stderr, one
 line per row, and the command exits non-zero when any row's probes failed.
 `PARAMS` and `CERTS` are the same status probes `make instance-deploy`
@@ -236,7 +236,7 @@ accept `--json` for one single-line JSON object per instance.
 
 `make instance-init` scaffolds `instance_type = "c8g.xlarge"`: 4 vCPU and
 8 GiB on Graviton4, the cheapest 4 vCPU / 8 GiB ARM instance in us-east-1,
-priced at roughly $0.12 per hour. That is the default for a real engine --
+priced at roughly $0.12 per hour. That is the default for a real engine,
 the size a project's day-to-day container, image builds and test runs fit
 in without tuning. For a throwaway engine that only proves a pipeline
 works, the scaffold's comment names `t4g.medium` as the proven cheapest
@@ -256,8 +256,8 @@ bucket's name without any per-instance file naming it. The state *key*
 inside the bucket is `<name>/terraform.tfstate`, derived from the instance
 directory's own path, so two instances never share a bucket or a state key.
 
-Terragrunt bootstraps the bucket itself -- versioning, encryption and
-TLS enforcement included -- the first time the instance runs a command
+Terragrunt bootstraps the bucket itself, with versioning, encryption and
+TLS enforcement included, the first time the instance runs a command
 with backend bootstrapping, which every Terragrunt-running make target
 does on your behalf (`make instance-plan`'s help line names this). The
 bucket stands outside the instance lifecycle:
@@ -268,7 +268,7 @@ Two targets manage the buckets instead: `make bucket-list` shows every
 bucket the fleet's template matches, marking the ones a configured
 instance owns, and `make bucket-delete INSTANCE=<name>` purges every
 version and deletes one; `ALL=1` deletes every bucket in `REMOTE_AWS_REGION`
-and additionally requires `CONFIRM=delete` -- worth pausing over, since it
+and additionally requires `CONFIRM=delete`. That one is worth pausing over, since it
 takes every instance's whole state history with it.
 
 ## The make targets, and the Terragrunt underneath them

@@ -6,7 +6,7 @@ name is prefixed `gd-`, and cross-references between skills use the bare
 this repository can resolve every name. Claude Code consumes the same
 roster through the plugin's `skills/` entry,
 `.claude/plugins/devcontainer/skills`, which is a relative symlink to
-`../../../.agents/skills` -- a pointer, never a copy -- so each skill is
+`../../../.agents/skills`, a pointer rather than a copy, so each skill is
 also reachable as the Claude Code invocation `/devcontainer:gd-<name>`.
 
 The table below is the skill roster: one row per skill directory under
@@ -42,27 +42,27 @@ prose.
 
 | Skill | Invocation |
 |---|---|
-| gd-env-setup-local | `gd-env-setup-local` (env-) -- asks the local backend's required answers (Section 5.1), writes and verifies the three private files, checks prerequisites, and ends by naming `make build` |
-| gd-env-setup-remote | `gd-env-setup-remote` (env-) -- asks the local backend's required answers plus instance name, id, region and profile (Section 5.1), verifies the SSO session and instance state, gates any Terragrunt apply behind PRECHECK-APPLY, issues certificates, creates the docker context and port forward, and ends by naming `make build INSTANCE=<name>` |
-| gd-env-doctor | `gd-env-doctor` (env-) -- asks nothing, delegates the thirteen `gd-instance-list` checks by reference rather than restating them, and reports every configuration, secrets, container-state and drift finding it does not cover, each with an exact remedy; it only reports, it never repairs anything itself |
-| gd-project-onboard | `gd-project-onboard` (project-) -- takes a fresh clone to ready-for-setup with `make init` and `make keybindings`, and ends by naming the env- setup skill for the chosen backend |
-| gd-instance-create | `gd-instance-create` (instance-) -- provisions one instance through `make instance-init`, `make instance-plan` and `make instance-deploy` behind PRECHECK-APPLY, linking the id with `make instance-link` |
-| gd-instance-fleet | `gd-instance-fleet` (instance-) -- runs status, stop, start and (behind its own confirmation) destroy across every configured instance through the `ALL=1` targets, reporting a per-instance result table |
-| gd-instance-list | `gd-instance-list` (instance-) -- defines the validation contract the other skills reuse: the thirteen checks of Section 4.2.1 (six local, seven remote), asking which instance only when Section 4.1.1 resolution is ambiguous, fixing only what is reversible and needs no operator credential (selecting an existing context, re-establishing a port forward), and ending in a per-check verdict table |
-| gd-instance-destroy | `gd-instance-destroy` (instance-) -- destroys one instance behind GATE-DESTROY, recording the two-part precheck (operator confirmation, and the volume verified free of unpushed work before the confirmation is requested), then verifying every derived artifact is gone |
-| gd-container-local | `gd-container-local` (container-) -- asks nothing, delegates engine reachability (and with it the `rdc_backend` local-against-remote selection) to `gd-instance-list`, then resolves the container itself through `rdc_container_ids` and `rdc_require_container` and picks `make build`, `make start`, `make restart` or `make reopen`, verifying by re-reading state after every action; it never destroys anything and ends with a running container |
-| gd-container-remote | `gd-container-remote` (container-) -- the remote twin of `gd-container-local`: opens the SSM port forward as a background daemon with `make connect` and manages its lifecycle (status, stop, refresh, list), selects the engine with `make remote`, then builds or resumes through the same state diagnosis against the cloned checkout in the instance's volume |
-| gd-container-verify | `gd-container-verify` (container-) -- read-only state verification through `make status` and `make check`, plus `make list-containers` when the question spans engines rather than the active one, flagging uncommitted or unpushed work in a remote volume and naming the remedy without repairing |
-| gd-container-lifecycle | `gd-container-lifecycle` (container-) -- asks for confirmation, always, taken against an inventory of what `make clean` or `make rebuild` will destroy (the container, its private volumes, its image) and what will survive (shared volumes, the base image); explains the unpushed-work and uncommitted-config guards rather than only enforcing them, never sets `FORCE` itself, destroys container state only (never an instance, which stays behind `GATE-DESTROY`), and ends by reporting what was destroyed and what survived from a fresh post-operation read |
-| gd-creds-setup | `gd-creds-setup` (creds-) -- asks which credential, manages the hostcreds manifest and the keychain items it names entirely through `make creds-init` and `make push-creds` (never a value on a command line, never a value rendered into the conversation), verifies every store by re-reading the keychain rather than trusting the command's own exit code, and ends by naming every credential affected and what now holds it |
-| gd-creds-rotate | `gd-creds-rotate` (creds-) -- replaces one stored credential: deletes the old keychain item, stores the replacement through `make creds-init`, re-pushes, and verifies by re-reading the keychain and the container |
-| gd-creds-doctor | `gd-creds-doctor` (creds-) -- verifies the credential path end to end by running `gd-env-doctor`'s secrets checks on demand and driving each finding's repair through the creds- make targets |
-| gd-cert-lifecycle | `gd-cert-lifecycle` (cert-) -- asks which instance, creates the CA and issues the server and client certificates on first use, rotates the client certificate with the instance left running, reports expiry (the `make cert-status` view), states that certificate revocation does not exist and that removing the principal's `ssm:StartSession` grant is the mechanism, and ends every material-changing operation by rewriting the docker context and completing a handshake before reporting success |
-| gd-skills-install | `gd-skills-install` (skills-) -- wires an agent's skill surface to the canonical `.agents/skills` home by symlink, never a copy, and verifies every `gd-*` name resolves through the agent; drives `make skills-install` with AGENT= and SCOPE= (global symlink, project verify/wire, or the printed runtime incantation) |
-| gd-skills-remove | `gd-skills-remove` (skills-) -- removes a skill from one agent's surface by unwiring, deleting only a symlink resolving inside this repository, with the canonical copy verified to survive; drives `make skills-remove` |
-| gd-skills-scope | `gd-skills-scope` (skills-) -- records which scope an agent surface receives (global symlink, in-repo project adapters, or the printed one-shot runtime incantation), in that surface's own configuration, never by deleting from the canonical home; drives `make skills-install` and verifies with `make skills-list` |
-| gd-quality | `gd-quality` (cross-cutting) -- asks nothing, reads the sub-target set `make validate` invokes from the Makefile itself rather than a copy embedded in the skill, interprets each failing sub-target's root cause and fixes it, never suppresses a finding (no bypass annotation, no linter-ignore entry, no raised threshold, no narrowed `LINT_EXCLUDES` or `SPELL_FILES`), stops and asks for human approval on a suspected false positive, hands anything else it cannot fix to `gd-env-doctor` or the operator, and ends by reporting the exit code of a fresh `make validate` run |
-| gd-help | `gd-help` (cross-cutting) -- the roster index: maps the seven families, names the one skill to invoke for a stated goal, and points at the make targets each family drives |
+| gd-env-setup-local | `gd-env-setup-local` (env-): asks the local backend's required answers (Section 5.1), writes and verifies the three private files, checks prerequisites, and ends by naming `make build` |
+| gd-env-setup-remote | `gd-env-setup-remote` (env-): asks the local backend's required answers plus instance name, id, region and profile (Section 5.1), verifies the SSO session and instance state, gates any Terragrunt apply behind PRECHECK-APPLY, issues certificates, creates the docker context and port forward, and ends by naming `make build INSTANCE=<name>` |
+| gd-env-doctor | `gd-env-doctor` (env-): asks nothing, delegates the thirteen `gd-instance-list` checks by reference rather than restating them, and reports every configuration, secrets, container-state and drift finding it does not cover, each with an exact remedy; it only reports, it never repairs anything itself |
+| gd-project-onboard | `gd-project-onboard` (project-): takes a fresh clone to ready-for-setup with `make init` and `make keybindings`, and ends by naming the env- setup skill for the chosen backend |
+| gd-instance-create | `gd-instance-create` (instance-): provisions one instance through `make instance-init`, `make instance-plan` and `make instance-deploy` behind PRECHECK-APPLY, linking the id with `make instance-link` |
+| gd-instance-fleet | `gd-instance-fleet` (instance-): runs status, stop, start and (behind its own confirmation) destroy across every configured instance through the `ALL=1` targets, reporting a per-instance result table |
+| gd-instance-list | `gd-instance-list` (instance-): defines the validation contract the other skills reuse: the thirteen checks of Section 4.2.1 (six local, seven remote), asking which instance only when Section 4.1.1 resolution is ambiguous, fixing only what is reversible and needs no operator credential (selecting an existing context, re-establishing a port forward), and ending in a per-check verdict table |
+| gd-instance-destroy | `gd-instance-destroy` (instance-): destroys one instance behind GATE-DESTROY, recording the two-part precheck (operator confirmation, and the volume verified free of unpushed work before the confirmation is requested), then verifying every derived artifact is gone |
+| gd-container-local | `gd-container-local` (container-): asks nothing, delegates engine reachability (and with it the `rdc_backend` local-against-remote selection) to `gd-instance-list`, then resolves the container itself through `rdc_container_ids` and `rdc_require_container` and picks `make build`, `make start`, `make restart` or `make reopen`, verifying by re-reading state after every action; it never destroys anything and ends with a running container |
+| gd-container-remote | `gd-container-remote` (container-): the remote twin of `gd-container-local`: opens the SSM port forward as a background daemon with `make connect` and manages its lifecycle (status, stop, refresh, list), selects the engine with `make remote`, then builds or resumes through the same state diagnosis against the cloned checkout in the instance's volume |
+| gd-container-verify | `gd-container-verify` (container-): read-only state verification through `make status` and `make check`, plus `make list-containers` when the question spans engines rather than the active one, flagging uncommitted or unpushed work in a remote volume and naming the remedy without repairing |
+| gd-container-lifecycle | `gd-container-lifecycle` (container-): asks for confirmation, always, taken against an inventory of what `make clean` or `make rebuild` will destroy (the container, its private volumes, its image) and what will survive (shared volumes, the base image); explains the unpushed-work and uncommitted-config guards rather than only enforcing them, never sets `FORCE` itself, destroys container state only (never an instance, which stays behind `GATE-DESTROY`), and ends by reporting what was destroyed and what survived from a fresh post-operation read |
+| gd-creds-setup | `gd-creds-setup` (creds-): asks which credential, manages the hostcreds manifest and the keychain items it names entirely through `make creds-init` and `make push-creds` (never a value on a command line, never a value rendered into the conversation), verifies every store by re-reading the keychain rather than trusting the command's own exit code, and ends by naming every credential affected and what now holds it |
+| gd-creds-rotate | `gd-creds-rotate` (creds-): replaces one stored credential: deletes the old keychain item, stores the replacement through `make creds-init`, re-pushes, and verifies by re-reading the keychain and the container |
+| gd-creds-doctor | `gd-creds-doctor` (creds-): verifies the credential path end to end by running `gd-env-doctor`'s secrets checks on demand and driving each finding's repair through the creds- make targets |
+| gd-cert-lifecycle | `gd-cert-lifecycle` (cert-): asks which instance, creates the CA and issues the server and client certificates on first use, rotates the client certificate with the instance left running, reports expiry (the `make cert-status` view), states that certificate revocation does not exist and that removing the principal's `ssm:StartSession` grant is the mechanism, and ends every material-changing operation by rewriting the docker context and completing a handshake before reporting success |
+| gd-skills-install | `gd-skills-install` (skills-): wires an agent's skill surface to the canonical `.agents/skills` home by symlink, never a copy, and verifies every `gd-*` name resolves through the agent; drives `make skills-install` with AGENT= and SCOPE= (global symlink, project verify/wire, or the printed runtime incantation) |
+| gd-skills-remove | `gd-skills-remove` (skills-): removes a skill from one agent's surface by unwiring, deleting only a symlink resolving inside this repository, with the canonical copy verified to survive; drives `make skills-remove` |
+| gd-skills-scope | `gd-skills-scope` (skills-): records which scope an agent surface receives (global symlink, in-repo project adapters, or the printed one-shot runtime incantation), in that surface's own configuration, never by deleting from the canonical home; drives `make skills-install` and verifies with `make skills-list` |
+| gd-quality | `gd-quality` (cross-cutting): asks nothing, reads the sub-target set `make validate` invokes from the Makefile itself rather than a copy embedded in the skill, interprets each failing sub-target's root cause and fixes it, never suppresses a finding (no bypass annotation, no linter-ignore entry, no raised threshold, no narrowed `LINT_EXCLUDES` or `SPELL_FILES`), stops and asks for human approval on a suspected false positive, hands anything else it cannot fix to `gd-env-doctor` or the operator, and ends by reporting the exit code of a fresh `make validate` run |
+| gd-help | `gd-help` (cross-cutting): the roster index: maps the seven families, names the one skill to invoke for a stated goal, and points at the make targets each family drives |
 
 ## Installing for agents
 
@@ -75,7 +75,7 @@ sets named on any other value:
 
 | AGENT | SCOPE=global | SCOPE=project | SCOPE=runtime |
 |---|---|---|---|
-| opencode | symlink `general-dev-skills` in `~/.config/opencode/skills` | native -- opencode reads `.agents/skills` directly, nothing to wire | prints the `OPENCODE_CONFIG` one-shot |
+| opencode | symlink `general-dev-skills` in `~/.config/opencode/skills` | native: opencode reads `.agents/skills` directly, nothing to wire | prints the `OPENCODE_CONFIG` one-shot |
 | claude | symlink `general-dev-skills` in `~/.claude/skills` | verifies the tracked `.claude/plugins/devcontainer/skills` relative symlink, wiring it if absent | prints the `claude --settings` one-shot |
 | both | both rows above | both rows above | both rows above |
 
@@ -84,7 +84,7 @@ devcontainer is not an install target, because the roster lives in the
 checkout that builds the container, not in any image.
 
 The global scope's one symlink points at this checkout's `.agents/skills`
-with an absolute target -- fine for a Mac-personal install, and recorded
+with an absolute target, which is fine for a Mac-personal install and is recorded
 by the install output and `make skills-list`. Removal is safe next to
 your own skills by construction: `make skills-remove` deletes only a
 symlink whose resolved target is this repository's skills home. A
@@ -94,7 +94,7 @@ refuses to replace an existing `general-dev-skills` entry it did not
 create. Nothing outside the one named path is ever addressed.
 
 The project scope needs no wiring on the opencode side, because
-`.agents/skills` is the checkout opencode runs in -- it is read natively.
+`.agents/skills` is the checkout opencode runs in, so it is read natively.
 Claude Code's route is the tracked relative symlink
 `.claude/plugins/devcontainer/skills` to `../../../.agents/skills`, which
 project scope verifies and, if absent, wires with exactly that relative
@@ -104,7 +104,7 @@ not an uninstall.
 
 The runtime scope changes no filesystem state: it prints a one-shot
 incantation for launching the agent against this checkout from outside
-it, and never executes it -- the operator decides:
+it, and never executes it; the operator decides:
 
 ```sh
 make skills-install AGENT=opencode SCOPE=runtime
@@ -114,12 +114,12 @@ The opencode incantation carries one caveat worth knowing: an
 `OPENCODE_CONFIG` override replaces the project config rather than
 merging with it, so the printed JSON embeds the provider/model block read
 from `.devcontainer/opencode.json` at generation time plus the
-`skills.paths` override -- a bare skills-only file would launch opencode
+`skills.paths` override. A bare skills-only file would launch opencode
 with no provider at all. The Claude Code incantation is a `--settings`
 one-shot enabling this checkout's plugin marketplace path, printed only
 when the installed build advertises that flag (decided from
 `claude --help` at run time); a build without it gets an explicit
-unsupported message naming the manual fallback instead -- install
+unsupported message naming the manual fallback instead: install
 globally with `make skills-install AGENT=claude SCOPE=global`, or
 register the marketplace in `~/.claude/settings.json` by hand.
 
@@ -129,7 +129,7 @@ For where this wiring sits in the fresh-machine sequence, see
 ## Flows
 
 Some recurring developer actions are not a single make target but a named
-flow -- a judgment, an answer, or a multi-step procedure spanning several
+flow: a judgment, an answer, or a multi-step procedure spanning several
 targets. Each flow below is listed once here and referenced by name in
 every covering skill's body as the backticked `` `flow: <name>` `` marker,
 so the correspondence is exact in both directions:
@@ -150,9 +150,9 @@ section does not list.
 
 Coverage over the make-target surface is test-enforced.
 `tests/test_skills_coverage.py` parses the live `make help` output and the
-declared names in `tests/data/help-unadvertised.txt` -- the same two
+declared names in `tests/data/help-unadvertised.txt`, the same two
 sources `tests/test_help_snapshot.py` uses to account for every `.PHONY`
-target -- and fails, naming each uncovered target, if any target in that
+target. It fails, naming each uncovered target, if any target in that
 union is referenced by no `SKILL.md` under `.agents/skills`. The same
 suite pins the roster's structure: every `SKILL.md` carries exactly one
 `## Invocation map` heading, the one section where the make targets a

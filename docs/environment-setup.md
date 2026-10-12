@@ -42,7 +42,7 @@ Which branch to take:
 > **Do I need the remote half at all?**
 > Only if work should survive the laptop sleeping, being offline, or being
 > a different laptop. The local engine alone covers everything else, and
-> the two run side by side later -- switching is `make local` /
+> the two run side by side later: switching is `make local` /
 > `make remote INSTANCE=<name>`, and `ENGINE=` addresses either without
 > switching. See "Working with several engines at once" below.
 
@@ -99,7 +99,7 @@ never overwriting a file that already exists:
 
 The first three hold identity and configuration; the fourth is the
 hostcreds manifest, the one list of credentials this machine pushes. All
-four are private on purpose -- they name you and your accounts -- which is
+four are private on purpose, since they name you and your accounts, which is
 why `make init` copies them from examples instead of the repository
 shipping them directly.
 
@@ -117,7 +117,7 @@ filling to Claude, and the macOS / Linux / WSL differences are all in
 [environment-files.md](environment-files.md).
 
 Verify: run `make init` again. It scans all four files and ends with
-`[DONE] no placeholders left` -- or lists exactly which placeholders
+`[DONE] no placeholders left`, or it lists exactly which placeholders
 remain, per file, until then.
 
 ## 4. Author the hostcreds manifest
@@ -145,27 +145,27 @@ resolves it. The committed example shows one entry per source:
 
 What each source does:
 
-- `keychain` -- a value stored in the macOS keychain. By default the item
+- `keychain`: a value stored in the macOS keychain. By default the item
   is addressed as service `devcontainer/<project>/<NAME>`, where
   `<project>` is the checkout directory's name, so one project's items
   cannot collide with another's; optional `service` and `account` labels
   override that for a credential that already lives somewhere else. In the
   container the credential is exported under its manifest name. Store the
   item with `make creds-init` in the next step.
-- `git` -- the password git's own credential helper holds for the bare
+- `git`: the password git's own credential helper holds for the bare
   hostname in its required `host` label (`gh auth login` feeds that helper
   for github.com). Inside the container it seeds `~/.git-credentials` and
   exports no variable: git reads it through its own helper, and copying it
   into the environment would only widen its exposure.
-- `aws-export` -- the session credentials `aws configure
+- `aws-export`: the session credentials `aws configure
   export-credentials` prints on this machine, for the optional `profile`
   label's profile (`default` when unset). In the container it becomes the
   three standard AWS variables, so every SDK and the aws CLI pick the
   session up. It expires with the session; a fragment past expiry exports
   nothing and says so (see Troubleshooting).
 
-A credential name must match `[A-Z][A-Z0-9_]*` -- an uppercase letter,
-then uppercase letters, digits or underscores -- because the name becomes
+A credential name must match `[A-Z][A-Z0-9_]*`, an uppercase letter
+followed by uppercase letters, digits or underscores, because the name becomes
 both a shell variable and a `<NAME>.env` fragment filename. Reserved names
 are refused outright: `PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`,
 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, each
@@ -249,7 +249,7 @@ Verify: `docker context show` prints the local context name.
 make build
 ```
 
-Builds the image, runs postCreate, and -- as its last step -- pushes every
+Builds the image, runs postCreate, and, as its last step, pushes every
 credential the manifest names. The push resolves each entry on this
 machine, writes one `<NAME>.env` fragment per credential into
 `~/.hostcreds/` inside the container (directory mode 700, fragments mode
@@ -261,7 +261,7 @@ code and all, until the container is actually up.
 
 A rebuild wipes the credentials by design: `~/.hostcreds` lives in the
 container's own filesystem, not a volume, so a rebuilt container starts
-with none -- and the build that created it has already pushed a fresh set.
+with none; the build that created it has already pushed a fresh set.
 There is nothing to restore by hand, ever.
 
 Verify: the command exits 0 after printing `pushed <N> credential
@@ -345,7 +345,7 @@ narrows it to one instance; the targets that accept it also take `ALL=1`
 for every configured instance at once.
 
 The container side mirrors both shapes. `make list-containers` sweeps every
-engine -- the local one plus every configured instance's -- and reports one
+engine, the local one plus every configured instance's, and reports one
 row per container this project's label owns, with per-engine reachability;
 an engine that cannot answer names itself and the sweep keeps going, and
 the exit code says whether every engine answered. The lifecycle targets
@@ -373,7 +373,7 @@ target requires with no default.
 init (bootstrapping the instance's state bucket on the very first
 run), validate, a plan guarded against accidental replacement, apply of
 exactly the guarded plan, then follow-ups that run only when a status probe
-reports the corresponding piece missing -- recording the applied EC2 id,
+reports the corresponding piece missing: recording the applied EC2 id,
 issuing and publishing the certificate material, and pushing secrets. When
 the material is already present, the steps are skipped entirely, so a
 deploy never restarts a live daemon; renewals are manual, via
@@ -392,14 +392,14 @@ The certificates then authenticate the docker API itself, in both
 directions, on top of that forward: the daemon presents a server
 certificate the client verifies, and the client presents a certificate the
 daemon verifies against the CA it holds. Neither factor substitutes for the
-other -- a valid SSO session alone commands nothing, and a copied client
+other. A valid SSO session alone commands nothing, and a copied client
 certificate is inert without a tunnel IAM authorizes.
 
 Certificate material lives per instance under `~/.docker/certs/<name>/`
 (or `$DOCKER_CONFIG/certs/<name>/`), and the same directory holds the
 instance's recorded EC2 id: an `instance-id` file written by
 `make instance-link` and, automatically, by `make instance-deploy`, read by
-every remote target's resolver -- so no id variable is ever set by hand,
+every remote target's resolver, so no id variable is ever set by hand,
 and an id dies with its instance. `make cert-status` reports client and CA
 expiry per instance; a renewal is a deliberate, manual step and touches
 nothing on the running instance, because the daemon accepts any client
@@ -411,7 +411,7 @@ certificate that chains to its CA.
 it reports stopped; `make instance-start INSTANCE=<name>` starts it again
 and waits for its SSM agent to report ready. Everything on the instance
 survives the cycle: containers, images, volumes, the cloned checkouts.
-The port forward does not -- open it again after a start with
+The port forward does not; open it again after a start with
 `make remote INSTANCE=<name>`; if connecting then still fails, reinstall
 the daemon's TLS material with `make cert-install INSTANCE=<name>`.
 
@@ -477,7 +477,7 @@ changes what `make` addresses, never what an open window talks to.
 
 Three targets refuse under `ENGINE` with exit code 2: `make local`,
 `make disconnect` and `make remote` switch the machine-wide docker context,
-which is exactly what `ENGINE` exists to avoid -- under it, every call is
+which is exactly what `ENGINE` exists to avoid: under it, every call is
 already aimed at the named engine and nothing needs switching. For the same
 reason, a run that names two different engines (`INSTANCE=a ENGINE=b`) is
 refused before any work happens.
@@ -488,13 +488,13 @@ The steps above reach a human through make; the same surface reaches an
 AI agent through the `gd-` skill roster shipped in this checkout. Every
 skill lives in one canonical place, `.agents/skills/<name>/SKILL.md`,
 prefixed `gd-` so the names are agent-agnostic, and drives the same
-targets this runbook states -- asking for what it needs, verifying each
+targets this runbook states, asking for what it needs, verifying each
 step, and refusing to guess. The roster, its families and its coverage
 guarantee are [skills.md](skills.md).
 
 Inside this checkout both supported agents already see the roster:
 opencode reads `.agents/skills` natively, and Claude Code reads it
-through the plugin's tracked `skills/` symlink -- nothing to install. To
+through the plugin's tracked `skills/` symlink, with nothing to install. To
 reach the roster from an agent launched outside this checkout, wire it
 once on this Mac:
 
@@ -516,7 +516,7 @@ and runtime scopes are described with the full AGENT x SCOPE matrix in
 
 **Ruff or Python logs `spawn .venv/bin/python ENOENT`.** Symptom: the
 container's Ruff log shows the error and falls back to its bundled binary.
-Cause: a host-OS virtual environment created inside the workspace -- the
+Cause: a host-OS virtual environment created inside the workspace. The
 directory is bind-mounted into the Linux container as-is, and the
 extensions resolve `.venv/bin/python` whose symlinks point at the macOS
 Python. The repository's Makefile already redirects uv's project
@@ -530,8 +530,8 @@ Makefile (for example `make test`) instead of a bare `uv run`.
 AWS variables are absent from that shell (the fragment's guard exports
 nothing past expiry rather than exporting stale values). Fix: re-login the
 host's session if it lapsed (`aws sso login --profile <profile>`), then
-run `make push-creds` -- or `make up`, which pushes as part of its normal
-work -- and open a new shell.
+run `make push-creds`, or `make up`, which pushes as part of its normal
+work, and open a new shell.
 
 **A keychain item is missing.** Symptom: `make build` or
 `make push-creds` aborts with `cannot resolve <NAME> from the keychain
@@ -542,8 +542,8 @@ message says so), then re-run `make push-creds`. An item that exists with
 an empty password counts as missing; creds-init stores over it.
 
 **The scanner blocked a commit.** Symptom: pre-commit (or
-`make lint-secrets`) fails with a finding naming a hostcreds credential
--- `make lint-secrets` compares every scanned line against the real values
+`make lint-secrets`) fails with a finding naming a hostcreds credential;
+`make lint-secrets` compares every scanned line against the real values
 resolved from this machine's manifest, so a pasted fragment or an
 accidentally committed value is caught even when it matches no generic
 pattern. The finding never prints the value. Fix: remove the value from
@@ -558,7 +558,7 @@ prints the offending plan lines (`must be replaced`, or a `Plan:` line
 counting resources to destroy). Cause: an edit to the per-instance file
 forces Terraform to replace a resource that exists. What dies if you
 proceed: the current EC2 instance and its volumes, and with them every
-container on that engine and the cloned checkout in its volume -- unpushed
+container on that engine and the cloned checkout in its volume; unpushed
 work goes with it. Deploy converges the fresh instance it creates, but it
 cannot bring data back. Fix: push anything worth keeping from the container
 first (`make exec`), then re-run deliberately with
@@ -576,13 +576,13 @@ confirmation.
 **A remote target reports the engine unreachable, or no recorded id.**
 Symptom: `make connect-start` or any docker call against the remote context fails
 with a connection diagnosis, or names a missing recorded id. Cause: the SSM
-port forward is not open -- it lives in the terminal that ran
+port forward is not open: it lives in the terminal that ran
 `make remote INSTANCE=<name>` and dies when that terminal is interrupted,
 when the laptop sleeps, or when the SSO session lapses. Fix: open or
 refresh the forward for that instance (`make remote INSTANCE=<name>`, after
 `aws sso login --profile <profile>` if the session expired), then retry.
 If the failure instead names a missing recorded id, record it with
-`make instance-link INSTANCE=<name> INSTANCE_ID=<id>` -- or re-run
+`make instance-link INSTANCE=<name> INSTANCE_ID=<id>`, or re-run
 `make instance-deploy INSTANCE=<name>`, which records the id
 automatically. `make list-instances` shows the forward port each
 instance's context records.

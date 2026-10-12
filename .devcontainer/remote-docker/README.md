@@ -50,7 +50,7 @@ the section that goes deeper.
 
 The context's endpoint is `tcp://127.0.0.1:<port>`: the forward's local
 half. The daemon itself is on the instance, bound to its own loopback, and
-the certificate the client presents is what authenticates you -- the port
+the certificate the client presents is what authenticates you; the port
 number is only where the tunnel answers. See
 [Transport](../../docs/devcontainer.md) in the deep dive.
 
@@ -161,8 +161,8 @@ make clean CONTAINER=general-dev-review
 
 ## Daily workflow, connect & disconnect
 
-One-time setup of this machine -- host tools, the SSO profile, and the
-certificate authority and client certificate this transport presents -- is what
+One-time setup of this machine (host tools, the SSO profile, and the
+certificate authority and client certificate this transport presents) is what
 the `gd-env-setup-local` and `gd-env-setup-remote` skills do.
 They ask what they need, state any command they cannot run themselves, and
 verify the result rather than assuming it.
@@ -172,8 +172,8 @@ The `make` targets run from the repository root and cover the whole lifecycle;
 gives every capability an alias would wrap, and aliases are one more thing to
 keep in step with it.
 
-To drive several engines at once -- one per project instance under
-`remote-instances/`, plus this machine's own -- prefix `ENGINE=local` or
+To drive several engines at once, one per project instance under
+`remote-instances/` plus this machine's own, prefix `ENGINE=local` or
 `ENGINE=<instance-name>` instead of switching contexts; see
 [docs/environment-setup.md](../../docs/environment-setup.md)'s "Working
 with several engines at once", and `make list-instances` for what exists.
@@ -414,7 +414,7 @@ make clean
 
 It reads the container's own mounts before removing it, so the volumes it
 deletes are the ones actually attached, not guessed from a naming convention, then removes the container, those volumes, and the image. `minikube-config` and
-`vscode` — the Dev Containers extension's engine-wide server cache — are
+`vscode` (the Dev Containers extension's engine-wide server cache) are
 excluded as shared (`SHARED_VOLUMES` overrides the list), the VS Code server
 volume is excluded by its mount point, and `devcontainer-base:noble` and
 `vsc-volume-bootstrap` stay cached: they hold no project state and make the

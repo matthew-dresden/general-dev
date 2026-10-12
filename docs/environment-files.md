@@ -1,8 +1,8 @@
 # Environment files
 
 Four files configure this devcontainer. All four are gitignored: three carry
-per-developer identity and configuration that must not reach git -- SSO
-profile selection, git identity, proxy settings and feature toggles -- and
+per-developer identity and configuration that must not reach git (SSO
+profile selection, git identity, proxy settings and feature toggles), and
 the fourth, the hostcreds manifest, names every credential this machine
 pushes into the container without ever holding a value itself. Each has a
 committed `.example` alongside it.
@@ -62,7 +62,7 @@ Read ~/.aws/config and .devcontainer/aws-profile-map.json.example, then build
 ### The interview route, with a worked example
 
 The `gd-env-setup-local` and `gd-env-setup-remote` skills ask a fixed
-question set -- the `FIELDS` schema in the plugin's `answers` module is its
+question set: the `FIELDS` schema in the plugin's `answers` module is its
 single source of truth, so every agent asks exactly these questions and
 nothing else. Conditional questions appear only when the branch they belong
 to is taken: `aws_profiles` when `aws_config_enabled` is true,
@@ -83,7 +83,7 @@ agent: Configure AWS profiles in the container? (true/false)
 you:  true
 
 agent: For each profile: name, region, SSO start URL, SSO region,
-      account name, account id, role name -- one line per profile?
+      account name, account id, and role name, one line per profile?
 you:  default us-east-1 https://<your-sso-portal>.awsapps.com/start
       us-east-1 <account-name> <account-id> DeveloperAccess
 
@@ -91,13 +91,13 @@ agent: Behind a corporate proxy? (true/false)
 you:  false
 ```
 
-The placeholder-styled values above are illustrative -- your real answers
+The placeholder-styled values above are illustrative; your real answers
 carry the actual portal URL and twelve-digit account id, and validation
 refuses anything still bracketed.
 
-Nothing is written until every answer validates -- an unreplaced
+Nothing is written until every answer validates. An unreplaced
 `<placeholder>`, an empty value, an account id that is not twelve digits,
-or a git provider carrying `https://` are each refused by name, and an
+or a git provider carrying `https://` is each refused by name, and an
 abort after the first answer leaves the working tree exactly as it was.
 When every answer validates, `render` writes all three files in one pass.
 
@@ -242,8 +242,8 @@ for whatever is missing.
 
 ## Secrets
 
-`shell.env` carries identity and configuration -- git identity, AWS profile
-selection, proxy settings -- and carries no credential. It is
+`shell.env` carries identity and configuration (git identity, AWS profile
+selection, proxy settings) and carries no credential. It is
 published to Parameter Store by `make push-secrets` so a remote container
 can bootstrap itself. Every credential is named in the hostcreds
 manifest and resolved from the developer's own machine, never stored in
@@ -254,8 +254,8 @@ manifest and resolved from the developer's own machine, never stored in
 `.devcontainer/hostcreds.map.json` (created by `make init` from its
 committed example, gitignored) is the one list of credentials this
 repository pushes: there is no second provider and no offline store. Each
-entry names its source -- the macOS keychain, git's own credential helper,
-or `aws configure export-credentials` -- and nothing else; no value is ever
+entry names its source, one of the macOS keychain, git's own credential
+helper, or `aws configure export-credentials`, and nothing else; no value is ever
 written into the manifest.
 
 `make creds-init` prompts once (getpass) for each keychain entry whose item
@@ -276,7 +276,7 @@ the manifest. `make verify-container` re-checks the pushed credentials
 inside the container.
 
 An `aws-export` entry resolves through `aws configure export-credentials`
-on the host, using the developer's already-valid AWS SSO session -- the
+on the host, using the developer's already-valid AWS SSO session; the
 container itself holds no AWS credential for this path.
 
 #### The manifest schema
@@ -293,7 +293,7 @@ variable the startup block exports and a `<NAME>.env` fragment filename,
 and the store directory is case-insensitive on macOS, where differently
 cased names would collide as filenames. Reserved names are refused however
 well-formed: `PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`,
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` -- a
+`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`. A
 manifest name becomes a shell variable at startup, and one of these would
 silently shadow the real thing. `<project>` below is the checkout
 directory's name.
@@ -307,9 +307,9 @@ directory's name.
 The default keychain service names this project and this credential, so
 one checkout's items cannot collide with another's without the operator
 choosing an explicit `service` label. The account is asymmetric on purpose:
-storing (creds-init) always writes one -- the manifest's, or the
+storing (creds-init) always writes one, either the manifest's or the
 credential's own `NAME` when it set none, because `add-generic-password`
-without `-a` fails on current macOS -- while the read and the probe omit
+without `-a` fails on current macOS, while the read and the probe omit
 `-a` entirely when the manifest sets none, since an empty account
 constraint matches a different item than no account constraint at all.
 
@@ -322,7 +322,7 @@ when the variable is absent.
 
 `make push-creds` resolves every entry through the
 `devcontainer_config.cli creds-fragments` subcommand on the host and
-aborts -- exit 1, the failed credential named on stderr -- when ANY entry
+aborts with exit 1, naming the failed credential on stderr, when ANY entry
 is unresolvable: a container silently shipping a subset of the manifest is
 the one failure the command must make impossible. Each resolved credential
 becomes one `<NAME>.env` fragment, written at mode 0600 into a fresh
@@ -346,8 +346,8 @@ in the container without giving git anything it does not already have.
 
 #### The secrets scanner
 
-`make lint-secrets` -- staged content by default, `RANGE=<a>..<b>` for a
-commit range -- additionally compares every scanned line against the
+`make lint-secrets` (staged content by default, `RANGE=<a>..<b>` for a
+commit range) additionally compares every scanned line against the
 hostcreds values resolved live from this machine's manifest, so a real
 credential value is caught even when it matches no generic pattern. A
 credential whose source command fails is reported by name as unavailable
@@ -358,8 +358,8 @@ There is no ignore list and no suppression annotation.
 `AWS_PROFILE` selects the profile the aws CLI resolves credentials through
 on the host-side cert publishing path: `certs.py`'s Parameter Store client
 takes no profile argument, so `make cert-publish` passes the profile the
-way the aws CLI reads it, and the CLI's own resolution -- including an
-already-valid SSO session for that profile -- applies. It defaults to
+way the aws CLI reads it, and the CLI's own resolution, including an
+already-valid SSO session for that profile, applies. It defaults to
 `default` when unset and is never set by this repository.
 
 ### Certificate lifetimes
@@ -388,7 +388,7 @@ unbounded lifetime.
 `CERT_WARN_DAYS` (E6-F1-S1-T2) governs `make cert-status`'s warning window
 , read in exactly one place,
 `certs._resolve_cert_warn_days`, and threaded from there into every
-`certs.classify` call the report makes -- never a second literal `14`
+`certs.classify` call the report makes, never a second literal `14`
 anywhere else in `certs.py`.
 
 | Variable | Default | Defined in |
@@ -410,14 +410,14 @@ certificate has already expired. A `RENEW` that failed the build would train
 the operator to ignore it, and a certificate with days left on it still
 works; only an already-expired certificate is a build-breaking failure. An
 unreadable or unparsable certificate file is reported by naming the path
-and the parse failure, never silently classified as `expired` -- that would
-send the operator to reissue material that may be perfectly valid. `make
+and the parse failure, never silently classified as `expired`, because that
+would send the operator to reissue material that may be perfectly valid. `make
 cert-status` reports the `ca` and `client` roles it finds locally under
 `certs.DEFAULT_CERTS_ROOT`/`instances.certs_root()`'s certificate-directory
 root (`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/`
-when `DOCKER_CONFIG` is unset -- see the "Instances" section's `DOCKER_CONFIG`
+when `DOCKER_CONFIG` is unset; see the "Instances" section's `DOCKER_CONFIG`
 row below); the server certificate is never reported because it is never
-persisted to that path in the first place --
+persisted to that path in the first place.
 `certs.issue_server` generates it into a temporary directory it removes
 before returning, handing the material back as PEM text instead (see the
 certificate-storage paragraph below for the full rule).
@@ -429,9 +429,9 @@ LibreSSL, including the `/usr/bin/openssl` macOS ships by default, does not
 implement (`unknown option -copy_extensions`). On macOS, `brew install
 openssl` installs the `openssl@3` keg; add `$(brew --prefix openssl@3)/bin`
 to the FRONT of `PATH` in the shell profile rather than relying on the
-Homebrew prefix's own `bin` directory already being ahead of `/usr/bin` --
-Homebrew does not guarantee `openssl@3` is symlinked into that shared
-prefix on every install -- then confirm `openssl version` reports `OpenSSL
+Homebrew prefix's own `bin` directory already being ahead of `/usr/bin`
+(Homebrew does not guarantee `openssl@3` is symlinked into that shared
+prefix on every install), then confirm `openssl version` reports `OpenSSL
 3.x`, not `LibreSSL`; on Linux/WSL, most current distributions'
 `apt-get install openssl` already satisfies the floor.
 The `gd-env-setup-local` skill checks this alongside the other host
@@ -469,7 +469,7 @@ or updating the per-instance docker context that carries the TLS material
 that proves the whole path works (`transport.handshake`), translating a
 handshake failure into the SAN requirement or a connection diagnosis
 (`transport.diagnose_handshake_failure`) rather than a bare, opaque TLS
-error -- see `docs/devcontainer.md`'s "Transport" section.
+error; see `docs/devcontainer.md`'s "Transport" section.
 `.claude/plugins/devcontainer/scripts/devcontainer_config/hostprobe.py`
 (E1-F3-S1-T1) is the docker-handshake probe `gd-instance-list`, `gd-env-setup-local` and
 `gd-env-setup-remote` share for their own, simpler "does the engine answer" check.
@@ -541,7 +541,7 @@ port and this variable together is a different error,
 `DockerHandshakeTimeoutError`, which `transport.handshake` raises instead,
 only once the retried `docker version` call itself either never answers
 before the deadline or answers with no budget left for the rootless probe
-that follows it -- `handshake` already knows the context and the port at
+that follows it, since `handshake` already knows the context and the port at
 that point, which the timeout reader itself never does. All six
 variables, `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`,
 `MATERIAL_INSTALL_TIMEOUT`, `PORT_PROBE_TIMEOUT`,
@@ -560,9 +560,9 @@ disagree on, the empty string, is documented above.
 ### State bucket name components
 
 `remote-instances/root.hcl`'s `state_bucket_name` local composes each
-instance's Terraform state bucket name from the instance's own name --
+instance's Terraform state bucket name from the instance's own name,
 `basename(path_relative_to_include())`, the including directory under
-`remote-instances/` -- plus the region in `REMOTE_AWS_REGION`, the AWS
+`remote-instances/`, plus the region in `REMOTE_AWS_REGION`, the AWS
 account, and a committed suffix. The instance name is derived, never typed,
 so the bucket cannot disagree with the directory it belongs to;
 `tests/test_state_bucket_name.py` pins the composition and the committed
@@ -595,15 +595,15 @@ value by name rather than silently falling back to the default.
 
 `.claude/plugins/devcontainer/scripts/devcontainer_config/instances.py` is
 the single module that turns an instance name into every artifact spec
-Section 9's addressing table names -- the Terragrunt directory, the state
+Section 9's addressing table names (the Terragrunt directory, the state
 key, the docker context, the Parameter Store prefix, the certificate
-directory, the recorded EC2 instance id, and the recorded forwarded port --
+directory, the recorded EC2 instance id, and the recorded forwarded port)
 and the single module that decides which instance a command means.
 `resolve-instance` is its entry
 point (`PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m
 devcontainer_config.cli resolve-instance`): it prints the resolved name
-and the statically derivable half of the addressing block -- everything
-except the forwarded port, which needs a real docker context -- as one
+and the statically derivable half of the addressing block, everything
+except the forwarded port, which needs a real docker context, as one
 `KEY=value` line per artifact on stdout, so the shell layer reads values
 rather than re-deriving them, and prints nothing to stdout and exits 1
 with the operator-facing text on stderr on any resolution failure.
@@ -616,7 +616,7 @@ moved location:
 | Variable | Default | Governs |
 |---|---|---|
 | `DOCKER_CONFIG` | Unset (`~/.docker`) | `instances.certs_dir`'s (and `certs.DEFAULT_CERTS_ROOT`'s) certificate-directory root: an absolute directory path. When set, certificates are addressed and written under `$DOCKER_CONFIG/certs/<name>/` instead of `~/.docker/certs/<name>/`. Read only; never set by this repository. |
-| `INSTANCE` | Unset | `instances.resolve`'s first resolution step: the instance name to select this call, read directly from the process environment. Optional. When set, must pass `instances.validate_name` -- a non-empty path segment of letters, digits, hyphens and underscores only, at most `instances.MAX_INSTANCE_NAME_LENGTH` (63) characters -- or resolution fails naming the value and the rule it broke. |
+| `INSTANCE` | Unset | `instances.resolve`'s first resolution step: the instance name to select this call, read directly from the process environment. Optional. When set, must pass `instances.validate_name`: a non-empty path segment of letters, digits, hyphens and underscores only, at most `instances.MAX_INSTANCE_NAME_LENGTH` (63) characters. Otherwise resolution fails, naming the value and the rule it broke. |
 | `DEFAULT_REMOTE_INSTANCE` | Unset | `instances.resolve`'s second resolution step, read directly from the process environment when `INSTANCE` is unset. Optional; has no entry in `shell.env.example`. Same format as `INSTANCE`: a non-empty path segment of at most `instances.MAX_INSTANCE_NAME_LENGTH` (63) characters. |
 | `ENGINE` | Unset | Addresses one engine explicitly instead of following the machine-wide active docker context: `local` names this machine's engine (`LOCAL_DOCKER_CONTEXT`), any other value must name an instance directory under `remote-instances/`, and every docker call the run makes is aimed at that engine's context without any `docker context use`. Read by the Makefile (exported to its recipes when set) and by `lib.sh`'s `rd_engine_context`, which derives the context through `instances.docker_context` and fails fast when the value names nothing this repository can address. Both `ENGINE=x make <target>` and `make <target> ENGINE=x` reach it. The three context switchers (`make local`, `make disconnect`, `make remote`) refuse under it. See `docs/environment-setup.md`'s "Working with several engines at once". |
 
@@ -658,8 +658,8 @@ failure:
 - An empty (or absent) `remote-instances/` directory on a remote backend
   fails, directing the operator to `gd-env-setup-remote`.
 
-Ambiguity -- more than one instance configured and neither selector chose
-one -- fails naming every configured instance and both remedies,
+Ambiguity, meaning more than one instance configured while neither selector
+chose one, fails naming every configured instance and both remedies,
 `make <target> INSTANCE=<name>` and `DEFAULT_REMOTE_INSTANCE='<name>'` in
 `shell.env`, with exit code 1 and no partial work: resolution happens
 before any docker or AWS call.
@@ -675,9 +675,9 @@ pure derivation is the recorded EC2 instance id: an `instance-id` file
 inside the instance's certificate directory (`instances.certs_dir(name)`,
 so `$DOCKER_CONFIG/certs/<name>/instance-id`, or
 `~/.docker/certs/<name>/instance-id` when `DOCKER_CONFIG` is unset).
-`make instance-link INSTANCE=<name> INSTANCE_ID=<id>` writes it -- the
-only deliberate writer, and `make instance-deploy` records the applied id
-there automatically at apply time -- and every remote target's resolver
+`make instance-link INSTANCE=<name> INSTANCE_ID=<id>` writes it, the
+only deliberate writer; `make instance-deploy` records the applied id
+there automatically at apply time; and every remote target's resolver
 reads it, so the id travels with the instance it names instead of in a
 variable set by hand. `make instance-destroy` removes the whole
 certificate directory, id file included, so a retired instance cannot

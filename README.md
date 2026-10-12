@@ -1,17 +1,29 @@
 # general-dev
 
-Personal general-purpose development workspace: one repository that runs as
-a devcontainer either on this laptop's Docker engine or on a remote EC2
-engine, with the projects you work on cloned inside it as plain nested
-repositories.
+A reusable devcontainer platform: one repository that creates and manages
+one to many separate development containers -- on this laptop's Docker
+engine, on remote EC2 engines, or both at once -- with the projects you
+work on cloned inside the workspace as plain nested repositories.
 
-- **Local**. VS Code Dev Containers on the laptop's Docker engine (OrbStack).
-- **Remote**. VS Code Dev Containers against a Docker engine on EC2, reached
-  through an SSM port forward carrying the docker API under mutual TLS.
-  Containers and source live on the instance, so work survives the laptop
-  sleeping, restarting, or losing connectivity. There is no key pair, and no
-  interactive access to the host: `make exec` opens a shell in a container,
-  which is the only shell this workspace offers.
+What that buys you, and why you would use it:
+
+- **Many containers, two kinds of engine.** A container per clone, per
+  branch under review, or per project -- named at creation (`make build
+  NAME=x`), listed across every engine at once (`make list-containers`),
+  and addressed per engine (`ENGINE=local` or `ENGINE=<instance>`) so
+  parallel terminals never switch the docker context underneath each other.
+- **Work survives the laptop.** Local containers bind-mount this checkout;
+  remote containers live on an EC2 engine reached through an SSM port
+  forward carrying the docker API under mutual TLS, so they keep running
+  through sleeps, restarts and offline stretches. There is no key pair and
+  no host access by design: `make exec` opens a shell in a container, the
+  only shell this workspace offers.
+- **Every operation is automated.** Provisioning an engine, its
+  certificates and secrets, building, naming, starting, stopping, checking,
+  fleet operations and teardown -- the whole lifecycle for engines and
+  containers alike is driven by make targets, one command each; `make help`
+  lists them all, and the `gd-*` skills drive those same targets when an
+  agent runs them for you.
 
 ## Quick start, local
 

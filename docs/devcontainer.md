@@ -699,9 +699,9 @@ single place the bare instance name is recovered for certificate lookup.
 **The ssh transport, for an SSH engine.** The value `ssh` runs the same
 `forwards open` lifecycle with the ssh flag form
 (`--name/--host/--port/--user/--docker-addr/--context`), reaching a
-generic SSH engine -- one declared by a
-`remote-instances/<name>/engine.json` manifest (`python3 -m
-devcontainer_config.cli engine-init` scaffolds one) -- through
+generic SSH engine (one declared by a
+`remote-instances/<name>/engine.json` manifest; `python3 -m
+devcontainer_config.cli engine-init` scaffolds one) through
 `devcontainer_config.transport_ssh`: a managed `ssh -N -L` local forward
 (`BatchMode` and `ExitOnForwardFailure` set, the operator's own identity
 and agent, no key flag and no remote command) to the engine's docker
@@ -710,8 +710,8 @@ material, readiness being the local port accepting a connection bounded by
 `SSH_FORWARD_TIMEOUT`, and the same `Connected:` announcement and teardown
 discipline as the ssm transport. The destination differs by platform: a
 Linux endpoint typically serves an absolute Unix socket path, while a
-Windows endpoint requires a tcp destination -- Windows OpenSSH cannot
-forward to named pipes or Unix sockets -- normally Docker Desktop's
+Windows endpoint requires a tcp destination (Windows OpenSSH cannot
+forward to named pipes or Unix sockets), normally Docker Desktop's
 `tcp://localhost:2375` ("Expose daemon on tcp://localhost:2375 without
 TLS"). A forward failure whose destination is a socket path states that
 guidance explicitly, and `engine-init --docker-addr`'s help states it at

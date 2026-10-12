@@ -479,14 +479,14 @@ point. There are two transports, so the selector has two accepted
 values: `ssm`, the default, the SSM port forward to an EC2 instance, and
 `ssh`, the managed `ssh -N -L` forward to a generic SSH engine (an
 instance whose `remote-instances/<name>/engine.json` manifest declares
-it). It is kept rather than removed because a caller that exports a stale
-value gets told so rather than being silently redirected.
+it). A value outside that set is refused by name rather than silently
+redirected.
 
 It has two readers, and they dispatch differently by design: the Makefile's
-`connect` recipe reads the variable from the environment and dispatches on
-it, accepting `ssm` and `ssh`, while `transport.py`'s `resolve_transport`,
-which the ssm module's own `connect` subcommand calls, still accepts only
-`ssm` -- the ssm transport remains opt-in, and the `ssh` value never
+`connect-start` recipe reads the variable from the environment and dispatches on
+engine kind, accepting `ssm` and `ssh`, while `transport.py`'s `resolve_transport`,
+which the ssm module's own `connect` subcommand calls, accepts only
+`ssm`: the ssm transport remains opt-in, and the `ssh` value never
 reaches that reader, because it routes to
 `devcontainer_config.transport_ssh`, which declares no selector of its
 own. Unset selects `ssm` at the Makefile. The literal `ssm` selects it
@@ -551,8 +551,8 @@ that point, which the timeout reader itself never does. `SSH_FORWARD_TIMEOUT`
 is the ssh transport's counterpart of `SSM_FORWARD_TIMEOUT`:
 `devcontainer_config.transport_ssh`'s `wait_ready` bounds by it how long it
 waits for the local end of the `ssh -N -L` forward to accept a connection
--- readiness always being a real connection attempt, never the elapsed
-time -- naming the instance, the endpoint, the port and this variable
+(readiness always being a real connection attempt, never the elapsed
+time), naming the instance, the endpoint, the port and this variable
 before raising. The ssh child's own teardown reuses
 `transport.stop_forward`, so the grace period that function grants the
 child before escalating to a kill is still bounded by
@@ -567,11 +567,11 @@ repository today: each default above applies
 whenever the variable is unset, and each reader rejects a non-numeric or
 non-positive value naming the variable and its value rather than
 silently falling back to the default. `DEVCONTAINER_TRANSPORT`'s readers apply the same fail-fast rule to every
-non-empty value other than `ssh` or `ssm`: the Makefile's `connect` recipe
+non-empty value other than `ssh` or `ssm`: the Makefile's `connect-start` recipe
 rejects it by name, and `transport.py`'s `resolve_transport` rejects
-everything but `ssm` -- the one value the Makefile additionally accepts,
+everything but `ssm`; the one value the Makefile additionally accepts,
 `ssh`, never reaches that reader, since it routes to
-`devcontainer_config.transport_ssh`; the one value they disagree on
+`devcontainer_config.transport_ssh`. The one value they disagree on
 otherwise, the empty string, is documented above.
 
 ### State bucket name components
@@ -636,6 +636,21 @@ moved location:
 | `INSTANCE` | Unset | `instances.resolve`'s first resolution step: the instance name to select this call, read directly from the process environment. Optional. When set, must pass `instances.validate_name`: a non-empty path segment of letters, digits, hyphens and underscores only, at most `instances.MAX_INSTANCE_NAME_LENGTH` (63) characters. Otherwise resolution fails, naming the value and the rule it broke. |
 | `DEFAULT_REMOTE_INSTANCE` | Unset | `instances.resolve`'s second resolution step, read directly from the process environment when `INSTANCE` is unset. Optional; has no entry in `shell.env.example`. Same format as `INSTANCE`: a non-empty path segment of at most `instances.MAX_INSTANCE_NAME_LENGTH` (63) characters. |
 | `ENGINE` | Unset | Addresses one engine explicitly instead of following the machine-wide active docker context: `local` names this machine's engine (`LOCAL_DOCKER_CONTEXT`), any other value must name an instance directory under `remote-instances/`, and every docker call the run makes is aimed at that engine's context without any `docker context use`. Read by the Makefile (exported to its recipes when set) and by `lib.sh`'s `rd_engine_context`, which derives the context through `instances.docker_context` and fails fast when the value names nothing this repository can address. Both `ENGINE=x make <target>` and `make <target> ENGINE=x` reach it. The three context switchers (`make local`, `make disconnect`, `make remote`) refuse under it. See `docs/environment-setup.md`'s "Working with several engines at once". |
+
+The block `resolve-instance` prints is resolver output, not a set of
+variables to set: nothing under `ENGINE_`, and no `KIND`, is ever read
+back from the environment. For an EC2 instance the block carries
+`INSTANCE`, `TERRAGRUNT_DIR`, `STATE_KEY`, `DOCKER_CONTEXT`,
+`PARAMETER_PREFIX` and `CERTS_DIR`. For an SSH engine the Terragrunt,
+state-key and Parameter Store rows do not exist, and the block instead
+carries `KIND=ssh` plus the manifest's validated values as `ENGINE_HOST`,
+`ENGINE_PORT`, `ENGINE_USER` and `ENGINE_DOCKER_ADDR`, and the composed
+`ENGINE_ENDPOINT`. The `ENGINE_` prefix is what lets the shell layer's
+export loop consume every line generically, and `KIND` is what
+`lib.sh`'s `rd_engine_kind` reads to tell the kinds apart downstream
+(`connect-start`'s dispatch, the kind refusals, the ssh delivery in
+`push-secrets.sh`). The one ssh-transport value an operator sets,
+`SSH_FORWARD_TIMEOUT`, is tabled in the Transport section above.
 
 `DEFAULT_REMOTE_INSTANCE` is the second step of the instance-resolution
 order, evaluated once per resolution by

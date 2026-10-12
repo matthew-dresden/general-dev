@@ -60,6 +60,19 @@ if [ -n "$(INSTANCE)" ] && [ "$(ALL)" = "1" ]; then \
 fi
 endef
 
+# Refusal for the resolver-loop targets that accept ALL=1 in place of
+# INSTANCE. ALL=1 acts on every configured instance, discovered at run time
+# through the engine's own discovery, which never consults ENGINE; ENGINE
+# pins exactly one. A fleet loop under ENGINE would therefore silently
+# ignore one of the two selections the caller made, so the run refuses with
+# the reason and exits 2, matching the usage guards' convention.
+define ENGINE_FLEET_REFUSAL
+if [ -n "$${ENGINE:-}" ] && [ "$(ALL)" = "1" ]; then \
+	printf '\033[0;31m[ERROR]\033[0m ENGINE=%s is set: ALL=1 acts on every configured instance and ENGINE pins exactly one; run it with INSTANCE=<name> only, or ALL=1 without ENGINE\n' "$${ENGINE}" >&2; \
+	exit 2; \
+fi
+endef
+
 # Refusal for the three targets that switch the machine-wide docker context
 # (local, remote, disconnect). ENGINE, when set, exists so a run never has
 # to: every docker call it makes is aimed at the engine it names without
@@ -463,6 +476,7 @@ connect-start:
 # forward state and is the one no-argument member.
 connect-status:
 	@$(call INSTANCE_OR_ALL_GUARD,connect-status)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; no forwards to report.\n'; exit 0; }; \
@@ -472,6 +486,7 @@ connect-status:
 
 connect-stop:
 	@$(call INSTANCE_OR_ALL_GUARD,connect-stop)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; no forwards to stop.\n'; exit 0; }; \
@@ -481,6 +496,7 @@ connect-stop:
 
 connect-refresh:
 	@$(call INSTANCE_OR_ALL_GUARD,connect-refresh)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; no forwards to refresh.\n'; exit 0; }; \
@@ -510,6 +526,7 @@ bucket-list:
 
 bucket-delete:
 	@$(call INSTANCE_OR_ALL_GUARD,bucket-delete)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@if [ "$(ALL)" = "1" ] && [ "$(CONFIRM)" != "delete" ]; then \
 		printf '\033[0;31m[ERROR]\033[0m ALL=1 deletes every state bucket this fleet names in REMOTE_AWS_REGION; confirm it: make bucket-delete ALL=1 CONFIRM=delete\n' >&2; \
 		exit 1; \
@@ -702,6 +719,7 @@ instance-init:
 # instance whose surface could not be reached.
 instance-status:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-status)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; nothing to report.\n'; exit 0; }; \
@@ -716,6 +734,7 @@ instance-status:
 # Terragrunt runs, and an ssh engine is refused naming the engine-* surface.
 instance-plan:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-plan)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	. $(RD_DIR)/lib.sh; \
 	$(TERRAGRUNT_INIT_HELPER); \
@@ -736,6 +755,7 @@ instance-plan:
 # and the refusal fires per instance before any aws call.
 instance-stop:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-stop)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	. $(RD_DIR)/lib.sh; \
 	$(REMOTE_AWS_REGION_GUARD) \
@@ -750,6 +770,7 @@ instance-stop:
 
 instance-start:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-start)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	. $(RD_DIR)/lib.sh; \
 	$(REMOTE_AWS_REGION_GUARD) \
@@ -843,6 +864,7 @@ engine-remove:
 # which blocks on `make remote` and so is printed rather than run.
 instance-deploy:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-deploy)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	. $(RD_DIR)/lib.sh; \
 	command -v jq > /dev/null 2>&1 || { \
@@ -938,6 +960,7 @@ instance-deploy:
 # Terragrunt does not know about.
 instance-destroy:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-destroy)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	. $(RD_DIR)/lib.sh; \
 	$(REMOTE_AWS_REGION_GUARD) \

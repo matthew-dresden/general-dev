@@ -86,12 +86,16 @@ def test_the_remote_section_describes_the_transport_and_host_access() -> None:
     )
 
 
-@pytest.mark.parametrize("token", ["make shell", "ssh", "tunnel"])
+@pytest.mark.parametrize("token", ["make shell", "tunnel"])
 def test_removed_surfaces_are_named_nowhere(token: str) -> None:
     """AC-DOC-005: the README documents current state only, so none of these appear.
 
     There is no change-history table to exempt: a reader meeting one of these
     tokens has found a description of something the platform does not offer.
+    `ssh` is deliberately absent from this list: it names a first-class
+    engine kind now, reached through `engine.json` manifests and the ssh
+    transport, so the README naming it is documentation, not a stale
+    reference.
     """
     haystack = _readme().lower()
     assert token not in haystack, (

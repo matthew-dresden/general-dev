@@ -536,13 +536,13 @@ def test_transport_table_documents_devcontainer_transport() -> None:
         f"row: {names!r}."
     )
     section = _transport_section_text_normalized()
-    assert "`ssh`" in section, (
-        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not state `ssh` as "
+    assert "`ssm`" in section, (
+        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not state `ssm` as "
         "DEVCONTAINER_TRANSPORT's default."
     )
-    assert "`ssm`" in section, (
-        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not name `ssm` as an "
-        "accepted DEVCONTAINER_TRANSPORT value."
+    assert "`ssh`" in section, (
+        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not state `ssh` as "
+        "DEVCONTAINER_TRANSPORT's other accepted value, the ssh engine transport."
     )
     assert "resolve_transport" in section, (
         f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not name "

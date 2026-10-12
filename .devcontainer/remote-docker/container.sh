@@ -487,7 +487,7 @@ rdc_ensure_secrets_current() {
   # transformed payload straight into the workspace volume (rdc_seed_volume),
   # fresh on every rebuild, which is the freshness guarantee this function
   # exists to give the EC2 path a different way.
-  if [ "${KIND:-}" = "ssh" ]; then
+  if [ "$(rd_engine_kind)" = "ssh" ]; then
     rd_log "SSH engine: config seeds into the workspace volume at build time (fresh on every rebuild), no Parameter Store check"
     return 0
   fi
@@ -545,14 +545,14 @@ rdc_git_credentials() {
 # bootstraps from Parameter Store at postCreate and a seeded copy would sit
 # stale beside it). The payload is the shared transform's output, written to
 # a 0700 temp directory on this machine, then carried into the volume by a
-# second `sh -s` heredoc: the values ride the heredoc body -- docker's own
-# stdin stream, the same channel the clone's git credential travels -- never
+# second `sh -s` heredoc: the values ride the heredoc body (docker's own
+# stdin stream, the same channel the clone's git credential travels), never
 # a docker argument, which on a remote engine sits in the process table of
 # a machine the operator may not be the only user of. The whole run is a
 # subshell so its EXIT trap cannot displace the override-config trap
 # rdc_build_remote arms immediately after rdc_seed_volume returns. On any
 # failure the partially configured volume is removed, so a retry starts
-# clean -- the same discipline the clone failure below applies.
+# clean, the same discipline the clone failure below applies.
 rdc_seed_config_payload() {
   local volume="$1"
   (
@@ -638,10 +638,10 @@ SEED
   }
   # The EC2 path stops here: its container fetches the payload from
   # Parameter Store at postCreate. An SSH engine has no Parameter Store, so
-  # its configuration channel is the volume itself -- the transformed
+  # its configuration channel is the volume itself: the transformed
   # payload rides in right after the clone, in the same seeded checkout the
   # postcreate wrapper's file-present branch will find and source.
-  if [ "${KIND:-}" = "ssh" ]; then
+  if [ "$(rd_engine_kind)" = "ssh" ]; then
     rdc_seed_config_payload "$volume"
   fi
   rd_ok "checkout seeded at ${CONTAINER_WORKSPACE}"
@@ -1083,7 +1083,7 @@ rdc_up() {
   backend="$(rdc_backend)"
 
   if ! docker info > /dev/null 2>&1; then
-    if [ "$backend" = "remote" ] && [ "${KIND:-}" = "ssh" ]; then
+    if [ "$backend" = "remote" ] && [ "$(rd_engine_kind)" = "ssh" ]; then
       # The ssh failure remedy names a refresh, not a credential refresh:
       # an ssh engine opens no AWS session, and refresh re-runs the recorded
       # command, so it can never open a different tunnel than the one that
@@ -1124,7 +1124,7 @@ rdc_up() {
       # forever, and its exit 0 after a Ctrl-C read as success against a
       # forward that had just closed. `forwards open` is idempotent, returns
       # once the docker context answers through the forward, and carries its
-      # own diagnosis on failure -- the same invocation connect-start runs.
+      # own diagnosis on failure, the same invocation connect-start runs.
       rd_log "remote engine is not answering, opening the ssm port forward"
       PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" python3 -m devcontainer_config.forwards open \
         --instance-id "$REMOTE_INSTANCE_ID" --context "$REMOTE_DOCKER_CONTEXT" \

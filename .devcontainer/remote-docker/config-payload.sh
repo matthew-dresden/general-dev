@@ -14,7 +14,7 @@
 
 # Sourced AFTER lib.sh, whose rd_die carries every failure below, and by a
 # caller that has set SHELL_ENV_SOURCE, PROFILE_MAP_SOURCE and PROJECT_NAME
-# -- both consumers do, right after rd_load_config.
+# (both consumers do, right after rd_load_config).
 
 # The in-container workspace root the BASH_ENV rewrite points at. The same
 # variable, with the same default, that container.sh derives its

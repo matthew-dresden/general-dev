@@ -2263,22 +2263,29 @@ def test_resolve_transport_defaults_to_ssm_when_unset(monkeypatch: pytest.Monkey
     assert transport.resolve_transport() == transport.TRANSPORT_SSM
 
 
-def test_resolve_transport_tells_a_caller_the_ssh_value_was_removed(
+def test_resolve_transport_tells_a_caller_where_the_ssh_value_belongs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The removed value gets its own message, not a generic rejection.
+    """The `ssh` value gets its own message, not a generic rejection.
 
-    Someone exporting `ssh` from an old shell profile has a different problem
-    from someone with a typo, and saying the transport was removed is more
-    useful than listing accepted values at them.
+    `ssh` is a first-class engine kind now, dispatched by engine kind at
+    `make connect-start` and routed to `transport_ssh`. This module's
+    reader still refuses it, because it gates the EC2/ssm path alone, and
+    the message says where the value does belong instead of claiming it
+    was removed, which stopped being true the moment the ssh engine landed.
     """
     transport = _import_transport()
     monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, "ssh")
     with pytest.raises(transport.TransportError) as excinfo:
         transport.resolve_transport()
     message = str(excinfo.value)
-    assert "removed at cutover" in message
-    assert transport.TRANSPORT_SSM in message, "the message must name what to use instead"
+    assert transport.DEVCONTAINER_TRANSPORT_ENV_VAR in message, (
+        "the message must name the variable it refuses"
+    )
+    assert transport.TRANSPORT_SSM in message, "the message must name the accepted value"
+    assert "removed" not in message, (
+        "ssh is an engine kind, not a removed surface; the message must not claim otherwise"
+    )
 
 
 def test_resolve_transport_reads_the_opt_in_ssm_value(monkeypatch: pytest.MonkeyPatch) -> None:

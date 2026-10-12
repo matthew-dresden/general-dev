@@ -1,6 +1,6 @@
 ---
 name: gd-engine-ssh
-description: Owns the SSH engine kind's lifecycle end to end -- scaffolds the engine.json manifest with make engine-init, proves reachability with the one-shot make engine-verify, runs the container through make remote and make build, and tears the engine whole down with make engine-remove behind its CONFIRM=remove gate; also drives the forward lifecycle (connect-start, connect-status, connect-stop, connect-refresh, connect-list) for ssh engines.
+description: Owns the SSH engine kind's lifecycle end to end, scaffolding the engine.json manifest with make engine-init, proving reachability with the one-shot make engine-verify, running the container through make remote and make build, and tearing the engine whole down with make engine-remove behind its CONFIRM=remove gate; also drives the forward lifecycle (connect-start, connect-status, connect-stop, connect-refresh, connect-list) for ssh engines.
 ---
 
 # gd-engine-ssh
@@ -9,8 +9,8 @@ This skill exists for the engine kind that is not an EC2 instance: a
 generic SSH endpoint with Docker, declared wholly by
 `remote-instances/<name>/engine.json` (see `devcontainer_config.instances`).
 An ssh engine has no AWS session, no Terragrunt deployment, no Parameter
-Store prefix and no certificates behind it -- the manifest is the whole
-declaration -- so every EC2-shaped question ("is the instance running",
+Store prefix and no certificates behind it (the manifest is the whole
+declaration), so every EC2-shaped question ("is the instance running",
 "where is its state bucket") is replaced by exactly one question: can this
 machine reach the engine's docker through an ssh forward? That question is
 what `make engine-verify` answers, one shot at a time.
@@ -20,7 +20,7 @@ powered and destroyed through the instance- targets (`gd-instance-create`,
 `gd-instance-fleet`, `gd-instance-destroy`); an ssh engine is scaffolded,
 verified and removed through this skill's three targets. The teardown
 refuses to run while a project container still exists on the engine, the
-same way `GATE-DESTROY` refuses on unpushed work -- destroy the containers
+same way `GATE-DESTROY` refuses on unpushed work: destroy the containers
 first, deliberately.
 
 ## Invocation map
@@ -38,7 +38,7 @@ first, deliberately.
 
 | Check | Prevents | Failure message | Remedy |
 |---|---|---|---|
-| the instance is the ssh kind | running an engine-* target against an EC2 instance, whose lifecycle belongs to other targets | `instance '<name>' is a ec2 engine; this target only reaches ssh instances` | Name the EC2 surface the refusal prints: `make connect-start INSTANCE=<name>` for reachability, `make instance-destroy INSTANCE=<name>` for teardown. Never force one kind's target onto the other. |
+| the instance is the ssh kind | running an engine-* target against an EC2 instance, whose lifecycle belongs to other targets | `instance '<name>' is an ec2 engine; this target only reaches ssh instances` | Name the EC2 surface the refusal prints: `make connect-start INSTANCE=<name>` for reachability, `make instance-destroy INSTANCE=<name>` for teardown. Never force one kind's target onto the other. |
 | the manifest is valid | a typo'd host, user, port or docker_addr becoming a half-working engine discovered only at connect time | the `engine_manifest` field refusal, naming the field and the rule | Fix the named field in `remote-instances/<name>/engine.json`, then re-run `make engine-verify INSTANCE=<name>` before anything depends on the engine. |
 | no project container exists on the engine | `make engine-remove` stranding this project's containers and their volumes on an engine that then disappears | `instance '<name>' still holds this project's container(s): <names>` | Run `make clean ENGINE=<name>` (FORCE=1 additionally bypasses its unpushed-work guard, only on an explicit operator instruction), then re-run `make engine-remove INSTANCE=<name> CONFIRM=remove`. |
 | the operator confirmed the removal | a typo'd or aborted intent deleting a registration, a context and local state in one step | `engine-remove deletes the engine registration, its docker context, its forward and its local state; confirm it: make engine-remove INSTANCE=<name> CONFIRM=remove` | State the exact confirming command, wait for the operator to run it deliberately. Never add CONFIRM=remove on the operator's behalf. |
@@ -55,8 +55,8 @@ first, deliberately.
 ## Related skills
 
 - `gd-instance-create`, `gd-instance-fleet`, `gd-instance-destroy`: the
-  EC2 kind's provisioning, fleet and teardown -- the surfaces the engine-*
-  targets deliberately do not touch.
+  EC2 kind's provisioning, fleet and teardown (the surfaces the engine-*
+  targets deliberately do not touch).
 - `gd-container-remote`: driving a container on a remote engine once the
   forward is open; this skill hands over after `make remote`.
 - `gd-instance-list`: the per-instance validation verdicts, whose

@@ -183,7 +183,10 @@ make clones under clones visible: the Definition section of
   git and aws reachability for whichever sources the manifest names.
 - One remote engine per project under `remote-instances/`: the `make help`
   INSTANCES group scaffolds, converges, powers and retires them
-  (`make list-instances` shows every instance's live state).
+  (`make list-instances` shows every instance's live state). The second
+  engine kind -- one declared by a `remote-instances/<name>/engine.json`
+  manifest, no AWS behind it -- is scaffolded, verified and removed with
+  `make engine-init`, `make engine-verify` and `make engine-remove`.
 - Claude Code starts on the classic renderer and never offers the flicker-free
   fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen`
   still opts in for the current container.

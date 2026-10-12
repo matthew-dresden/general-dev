@@ -340,7 +340,12 @@ every stage:
 
 `make list-instances` reports every configured instance's live state at any
 point: EC2 state, recorded id, Parameter Store and certificate material,
-forwarded port, docker context. `make instance-status INSTANCE=<name>`
+forwarded port, docker context. The probes are kind-aware: an ssh engine
+(one declared by a `remote-instances/<name>/engine.json` manifest, see the
+ssh transport in devcontainer.md) runs no EC2 probe at all and answers one
+reachability probe instead, rendered in the same STATE column as `ok` or
+`unreachable`, with the EC2-only columns dashed.
+`make instance-status INSTANCE=<name>`
 narrows it to one instance; the targets that accept it also take `ALL=1`
 for every configured instance at once.
 
@@ -401,7 +406,9 @@ instance's recorded EC2 id: an `instance-id` file written by
 `make instance-link` and, automatically, by `make instance-deploy`, read by
 every remote target's resolver, so no id variable is ever set by hand,
 and an id dies with its instance. `make cert-status` reports client and CA
-expiry per instance; a renewal is a deliberate, manual step and touches
+expiry per instance (EC2 engines only; no TLS material exists for an ssh
+engine, so a fleet mixing kinds is refused naming the first ssh engine); a
+renewal is a deliberate, manual step and touches
 nothing on the running instance, because the daemon accepts any client
 certificate that chains to its CA.
 
@@ -434,7 +441,9 @@ marks the ones a configured instance owns, and `make bucket-delete
 INSTANCE=<name>` purges every version and deletes one; `ALL=1` deletes
 every bucket in `REMOTE_AWS_REGION` and additionally requires
 `CONFIRM=delete`, because it takes every instance's state history with
-it.
+it. Both are EC2-only by kind: an ssh engine has no state bucket, so a
+fleet mixing kinds is refused naming the first ssh engine, and a mixed
+fleet is scanned deliberately.
 
 ### Working with several engines at once
 

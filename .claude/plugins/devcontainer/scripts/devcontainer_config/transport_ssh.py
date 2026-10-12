@@ -876,6 +876,50 @@ def _run_connect(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_verify(args: argparse.Namespace) -> int:
+    """Handler for `verify`: a one-shot open -> handshake -> stop reachability proof.
+
+    `make engine-verify` drives this: establish the forward exactly as
+    `connect` does, create or update the plain `tcp://` context at the port
+    just allocated, complete the version handshake -- then stop the forward
+    and report one verdict line. The context is left created (it is the
+    record of the port allocation, and the next connect reuses the same
+    port through it) but never activated: a proof must not switch the
+    machine-wide docker context as a side effect, and the daemon is never
+    left running. Every failure path after the launch runs inside
+    `_teardown_forward_on_error`, so the ssh child is stopped before the
+    error propagates.
+    """
+    try:
+        instances.validate_name(args.name)
+    except instances.InvalidInstanceNameError as exc:
+        raise SSHTransportError(f"ERROR: {exc}") from exc
+    validated = validated_engine_values(
+        host=args.host, user=args.user, port=args.port, docker_addr=args.docker_addr
+    )
+    endpoint = engine_endpoint(validated)
+    established = _establish_forward(
+        validated=validated,
+        context_name=args.context,
+        instance=args.name,
+        endpoint=endpoint,
+        docker_addr=args.docker_addr,
+    )
+    if established is None:
+        return 0
+    runner = transport.subprocess_command_runner
+    with _teardown_forward_on_error(established.process):
+        ensure_context(runner, context_name=args.context, port=established.local_port)
+        result = handshake(runner, context_name=args.context)
+    transport.stop_forward(established.process)
+    rootless_note = ", rootless" if result.rootless else ""
+    print(
+        f"Verified: docker context {args.context!r} -> {endpoint} over ssh forward "
+        f"(server {result.server_version}, api {result.api_version}{rootless_note})."
+    )
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="devcontainer_config.transport_ssh",
@@ -909,6 +953,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     connect_parser.add_argument("--context", required=True, help="The docker context name.")
     connect_parser.set_defaults(handler=_run_connect)
+
+    verify_parser = subparsers.add_parser(
+        "verify",
+        help=(
+            "One-shot reachability proof: open the forward, handshake docker "
+            "through the context, stop the forward. Leaves the context created."
+        ),
+    )
+    verify_parser.add_argument(
+        "--name", required=True, help="The instance name (the remote-instances/<name> directory)."
+    )
+    verify_parser.add_argument("--host", required=True, help="The engine's SSH host.")
+    verify_parser.add_argument("--port", type=int, required=True, help="The engine's SSH port.")
+    verify_parser.add_argument("--user", required=True, help="The user the engine is reached as.")
+    verify_parser.add_argument(
+        "--docker-addr",
+        required=True,
+        help=(
+            "The docker destination: an absolute Unix socket path, or "
+            "'tcp://<host>:<port>' (the only form a Windows endpoint can forward to)."
+        ),
+    )
+    verify_parser.add_argument("--context", required=True, help="The docker context name.")
+    verify_parser.set_defaults(handler=_run_verify)
 
     return parser
 

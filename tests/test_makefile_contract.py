@@ -53,7 +53,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import _makefile_text, _removed_identifiers, _resolve_make_refs
+from conftest import _make_variable, _makefile_text, _removed_identifiers, _resolve_make_refs
 from devcontainer_config import helpline, instances
 from devcontainer_config.repo import find_root
 
@@ -1218,3 +1218,271 @@ def test_init_form_comes_from_one_explicit_probe_not_a_caught_error() -> None:
         "exactly the two init forms (plain and bootstrap) may appear; a retry "
         "would run init again after a failure"
     )
+
+
+# ---------------------------------------------------------------------------
+# The ssh engine lifecycle (feature/ssh-engines, P4): the engine-* targets,
+# and the kind refusals every EC2-only target now carries. The predicate and
+# the refusal live once in lib.sh (rd_engine_kind / rd_require_engine_kind);
+# this file pins that the named recipes route through them, that the new
+# targets are defined, .PHONY'd, advertised and delegated like the rest of
+# the instance surface, and that the fleet-wide kind guard resolves each
+# instance fresh rather than carrying one resolution across a loop.
+# ---------------------------------------------------------------------------
+
+
+ENGINE_TARGETS: tuple[str, ...] = ("engine-init", "engine-verify", "engine-remove")
+
+# The EC2-only targets whose own recipe must carry the per-instance kind
+# refusal (cert-ca/cert-client/cert-publish route through certs.sh, covered
+# separately below; bucket-list and cert-status are fleet-wide and carry the
+# fleet guard; cert-install's refusal sits ahead of its readiness poll).
+EC2_ONLY_RECIPE_TARGETS: tuple[str, ...] = (
+    "instance-plan",
+    "instance-deploy",
+    "instance-stop",
+    "instance-start",
+    "instance-destroy",
+    "instance-link",
+)
+
+_LIB_SH_RELATIVE = Path(".devcontainer") / "remote-docker" / "lib.sh"
+_CERTS_SH_RELATIVE = Path(".devcontainer") / "remote-docker" / "certs.sh"
+
+
+def _lib_sh_text() -> str:
+    root = find_root(Path(__file__).resolve().parent)
+    return (root / _LIB_SH_RELATIVE).read_text(encoding="utf-8")
+
+
+def _certs_sh_text() -> str:
+    root = find_root(Path(__file__).resolve().parent)
+    return (root / _CERTS_SH_RELATIVE).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("target", ENGINE_TARGETS)
+def test_engine_target_is_phony(target: str) -> None:
+    assert target in _phony_targets(_makefile_text())
+
+
+@pytest.mark.parametrize("target", ENGINE_TARGETS)
+def test_engine_target_is_defined(target: str) -> None:
+    assert re.search(rf"^{re.escape(target)}:", _makefile_text(), re.MULTILINE) is not None, (
+        f"{target} is .PHONY'd but defines no recipe"
+    )
+
+
+@pytest.mark.parametrize("target", ENGINE_TARGETS)
+def test_engine_target_has_a_help_row(target: str) -> None:
+    help_recipe = _help_recipe_body(_makefile_text())
+    rows = [line for line in help_recipe.splitlines() if f'"make {target}"' in line]
+    assert len(rows) == 1, f"make help must advertise {target} exactly once"
+
+
+@pytest.mark.parametrize("target", ENGINE_TARGETS)
+def test_engine_recipe_guards_a_missing_instance_with_usage_and_exit_two(
+    target: str,
+) -> None:
+    """The same single-instance usage guard the instance targets apply."""
+    recipe = _expanded_instance_recipe(_makefile_text(), target)
+    assert '[ -z "$(INSTANCE)" ]' in recipe, f"{target} never checks INSTANCE for emptiness"
+    assert "exit 2" in recipe, f"{target} must exit 2 on a missing INSTANCE"
+    assert "make list-instances" in recipe, "the usage lines must point at the listing"
+
+
+@pytest.mark.parametrize(
+    ("target", "delegate"),
+    (
+        ("engine-init", "devcontainer_config.cli engine-init"),
+        ("engine-verify", "devcontainer_config.transport_ssh verify"),
+        ("engine-remove", "devcontainer_config.cli engine-remove"),
+    ),
+)
+def test_engine_recipe_delegates_to_the_engine_of_the_same_concern(
+    target: str, delegate: str
+) -> None:
+    """The recipe resolves and kind-checks; the operation lives in its engine."""
+    recipe = _target_recipe_body(_makefile_text(), target)
+    assert delegate in recipe, (
+        f"{target} must delegate to `{delegate}` "
+        "(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR)), not re-implement it"
+    )
+    assert "PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR)" in recipe
+
+
+def test_engine_init_recipe_guards_host_and_user() -> None:
+    """HOST and USER are the manifest's required fields; the recipe refuses
+    their absence with usage and exit 2, before the cli ever runs."""
+    recipe = _target_recipe_body(_makefile_text(), "engine-init")
+    assert '[ -z "$(HOST)" ]' in recipe
+    assert '[ -z "$(USER)" ]' in recipe
+    assert "exit 2" in recipe
+
+
+def test_engine_init_recipe_states_the_platform_guidance() -> None:
+    """The one-liner the help row and the refusal both owe the operator:
+    Linux engines default to the socket; a Windows engine needs the tcp
+    destination, because Windows OpenSSH cannot forward to one."""
+    recipe = _target_recipe_body(_makefile_text(), "engine-init")
+    assert "tcp://localhost:2375" in recipe
+
+
+def test_engine_remove_recipe_demands_confirm_remove() -> None:
+    """The exact-command refusal style bucket-delete and clean ALL=1 apply."""
+    recipe = _target_recipe_body(_makefile_text(), "engine-remove")
+    assert '[ "$(CONFIRM)" != "remove" ]' in recipe
+    assert "make engine-remove INSTANCE=<name> CONFIRM=remove" in recipe
+
+
+def test_engine_remove_without_confirm_refuses_before_anything_resolves() -> None:
+    """Proved live: the refusal fires before the resolver runs, so nothing
+    is touched and no resolution diagnosis can preempt the confirm demand."""
+    root = find_root(Path(__file__).resolve().parent)
+    make_path = shutil.which("make")
+    assert make_path is not None, "make must be installed on the machine running this suite"
+    environment = dict(os.environ)
+    for inherited in ("MAKEFLAGS", "MAKELEVEL", "MFLAGS"):
+        environment.pop(inherited, None)
+    result = subprocess.run(
+        [make_path, "engine-remove", "INSTANCE=no-such-engine-here"],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=float(os.environ.get("MAKEFILE_GUARD_TEST_TIMEOUT_SECONDS", "30")),
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "CONFIRM=remove" in combined
+    assert "Could not resolve" not in combined, (
+        "the confirm refusal must fire before the resolver, whose diagnosis "
+        "would otherwise answer for an unconfirmed destructive run"
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "ec2_remedy"),
+    (
+        ("engine-init", None),
+        ("engine-verify", "make connect-start"),
+        ("engine-remove", "make instance-destroy"),
+    ),
+)
+def test_engine_recipe_carries_the_kind_refusal(target: str, ec2_remedy: str | None) -> None:
+    """engine-verify is the ssh-only check and engine-remove removes ssh
+    engines only; both refuse the other kind through the one lib.sh refusal,
+    naming the EC2 analog as the remedy. engine-init has no kind guard: it
+    scaffolds a manifest and refuses nothing about existing kinds."""
+    recipe = _target_recipe_body(_makefile_text(), target)
+    if ec2_remedy is None:
+        assert "rd_require_engine_kind" not in recipe
+        return
+    assert "rd_require_engine_kind ssh" in recipe
+    assert ec2_remedy in recipe, f"{target}'s refusal must name the EC2 remedy"
+
+
+@pytest.mark.parametrize("target", EC2_ONLY_RECIPE_TARGETS)
+def test_ec2_only_recipe_carries_the_per_instance_kind_refusal(target: str) -> None:
+    recipe = _target_recipe_body(_makefile_text(), target)
+    assert 'rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"' in recipe, (
+        f"{target} reaches EC2 state only and must refuse an ssh engine "
+        "through rd_require_engine_kind, naming the engine-* remedy"
+    )
+
+
+def test_the_kind_refusals_loop_re_resolution_not_one_carried_kind() -> None:
+    """ALL=1 loops resolve each instance fresh: KIND is exported by
+    resolution, so a loop that skipped re-resolution would kind-check every
+    iteration against the first instance's kind."""
+    makefile_text = _makefile_text()
+    for target in (
+        "instance-plan",
+        "instance-deploy",
+        "instance-stop",
+        "instance-start",
+        "instance-destroy",
+    ):
+        recipe = _target_recipe_body(makefile_text, target)
+        assert "unset RD_INSTANCE_RESOLVED" in recipe, (
+            f"{target}'s loop must clear the resolver's once-per-process guard "
+            "so every iteration resolves its own instance and its own kind"
+        )
+
+
+def test_the_fleet_kind_guard_resolves_every_instance_and_requires_ec2() -> None:
+    body = _make_define_body(_makefile_text(), "FLEET_EC2_KIND_GUARD")
+    assert "$(DISCOVER_INSTANCE_NAMES)" in body, (
+        "the guard enumerates through the engine's own discovery, never a "
+        "second shell reimplementation"
+    )
+    assert "unset RD_INSTANCE_RESOLVED" in body
+    assert 'rd_require_engine_kind ec2 "$(1)"' in body
+
+
+@pytest.mark.parametrize(
+    ("target", "remedy_variable"),
+    (
+        ("bucket-list", "BUCKET_KIND_REMEDY"),
+        ("bucket-delete", "BUCKET_KIND_REMEDY"),
+        ("cert-status", "CERT_KIND_REMEDY"),
+    ),
+)
+def test_fleet_wide_ec2_only_target_expands_the_fleet_kind_guard(
+    target: str, remedy_variable: str
+) -> None:
+    recipe = _target_recipe_body(_makefile_text(), target)
+    assert f"$(call FLEET_EC2_KIND_GUARD,$({remedy_variable}))" in recipe, (
+        f"{target} addresses no single instance, so its kind refusal is the "
+        f"fleet guard with the {remedy_variable} remedy"
+    )
+
+
+def test_bucket_delete_single_instance_branch_refuses_through_the_predicate() -> None:
+    recipe = _target_recipe_body(_makefile_text(), "bucket-delete")
+    assert 'rd_require_engine_kind ec2 "$(BUCKET_KIND_REMEDY)"' in recipe
+
+
+def test_cert_install_refuses_before_its_readiness_poll() -> None:
+    """The poll reads an EC2 id; an ssh engine must be refused before the
+    poll can mistake a missing id for its own failure."""
+    recipe = _target_recipe_body(_makefile_text(), "cert-install")
+    refusal_at = recipe.index('rd_require_engine_kind ec2 "$(CERT_KIND_REMEDY)"')
+    poll_at = recipe.index("instance-status")
+    assert refusal_at < poll_at
+
+
+def test_the_cert_issuing_script_refuses_ssh_engines_once_for_all_four() -> None:
+    """cert-ca, cert-client, cert-publish and cert-install all route through
+    certs.sh, so the refusal lives at its single resolve point, after it."""
+    text = _certs_sh_text()
+    resolve_at = text.index("rd_resolve_instance")
+    guard_at = text.index("rd_require_engine_kind ec2")
+    assert resolve_at < guard_at
+    assert "no TLS material exists for ssh engines" in text
+
+
+def test_lib_sh_carries_the_centralized_kind_predicate() -> None:
+    text = _lib_sh_text()
+    assert "rd_engine_kind()" in text
+    assert "printf '%s\\n' \"${KIND:-ec2}\"" in text
+    assert "rd_require_engine_kind()" in text
+
+
+def test_lib_sh_reads_the_kind_only_through_the_predicate() -> None:
+    """The P3-era `${KIND:-...}` reads are gone from lib.sh: the predicate is
+    the one site the variable is read at."""
+    text = _lib_sh_text()
+    assert text.count('"${KIND:-') == 1, (
+        "rd_engine_kind must be the only lib.sh site reading KIND; every "
+        "other kind-aware branch reads it through the predicate"
+    )
+
+
+def test_the_ec2_kind_remedy_names_the_engine_surface() -> None:
+    makefile_text = _makefile_text()
+    remedy = _make_variable(makefile_text, "EC2_KIND_REMEDY")
+    assert "engine-verify" in remedy
+    assert "engine-remove" in remedy
+    assert "connect-start" in remedy
+    assert "," not in remedy, "the remedy rides a $(call ...) argument, which splits on commas"

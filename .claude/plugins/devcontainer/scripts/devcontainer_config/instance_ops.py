@@ -50,6 +50,25 @@ bucket is deliberately out of scope for cleanup: each instance's bucket is
 derived in `remote-instances/root.hcl` from its own name, so destroying it
 is a Terragrunt/backend concern, never an instance-lifecycle one.
 
+`engine_remove` is the SSH engine kind's teardown counterpart: it refuses
+anything that is not an ssh-kind instance, refuses while a project container
+still exists on the engine's docker context, and only then stops the
+engine's forward, removes its docker context (an absent one is the desired
+state, never a failure), deletes its certificate-material directory -- the
+forward record and the log live there, so they die with it -- and removes
+`remote-instances/<name>`, the registration itself. Like `cleanup` it
+attempts every removal even after an earlier one failed and raises the
+failures together at the end.
+
+`state` is kind-aware: an EC2 instance answers the probes it always answered,
+while an SSH engine -- no AWS, no Parameter Store, no certificates behind it
+-- skips the EC2 describe and the describe-parameters probe entirely and
+instead answers one reachability probe, a plain `ssh ... docker version`
+through the engine's own manifest values. An ssh row's `ec2_state` and
+`params_present` are None because the probes do not apply (the same
+does-not-apply meaning None already carries), and `engine_reachable` carries
+the reachability answer.
+
 Every aws/docker command is issued through an injected `Runner` (the same
 shape `devcontainer_config.hostcreds` defines), so the unit suite runs
 hermetically -- no AWS, no docker, no network -- and no test patches this
@@ -68,14 +87,21 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from devcontainer_config import certs, instances
-from devcontainer_config.hostprobe import CommandResult, CommandRunner
+from devcontainer_config import certs, containers, forwards, instances
+from devcontainer_config.hostprobe import (
+    CommandResult,
+    CommandRunner,
+    HostProbeError,
+    read_positive_seconds,
+)
 
 # The two external commands this module asks a runner to invoke. Every aws
 # argv below starts with AWS_EXECUTABLE; every docker argv with
-# DOCKER_EXECUTABLE; nothing else names an executable.
+# DOCKER_EXECUTABLE; every ssh reachability probe with SSH_EXECUTABLE;
+# nothing else names an executable.
 AWS_EXECUTABLE = "aws"
 DOCKER_EXECUTABLE = "docker"
+SSH_EXECUTABLE = "ssh"
 
 # The SSM public parameter holding Canonical's current Ubuntu 24.04 arm64
 # image for the region the scaffold targets. Read once per scaffold when the
@@ -166,6 +192,28 @@ class CleanupError(InstanceOpsError):
 
 class PowerError(InstanceOpsError):
     """A power operation could not run, or the instance never reached its target state."""
+
+
+class EngineRemoveError(InstanceOpsError):
+    """An SSH engine removal was refused, or one or more removals failed.
+
+    The refusal cases (not an ssh engine, a project container still on the
+    engine) raise this before anything is removed; the removal cases raise
+    it after every removal was attempted, the message naming each failure.
+    """
+
+
+# The reachability probe's connection budget. An unreachable engine must not
+# stall a fleet listing on the network's own timeout, and the budget is
+# configurable (CLAUDE.md: no hard-coded timeout values) through the same
+# positive-seconds reader every other timeout in this package uses.
+ENGINE_PROBE_CONNECT_TIMEOUT_ENV_VAR = "ENGINE_PROBE_CONNECT_TIMEOUT_SECONDS"
+ENGINE_PROBE_CONNECT_TIMEOUT_DEFAULT_SECONDS = 5.0
+
+# The `docker version --format` template the reachability probe runs on the
+# engine: a daemon that answers it is reachable, and its answer proves the
+# forwarded docker path, not merely the ssh login path.
+_ENGINE_REACH_DOCKER_FORMAT = "{{.Server.Version}}"
 
 
 # The Runner every command is handed: given the full argv, an optional stdin
@@ -738,10 +786,15 @@ class InstanceState:
     """What one instance looks like right now, per probe.
 
     A `None` probe field means the probe could not answer (its reason is in
-    `lookup_error`) or does not apply (no recorded id, no certificate file).
-    `lookup_error` is a sanitized one-line reason for the first probe that
-    failed, or None when every probe answered. `state` never raises for an
-    aws/docker failure: a listing of many instances degrades per row.
+    `lookup_error`) or does not apply (no recorded id, no certificate file,
+    or -- for the EC2-only probes on an SSH engine -- no EC2 surface behind
+    the instance at all). `lookup_error` is a sanitized one-line reason for
+    the first probe that failed, or None when every probe answered. `state`
+    never raises for an aws/docker failure: a listing of many instances
+    degrades per row.
+
+    `engine_reachable` is the SSH engine kind's own probe (`True`/`False`)
+    and None for an EC2 instance, whose kind has no such probe.
     """
 
     name: str
@@ -753,6 +806,7 @@ class InstanceState:
     client_cert_days_left: int | None
     context_exists: bool | None
     forward_port: int | None
+    engine_reachable: bool | None
     lookup_error: str | None
 
 
@@ -827,6 +881,60 @@ def _parameters_present(runner: Runner, name: str) -> bool:
     return bool(parameters)
 
 
+def _engine_reach_argv(values: dict[str, object], timeout_seconds: float) -> list[str]:
+    """The one-shot `ssh ... docker version` argv proving an engine is reachable.
+
+    `BatchMode=yes` fails fast instead of prompting (a listing has no tty to
+    answer one), `ConnectTimeout` bounds the network wait by the configured
+    budget (`:g` formatting so the default renders as `5`, a form ssh
+    accepts), and the remote command is a docker version call: the probe
+    answers for the docker path an engine exists to serve, not merely for an
+    ssh login. The values come from `instances.engine_manifest` -- already
+    validated -- so no unvalidated value reaches an ssh argument vector.
+    """
+    return [
+        SSH_EXECUTABLE,
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={timeout_seconds:g}",
+        "-p",
+        str(values["port"]),
+        f"{values['user']}@{values['host']}",
+        "docker",
+        "version",
+        "--format",
+        _ENGINE_REACH_DOCKER_FORMAT,
+    ]
+
+
+def _engine_reachable(runner: Runner, values: dict[str, object]) -> tuple[bool | None, str | None]:
+    """The SSH engine's reachability answer, and why the probe could not run.
+
+    Returns `(True, None)` when the engine's docker answered, `(False, None)`
+    when ssh ran and failed -- an unreachable engine is an answer, not a
+    probe error, and a listing reports it without turning the exit code --
+    and `(None, reason)` when the probe could not run at all: ssh missing
+    from PATH, or a timeout value the configuration reader refuses. The
+    reason is folded into `lookup_error` by the caller, the same
+    could-not-answer discipline every other probe failure follows.
+    """
+    try:
+        timeout = read_positive_seconds(
+            ENGINE_PROBE_CONNECT_TIMEOUT_ENV_VAR, ENGINE_PROBE_CONNECT_TIMEOUT_DEFAULT_SECONDS
+        )
+    except HostProbeError as exc:
+        return None, _one_line(str(exc))
+    argv = _engine_reach_argv(values, timeout)
+    try:
+        result = runner(argv, None)
+    except OSError:
+        # ssh itself could not be spawned (not on PATH, or unexecutable):
+        # the engine could not be reached, which is the probe's answer.
+        return False, None
+    return result.returncode == 0, None
+
+
 def _command_adapter(runner: Runner) -> CommandRunner:
     """`runner` viewed as a `hostprobe.CommandRunner`.
 
@@ -847,12 +955,33 @@ def _command_adapter(runner: Runner) -> CommandRunner:
     return adapted
 
 
+def _state_kind(root: Path, name: str, record: Callable[[object], None]) -> str:
+    """The instance's engine kind, folding a corrupt manifest into the probe record.
+
+    A manifest that exists but cannot be read or parsed is a probe failure,
+    not a kind flip: the row keeps the ssh kind its manifest declares -- so
+    no EC2 probe ever runs against an engine that has no EC2 surface -- and
+    carries the reason in `lookup_error` through `record`.
+    """
+    try:
+        return instances.read_kind(root, name)
+    except instances.EngineManifestError as exc:
+        record(exc)
+        return instances.ENGINE_KIND_SSH
+
+
 def state(root: Path, name: str, *, runner: Runner) -> InstanceState:
     """Everything knowable about `name` right now, as one `InstanceState`.
 
     Every aws/docker probe failure is folded into `lookup_error` (the first
     failure wins; later probes still run) instead of raising, so one
     unreachable surface never blanks the whole report.
+
+    The probes are kind-aware: an SSH engine (`instances.ENGINE_KIND_SSH`)
+    has no EC2 surface behind it, so the describe and describe-parameters
+    probes do not run and their fields stay None (the does-not-apply
+    meaning), and the engine reachability probe answers in their place. An
+    EC2 instance keeps exactly the probe set and order it always had.
 
     Raises:
         StateError: `name` fails `instances.validate_name` -- a malformed
@@ -865,26 +994,40 @@ def state(root: Path, name: str, *, runner: Runner) -> InstanceState:
 
     lookup_error: str | None = None
 
-    def record(exc: Exception) -> None:
+    def record(reason: object) -> None:
+        """Fold the first probe failure's sanitized one-line reason in."""
         nonlocal lookup_error
         if lookup_error is None:
-            lookup_error = _one_line(str(exc))
+            lookup_error = _one_line(str(reason))
 
     directory = instances.terragrunt_dir(root, name).is_dir()
     instance_id = recorded_id(root, name)
+    kind = _state_kind(root, name, record)
 
     ec2_state: str | None = None
-    if instance_id is not None:
+    engine_reachable: bool | None = None
+    if kind == instances.ENGINE_KIND_SSH:
+        values: dict[str, object] | None = None
+        try:
+            values = instances.engine_manifest(root, name)
+        except instances.EngineManifestError as exc:
+            record(exc)
+        if values is not None:
+            engine_reachable, reach_reason = _engine_reachable(runner, values)
+            if reach_reason is not None:
+                record(reach_reason)
+    elif instance_id is not None:
         try:
             ec2_state = _ec2_state(runner, instance_id)
         except _ProbeFailure as exc:
             record(exc)
 
     params_present: bool | None = None
-    try:
-        params_present = _parameters_present(runner, name)
-    except _ProbeFailure as exc:
-        record(exc)
+    if kind != instances.ENGINE_KIND_SSH:
+        try:
+            params_present = _parameters_present(runner, name)
+        except _ProbeFailure as exc:
+            record(exc)
 
     client_cert_path = instances.certs_dir(name) / certs.CLIENT_CERT_FILENAME
     certs_present = client_cert_path.is_file()
@@ -922,6 +1065,7 @@ def state(root: Path, name: str, *, runner: Runner) -> InstanceState:
         client_cert_days_left=client_cert_days_left,
         context_exists=context_exists,
         forward_port=forward_port,
+        engine_reachable=engine_reachable,
         lookup_error=lookup_error,
     )
 
@@ -1172,6 +1316,95 @@ def _context_absent(stderr: str) -> bool:
     return _CONTEXT_ABSENT_PATTERN.search(stderr) is not None
 
 
+# The shared shape of cleanup and engine_remove: both attempt every removal
+# even after an earlier one failed, append each failure's sanitized reason to
+# `failures` and each success report to `messages`, and raise their failures
+# together at the end. The helpers below carry that discipline once, so the
+# two teardown paths cannot drift apart.
+#
+# The one attempt helper: run one removal command, appending a sanitized
+# reason to `failures` and returning None on any failure. The `runner`
+# argument is the caller's Runner; `cleanup` and `engine_remove` hand their
+# own in, so one helper serves both.
+def _attempt(
+    runner: Runner, failures: list[str], operation: str, argv: Sequence[str]
+) -> subprocess.CompletedProcess[str] | None:
+    """Run one removal command; record a failure and return None on any failure."""
+    try:
+        result = runner(list(argv), None)
+    except OSError as exc:
+        failures.append(f"{operation}: {_one_line(str(exc))}")
+        return None
+    if result.returncode != 0:
+        failures.append(
+            f"{operation}: {' '.join(argv)} exited {result.returncode}: {_one_line(result.stderr)}"
+        )
+        return None
+    return result
+
+
+def _remove_docker_context(
+    root: Path, name: str, runner: Runner, *, failures: list[str], messages: list[str]
+) -> None:
+    """Remove the instance's docker context, tolerating an absent one.
+
+    A nonzero `docker context inspect` counts as "the context is absent,
+    nothing to remove" only when docker's own answer says so (`no such
+    context`, or `context <name> not found`); any other failure -- a stopped
+    or unreachable daemon, say -- is recorded as a failed operation, so a
+    teardown never reports success while the context survives. Shared by
+    `cleanup` and `engine_remove`, which refuse contexts in different ways
+    but must remove the one they do remove identically.
+    """
+    context = instances.docker_context(root, name)
+    inspect_argv = [DOCKER_EXECUTABLE, "context", "inspect", context]
+    try:
+        inspected = runner(list(inspect_argv), None)
+    except OSError as exc:
+        failures.append(f"inspect docker context {context}: {_one_line(str(exc))}")
+        return
+    if inspected.returncode == 0:
+        removed = _attempt(
+            runner,
+            failures,
+            f"remove docker context {context}",
+            [DOCKER_EXECUTABLE, "context", "rm", "-f", context],
+        )
+        if removed is not None:
+            messages.append(f"removed docker context {context!r}")
+    elif _context_absent(inspected.stderr):
+        messages.append(f"docker context {context!r} is absent; nothing to remove")
+    else:
+        failures.append(
+            f"inspect docker context {context}: {' '.join(inspect_argv)} "
+            f"exited {inspected.returncode}: {_one_line(inspected.stderr)}"
+        )
+
+
+def _remove_certificate_directory(name: str, *, failures: list[str], messages: list[str]) -> None:
+    """Delete the instance's certificate-material directory, tolerating absence.
+
+    `instances.certs_dir(name)` in full: the client certificate, the recorded
+    `instance-id` file and -- for an SSH engine that ever opened a forward --
+    the forward record and its log, which live in the same directory. Shared
+    by `cleanup` and `engine_remove` for the same reason the context removal
+    is.
+    """
+    cert_directory = instances.certs_dir(name)
+    if cert_directory.is_dir():
+        try:
+            shutil.rmtree(cert_directory)
+        except OSError as exc:
+            failures.append(f"remove certificate directory {cert_directory}: {_one_line(str(exc))}")
+        else:
+            messages.append(
+                f"removed certificate directory {cert_directory} "
+                f"(including the recorded {INSTANCE_ID_FILENAME} file)"
+            )
+    else:
+        messages.append(f"no certificate directory at {cert_directory}; nothing to remove")
+
+
 def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str, ...]:
     """Tear down everything `name` scattered outside its Terragrunt directory.
 
@@ -1201,23 +1434,10 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
     failures: list[str] = []
     messages: list[str] = []
 
-    def attempt(operation: str, argv: Sequence[str]) -> subprocess.CompletedProcess[str] | None:
-        """Run one cleanup command; record a failure and return None on any failure."""
-        try:
-            result = runner(list(argv), None)
-        except OSError as exc:
-            failures.append(f"{operation}: {_one_line(str(exc))}")
-            return None
-        if result.returncode != 0:
-            failures.append(
-                f"{operation}: {' '.join(argv)} exited {result.returncode}: "
-                f"{_one_line(result.stderr)}"
-            )
-            return None
-        return result
-
     prefix = instances.parameter_prefix(name)
-    listed = attempt(
+    listed = _attempt(
+        runner,
+        failures,
         f"list SSM parameters under {prefix}",
         [
             AWS_EXECUTABLE,
@@ -1238,7 +1458,9 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
             failures.append(_one_line(str(exc)))
         else:
             for parameter_name in parameter_names:
-                deleted = attempt(
+                deleted = _attempt(
+                    runner,
+                    failures,
                     f"delete SSM parameter {parameter_name}",
                     [
                         AWS_EXECUTABLE,
@@ -1253,41 +1475,8 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
                 if deleted is not None:
                     messages.append(f"deleted parameter {parameter_name}")
 
-    context = instances.docker_context(root, name)
-    inspect_argv = [DOCKER_EXECUTABLE, "context", "inspect", context]
-    try:
-        inspected = runner(list(inspect_argv), None)
-    except OSError as exc:
-        failures.append(f"inspect docker context {context}: {_one_line(str(exc))}")
-    else:
-        if inspected.returncode == 0:
-            removed = attempt(
-                f"remove docker context {context}",
-                [DOCKER_EXECUTABLE, "context", "rm", "-f", context],
-            )
-            if removed is not None:
-                messages.append(f"removed docker context {context!r}")
-        elif _context_absent(inspected.stderr):
-            messages.append(f"docker context {context!r} is absent; nothing to remove")
-        else:
-            failures.append(
-                f"inspect docker context {context}: {' '.join(inspect_argv)} "
-                f"exited {inspected.returncode}: {_one_line(inspected.stderr)}"
-            )
-
-    cert_directory = instances.certs_dir(name)
-    if cert_directory.is_dir():
-        try:
-            shutil.rmtree(cert_directory)
-        except OSError as exc:
-            failures.append(f"remove certificate directory {cert_directory}: {_one_line(str(exc))}")
-        else:
-            messages.append(
-                f"removed certificate directory {cert_directory} "
-                f"(including the recorded {INSTANCE_ID_FILENAME} file)"
-            )
-    else:
-        messages.append(f"no certificate directory at {cert_directory}; nothing to remove")
+    _remove_docker_context(root, name, runner, failures=failures, messages=messages)
+    _remove_certificate_directory(name, failures=failures, messages=messages)
 
     if failures:
         raise CleanupError(
@@ -1296,5 +1485,168 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
             + "\n"
             "Resolve every failure listed above, then re-run the destroy for "
             f"this instance: make instance-destroy INSTANCE={name}"
+        )
+    return tuple(messages)
+
+
+# The remedy every ssh-kind refusal names for an EC2-kind instance: the
+# teardown that actually reaches it.
+_EC2_ENGINE_REMOVAL_REMEDY = (
+    "An EC2 instance is torn down by its own target, which also runs this "
+    "cleanup's work: make instance-destroy INSTANCE={name}."
+)
+
+
+def _refuse_non_ssh_engine(kind: str, name: str) -> EngineRemoveError:
+    """The refusal for `engine_remove` on an instance that is not an ssh engine."""
+    return EngineRemoveError(
+        f"ERROR: instance {name!r} is a {kind} engine; engine-remove only removes "
+        f"{instances.ENGINE_KIND_SSH} engines\n" + _EC2_ENGINE_REMOVAL_REMEDY.format(name=name)
+    )
+
+
+def _project_container_refusal(name: str, container_names: Sequence[str]) -> EngineRemoveError:
+    """The refusal for `engine_remove` while the engine still holds a container."""
+    listed = ", ".join(container_names)
+    return EngineRemoveError(
+        f"ERROR: instance {name!r} still holds this project's container(s): {listed}\n"
+        "Removing the engine would strand them with their volumes. Destroy them "
+        "first; make clean targets this project's containers on one engine "
+        "without touching the shared docker context:\n"
+        f"make clean ENGINE={name}\n"
+        "FORCE=1 additionally bypasses clean's unpushed-work guard.\n"
+        "Then re-run: make engine-remove INSTANCE=" + name + " CONFIRM=remove"
+    )
+
+
+def _verify_engine_holds_no_container(root: Path, name: str, runner: Runner, context: str) -> None:
+    """Refuse while any container carrying this project's label exists on `context`.
+
+    The probe is the same filter `containers.list_containers` reports from,
+    so the listing and this refusal can never disagree about what "this
+    project's container" means. A probe that cannot answer is a refusal too,
+    never a pass: removing an engine whose containers could not be counted
+    would report success while stranding whatever was there.
+
+    Raises:
+        EngineRemoveError: the engine holds a project container, or its
+            container state could not be read.
+    """
+    ps_argv = [
+        DOCKER_EXECUTABLE,
+        "--context",
+        context,
+        "ps",
+        "-a",
+        "--filter",
+        containers.project_label(root),
+        "--format",
+        "{{.Names}}",
+    ]
+    try:
+        result = runner(ps_argv, None)
+    except OSError as exc:
+        raise EngineRemoveError(
+            f"ERROR: could not check the containers on engine {name!r} (context {context!r})\n"
+            f"{_one_line(str(exc))}\n"
+            "Removing the engine is refused while its containers cannot be counted. "
+            "Make docker reachable and retry."
+        ) from exc
+    if result.returncode != 0:
+        raise EngineRemoveError(
+            f"ERROR: could not check the containers on engine {name!r} (context {context!r})\n"
+            f"docker ps exited {result.returncode}: {_one_line(result.stderr)}\n"
+            "The engine's forward may be down; open it with: make connect-start "
+            f"INSTANCE={name} DEVCONTAINER_TRANSPORT=ssh\n"
+            "Then re-run: make engine-remove INSTANCE=" + name + " CONFIRM=remove"
+        )
+    container_names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if container_names:
+        raise _project_container_refusal(name, container_names)
+
+
+def engine_remove(
+    root: Path,
+    name: str,
+    *,
+    runner: Runner,
+    stop_forward: Callable[[str], str] | None = None,
+) -> tuple[str, ...]:
+    """Remove an SSH engine whole: forward, context, local state, registration.
+
+    The SSH engine kind's teardown counterpart of `cleanup`, refusing
+    anything it cannot remove truthfully: `name` must be an ssh-kind
+    instance (an EC2 instance is refused, naming `make instance-destroy`),
+    and no container carrying this project's label may still exist on the
+    engine's docker context (the remedy is `make clean ENGINE=<name>`, whose
+    own guards still apply). Only then, in order: the engine's forward is
+    stopped (`forwards.stop_forward`, injected so a test supplies a fake);
+    its docker context is removed, an absent one reported as the desired
+    state, never a failure; its certificate-material directory is deleted --
+    the forward record and log live there, so they die with it -- and
+    `remote-instances/<name>`, the registration `engine-init` wrote, is
+    removed. Every removal is attempted even after an earlier one failed,
+    and all failures are raised together in ONE `EngineRemoveError` at the
+    end.
+
+    The remote-state bucket is deliberately out of scope, for the same
+    reason `cleanup` excludes it: an SSH engine has no bucket at all, and an
+    EC2 instance's is a Terragrunt/backend concern this function refuses to
+    reach.
+
+    Args:
+        runner: the Runner every docker probe and removal is issued through.
+        stop_forward: the forward stopper, `forwards.stop_forward` by
+            default. Injected because stopping a daemon means signalling a
+            process group; a test substitutes a recorder here the same way
+            `stop`/`start` inject `sleep`.
+
+    Raises:
+        EngineRemoveError: `name` is invalid, `name` is not an ssh engine,
+            a project container still exists on the engine (or its
+            container state could not be read), or any removal failed (the
+            message names every failed removal).
+    """
+    _validated(name, EngineRemoveError)
+    try:
+        kind = instances.read_kind(root, name)
+    except instances.EngineManifestError as exc:
+        raise EngineRemoveError(f"ERROR: {exc}") from exc
+    if kind != instances.ENGINE_KIND_SSH:
+        raise _refuse_non_ssh_engine(kind, name)
+
+    context = instances.docker_context(root, name)
+    _verify_engine_holds_no_container(root, name, runner, context)
+
+    failures: list[str] = []
+    messages: list[str] = []
+
+    stopper = stop_forward if stop_forward is not None else forwards.stop_forward
+    try:
+        messages.append(stopper(name))
+    except (forwards.ForwardError, OSError) as exc:
+        failures.append(f"stop forward for {name!r}: {_one_line(str(exc))}")
+
+    _remove_docker_context(root, name, runner, failures=failures, messages=messages)
+    _remove_certificate_directory(name, failures=failures, messages=messages)
+
+    directory = instances.terragrunt_dir(root, name)
+    if directory.is_dir():
+        try:
+            shutil.rmtree(directory)
+        except OSError as exc:
+            failures.append(f"remove engine registration {directory}: {_one_line(str(exc))}")
+        else:
+            messages.append(f"removed engine registration {directory}")
+    else:
+        messages.append(f"no engine registration at {directory}; nothing to remove")
+
+    if failures:
+        raise EngineRemoveError(
+            f"ERROR: engine removal for {name!r} did not complete\n"
+            + "\n".join(f"- {failure}" for failure in failures)
+            + "\n"
+            "Resolve every failure listed above, then re-run: "
+            f"make engine-remove INSTANCE={name} CONFIRM=remove"
         )
     return tuple(messages)

@@ -1397,3 +1397,161 @@ def test_wait_ready_never_probes_once_the_deadline_is_exhausted_mid_slice(
     assert calls == [], "a probe must never run on an exhausted deadline"
     writer.close()
     reader.close()
+
+
+# ---------------------------------------------------------------------------
+# The verify flow (make engine-verify): one-shot open -> handshake -> stop.
+# ---------------------------------------------------------------------------
+
+
+def _verify_argv(context: str = _CONTEXT, docker_addr: str = _SOCKET_ADDR) -> list[str]:
+    return [
+        "verify",
+        "--name",
+        "engine-x",
+        "--host",
+        _HOST,
+        "--port",
+        str(_PORT),
+        "--user",
+        _USER,
+        "--docker-addr",
+        docker_addr,
+        "--context",
+        context,
+    ]
+
+
+def _run_main_verify(
+    monkeypatch: pytest.MonkeyPatch,
+    transport_ssh: ModuleType,
+    *,
+    runner: object,
+    fake_process: _FakeForwardProcess,
+) -> int:
+    """Wire `main(["verify", ...])` to `runner` and a fake forward process.
+
+    The same seams `_run_main_connect` wires: the allocated port is bound by
+    a real loopback listener so readiness genuinely answers, and the
+    launcher seam returns the fake process, whose stdout is a real pipe.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+
+        def allocate_and_listen(runner_arg: object, context_name: str) -> int:
+            port = _free_loopback_port()
+            listener.bind(("127.0.0.1", port))
+            listener.listen(1)
+            return port
+
+        monkeypatch.setattr(transport_ssh.transport, "allocate_local_port", allocate_and_listen)
+        monkeypatch.setattr(transport_ssh.transport, "subprocess_command_runner", runner)
+        monkeypatch.setattr(
+            transport_ssh.transport, "default_process_launcher", lambda command: fake_process
+        )
+        exit_code = int(transport_ssh.main(_verify_argv()))
+        return exit_code
+
+
+def _verify_runner(transport_ssh: ModuleType, context: str = _CONTEXT) -> _RecordingRunner:
+    """A runner answering the docker surface a verify run touches."""
+
+    def answer(command: tuple[str, ...]) -> object:
+        ok = transport_ssh.transport.CommandResult(exit_code=0)
+        if command == _context_inspect_command(context):
+            return _no_such_context_result(transport_ssh, context)
+        if command[:3] == ("docker", "context", "create"):
+            return ok
+        if command == _version_command(context):
+            return transport_ssh.transport.CommandResult(
+                exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"1.51"}'
+            )
+        if command == _info_command(context):
+            return transport_ssh.transport.CommandResult(exit_code=0, stdout="[]")
+        raise AssertionError(f"unexpected command: {command}")
+
+    return _RecordingRunner(answer)
+
+
+def test_main_verify_handshakes_stops_the_forward_and_never_activates_the_context(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One shot, no daemon left, no context switch: verify creates the
+    context (the record of the allocation), handshakes through it, stops the
+    forward and prints one verdict line -- and never runs `context use`."""
+    transport_ssh = _import_transport_ssh()
+    runner = _verify_runner(transport_ssh)
+    process = _FakeForwardProcess()
+
+    exit_code = _run_main_verify(monkeypatch, transport_ssh, runner=runner, fake_process=process)
+
+    assert exit_code == 0
+    assert process.terminated, "the forward must be stopped after the handshake"
+    assert ("docker", "context", "use", _CONTEXT) not in runner.commands, (
+        "a proof must not switch the machine-wide docker context"
+    )
+    assert _version_command(_CONTEXT) in runner.commands
+    captured = capsys.readouterr()
+    verified = [line for line in captured.out.splitlines() if line.startswith("Verified:")]
+    assert verified == [
+        f"Verified: docker context '{_CONTEXT}' -> ssh://{_USER}@{_HOST}:{_PORT} "
+        "over ssh forward (server 28.6.0, api 1.51)."
+    ]
+
+
+def test_main_verify_stops_the_forward_when_the_handshake_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every failure path after the launch stops the forward before the
+    error propagates, the same discipline connect applies."""
+    transport_ssh = _import_transport_ssh()
+
+    def answer(command: tuple[str, ...]) -> object:
+        if command == _context_inspect_command(_CONTEXT):
+            return _no_such_context_result(transport_ssh, _CONTEXT)
+        if command[:3] == ("docker", "context", "create"):
+            return transport_ssh.transport.CommandResult(exit_code=0)
+        if command == _version_command(_CONTEXT):
+            return transport_ssh.transport.CommandResult(
+                exit_code=0, stdout='{"Version":"20.10.0","ApiVersion":"1.41"}'
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    runner = _RecordingRunner(answer)
+    process = _FakeForwardProcess()
+    monkeypatch.setenv("DOCKER_HANDSHAKE_TIMEOUT", "1")
+
+    exit_code = _run_main_verify(monkeypatch, transport_ssh, runner=runner, fake_process=process)
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert process.terminated, "a failed verify must not leave the forward running"
+    assert "Verified:" not in captured.out
+    assert "ERROR" in captured.err
+    assert "below the required floor" in captured.err
+
+
+def test_main_verify_rejects_an_invalid_instance_name_before_anything_runs(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    transport_ssh = _import_transport_ssh()
+    argv = _verify_argv()
+    argv[argv.index("--name") + 1] = "../escape"
+    process = _FakeForwardProcess()
+    launched: list[Sequence[str]] = []
+
+    def allocate_and_listen(runner_arg: object, context_name: str) -> int:
+        raise AssertionError("no port may be allocated for an invalid name")
+
+    monkeypatch.setattr(transport_ssh.transport, "allocate_local_port", allocate_and_listen)
+    monkeypatch.setattr(
+        transport_ssh.transport,
+        "default_process_launcher",
+        lambda command: launched.append(tuple(command)) or process,
+    )
+    exit_code = int(transport_ssh.main(argv))
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert launched == [], "an invalid name must never launch a forward"
+    assert "ERROR" in captured.err
+    assert "invalid instance name" in captured.err

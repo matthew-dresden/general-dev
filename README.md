@@ -34,6 +34,7 @@ does now. The identifiers match Section 0 of the platform specification.
 | B8 | The devcontainer image had no Terraform, Terragrunt or session-manager-plugin. | All three are installed by devcontainer features. An image rebuild is required. |
 | B9 | The instance's cloud-init user data was applied by hand, to an instance created in the console. | The instance is declared in Terraform and created by Terragrunt, and its user data is rendered from the module. |
 | B10 | `shell.env` was the only place project configuration lived. | Unchanged for configuration. Only credentials moved. |
+| B11 | Container state was visible only for the active engine, containers were named after the fact, and every lifecycle target acted on one container. | `make list-containers` sweeps every engine; `make build/up NAME=x` names at creation; the lifecycle targets take `ALL=1` (clean's fleet form gated behind `CONFIRM=destroy`), and teardown keeps an image a sibling container still uses. |
 
 ## Layout
 

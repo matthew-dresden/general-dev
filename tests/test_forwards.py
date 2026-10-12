@@ -660,3 +660,256 @@ def test_module_entry_point_invokes_main_under_the_dunder_guard() -> None:
     assert any("sys.exit(main())" in call for call in calls), (
         "the __main__ guard must exit through this module's own main()"
     )
+
+
+# ---------------------------------------------------------------------------
+# The ssh kind: the child argv, the record's engine kind and endpoint, and
+# the open dispatch that accepts the ssh flag form.
+# ---------------------------------------------------------------------------
+
+_SSH_ENGINE = {
+    "kind": instances.ENGINE_KIND_SSH,
+    "host": "engine-x.example.invalid",
+    "user": "dev-x",
+    "port": 2222,
+    "docker_addr": "/var/run/docker-x.sock",
+}
+_SSH_ENDPOINT = "ssh://dev-x@engine-x.example.invalid:2222"
+
+
+def test_child_argv_ssh_form_builds_the_transport_ssh_connect_command() -> None:
+    argv = forwards.child_argv(
+        "x", "general-dev-x", "", "", kind=instances.ENGINE_KIND_SSH, engine=_SSH_ENGINE
+    )
+
+    assert argv[1:3] == ("-u", "-m")
+    assert argv[3:5] == ("devcontainer_config.transport_ssh", "connect")
+    assert argv[5:] == (
+        "--name",
+        "x",
+        "--host",
+        "engine-x.example.invalid",
+        "--port",
+        "2222",
+        "--user",
+        "dev-x",
+        "--docker-addr",
+        "/var/run/docker-x.sock",
+        "--context",
+        "general-dev-x",
+    )
+
+
+def test_child_argv_ssm_form_is_unchanged_by_the_kind_parameter() -> None:
+    """The default kind builds the byte-identical ssm vector it always built."""
+    assert forwards.child_argv("i-abc", "general-dev-x", "profile", "us-east-1") == _child_argv()
+
+
+def test_child_argv_ssh_requires_the_engine_values() -> None:
+    with pytest.raises(ForwardError, match="engine manifest values"):
+        forwards.child_argv("x", "general-dev-x", "", "", kind=instances.ENGINE_KIND_SSH)
+
+
+def test_record_round_trips_engine_kind_and_defaults_old_records_to_ssm() -> None:
+    record = ForwardRecord(
+        pid=4242,
+        instance="x",
+        instance_id=_SSH_ENDPOINT,
+        context="general-dev-x",
+        port=51368,
+        argv=_child_argv(),
+        log="/log",
+        started_at="2026-10-01T12:00:00+00:00",
+        engine_kind=instances.ENGINE_KIND_SSH,
+    )
+    again = ForwardRecord.from_json(record.to_json())
+    assert again == record
+
+    payload = json.loads(record.to_json())
+    del payload["engine_kind"]
+    old = ForwardRecord.from_json(json.dumps(payload))
+    assert old.engine_kind == forwards.KIND_SSM, (
+        "a record written before the field existed must read back as the ssm kind"
+    )
+
+
+def test_open_forward_ssh_kind_records_the_endpoint_and_engine_kind(tmp_path: Path) -> None:
+    tmp_path = _git_root(tmp_path)
+    spawner = _Spawner(pid=778)
+
+    def runner(_command: object, _timeout: float | None) -> CommandResult:
+        return CommandResult(
+            exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", runner)
+        message = forwards.open_forward(
+            "unused-for-ssh",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=instances.ENGINE_KIND_SSH,
+            engine=_SSH_ENGINE,
+            spawner=spawner,
+            poll_clock=lambda _seconds: None,
+        )
+
+    assert _SSH_ENDPOINT in message
+    record = forwards.read_record("x")
+    assert record is not None
+    assert record.engine_kind == instances.ENGINE_KIND_SSH
+    assert record.instance_id == _SSH_ENDPOINT
+    assert spawner.argv is not None
+    assert spawner.argv[3:5] == ("devcontainer_config.transport_ssh", "connect")
+
+
+def test_open_forward_ssh_kind_reads_the_manifest_when_no_values_are_given(
+    tmp_path: Path,
+) -> None:
+    tmp_path = _git_root(tmp_path)
+    manifest = tmp_path / "remote-instances" / "x" / "engine.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps(_SSH_ENGINE), encoding="utf-8")
+    spawner = _Spawner(pid=779)
+
+    def runner(_command: object, _timeout: float | None) -> CommandResult:
+        return CommandResult(
+            exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", runner)
+        forwards.open_forward(
+            "unused-for-ssh",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=instances.ENGINE_KIND_SSH,
+            engine=None,
+            spawner=spawner,
+            poll_clock=lambda _seconds: None,
+        )
+
+    assert spawner.argv is not None
+    assert "--host" in spawner.argv and "engine-x.example.invalid" in spawner.argv
+
+
+def test_open_forward_ssh_kind_refuses_invalid_engine_values(tmp_path: Path) -> None:
+    tmp_path = _git_root(tmp_path)
+
+    with pytest.raises(ForwardError, match="unusable"):
+        forwards.open_forward(
+            "unused-for-ssh",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=instances.ENGINE_KIND_SSH,
+            engine={**_SSH_ENGINE, "docker_addr": "var/run/docker.sock"},
+            spawner=_Spawner(),
+            poll_clock=lambda _seconds: None,
+        )
+
+
+def test_main_open_accepts_the_ssh_flag_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _git_root(tmp_path)
+    spawner = _Spawner(pid=780)
+
+    def runner(_command: object, _timeout: float | None) -> CommandResult:
+        return CommandResult(
+            exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+        )
+
+    monkeypatch.setattr(forwards, "_context_port_runner", runner)
+    monkeypatch.setattr(forwards, "_default_spawner", spawner)
+    monkeypatch.chdir(root)
+
+    exit_code = forwards.main(
+        [
+            "open",
+            "--name",
+            "x",
+            "--host",
+            "engine-x.example.invalid",
+            "--port",
+            "2222",
+            "--user",
+            "dev-x",
+            "--docker-addr",
+            "/var/run/docker-x.sock",
+            "--context",
+            "general-dev-x",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "is open" in capsys.readouterr().out
+    record = forwards.read_record("x")
+    assert record is not None
+    assert record.engine_kind == instances.ENGINE_KIND_SSH
+    assert record.instance_id == _SSH_ENDPOINT
+
+
+def test_main_open_refuses_mixed_or_incomplete_flag_forms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(_git_root(tmp_path))
+
+    mixed = [
+        "open",
+        "--instance-id",
+        "i-abc",
+        "--name",
+        "x",
+        "--context",
+        "general-dev-x",
+    ]
+    assert forwards.main(mixed) == 1
+    assert "exactly one transport form" in capsys.readouterr().err
+
+    incomplete = [
+        "open",
+        "--name",
+        "x",
+        "--host",
+        "engine-x.example.invalid",
+        "--context",
+        "general-dev-x",
+    ]
+    assert forwards.main(incomplete) == 1
+    err = capsys.readouterr().err
+    assert "missing required flags" in err
+    for missing in ("port", "user", "docker-addr"):
+        assert missing in err
+
+
+def test_main_open_refuses_a_non_integer_ssh_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(_git_root(tmp_path))
+
+    exit_code = forwards.main(
+        [
+            "open",
+            "--name",
+            "x",
+            "--host",
+            "engine-x.example.invalid",
+            "--port",
+            "ssh",
+            "--user",
+            "dev-x",
+            "--docker-addr",
+            "/var/run/docker-x.sock",
+            "--context",
+            "general-dev-x",
+        ]
+    )
+
+    assert exit_code == 1
+    assert "--port" in capsys.readouterr().err

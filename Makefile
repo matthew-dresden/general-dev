@@ -263,14 +263,14 @@ help:
 	row "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."; \
 	row "make cert-status"      "host"   "Client and CA expiry per instance."; \
 	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."; \
-	row "make connect-start"    "remote" "Open the SSM forward as a background daemon; returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
+	row "make connect-start"    "remote" "Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json engines); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
 	row "make connect-status"   "host"   "Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1"; \
 	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \
 	row "make connect-refresh"  "host"   "Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1"; \
 	row "make connect-list"     "host"   "Every instance's forward: pid, port, listening or not."; \
 	row "make bucket-list"      "host"   "Every state bucket this fleet's naming template matches: name, configured or orphaned. REMOTE_AWS_REGION required."; \
 	row "make bucket-delete"    "host"   "Purge + delete state buckets: INSTANCE=<name>, or ALL=1 CONFIRM=delete for every one in REMOTE_AWS_REGION. REMOTE_AWS_REGION required."; \
-	row "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)): ensures the SSM forward in the background, then switches docker. INSTANCE=<name> targets that instance."; \
+	row "make remote"           "host"   "Point them at the remote engine ($(REMOTE_CONTEXT)): ensures the engine's forward in the background, then switches docker. INSTANCE=<name> targets that instance."; \
 	note "BUILD" "every target blocks until the container is up and exits non-zero if anything fails"; \
 	row "make build"            "both"   "Create the container for the active backend. Refuses if one already exists."; \
 	row "make rebuild"          "both"   "clean, then build. Prerequisites are checked before anything is destroyed."; \
@@ -327,7 +327,7 @@ help:
 	@printf '\n  %s\n' "Every target checks what it needs and fails with the command that installs it."
 	@printf '\n'
 
-# Opens the SSM port forward as a detached daemon and returns once the
+# Opens an engine's forward as a detached daemon and returns once the
 # connection is confirmed. The instance it opens one for: INSTANCE when
 # given, else ENGINE when it names an instance, else none -- the resolver's
 # default, addressed through the parse-time config values exactly as before.
@@ -338,11 +338,17 @@ help:
 # otherwise: the variable was accepted and ignored, and the forward for
 # whatever instance the resolver defaulted to opened regardless of what was
 # asked for. INSTANCE and ENGINE naming different engines is refused by the
-# resolver's own guard before anything opens. The daemon is managed by
-# devcontainer_config.forwards (spawn, readiness poll, record); this recipe
-# only resolves WHICH instance and hands the resolved values over. The
-# lifecycle companions: connect-start (this target), connect-status,
-# connect-stop, connect-refresh and connect-list.
+# resolver's own guard before anything opens. The transport is then chosen
+# by kind, from the resolved address block's KIND line: an SSH engine
+# (engine.json, KIND=ssh) opens through devcontainer_config.transport_ssh
+# with the engine's own values and no AWS requirement at all, while an EC2
+# instance opens the SSM forward through devcontainer_config.forwards' ssm
+# form -- the AWS guards live inside that branch only, so an ssh engine is
+# never asked for a region, a profile or an instance id. The daemon is
+# managed by devcontainer_config.forwards (spawn, readiness poll, record);
+# this recipe only resolves WHICH instance and hands the resolved values
+# over. The lifecycle companions: connect-start (this target),
+# connect-status, connect-stop, connect-refresh and connect-list.
 connect-start:
 	@set -euo pipefail; \
 	$(PROXY_ENV) \
@@ -355,35 +361,59 @@ connect-start:
 		INSTANCE="$$target" rd_resolve_instance; \
 		ctx="$$(rd_engine_context)"; \
 		[ -n "$$ctx" ] || ctx="$${DOCKER_CONTEXT:-}"; \
-		if [ -z "$${REMOTE_INSTANCE_ID:-}" ]; then \
-			printf '\033[0;31m[ERROR]\033[0m no EC2 instance id is recorded for instance %s\n' "$$target" >&2; \
-			printf '        Link it first: make instance-link INSTANCE=%s\n' "$$target" >&2; \
-			exit 1; \
-		fi; \
 	else \
-		[ -n "$${REMOTE_INSTANCE_ID:-}" ] || { \
-			printf '\033[0;31m[ERROR]\033[0m no instance is selected and no default id is recorded\n' >&2; \
-			printf '        Name one: make connect-start INSTANCE=<instance-name>\n' >&2; \
-			exit 1; \
-		}; \
 		ctx="$(REMOTE_CONTEXT)"; \
 	fi; \
-	[ -n "$${REMOTE_AWS_REGION:-}" ] || { \
-		printf '\033[0;31m[ERROR]\033[0m REMOTE_AWS_REGION is required and has no default: the forward opens an SSM session in it\n' >&2; \
-		printf '        Set it with: export REMOTE_AWS_REGION=<region>\n' >&2; \
-		exit 2; \
-	}; \
-	[ -n "$${REMOTE_AWS_PROFILE:-}" ] || { \
-		printf '\033[0;31m[ERROR]\033[0m REMOTE_AWS_PROFILE is required and has no default: the SSM session resolves credentials through it\n' >&2; \
-		printf '        Set it with: export REMOTE_AWS_PROFILE=<sso-profile>, after: aws sso login --profile <sso-profile>\n' >&2; \
-		exit 2; \
-	}; \
 	case "$$transport" in \
-		ssm) PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
-			--instance-id "$$REMOTE_INSTANCE_ID" --context "$$ctx" \
-			--profile "$$REMOTE_AWS_PROFILE" --region "$$REMOTE_AWS_REGION" ;; \
+		ssh) \
+			if [ -z "$$target" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT=ssh needs the engine named\n' >&2; \
+				printf '        The ssh form forwards the values of one resolved engine; run:\n' >&2; \
+				printf '        make connect-start INSTANCE=<name> DEVCONTAINER_TRANSPORT=ssh\n' >&2; \
+				exit 2; \
+			fi; \
+			if [ "$${KIND:-}" != "ssh" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is not an SSH engine; DEVCONTAINER_TRANSPORT=ssh needs a remote-instances/<name>/engine.json manifest\n' "$$target" >&2; \
+				printf '        Scaffold one: python3 -m devcontainer_config.cli engine-init %s --host <host> --user <user>\n' "$$target" >&2; \
+				exit 1; \
+			fi; \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
+				--name "$$target" --host "$$ENGINE_HOST" --port "$$ENGINE_PORT" \
+				--user "$$ENGINE_USER" --docker-addr "$$ENGINE_DOCKER_ADDR" --context "$$ctx" ;; \
+		ssm) \
+			if [ "$${KIND:-}" = "ssh" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is an SSH engine; the ssm transport only reaches EC2 instances\n' "$$target" >&2; \
+				printf '        Run: make connect-start INSTANCE=%s DEVCONTAINER_TRANSPORT=ssh\n' "$$target" >&2; \
+				exit 1; \
+			fi; \
+			if [ -n "$$target" ]; then \
+				[ -n "$${REMOTE_INSTANCE_ID:-}" ] || { \
+					printf '\033[0;31m[ERROR]\033[0m no EC2 instance id is recorded for instance %s\n' "$$target" >&2; \
+					printf '        Link it first: make instance-link INSTANCE=%s\n' "$$target" >&2; \
+					exit 1; \
+				}; \
+			else \
+				[ -n "$${REMOTE_INSTANCE_ID:-}" ] || { \
+					printf '\033[0;31m[ERROR]\033[0m no instance is selected and no default id is recorded\n' >&2; \
+					printf '        Name one: make connect-start INSTANCE=<instance-name>\n' >&2; \
+					exit 1; \
+				}; \
+			fi; \
+			[ -n "$${REMOTE_AWS_REGION:-}" ] || { \
+				printf '\033[0;31m[ERROR]\033[0m REMOTE_AWS_REGION is required and has no default: the forward opens an SSM session in it\n' >&2; \
+				printf '        Set it with: export REMOTE_AWS_REGION=<region>\n' >&2; \
+				exit 2; \
+			}; \
+			[ -n "$${REMOTE_AWS_PROFILE:-}" ] || { \
+				printf '\033[0;31m[ERROR]\033[0m REMOTE_AWS_PROFILE is required and has no default: the SSM session resolves credentials through it\n' >&2; \
+				printf '        Set it with: export REMOTE_AWS_PROFILE=<sso-profile>, after: aws sso login --profile <sso-profile>\n' >&2; \
+				exit 2; \
+			}; \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
+				--instance-id "$$REMOTE_INSTANCE_ID" --context "$$ctx" \
+				--profile "$$REMOTE_AWS_PROFILE" --region "$$REMOTE_AWS_REGION" ;; \
 		*) printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT="%s" is not recognized.\n' "$$transport" >&2; \
-		   printf '        Accepted value: ssm. The ssh transport was removed at cutover.\n' >&2; \
+		   printf '        Accepted values: ssm (the EC2 SSM forward) and ssh (the SSH engine forward).\n' >&2; \
 		   exit 1 ;; \
 	esac
 

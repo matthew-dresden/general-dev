@@ -634,7 +634,9 @@ Writes the one manifest a generic SSH endpoint with Docker requires: a
 host, a user, and optional port and docker-socket values. No AWS, no
 Terragrunt, no Parameter Store, no certificates -- the manifest is the
 whole declaration, validated before anything is written. Never connects:
-the transport that would consume it is a later unit.
+the transport that consumes it, `devcontainer_config.transport_ssh`, runs
+later, at connect time (`make connect-start INSTANCE=<name>
+DEVCONTAINER_TRANSPORT=ssh`).
 """
 
 _INSTANCE_LIST_DESCRIPTION = """List every configured instance with its live state.
@@ -720,7 +722,11 @@ _ENGINE_INIT_PORT_HELP = f"The engine's SSH port (default: {instances.DEFAULT_EN
 _ENGINE_INIT_DOCKER_ADDR_HELP = (
     "The docker socket on the engine: an absolute Unix socket path or a "
     "'tcp://<host>:<port>' URL "
-    f"(default: {instances.DEFAULT_ENGINE_DOCKER_ADDR})."
+    f"(default: {instances.DEFAULT_ENGINE_DOCKER_ADDR}). Linux endpoints "
+    "usually serve an absolute Unix socket path; a Windows endpoint needs a "
+    "tcp destination, because Windows OpenSSH cannot forward to named pipes "
+    "or Unix sockets -- enable Docker Desktop's 'Expose daemon on "
+    "tcp://localhost:2375 without TLS' and pass tcp://localhost:2375."
 )
 
 _INSTANCE_JSON_HELP = (

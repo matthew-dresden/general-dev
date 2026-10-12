@@ -558,21 +558,69 @@ def test_context_prefix_assertion_message_names_the_current_prefix_owner() -> No
 
 
 def test_connect_recipe_defaults_to_the_ssm_transport_when_unset() -> None:
-    """An unset DEVCONTAINER_TRANSPORT selects ssm, the only transport left.
+    """An unset DEVCONTAINER_TRANSPORT selects ssm, and both branches exist.
 
     Before the cutover this asserted the opposite: an unset selector ran
     `$(TUNNEL_SH)` bare so `make remote` and `make up` saw no behavior change
     while both transports existed. The cutover deleted the SSH tunnel script, so the
-    default has to move rather than merely lose a branch -- otherwise an
+    default had to move rather than merely lose a branch -- otherwise an
     operator who sets nothing gets a recipe that dispatches to a value its own
     case statement rejects. Asserted against the recipe source, never by
-    invoking the ssm branch, which needs real AWS state.
+    invoking the ssm branch, which needs real AWS state. Updated when the SSH
+    engine kind landed its own transport (feature/ssh-engines, P2): the
+    `ssh)` branch -- banned between the cutover and that transport's arrival,
+    because the name then belonged to the removed tunnel -- is back as a
+    positive branch, routing an SSH engine through
+    `devcontainer_config.transport_ssh`, while the default stays `ssm`.
     """
     recipe = _connect_recipe_body(_makefile_text())
     assert "DEVCONTAINER_TRANSPORT:-ssm" in recipe, (
-        "an unset DEVCONTAINER_TRANSPORT must default to ssm now that ssh is gone"
+        "an unset DEVCONTAINER_TRANSPORT must default to ssm"
     )
-    assert "ssh)" not in recipe, "the ssh branch must be gone from the case statement"
+    assert "ssm)" in recipe and "ssh)" in recipe, (
+        "the case statement must carry both transport branches: ssm (the EC2 "
+        "SSM forward) and ssh (the SSH engine forward through "
+        "devcontainer_config.transport_ssh)"
+    )
+
+
+def test_connect_recipe_keeps_the_aws_guards_inside_the_ssm_branch_only() -> None:
+    """Kind dispatch must not charge an ssh engine the ssm path's requirements.
+
+    The ssh branch needs no EC2 id, no region and no profile: an SSH engine
+    opens no AWS session. Every guard that exists to ensure the SSM session
+    can be opened therefore lives inside the `ssm)` branch alone -- textually,
+    between `ssm)` and the unrecognized-transport rejection -- and appears
+    nowhere before it, where the ssh branch (and the resolution block the
+    ssh branch shares) could execute it.
+    """
+    recipe = _connect_recipe_body(_makefile_text())
+    ssh_at = recipe.index("ssh)")
+    ssm_at = recipe.index("ssm)")
+    assert ssh_at < ssm_at, (
+        "the case statement must carry an ssh) branch before the ssm) branch; "
+        "splitting at ssm) below would be meaningless otherwise"
+    )
+    before_ssm = recipe[:ssm_at]
+    ssm_branch = recipe[ssm_at:]
+    guards = (
+        "REMOTE_AWS_REGION is required",
+        "REMOTE_AWS_PROFILE is required",
+        "no EC2 instance id is recorded",
+        "no instance is selected and no default id is recorded",
+    )
+    for guard in guards:
+        assert guard not in before_ssm, (
+            f"the guard {guard!r} runs before the ssm branch, so an ssh engine "
+            "(which needs no AWS values at all) would be charged it"
+        )
+        assert guard in ssm_branch, (
+            f"the guard {guard!r} is gone from the ssm branch; the ssm forward still requires it"
+        )
+    assert "DEVCONTAINER_TRANSPORT=ssh" in before_ssm, (
+        "the ssh branch's own refusals must name the selector value that "
+        "selects them, so the remedy is copy-and-pasteable"
+    )
 
 
 def test_connect_start_recipe_rejects_an_unrecognized_transport() -> None:

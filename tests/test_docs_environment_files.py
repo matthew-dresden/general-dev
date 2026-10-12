@@ -311,6 +311,7 @@ _ENUMERATION_WORD_TO_COUNT = {
     "four": 4,
     "five": 5,
     "six": 6,
+    "seven": 7,
 }
 
 # AC-DOC-003's negative clause: no claim that DEVCONTAINER_TRANSPORT changes
@@ -987,15 +988,15 @@ _NEITHER_LANDED_TRUE_STATEMENT_TEXT = (
 # Proves `makefile_reads_variable` alone (independent of resolve_transport)
 # also triggers the stale-phrase forbid, closing the round-2 finding that
 # the parameter was dead at its only real call site (code_review).
-_MAKEFILE_ONLY_STALE_TEXT = "make connect-start ... resolve_transport has not landed ... no effect at all"
+_MAKEFILE_ONLY_STALE_TEXT = (
+    "make connect-start ... resolve_transport has not landed ... no effect at all"
+)
 
 # Proves the mirror-image check (`_connect_recipe_mentions_without_landed_caveat`)
 # fires: a mention of the Makefile's `connect` recipe reading/dispatching the
 # variable with no landed-state caveat nearby, exactly the shape of text a
 # probe against the round-2 guard confirmed it accepted (test_review, round 2).
-_MAKEFILE_RECIPE_UNCAVEATED_TEXT = (
-    "make connect-start recipe reads DEVCONTAINER_TRANSPORT and dispatches it, resolve_transport only"
-)
+_MAKEFILE_RECIPE_UNCAVEATED_TEXT = "make connect-start recipe reads DEVCONTAINER_TRANSPORT and dispatches it, resolve_transport only"
 
 # Round 3 fix (code_review/test_review REVIEW_FAIL): proves the mirror
 # branch of the mirror check, `_connect_recipe_mentions_with_landed_caveat`,

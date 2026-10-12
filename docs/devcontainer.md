@@ -643,15 +643,12 @@ daemon's API version, which must be at least 1.44 for mTLS on a TCP
 listener with a rootless daemon, and whether it reports
 running rootless.
 
-**One build path, and a selector kept for the next one.** `make connect-start`
+**Two transports, one selector.** `make connect-start`
 reads `DEVCONTAINER_TRANSPORT` from the environment
-(`docs/environment-files.md`) and dispatches on it. There is one accepted
-value, `ssm`, which is also the default; any other value, including a
-leftover `ssh`, exits non-zero naming the variable, the
-offending value and the accepted value. The selector is kept rather than
-removed because it is the seam a future transport is added at, and because a
-caller who exports a stale value is told so instead of being
-silently redirected. Unset, or the explicit value `ssm`, runs
+(`docs/environment-files.md`) and dispatches on it. The accepted values
+are `ssm`, the default, and `ssh`; any other value exits non-zero naming
+the variable, the offending value and the accepted values. Unset, or the
+explicit value `ssm`, runs
 
 ```sh
 PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.forwards \
@@ -688,9 +685,9 @@ tunnel) and `make connect-list`. `--certs-root`
 defaults to `certs.DEFAULT_CERTS_ROOT`, the same `<certs-root>` root
 `make cert-status` and the certificate material above use, and only
 needs overriding for a test fixture or an alternate checkout layout.
-The transport installs no SSH configuration block, spawns no `ssh` process,
-and names no `AWS-StartSSHSession` document; it requires no key on the
-instance, and the instance is provisioned without one. The `--context`
+The ssm transport installs no SSH configuration block, spawns no `ssh`
+process, and names no `AWS-StartSSHSession` document; it requires no key on
+the instance, and the instance is provisioned without one. The `--context`
 value (and the `REMOTE_DOCKER_CONTEXT` the Makefile derives it from,
 `config.env`, operator-overridable) must carry the `<repo-slug>-` prefix
 `instances.docker_context_prefix` derives from `repo.repo_slug`
@@ -698,6 +695,29 @@ value (and the `REMOTE_DOCKER_CONTEXT` the Makefile derives it from,
 `transport.instance_from_context_name` raises `InvalidContextNameError` on
 any context name that does not start with it, since that prefix is the
 single place the bare instance name is recovered for certificate lookup.
+
+**The ssh transport, for an SSH engine.** The value `ssh` runs the same
+`forwards open` lifecycle with the ssh flag form
+(`--name/--host/--port/--user/--docker-addr/--context`), reaching a
+generic SSH engine -- one declared by a
+`remote-instances/<name>/engine.json` manifest (`python3 -m
+devcontainer_config.cli engine-init` scaffolds one) -- through
+`devcontainer_config.transport_ssh`: a managed `ssh -N -L` local forward
+(`BatchMode` and `ExitOnForwardFailure` set, the operator's own identity
+and agent, no key flag and no remote command) to the engine's docker
+address, a plain `tcp://127.0.0.1:<port>` context with no certificate
+material, readiness being the local port accepting a connection bounded by
+`SSH_FORWARD_TIMEOUT`, and the same `Connected:` announcement and teardown
+discipline as the ssm transport. The destination differs by platform: a
+Linux endpoint typically serves an absolute Unix socket path, while a
+Windows endpoint requires a tcp destination -- Windows OpenSSH cannot
+forward to named pipes or Unix sockets -- normally Docker Desktop's
+`tcp://localhost:2375` ("Expose daemon on tcp://localhost:2375 without
+TLS"). A forward failure whose destination is a socket path states that
+guidance explicitly, and `engine-init --docker-addr`'s help states it at
+scaffold time. No AWS value is required: an SSH engine opens no session,
+so the region, profile and instance-id guards apply to the ssm branch
+alone.
 
 **The SAN requirement, and its symptom.** TLS validates the name the
 *client* dials the daemon with, and the client dials `127.0.0.1` through

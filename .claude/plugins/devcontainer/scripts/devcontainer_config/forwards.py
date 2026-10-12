@@ -77,7 +77,7 @@ _OPEN_POLL_LIMIT_DEFAULT = 120  # 60 seconds at the default cadence
 OPEN_TIMEOUT_ENV_VAR = "FORWARD_OPEN_TIMEOUT_SECONDS"
 
 # The stop poll: SIGINT first, then SIGTERM to a holdout, then SIGKILL, and
-# finally the port-closed verification -- at most `_STOP_POLL_LIMIT_DEFAULT`
+# and finally the port-closed verification, at most `_STOP_POLL_LIMIT_DEFAULT`
 # polls of each wait. `FORWARD_STOP_TIMEOUT_SECONDS` names the same shape of
 # deadline for the stop path.
 STOP_POLL_SECONDS = 0.5
@@ -753,7 +753,7 @@ def _run_open(rest: Sequence[str]) -> int:
 def _run_status(rest: Sequence[str]) -> int:
     (instance,) = _require_args(rest, 1, "status")
     print(_render_status_row(status_forward(instance)))
-    # A correct report -- listening, down, or no forward at all -- is a
+    # A correct report, whether listening, down, or no forward at all, is a
     # success: the row IS the answer. Only a real failure (an unanswerable
     # probe, an invalid name) is an error, and main turns those into exit 1.
     return 0

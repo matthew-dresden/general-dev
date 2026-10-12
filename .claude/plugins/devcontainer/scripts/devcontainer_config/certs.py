@@ -235,7 +235,7 @@ CLIENT_EXTENDED_KEY_USAGE = "clientAuth"
 
 # spec Section 7.3: the expiry-warning window `make cert-status` (spec
 # Section 4.1.2) applies, resolved in exactly one place, `_resolve_cert_warn_days`
-# (AC-FUNC-007) -- the literal `14` below is the only place this module ever
+# (AC-FUNC-007); the literal `14` below is the only place this module ever
 # writes that number; every other reference to the window is this constant
 # or a value `_resolve_cert_warn_days` returned.
 CERT_WARN_DAYS_ENV_VAR = "CERT_WARN_DAYS"
@@ -269,7 +269,7 @@ _NO_CERTIFICATES_LINE = (
 
 # spec Section 5.3's Parameter Store layout for TLS material.
 # `PARAMETER_ROOT` is `instances.PARAMETER_ROOT` itself, not a second
-# literal declaration of the `/devcontainer` root -- `instances` owns the
+# literal declaration of the `/devcontainer` root; `instances` owns the
 # addressing table (spec Section 9), so the root has a single definition
 # site across both modules. `SECURE_STRING_TYPE` and `STRING_TYPE` are
 # declared here: publication is the only Parameter Store write this
@@ -341,7 +341,7 @@ def _validate_instance(instance: str) -> None:
             f"ERROR: invalid instance name {instance!r}\n"
             "An instance name must be a non-empty path segment of at most "
             f"{instances.MAX_INSTANCE_NAME_LENGTH} characters: letters, "
-            "digits, hyphens and underscores only -- the identical rule "
+            "digits, hyphens and underscores only; the identical rule "
             "devcontainer_config.instances enforces for the same "
             "/devcontainer/<instance>/ prefix.\n"
             "Use a valid instance name."
@@ -429,7 +429,7 @@ class PublicationEntry:
 # deleted secret-catalog client, which owned the identical argv invariant
 # (a value travels in a `--cli-input-json` document, never an argument);
 # the secret-shaped operations (resolve, list, the two-tier scope rule)
-# went with that module -- only the path-shaped write and read back
+# went with that module; only the path-shaped write and read back
 # survived, because publishing a certificate is not a secret operation.
 # ---------------------------------------------------------------------------
 
@@ -445,7 +445,7 @@ PUT_PARAMETER_OP = "put-parameter"
 # `file:///dev/stdin` (it reports "Invalid JSON received" whether stdin is
 # a pipe or a redirected regular file, and blocks indefinitely on a FIFO),
 # so the document must be a real, regular file for the duration of the
-# call -- created at mode 0600 inside a 0700 directory that is removed
+# call, created at mode 0600 inside a 0700 directory that is removed
 # before returning.
 PUT_DOCUMENT_FILENAME = "put-parameter.json"
 
@@ -1607,7 +1607,7 @@ def _missing_role_message(instance: str, missing_role: str) -> str:
     return (
         f"ERROR: instance {instance!r} is missing its {missing_role} certificate\n"
         f"Other certificate material exists for this instance, but its {missing_role} "
-        "certificate does not -- a partial material set is never reported as a row.\n"
+        "certificate does not; a partial material set is never reported as a row.\n"
         f"Run gd-cert-lifecycle INSTANCE={instance} to reissue it."
     )
 

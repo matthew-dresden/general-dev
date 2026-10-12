@@ -1,6 +1,6 @@
 ---
 name: gd-skills-remove
-description: Removes a skill from an agent's surface by unwiring it -- deleting the symlink entry or the agent-specific registration, never editing the canonical copy -- and verifies the removal by confirming the name no longer resolves while the canonical SKILL.md still exists; drives the make skills-remove target.
+description: Removes a skill from an agent's surface by unwiring it, deleting the symlink entry or the agent-specific registration, never editing the canonical copy, and verifies the removal by confirming the name no longer resolves while the canonical SKILL.md still exists; drives the make skills-remove target.
 ---
 
 # gd-skills-remove
@@ -9,8 +9,8 @@ Removal in this roster means unwiring, never deleting canonical content: the
 `SKILL.md` under `.agents/skills/<name>/` is the one copy, and an agent that
 should no longer see a skill loses its route to it, not the document. This
 skill states which of the two it is doing at every step, because the failure
-mode it exists to prevent -- a removal request silently taking out the
-canonical file every other agent still uses -- is unrecoverable from git
+mode it exists to prevent, a removal request silently taking out the
+canonical file every other agent still uses, is unrecoverable from git
 history alone in any surface that caches.
 
 The `make skills-remove` target is native-Mac: it deletes filesystem

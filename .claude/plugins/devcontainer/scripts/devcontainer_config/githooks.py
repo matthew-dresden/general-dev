@@ -99,7 +99,7 @@ _ZERO_OBJECT_ID = re.compile(r"^0+$")
 _PUSH_REF_FIELD_COUNT = 4
 
 # `git merge-base`'s own exit code when the named commits share no common
-# ancestor at all -- a valid, non-error result (see `_not_on_any_remote_base`),
+# ancestor at all, a valid non-error result (see `_not_on_any_remote_base`),
 # distinguished from a genuine failure by git also emitting no stderr for it.
 _MERGE_BASE_NO_COMMON_ANCESTOR_EXIT_CODE = 1
 

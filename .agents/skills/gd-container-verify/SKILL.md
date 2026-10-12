@@ -1,6 +1,6 @@
 ---
 name: gd-container-verify
-description: Read-only container-state verification -- runs make status and make check, reports backend, container, image and volume state, and flags uncommitted or unpushed work in a remote volume; performs no repair of its own and names the exact remedy for every finding.
+description: Read-only container-state verification, running make status and make check, reporting backend, container, image and volume state, and flags uncommitted or unpushed work in a remote volume; performs no repair of its own and names the exact remedy for every finding.
 ---
 
 # gd-container-verify
@@ -13,7 +13,7 @@ performs no repair: every finding names the exact command or skill that
 fixes it, and the operator (or the named skill) runs it.
 
 The primitives beneath both targets are `container.sh`'s `rdc_status`,
-`rdc_check`, `rdc_container_ids` and `rdc_require_container` -- this skill
+`rdc_check`, `rdc_container_ids` and `rdc_require_container`; this skill
 runs the targets rather than re-deriving container state a second way, the
 same reuse rule `gd-env-doctor`'s container-state group and
 `gd-container-lifecycle`'s inventory already follow.
@@ -23,8 +23,8 @@ same reuse rule `gd-env-doctor`'s container-state group and
 | Check | What this skill runs | Notes |
 |---|---|---|
 | State | `make status` | Read-only on both backends; the right first read whenever something looks wrong. |
-| Fleet | `make list-containers` | Read-only sweep of every engine -- the local one plus every configured instance's -- one row per container this project's label owns, per-engine reachability in the mix. The listing answer when several clones or engines are in play and `make status`'s active-backend view is not wide enough. |
-| Work-loss guard | `make check` | Remote: reports uncommitted or unpushed work in the volume, non-zero when dirty. Local: a no-op -- the container shares this working tree. |
+| Fleet | `make list-containers` | Read-only sweep of every engine, the local one plus every configured instance's, one row per container this project's label owns, per-engine reachability in the mix. The listing answer when several clones or engines are in play and `make status`'s active-backend view is not wide enough. |
+| Work-loss guard | `make check` | Remote: reports uncommitted or unpushed work in the volume, non-zero when dirty. Local: a no-op, since the container shares this working tree. |
 
 ## Checks
 

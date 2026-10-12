@@ -213,8 +213,8 @@ _LOCALHOST = "127.0.0.1"
 # appears, definitely not listening.
 _PORT_OPENED_MARKER = b"opened for sessionId"
 
-# Substrings the AWS CLI's stderr carries for an unusable credential --
-# expired SSO session or none resolved at all -- matched literally against
+# Substrings the AWS CLI's stderr carries for an unusable credential,
+# an expired SSO session or none resolved at all, matched literally against
 # plain-text CLI error output, the same technique
 # `devcontainer_config.hostprobe.probe_aws_identity` already uses for its
 # own AWS call sites (independent copies by design: each module owns
@@ -262,7 +262,7 @@ _ROOTLESS_SECURITY_OPTION = "name=rootless"
 
 # Substrings a real `docker version`/`docker --context ... version`
 # invocation's stderr carries when the TLS handshake failed because the
-# server certificate does not carry the name the client dialed -- verified
+# server certificate does not carry the name the client dialed, verified
 # against a real docker CLI (29.4.0) and a real, deliberately mis-issued
 # certificate (this module's own test suite quotes both verbatim). Every
 # other handshake failure (the forward not established, the daemon not
@@ -994,7 +994,7 @@ def _use_context(runner: CommandRunner, context_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Readiness (spec Section 7.2, 7.3): a real event, then a connection --
+# Readiness (spec Section 7.2, 7.3): a real event, then a connection;
 # never time.
 # ---------------------------------------------------------------------------
 
@@ -1355,8 +1355,8 @@ def stop_forward(process: subprocess.Popen[bytes]) -> None:
 
 # ---------------------------------------------------------------------------
 # Handshake (spec Section 4.2.1, 6, 7.2, 7.3, 11; E6-F2-S1-T2): the docker
-# version call that proves the whole path -- forward, context, TLS material
-# -- actually works, and the failure translator that keeps a certificate
+# version call that proves the whole path (forward, context, TLS material)
+# actually works, and the failure translator that keeps a certificate
 # problem from reading like a tunnel problem.
 # ---------------------------------------------------------------------------
 

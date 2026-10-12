@@ -1,6 +1,6 @@
 ---
 name: gd-instance-destroy
-description: Destroys one remote instance behind GATE-DESTROY -- records the two-part precheck (operator confirmation, and the volume verified to hold no unpushed work before the confirmation is even requested), then runs make instance-destroy and verifies every derived artifact (parameters, certificates, context, id) is gone; never destroys on an ambiguous request.
+description: Destroys one remote instance behind GATE-DESTROY, records the two-part precheck (operator confirmation, and the volume verified to hold no unpushed work before the confirmation is even requested), then runs make instance-destroy and verifies every derived artifact (parameters, certificates, context, id) is gone; never destroys on an ambiguous request.
 ---
 
 # gd-instance-destroy
@@ -9,7 +9,7 @@ This skill is the destructive counterpart of `gd-instance-create`, and the
 only skill in this roster that reaches `GATE-DESTROY`. The gate's two-part
 requirement (spec Section 4.4) is ordered: the work-loss check runs and is
 found clean *first*, and only then is the operator's confirmation requested
-and recorded -- verbatim, by the human operator, never on this skill's own
+and recorded verbatim, by the human operator, never on this skill's own
 behalf. A confirmation taken before the work-loss evidence exists is not a
 confirmation this skill may act on.
 

@@ -1,13 +1,13 @@
 ---
 name: gd-container-remote
-description: Drives the remote backend's container -- opens the SSM port forward as a background daemon with make connect-start, manages that daemon's lifecycle (status, stop, refresh, list) without touching the instance, points docker and VS Code at the instance with make remote, then builds, starts or reopens through the same state diagnosis as the local skill, against the cloned checkout in the instance's volume; destroys nothing.
+description: Drives the remote backend's container by opening the SSM port forward as a background daemon with make connect-start, manages that daemon's lifecycle (status, stop, refresh, list) without touching the instance, points docker and VS Code at the instance with make remote, then builds, starts or reopens through the same state diagnosis as the local skill, against the cloned checkout in the instance's volume; destroys nothing.
 ---
 
 # gd-container-remote
 
 This skill is the remote-backend counterpart of `gd-container-local`: same
 four actions (`make build`, `make start`, `make restart`, `make reopen`),
-same never-destroys-anything boundary, one added stage -- the container
+same never-destroys-anything boundary, one added stage: the container
 lives on a remote EC2 engine reached through an SSM port forward under
 mutual TLS, so the forward and the context switch come first and every
 later step runs against the instance's docker context. The container is a
@@ -30,7 +30,7 @@ section).
 | Step | What this skill runs | Notes |
 |---|---|---|
 | Validate the instance | Invoke `gd-instance-list INSTANCE=<name>` first | Its thirteen-check verdict is this skill's precondition; a failure there is reported unchanged and stops this skill. |
-| Open the forward | `make connect-start INSTANCE=<name>` | Opens the forward as a background daemon and returns once docker answers through it; idempotent -- already-open reports and exits 0. |
+| Open the forward | `make connect-start INSTANCE=<name>` | Opens the forward as a background daemon and returns once docker answers through it; idempotent; an already-open forward reports and exits 0. |
 | Forward status | `make connect-status INSTANCE=<name>` / `ALL=1` | pid, port, listening per instance; a report is always a success, never an error. |
 | Close the forward | `make connect-stop INSTANCE=<name>` / `ALL=1` | Stops the daemon, verifies the port closed; the instance itself keeps running. |
 | Forward roster | `make connect-list` | Every configured instance's forward state. |

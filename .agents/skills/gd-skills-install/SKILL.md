@@ -1,6 +1,6 @@
 ---
 name: gd-skills-install
-description: Installs this roster's canonical skills into an agent's skill surface -- verifies the agent reads .agents/skills directly or wires the documented relative symlink, never copies files -- and verifies the install by resolving every name to its SKILL.md through the agent's own surface; drives the make skills-install target.
+description: Installs this roster's canonical skills into an agent's skill surface by verifying the agent reads .agents/skills directly or wires the documented relative symlink, never copying files, and verifies the install by resolving every name to its SKILL.md through the agent's own surface; drives the make skills-install target.
 ---
 
 # gd-skills-install
@@ -25,15 +25,15 @@ repository ships wiring for are the standing example of the
 Flows section: opencode reads `.agents/skills` directly (the canonical
 home needs no pointer), and Claude Code consumes the roster through the
 plugin's `skills/` relative symlink described above. Wiring any other
-agent follows the same two rules this skill verifies -- point at the
-canonical home, never copy it -- and resolves every `gd-` name afterward.
+agent follows the same two rules this skill verifies, point at the
+canonical home and never copy it, and resolves every `gd-` name afterward.
 
 ## Invocation map
 
 | Step | What this skill runs | Notes |
 |---|---|---|
 | Discover the agent surface | `make skills-list SCOPE=global AGENT=<agent>` (read) | Report the current state per agent: installed (with the resolved target), native (project), or not installed. |
-| Wire | `make skills-install AGENT=<agent> SCOPE=<scope>` | `SCOPE=global` (the default) creates one `general-dev-skills` symlink in the agent's user-level skill directory, pointing absolutely at this checkout's `.agents/skills`; `SCOPE=project` verifies -- and, for Claude Code, wires -- the in-repo adapters; `SCOPE=runtime` prints the agent's one-shot incantation and changes nothing. |
+| Wire | `make skills-install AGENT=<agent> SCOPE=<scope>` | `SCOPE=global` (the default) creates one `general-dev-skills` symlink in the agent's user-level skill directory, pointing absolutely at this checkout's `.agents/skills`; `SCOPE=project` verifies, and for Claude Code wires, the in-repo adapters; `SCOPE=runtime` prints the agent's one-shot incantation and changes nothing. |
 | Verify | None (read) | Resolve every `gd-*` name in the roster (`docs/skills.md`) to a `SKILL.md` through the agent's own surface; report any name that does not resolve. |
 
 ### Scope semantics
@@ -42,7 +42,7 @@ canonical home, never copy it -- and resolves every `gd-` name afterward.
 |---|---|
 | `global` | Symlink named `general-dev-skills` in `~/.config/opencode/skills` (opencode) or `~/.claude/skills` (Claude Code), absolute target, recorded in the output. Refuses any existing entry of that name that is not already our symlink. |
 | `project` | The repository itself: opencode is native (`.agents/skills`, nothing to wire); Claude Code's tracked `.claude/plugins/devcontainer/skills` relative symlink is verified and, if missing, wired with the documented relative target. |
-| `runtime` | No filesystem change. Prints a one-shot incantation instead -- see below. |
+| `runtime` | No filesystem change. Prints a one-shot incantation instead; see below. |
 
 ### The runtime incantation
 
@@ -53,7 +53,7 @@ incantation for the selected agent:
   `skills.paths` override. Because an `OPENCODE_CONFIG` file REPLACES the
   project config rather than merging with it, the printed JSON embeds the
   provider/model block read from `.devcontainer/opencode.json` at
-  generation time -- a bare skills-only override would launch opencode
+  generation time; a bare skills-only override would launch opencode
   with no provider at all.
 - Claude Code: a `--settings` one-shot whose JSON enables this checkout's
   plugin marketplace path. Printed only when the installed build

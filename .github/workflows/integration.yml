@@ -1,0 +1,245 @@
+# SSH engine integration: the SSH-engine lifecycle exercised against a REAL
+# ssh+docker endpoint built ephemerally on this runner.
+#
+# This workflow is deliberately SEPARATE from ci.yml. The hermetic suite
+# (`make lint` + `make test`) must stay hermetic: no docker, no network, no
+# ssh. This job needs all three -- the runner's own docker daemon plays the
+# remote engine, an sshd container carries the docker CLI with the runner's
+# socket mounted read-write, and every docker call the lifecycle makes rides
+# an `ssh -N -L` forward into that container. Nothing here is checked in: the
+# SSH keypair is generated per run, the sshd image is built inline, and no
+# repository secret is read, so this job can only fail when the ssh/docker
+# machinery itself is broken -- never for want of secrets.
+
+name: SSH engine integration
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# The fixture build and the lifecycle are minutes of work; 10 bounds a
+# wedged probe loop.
+jobs:
+  ssh-engine-integration:
+    name: ssh-engine-integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # The runner's docker CLI ships a context literally named "default";
+    # config.env defaults LOCAL_DOCKER_CONTEXT to "orbstack" (this repo's
+    # macOS convention), and `make list-containers` probes that context as
+    # the local engine. The environment value wins over config.env's
+    # assign-if-unset, so the local row probes the context that exists here.
+    env:
+      LOCAL_DOCKER_CONTEXT: default
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Per-run ed25519 keypair at the default identity path: the ssh
+      # transport never passes a key-file flag, so the default identity and
+      # agent decide authentication, exactly as an operator's machine does.
+      - name: Create the ephemeral SSH identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keygen -t ed25519 -N '' -C 'ci-ssh-engine' -f ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      # The remote-engine stand-in: alpine + sshd + the docker CLI. The
+      # runner's socket is mounted read-write at the path the manifest names,
+      # so docker commands arriving over the ssh session drive the runner's
+      # own daemon. The entrypoint overrides alpine's shipped
+      # `AllowTcpForwarding no` -- with it, sshd denies the `-L` channel
+      # whose destination is the docker socket path ("Received request to
+      # connect to path ..., but the request was denied").
+      - name: Build the sshd image
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_dir="$(mktemp -d)"
+          cat > "$build_dir/Dockerfile" <<'DOCKERFILE'
+          FROM alpine:3.20
+          COPY sshd-entrypoint.sh /sshd-entrypoint.sh
+          RUN apk add --no-cache openssh-server docker-cli \
+           && chmod +x /sshd-entrypoint.sh
+          EXPOSE 22
+          ENTRYPOINT ["/sshd-entrypoint.sh"]
+          DOCKERFILE
+          cat > "$build_dir/sshd-entrypoint.sh" <<'ENTRYPOINT'
+          #!/bin/sh
+          set -eu
+          mkdir -p /root/.ssh
+          cp /run/ssh/authorized_keys /root/.ssh/authorized_keys
+          chmod 700 /root/.ssh
+          chmod 600 /root/.ssh/authorized_keys
+          ssh-keygen -A
+          exec /usr/sbin/sshd -D -e \
+            -o PermitRootLogin=prohibit-password \
+            -o PasswordAuthentication=no \
+            -o AllowTcpForwarding=yes \
+            -o AllowStreamLocalForwarding=yes
+          ENTRYPOINT
+          docker build -t ssh-engine-ci:ci "$build_dir"
+
+      - name: Run the sshd container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name ssh-engine-ci \
+            -p 127.0.0.1:2222:22 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$HOME/.ssh/id_ed25519.pub":/run/ssh/authorized_keys:ro \
+            ssh-engine-ci:ci
+
+      # Readiness is the ssh port answering, never a fixed wait: a bounded
+      # ssh-keyscan loop probes it, and the scan that succeeds is also what
+      # teaches this run's client to trust the container's fresh host key,
+      # which BatchMode requires to be known in advance. On exhaustion the
+      # fixture's own state is printed and the job fails.
+      - name: Wait for the ssh port and trust the host key
+        shell: bash
+        run: |
+          set -euo pipefail
+          attempts="${SSH_PORT_MAX_ATTEMPTS:-30}"
+          i=0
+          until out="$(ssh-keyscan -T 2 -p 2222 127.0.0.1 2>/dev/null)" && [ -n "$out" ]; do
+            i=$((i + 1))
+            if [ "$i" -ge "$attempts" ]; then
+              echo "the sshd container's port did not answer within $attempts probes" >&2
+              docker ps -a
+              docker logs ssh-engine-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          printf '%s\n' "$out" >> ~/.ssh/known_hosts
+          echo "ssh port ready after $i failed probe(s)"
+
+      # Step 1: scaffold the engine manifest.
+      - name: engine-init
+        shell: bash
+        run: |
+          set -euo pipefail
+          make engine-init INSTANCE=ci HOST=127.0.0.1 PORT=2222 USER=root \
+            DOCKER_ADDR=/var/run/docker.sock
+
+      # Step 2: the one-shot reachability proof -- forward, handshake, stop.
+      # The verdict line is asserted, not just the exit code: "Verified:"
+      # is printed only after docker answered a handshake through the
+      # tunnel, so its presence is the proof.
+      - name: engine-verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$(make engine-verify INSTANCE=ci)"
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -q 'Verified:' || {
+            echo "engine-verify did not print the Verified verdict" >&2
+            exit 1
+          }
+
+      # Step 3: the daemon forward and the container-level targets behind it.
+      - name: connect-start, connect-status
+        shell: bash
+        run: |
+          set -euo pipefail
+          make connect-start INSTANCE=ci DEVCONTAINER_TRANSPORT=ssh
+          make connect-status INSTANCE=ci
+
+      # The containers listing must show a healthy ci engine row. The
+      # command's exit code is NOT the gate here: it is 1 whenever ANY
+      # engine's probe failed, and this runner has no AWS identity, so the
+      # repo's committed EC2 instance row (remote-dev) always degrades. The
+      # ci row's content is the real assertion: present, and not
+      # "unreachable".
+      - name: list-containers shows the ci engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          listing="$(make list-containers 2>&1 || true)"
+          printf '%s\n' "$listing"
+          ci_row="$(printf '%s\n' "$listing" | awk '$NF == "ci"')"
+          if [ -z "$ci_row" ]; then
+            echo "no ci engine row in list-containers" >&2
+            exit 1
+          fi
+          case "$ci_row" in
+            *"unreachable"*)
+              echo "the ci engine row reports unreachable: $ci_row" >&2
+              exit 1
+              ;;
+          esac
+
+      # No container was ever built on the ci engine: both targets take the
+      # no-container branch and must exit 0.
+      - name: status and clean on the empty engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          make status ENGINE=ci
+          make clean ENGINE=ci
+
+      - name: connect-stop
+        shell: bash
+        run: |
+          set -euo pipefail
+          make connect-stop INSTANCE=ci
+
+      # Step 4: the CONFIRM gate. The removal's first act is a container
+      # check through the engine's context, so the forward must be open for
+      # it to answer -- connect-stop closed it, so it is re-opened here, and
+      # the successful removal stops the forward itself as its first
+      # teardown step. Without CONFIRM=remove the removal must refuse
+      # (non-zero); with it, the removal must complete; afterwards the
+      # instance must be gone from the listing. The listing assertion runs
+      # on the captured table for the same AWS-row reason as
+      # list-containers above (the summary line proves the table rendered;
+      # the row grep proves ci is gone).
+      - name: engine-remove gate and teardown
+        shell: bash
+        run: |
+          set -euo pipefail
+          make connect-start INSTANCE=ci DEVCONTAINER_TRANSPORT=ssh
+          refusal="$(make engine-remove INSTANCE=ci 2>&1 || true)"
+          printf '%s\n' "$refusal"
+          if make engine-remove INSTANCE=ci > /dev/null 2>&1; then
+            echo "engine-remove without CONFIRM=remove must refuse" >&2
+            exit 1
+          fi
+          make engine-remove INSTANCE=ci CONFIRM=remove
+          listing="$(make list-instances 2>&1 || true)"
+          printf '%s\n' "$listing"
+          printf '%s\n' "$listing" | grep -Fq 'instance(s) listed' || {
+            echo "list-instances produced no table" >&2
+            exit 1
+          }
+          if printf '%s\n' "$listing" | grep -Eq '(^|[[:space:]])ci([[:space:]]|$)'; then
+            echo "ci is still listed after engine-remove" >&2
+            exit 1
+          fi
+
+      # Step 5: the run-log tail.
+      - name: final fleet state
+        shell: bash
+        run: |
+          set -euo pipefail
+          make list-instances 2>&1 || true
+          docker ps
+
+      - name: Stop the sshd container
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if docker ps -a --format '{{.Names}}' | grep -qx ssh-engine-ci; then
+            docker rm -f ssh-engine-ci
+          fi

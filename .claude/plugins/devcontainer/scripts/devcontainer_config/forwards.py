@@ -358,7 +358,15 @@ def _log_tail(log_file: Path) -> str:
 
 
 def _default_spawner(argv: Sequence[str], log_file: Path) -> subprocess.Popen[bytes]:
-    """Spawn the daemon detached: its own session, stdin closed, output to the log."""
+    """Spawn the daemon detached: its own session, stdin closed, output to the log.
+
+    The log's parent directory is created here, at the one place the log is
+    opened: a first-ever forward on a machine has no per-instance state
+    directory yet (`~/.docker/certs/<name>/` springs into existence with the
+    daemon, not before it), and an append-open without it would end the open
+    with a bare traceback instead of a daemon.
+    """
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     handle = open(log_file, "ab")
     try:
         return subprocess.Popen(

@@ -52,12 +52,18 @@ the port accepting a connection, bounded by `SSH_FORWARD_TIMEOUT` (default
 shared reader of that variable shape), and the wait between probe attempts
 blocks on the forward process's own stdout through `selectors`, a real
 I/O-readiness wait, the same primitive `transport.wait_ready` rests on. An
-`ssh -N` forward announces nothing on stdout, so the stream is silent in
-normal operation and the bounded wait simply paces the probes; the moment
-the stream has data or hits EOF (the ssh process exited, its inherited
-stderr having already reached the operator) the wait reacts at once instead
-of waiting out the deadline. The retry loop of the handshake is paced the
-same way `transport.handshake`'s is: every attempt shells out to a real
+`ssh -N` forward normally announces nothing on stdout, so the stream is
+silent in normal operation and the bounded wait simply paces the probes.
+An EOF on that stream is the ssh process exiting -- unless the process is
+still alive when the EOF arrives: a session-less OpenSSH client (observed
+on 10.x, which closes its stdout when it runs no remote command) closes
+its stdout while the forward runs, so `wait_ready` accepts a
+`process_alive` probe and treats an EOF beside a live process as the
+stream going quiet rather than as the child's death, pacing its remaining
+probes on the same bounded cadence. The moment the stream has data, or
+EOF beside a dead process, the wait reacts at once instead of waiting out
+the deadline. The retry loop of the handshake is paced the same way
+`transport.handshake`'s is: every attempt shells out to a real
 `docker` CLI process, whose own fork/exec and dial cost paces the loop
 without this module adding a fixed delay, and the deadline check bounds the
 total regardless.
@@ -87,7 +93,7 @@ import selectors
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import IO, NoReturn, cast
 
@@ -419,6 +425,23 @@ def _readline_with_deadline(stream: IO[bytes], budget_seconds: float) -> bytes |
     return stream.readline()
 
 
+def _pace(seconds: float) -> None:
+    """One bounded wait between probes when no live stream can pace them.
+
+    The same bounded-wait primitive `_readline_with_deadline` rests on,
+    with nothing registered: the selector blocks for at most `seconds`
+    (a real I/O wait, never a sleep) and returns once the slice has
+    passed. This is the pacing of the probe loop for the one case the
+    stream cannot pace itself -- an `ssh` client that closed its stdout
+    while the forward process is still alive.
+    """
+    selector = selectors.DefaultSelector()
+    try:
+        selector.select(timeout=seconds)
+    finally:
+        selector.close()
+
+
 def wait_ready(
     probe: transport.ReadinessProbe,
     forward_output: IO[bytes],
@@ -427,6 +450,7 @@ def wait_ready(
     endpoint: str,
     docker_addr: str,
     port: int,
+    process_alive: Callable[[], bool] | None = None,
 ) -> None:
     """Confirm the forward is ready, bounded by `SSH_FORWARD_TIMEOUT`.
 
@@ -434,13 +458,31 @@ def wait_ready(
     successful connection attempt (`probe`) counts, never the process being
     alive. Between attempts this blocks on `forward_output` (the ssh
     process's stdout) for at most the smaller of the remaining deadline
-    and one poll cadence; `ssh -N` writes nothing there in normal operation,
-    so the wait simply spaces the probes, while data (an abnormal stdout) or
-    EOF (the ssh process exited, its inherited stderr having already shown
-    the operator why) is reacted to immediately instead of waiting out the
-    deadline. A line that is neither is read and ignored, the same
-    discipline `transport.wait_ready` applies to its own process's startup
-    output.
+    and one poll cadence; `ssh -N` normally writes nothing there, so the
+    wait simply spaces the probes, while data (an abnormal stdout) is
+    reacted to immediately instead of waiting out the deadline. An EOF is
+    the ssh process exiting -- its inherited stderr having already shown
+    the operator why -- and raises at once, UNLESS `process_alive` was
+    given and answers True: a session-less OpenSSH client (observed on
+    10.x) closes its stdout while the forward runs, so an EOF beside a
+    live process means only that the stream went quiet. The wait then
+    stops reading the stream and paces its remaining probes on the same
+    bounded cadence (`_pace`), never spinning. A line that is neither data
+    nor EOF is read and ignored, the same discipline `transport.wait_ready`
+    applies to its own process's startup output.
+
+    Args:
+        probe: the readiness probe; called with the remaining budget in
+            seconds, and readiness is its returning True.
+        forward_output: the forward process's stdout, readable.
+        instance: the instance name, for the failure diagnoses.
+        endpoint: the ssh endpoint, for the failure diagnoses.
+        docker_addr: the forward destination, for the Windows guidance.
+        port: the local forwarded port, for the failure diagnoses.
+        process_alive: when given, consulted before an EOF is read as the
+            child's death; True keeps probing, False (or omitted) raises
+            the death diagnosis. `_establish_forward` passes the forward
+            process's own liveness.
 
     Raises:
         SSHForwardTimeoutError: the port never accepted a connection within
@@ -452,6 +494,7 @@ def wait_ready(
     """
     timeout = _forward_timeout_seconds()
     deadline = time.monotonic() + timeout
+    stream_live = True
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -467,27 +510,43 @@ def wait_ready(
                     ),
                 )
             )
-        line = _readline_with_deadline(forward_output, min(remaining, _FORWARD_POLL_SECONDS))
-        if line is None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                continue  # the loop head raises the timeout diagnosis
-            if probe(remaining):
-                return
-            continue
-        if line == b"":
-            raise SSHForwardError(
-                diagnose_forward_not_opened(
-                    instance=instance,
-                    endpoint=endpoint,
-                    docker_addr=docker_addr,
-                    port=port,
-                    summary=(
-                        "the ssh process exited before it accepted a connection "
-                        "(its own diagnostics are above)"
-                    ),
+        if stream_live:
+            line = _readline_with_deadline(forward_output, min(remaining, _FORWARD_POLL_SECONDS))
+            if line is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    continue  # the loop head raises the timeout diagnosis
+                if probe(remaining):
+                    return
+                continue
+            if line == b"":
+                if process_alive is not None and process_alive():
+                    # The client closed its stdout while the forward is
+                    # still running: the stream can no longer pace the
+                    # probes, so the loop below paces them itself.
+                    stream_live = False
+                    continue
+                raise SSHForwardError(
+                    diagnose_forward_not_opened(
+                        instance=instance,
+                        endpoint=endpoint,
+                        docker_addr=docker_addr,
+                        port=port,
+                        summary=(
+                            "the ssh process exited before it accepted a connection "
+                            "(its own diagnostics are above)"
+                        ),
+                    )
                 )
-            )
+            continue  # a data line: not readiness; read and ignored
+        # The stream closed beside a live process: pace the next probe on
+        # the same bounded cadence the stream used to supply.
+        _pace(min(remaining, _FORWARD_POLL_SECONDS))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            continue  # the loop head raises the timeout diagnosis
+        if probe(remaining):
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -775,6 +834,7 @@ def _establish_forward(
             endpoint=endpoint,
             docker_addr=docker_addr,
             port=local_port,
+            process_alive=lambda: process.poll() is None,
         )
     except SSHForwardError:
         # A forward that never opened is torn down before the error

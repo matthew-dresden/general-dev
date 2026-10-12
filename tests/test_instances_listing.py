@@ -303,3 +303,109 @@ def test_json_mode_still_exits_nonzero_on_a_probe_failure(
     assert row["params_present"] is None
     assert "simulated SSM outage" in row["lookup_error"]
     assert alpha in captured.err
+
+
+# ---------------------------------------------------------------------------
+# The ssh engine kind: reachability replaces the EC2 probes
+# ---------------------------------------------------------------------------
+
+
+def _make_ssh_engine(root: Path, name: str) -> None:
+    """A minimal ssh engine under `remote-instances/<name>/`: the manifest only."""
+    instances = importlib.import_module("devcontainer_config.instances")
+    manifest = root / "remote-instances" / name / instances.ENGINE_MANIFEST_FILENAME
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "kind": instances.ENGINE_KIND_SSH,
+                "host": f"engine-{uuid.uuid4().hex[:8]}.example.invalid",
+                "user": f"dev-{uuid.uuid4().hex[:8]}",
+                "port": 20000 + uuid.uuid4().int % 20000,
+                "docker_addr": "/var/run/docker.sock",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_an_ssh_engine_row_answers_reachability_in_the_state_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The probes are kind-aware: the ssh engine runs one reachability probe
+    (and the context probes), and its STATE column carries `ok`."""
+    root = _repo_root(tmp_path)
+    name = _instance_name("engine")
+    _make_ssh_engine(root, name)
+    runner = _FakeRunner()
+    runner.queue(_ok("27.0.3\n"))  # the reach probe: docker answered over ssh
+    runner.queue(_err("no such context: anything"))  # the context inspect
+
+    exit_code = _run_instance_list(monkeypatch, root, runner)
+
+    out_lines = capsys.readouterr().out.splitlines()
+    assert exit_code == 0
+    assert len(runner.calls) == 2, "no EC2 probe of any kind runs for an ssh engine"
+    assert runner.calls[0][0] == "ssh"
+    row_columns = out_lines[1].split()
+    assert row_columns[0] == name
+    assert row_columns[1] == "ok"
+    # The EC2-only probes never ran: their columns render the dash every
+    # does-not-apply probe gets, and the answered ones answer.
+    assert row_columns[2] == "-"
+    assert row_columns[3] == "-"
+    assert row_columns[4] == "no"
+    assert row_columns[6] == "absent"
+
+
+def test_an_unreachable_ssh_engine_reports_unreachable_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`unreachable` is the probe's answer, not a probe failure: the row
+    renders it and the listing still exits zero."""
+    root = _repo_root(tmp_path)
+    name = _instance_name("engine")
+    _make_ssh_engine(root, name)
+    runner = _FakeRunner()
+    runner.queue(_err("Connection refused"))  # the reach probe failed
+    runner.queue(_err("no such context: anything"))
+
+    exit_code = _run_instance_list(monkeypatch, root, runner)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    row_columns = captured.out.splitlines()[1].split()
+    assert row_columns[1] == "unreachable"
+
+
+def test_mixed_fleet_rows_carry_their_own_kinds_probes_and_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One fleet, both kinds: the EC2 row answers exactly the probes it
+    always answered, the ssh row answers reachability, and --json carries
+    the same fields for both with the new one nullable."""
+    root = _repo_root(tmp_path)
+    ec2_name = _instance_name("alpha")
+    ssh_name = _instance_name("engine")
+    _make_instance(root, ec2_name)
+    _make_ssh_engine(root, ssh_name)
+    runner = _FakeRunner()
+    _queue_clean_probes(runner, root, (ec2_name,))  # ec2 probes, in engine order
+    runner.queue(_ok("27.0.3\n"))  # the ssh engine's reach probe
+    runner.queue(_err("no such context: anything"))  # the ssh engine's context inspect
+
+    exit_code = _run_instance_list(monkeypatch, root, runner, "--json")
+
+    out_lines = capsys.readouterr().out.splitlines()
+    assert exit_code == 0
+    assert len(out_lines) == 2
+    rows = {json.loads(line)["name"]: json.loads(line) for line in out_lines}
+    assert rows[ec2_name]["engine_reachable"] is None
+    assert rows[ec2_name]["params_present"] is False
+    assert rows[ssh_name]["engine_reachable"] is True
+    assert rows[ssh_name]["ec2_state"] is None
+    assert rows[ssh_name]["params_present"] is None
+    assert rows[ssh_name]["lookup_error"] is None
+    # The same field set on both rows, in the same order.
+    assert list(rows[ec2_name]) == list(rows[ssh_name])

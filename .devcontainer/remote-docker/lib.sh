@@ -74,7 +74,7 @@ rd_require_remote_config() {
   # An SSH engine's manifest (remote-instances/<name>/engine.json) is its
   # whole declaration: no EC2 id store and no AWS session exist behind it,
   # so only the docker context the engine answers on is demanded.
-  if [ "${KIND:-ec2}" = "ssh" ]; then
+  if [ "$(rd_engine_kind)" = "ssh" ]; then
     : "${REMOTE_DOCKER_CONTEXT:?REMOTE_DOCKER_CONTEXT must be set}"
     return 0
   fi
@@ -98,7 +98,7 @@ rd_check_prereqs() {
   # An SSH engine opens no AWS session: neither the aws CLI nor the SSM
   # session-manager-plugin is on its path. Docker and jq are demanded by
   # their own call sites, as before.
-  if [ "${KIND:-ec2}" = "ssh" ]; then
+  if [ "$(rd_engine_kind)" = "ssh" ]; then
     return 0
   fi
   rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
@@ -252,6 +252,31 @@ rd_require_engine_instance_agreement() {
     "What is configured:       ${RD_BOLD}make list-instances${RD_RESET}"
 }
 
+# The engine-kind predicate and its refusal, the one place this library
+# tells the kinds apart. An instance's kind is the KIND line its resolved
+# address block exported (the resolver emits KIND=ssh for an SSH engine and
+# no KIND line at all for an EC2 instance), so the default is ec2 -- the
+# same default every consumer of the resolved block reads. Callers must have
+# resolved the instance (rd_resolve_instance) before asking, because KIND is
+# exported by that resolution; before it has run, the predicate honestly
+# answers ec2, which is exactly what an unresolved EC2 default is.
+rd_engine_kind() {
+  printf '%s\n' "${KIND:-ec2}"
+}
+
+# Refuse when the resolved instance is not the wanted kind. $(1) is the
+# wanted kind ("ec2" or "ssh"); $(2) is the remedy -- the target family's
+# own next step, stated as one copy-pasteable line. The failure names the
+# instance, its actual kind, and that remedy, so the operator never has to
+# guess which surface reaches the engine they actually have.
+rd_require_engine_kind() {
+  local wanted="$1" remedy="$2" actual
+  actual="$(rd_engine_kind)"
+  [ "$actual" = "$wanted" ] && return 0
+  rd_fail "instance '${INSTANCE:-<unresolved>}' is a ${actual} engine; this target only reaches ${wanted} instances" \
+    "$remedy"
+}
+
 rd_check_aws_auth() {
   aws sts get-caller-identity --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null 2>&1 \
     || rd_die "AWS credentials for profile '$REMOTE_AWS_PROFILE' are not valid. Run: aws sso login --profile $REMOTE_AWS_PROFILE"
@@ -382,14 +407,14 @@ rd_engine_diagnosis() {
   # question only; running it for ssh would read an absent profile as an
   # expired session and send the operator to sign in to something the engine
   # never uses.
-  if [ "${KIND:-}" != "ssh" ] \
+  if [ "$(rd_engine_kind)" != "ssh" ] \
     && command -v aws > /dev/null 2>&1 \
     && ! aws sts get-caller-identity --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null 2>&1; then
     printf 'the AWS session for profile '\''%s'\'' has expired, which breaks the port forward.\n' "$REMOTE_AWS_PROFILE"
     printf 'aws sso login --profile %s, then %s\n' "$REMOTE_AWS_PROFILE" "$forward_remedy"
     return 0
   fi
-  if [ "${KIND:-}" = "ssh" ]; then
+  if [ "$(rd_engine_kind)" = "ssh" ]; then
     printf 'the ssh forward to %s has dropped.\n' "${ENGINE_ENDPOINT:-<unresolved>}"
     printf '%s reopens it\n' "$ssh_forward_remedy"
     return 0

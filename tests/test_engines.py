@@ -856,3 +856,162 @@ def test_engine_init_help_names_every_flag(
     for flag in ("--host", "--user", "--port", "--docker-addr"):
         assert flag in out, f"{flag} is missing from engine-init's help"
     assert re.search(r"--host\b", out)
+
+
+# ---------------------------------------------------------------------------
+# cli engine-remove
+# ---------------------------------------------------------------------------
+
+
+def _import_forwards() -> ModuleType:
+    """Import devcontainer_config.forwards from inside a function body."""
+    return importlib.import_module("devcontainer_config.forwards")
+
+
+def _seed_registered_engine(root: Path, name: str) -> Path:
+    """A registered ssh engine: the directory, its manifest, and local state.
+
+    The local state mirrors what a forward that once ran leaves behind: the
+    per-instance id store and the forward record, both inside
+    `instances.certs_dir(name)` -- the subtree the removal deletes.
+    """
+    instances = _import_instances()
+    instance_ops = _import_instance_ops()
+    manifest = instances.engine_manifest_path(root, name)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "kind": instances.ENGINE_KIND_SSH,
+                "host": _engine_host(),
+                "user": _engine_user(),
+                "port": _engine_port(),
+                "docker_addr": "/var/run/docker.sock",
+            }
+        ),
+        encoding="utf-8",
+    )
+    cert_directory = instances.certs_dir(name)
+    cert_directory.mkdir(parents=True, exist_ok=True)
+    (cert_directory / instance_ops.INSTANCE_ID_FILENAME).write_text("i-stale\n", encoding="utf-8")
+    (cert_directory / "forward.json").write_text("{}\n", encoding="utf-8")
+    return cert_directory
+
+
+class _FakeStopper:
+    """The injected forward stopper, hermetic: records and answers success."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __call__(self, name: str) -> str:
+        self.calls.append(name)
+        return f"stopped forward for {name!r}"
+
+
+class _EngineRunner:
+    """A queued Runner double for the engine-remove docker surface."""
+
+    def __init__(self, *results: subprocess.CompletedProcess[str]) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self._queue = list(results)
+
+    def __call__(
+        self, argv: Sequence[str], stdin: str | None, *, env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        self.calls.append(tuple(argv))
+        assert self._queue, f"_EngineRunner was invoked with no queued response: {tuple(argv)!r}"
+        return self._queue.pop(0)
+
+
+def _ok_result(stdout: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+def _err_result(stderr: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=stderr)
+
+
+def test_engine_remove_cli_removes_the_engine_and_prints_each_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    instances = _import_instances()
+    instance_ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    cert_directory = _seed_registered_engine(root, name)
+    context = instances.docker_context(root, name)
+    runner = _EngineRunner(_ok_result(), _ok_result(), _ok_result())
+    stopper = _FakeStopper()
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+    monkeypatch.setattr(_import_forwards(), "stop_forward", stopper)
+
+    exit_code = run_cli(monkeypatch, root, ["engine-remove", name])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert stopper.calls == [name]
+    assert not cert_directory.exists()
+    assert not (root / "remote-instances" / name).exists()
+    assert f"removed docker context {context!r}" in out
+    assert "removed engine registration" in out
+
+
+def test_engine_remove_cli_refuses_an_ec2_instance_naming_instance_destroy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    instance_ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("ec2")
+    directory = root / "remote-instances" / name
+    directory.mkdir(parents=True)
+    (directory / "terragrunt.hcl").write_text("# seeded\n", encoding="utf-8")
+    runner = _EngineRunner()
+    stopper = _FakeStopper()
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+    monkeypatch.setattr(_import_forwards(), "stop_forward", stopper)
+
+    exit_code = run_cli(monkeypatch, root, ["engine-remove", name])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "make instance-destroy" in captured.err
+    assert runner.calls == []
+    assert stopper.calls == []
+    assert directory.is_dir()
+
+
+def test_engine_remove_cli_refuses_while_a_container_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    instances = _import_instances()
+    instance_ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    cert_directory = _seed_registered_engine(root, name)
+    assert (cert_directory / "forward.json").exists()
+    runner = _EngineRunner(_ok_result("the-devcontainer\n"))
+    stopper = _FakeStopper()
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+    monkeypatch.setattr(_import_forwards(), "stop_forward", stopper)
+
+    exit_code = run_cli(monkeypatch, root, ["engine-remove", name])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert f"make clean ENGINE={name}" in captured.err
+    assert stopper.calls == []
+    assert instances.engine_manifest_path(root, name).is_file()
+
+
+def test_module_help_lists_engine_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Wiring smoke test: `engine-remove` is a subcommand of `main`."""
+    cli = import_cli()
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--help"])
+
+    assert exc_info.value.code == 0
+    assert "engine-remove" in capsys.readouterr().out

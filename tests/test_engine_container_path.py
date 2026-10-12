@@ -367,9 +367,14 @@ def test_engine_diagnosis_ec2_path_still_names_the_sso_remedy(tmp_path: Path) ->
 
 
 def test_engine_diagnosis_ssh_branch_text_is_forward_only() -> None:
-    """Static: the ssh branch itself names ENGINE_ENDPOINT and no EC2 value."""
+    """Static: the ssh branch itself names ENGINE_ENDPOINT and no EC2 value.
+
+    The branch guard reads the kind through `rd_engine_kind`, the one
+    predicate in lib.sh since the P4 kind refusals centralized it -- the
+    same text every other kind-aware site in the library now reads.
+    """
     body = _sh_function_body("rd_engine_diagnosis", _lib_text())
-    branch_at = body.index('if [ "${KIND:-}" = "ssh" ]; then')
+    branch_at = body.index('if [ "$(rd_engine_kind)" = "ssh" ]; then')
     branch = body[branch_at : body.index("return 0", branch_at)]
     assert "ENGINE_ENDPOINT" in branch, "the ssh diagnosis names the resolved endpoint"
     assert "ssh_forward_remedy" in branch or "make connect-refresh" in branch, (

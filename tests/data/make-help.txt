@@ -25,7 +25,7 @@ ENGINE                            pick where builds and containers live
   make disconnect         host    What 'make local' calls. Only changes where new commands and windows point.
 
 INSTANCES                         one remote engine per project under remote-instances/; instance names are project names (e.g. acme)
-  make list-instances     host    List every instance with live status: EC2 state, id, params, certs, forward, context.
+  make list-instances     host    List every instance with live status: EC2 state, id, params, certs, forward, context; ssh engines answer reachability instead.
   make list-containers    host    Every container this project owns, local engine plus every instance's, with per-engine reachability.
   make instance-init      host    Scaffold <project>'s directory; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= for the AMI/AZ lookup only; the deployment region is REMOTE_AWS_REGION]
   make instance-deploy    remote  Converge: provision, link id, trust chain if missing, push secrets. Refuses instance replacement without CONFIRM=replace. INSTANCE= | ALL=1
@@ -35,19 +35,22 @@ INSTANCES                         one remote engine per project under remote-ins
   make instance-start     remote  Start it again and wait for its SSM agent to report ready. INSTANCE=<instance-name> | ALL=1
   make instance-destroy   remote  Destroy + cleanup params, certs, context, id. CONFIRM=destroy only for ALL=1. INSTANCE=<instance-name> | ALL=1
   make instance-link      host    Save the instance's EC2 id for other targets. Deploy does this automatically; run it only after re-provisioning outside make. INSTANCE_ID=<id>
+  make engine-init        host    Scaffold an ssh engine manifest (engine.json). INSTANCE=<name> HOST=<host> USER=<user> [PORT=22] [DOCKER_ADDR=/var/run/docker.sock; a Windows engine needs tcp://localhost:2375]
+  make engine-verify      host    One-shot ssh engine reachability proof: opens the forward, handshakes docker through its context, closes the forward. The ssh engine's connect-start.
+  make engine-remove      host    Remove an ssh engine whole: forward, docker context, local state, registration. Needs CONFIRM=remove; refuses while a project container exists on the engine.
   make cert-ca            host    Create this instance's certificate authority. Once per instance; refuses if one exists.
   make cert-client        host    Issue the client certificate 'make connect-start' presents. Run after cert-ca, and again at renewal.
   make cert-publish       remote  Issue server material and publish it to Parameter Store. The daemon needs it to open its listener.
   make cert-install       remote  Have the instance fetch the published material and start its daemon. Run after cert-publish.
-  make cert-status        host    Client and CA expiry per instance.
+  make cert-status        host    Client and CA expiry per instance. EC2 engines only; no TLS material exists for ssh engines.
   make push-secrets       remote  Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed.
   make connect-start      remote  Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json engines); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>).
   make connect-status     host    Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1
   make connect-stop       host    Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1
   make connect-refresh    host    Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1
   make connect-list       host    Every instance's forward: pid, port, listening or not.
-  make bucket-list        host    Every state bucket this fleet's naming template matches: name, configured or orphaned. REMOTE_AWS_REGION required.
-  make bucket-delete      host    Purge + delete state buckets: INSTANCE=<name>, or ALL=1 CONFIRM=delete for every one in REMOTE_AWS_REGION. REMOTE_AWS_REGION required.
+  make bucket-list        host    Every state bucket this fleet's naming template matches: name, configured or orphaned. REMOTE_AWS_REGION required. EC2 engines only; refuses if any ssh engine is configured.
+  make bucket-delete      host    Purge + delete state buckets: INSTANCE=<name>, or ALL=1 CONFIRM=delete for every one in REMOTE_AWS_REGION. REMOTE_AWS_REGION required. EC2 engines only; a mixed fleet is refused.
   make remote             host    Point them at the remote engine (<REMOTE_DOCKER_CONTEXT>): ensures the engine's forward in the background, then switches docker. INSTANCE=<name> targets that instance.
 
 BUILD                             every target blocks until the container is up and exits non-zero if anything fails

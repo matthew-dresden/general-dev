@@ -2,13 +2,16 @@
 
 "Instance-scoped" is read off the Makefile as "dispatches through one of the
 instance-aware entry scripts" -- the scripts that call `rd_resolve_instance` and
-so act on one named instance. Two of them reach the remote engine
-(`container.sh`, `push-secrets.sh`) and one addresses an instance's material
-without touching an engine at all (`certs.sh`, whose `ca` and `client`
-subcommands write only to the local certificate directory). The property that
-matters is the same for all three: a target scoped to one instance must accept
-`INSTANCE`, or `INSTANCE=<name> make <target>` silently acts on the default
-instead.
+so act on one named instance -- or as resolving in the recipe itself: since the
+ssh engine kind arrived, several instance-* targets resolve inside their own
+recipe body (`. lib.sh; INSTANCE=... rd_resolve_instance`) to kind-check before
+acting, which is the same instance-scoping one level up. Two of the scripts
+reach the remote engine (`container.sh`, `push-secrets.sh`) and one addresses
+an instance's material without touching an engine at all (`certs.sh`, whose
+`ca` and `client` subcommands write only to the local certificate directory).
+The property that matters is the same for all of them: a target scoped to one
+instance must accept `INSTANCE`, or `INSTANCE=<name> make <target>` silently
+acts on the default instead.
 
 `tests/test_remote_target_instance_wiring.py` checks that each remote recipe
 passes `INSTANCE` through. That is a forward check, and a forward check alone
@@ -63,11 +66,15 @@ def _target_recipes() -> dict[str, list[str]]:
 def _targets_reaching_the_remote_engine() -> set[str]:
     """Targets whose recipe reaches container.sh/push-secrets.sh/certs.sh.
 
-    Either directly, or through `CONTAINER_FLEET_DISPATCH` -- the define the
+    Either directly, through `CONTAINER_FLEET_DISPATCH` -- the define the
     container targets' fleet forms share, whose expansion invokes
-    `$(CONTAINER_SH)` once per engine. A recipe that only calls the define
-    still reaches the remote engine, so the parse must follow it or silently
-    drop every target the dispatcher absorbed.
+    `$(CONTAINER_SH)` once per engine -- or by resolving in the recipe
+    itself: a recipe that calls `rd_resolve_instance` acts on one named
+    instance whatever it does next (kind-check, cli call, engine teardown),
+    which is the instance-scoping this file's docstring defines. A recipe
+    that only calls the dispatcher still reaches the remote engine, so the
+    parse must follow it or silently drop every target the dispatcher
+    absorbed.
     """
     return {
         target
@@ -75,6 +82,7 @@ def _targets_reaching_the_remote_engine() -> set[str]:
         if any(
             re.search(r"\$\((CONTAINER_SH|SECRETS_SH|CERTS_SH)\)", line)
             or "$(call CONTAINER_FLEET_DISPATCH," in line
+            or "rd_resolve_instance" in line
             for line in lines
         )
     }
@@ -86,13 +94,16 @@ def _targets_accepting_instance() -> set[str]:
     `CONTAINER_FLEET_DISPATCH` carries `INSTANCE="$(INSTANCE)"` into every
     engine iteration itself, so a recipe calling it accepts an instance
     exactly as a recipe naming `$(CONTAINER_SH)` with an explicit
-    `INSTANCE="$(INSTANCE)"` does.
+    `INSTANCE="$(INSTANCE)"` does. An in-recipe `rd_resolve_instance` call
+    accepts one too: the resolver reads INSTANCE from its environment.
     """
     return {
         target
         for target, lines in _target_recipes().items()
         if any(
-            'INSTANCE="$(INSTANCE)"' in line or "$(call CONTAINER_FLEET_DISPATCH," in line
+            'INSTANCE="$(INSTANCE)"' in line
+            or "$(call CONTAINER_FLEET_DISPATCH," in line
+            or "rd_resolve_instance" in line
             for line in lines
         )
     }

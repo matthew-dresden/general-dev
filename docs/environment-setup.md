@@ -360,6 +360,36 @@ the first that cannot answer; `make clean ALL=1` additionally requires
 container at creation instead of leaving the `<repo>-<devcontainerId>`
 default for a later `make rename`.
 
+### The ssh engine path
+
+An EC2 instance is one kind of remote engine. The other kind is any machine
+reachable over SSH that runs Docker: a Linux daemon through its socket or a
+TCP endpoint, or Windows through Docker Desktop's exposed TCP endpoint. The
+whole engine is one `remote-instances/<name>/engine.json` manifest, and no
+AWS value exists behind it anywhere: no Terragrunt deployment, no state
+bucket, no Parameter Store prefix, no certificates, no instance role. The
+ssh transport in [devcontainer.md](devcontainer.md)'s "Transport" section
+carries the docker API to it over a managed ssh local forward instead of
+an SSM session.
+
+The lifecycle is five targets:
+
+| Stage | Command |
+|---|---|
+| Scaffold the manifest | `make engine-init INSTANCE=<name> HOST=<host> USER=<user>` (`PORT=` and `DOCKER_ADDR=` optional; a Windows engine needs Docker Desktop exposed and `DOCKER_ADDR=tcp://localhost:2375`) |
+| Prove reachability | `make engine-verify INSTANCE=<name>`: opens the forward, handshakes docker through its context, closes the forward, prints the versions |
+| Open the forward | `make remote INSTANCE=<name> DEVCONTAINER_TRANSPORT=ssh` (or `make connect-start INSTANCE=<name> DEVCONTAINER_TRANSPORT=ssh`, which leaves the machine-wide context alone); the selector chooses the kind, and the ssm default refuses an ssh engine naming this command as the remedy |
+| Build | `make build INSTANCE=<name>` |
+| Retire | `make engine-remove INSTANCE=<name> CONFIRM=remove`, refused while a project container still exists on the engine |
+
+Configuration reaches such an engine's container through the volume, not
+Parameter Store: the build seeds the same transformed payload the EC2 path
+publishes straight into the freshly cloned workspace (fresh on every
+rebuild), and `make push-secrets` refreshes the two files in the running
+container over stdin, so a config change needs no rebuild. Both channels
+and their guarantees are in [devcontainer.md](devcontainer.md)'s "Secrets
+model" section. `gd-engine-ssh` drives this whole path for an agent.
+
 ### What scaffold and deploy do
 
 `make instance-init INSTANCE=<name>` writes the one file a new instance
@@ -470,8 +500,10 @@ terminal can run `make build ENGINE=local` while another runs
 `make build ENGINE=acme`, and a third drives a second instance. Each
 remote engine needs its forward open first: `make remote INSTANCE=<name>`
 opens it as a background daemon and returns once docker answers through
-it, and later `make connect-start ENGINE=<name>` re-opens a single forward
-without touching what other terminals see. The forward daemon's lifecycle
+it (an SSH engine adds `DEVCONTAINER_TRANSPORT=ssh`, per the ssh engine
+path above), and later `make connect-start ENGINE=<name>` re-opens a
+single forward without touching what other terminals see. The forward
+daemon's lifecycle
 has its own targets: `make connect-status INSTANCE=<name>` (or `ALL=1`)
 reports pid, port and whether the tunnel answers, `make connect-stop`
 closes one or every forward, `make connect-refresh` stops and reopens from

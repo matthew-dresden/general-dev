@@ -2,22 +2,25 @@
 
 A reusable devcontainer platform: one repository that creates and manages
 one to many separate development containers, whether on this laptop's
-Docker engine, on remote EC2 engines, or on both at once. The projects you
-work on are cloned inside the workspace as plain nested repositories.
+Docker engine, on remote EC2 engines, on SSH engines, or on any mix of
+them at once. The projects you work on are cloned inside the workspace as
+plain nested repositories.
 
 What that buys you, and why you would use it:
 
-- **Many containers, two kinds of engine.** A container per clone, per
+- **Many containers, three kinds of engine.** A container per clone, per
   branch under review, or per project. Name one at creation (`make build
   NAME=x`), list them across every engine at once (`make list-containers`),
   and addressed per engine (`ENGINE=local` or `ENGINE=<instance>`) so
   parallel terminals never switch the docker context underneath each other.
 - **Work survives the laptop.** Local containers bind-mount this checkout;
-  remote containers live on an EC2 engine reached through an SSM port
-  forward carrying the docker API under mutual TLS, so they keep running
-  through sleeps, restarts and offline stretches. There is no key pair and
-  no host access by design: `make exec` opens a shell in a container, the
-  only shell this workspace offers.
+  remote containers live on an engine reached over the network: an EC2
+  engine through an SSM port forward carrying the docker API under mutual
+  TLS, or an SSH engine through a managed ssh local forward. Either way
+  they keep running through sleeps, restarts and offline stretches. On the
+  EC2 path there is no key pair and no host access by design, and on every
+  path `make exec` opens a shell in a container, the only shell this
+  workspace offers.
 - **Every operation is automated.** Provisioning an engine, its
   certificates and secrets, building, naming, starting, stopping, checking,
   fleet operations and teardown: the whole lifecycle for engines and
@@ -182,11 +185,14 @@ make clones under clones visible: the Definition section of
   container: fragment modes, the startup block, silent shell startup, and
   git and aws reachability for whichever sources the manifest names.
 - One remote engine per project under `remote-instances/`: the `make help`
-  INSTANCES group scaffolds, converges, powers and retires them
-  (`make list-instances` shows every instance's live state). The second
-  engine kind -- one declared by a `remote-instances/<name>/engine.json`
-  manifest, no AWS behind it -- is scaffolded, verified and removed with
-  `make engine-init`, `make engine-verify` and `make engine-remove`.
+  INSTANCES group scaffolds, converges, powers and retires the EC2 kind
+  (`make list-instances` shows every instance's live state). The third
+  engine kind, SSH, is any machine reachable over SSH that runs Docker: a
+  Linux daemon through its socket or a TCP endpoint, or Windows through
+  Docker Desktop's exposed TCP endpoint. An SSH engine, declared by a
+  `remote-instances/<name>/engine.json` manifest with no AWS behind it, is
+  scaffolded, verified and removed with `make engine-init`,
+  `make engine-verify` and `make engine-remove`.
 - Claude Code starts on the classic renderer and never offers the flicker-free
   fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen`
   still opts in for the current container.
@@ -221,7 +227,7 @@ make clones under clones visible: the Definition section of
 | `.devcontainer/` | Devcontainer definition (image + features), postcreate setup, shared shell functions |
 | `.devcontainer/hostcreds.map.json` (+ committed `.example`) | Hostcreds manifest, gitignored: every credential this machine pushes into the container, named with its source |
 | `.devcontainer/remote-docker/` | Remote EC2 engine: transport, certificate and secret entry points, instance config, see its [README](.devcontainer/remote-docker/README.md) |
-| `remote-instances/` | One Terragrunt deployment per remote engine, scaffolded by `make instance-init`; see its [README](remote-instances/README.md) |
+| `remote-instances/` | One remote engine per project: a Terragrunt deployment (`terragrunt.hcl`) per EC2 engine, scaffolded by `make instance-init`, or an SSH engine declared by an `engine.json` manifest, scaffolded by `make engine-init`; see its [README](remote-instances/README.md) |
 | `.devcontainer/nix-family-os/`, `wsl-family-os/` | Host-side proxy (tinyproxy) helpers for local mode |
 | `repos/` | Where project repositories are cloned. Only its `.gitkeep` is tracked |
 | `.agents/skills/` | Canonical agent-agnostic skills home (roster prefixed `gd-`); wired into an agent on this Mac by the `skills-*` make targets |

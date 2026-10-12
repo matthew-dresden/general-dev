@@ -255,7 +255,7 @@ rd_require_engine_instance_agreement() {
 # The engine-kind predicate and its refusal, the one place this library
 # tells the kinds apart. An instance's kind is the KIND line its resolved
 # address block exported (the resolver emits KIND=ssh for an SSH engine and
-# no KIND line at all for an EC2 instance), so the default is ec2 -- the
+# no KIND line at all for an EC2 instance), so the default is ec2, the
 # same default every consumer of the resolved block reads. Callers must have
 # resolved the instance (rd_resolve_instance) before asking, because KIND is
 # exported by that resolution; before it has run, the predicate honestly
@@ -265,7 +265,7 @@ rd_engine_kind() {
 }
 
 # Refuse when the resolved instance is not the wanted kind. $(1) is the
-# wanted kind ("ec2" or "ssh"); $(2) is the remedy -- the target family's
+# wanted kind ("ec2" or "ssh"); $(2) is the remedy, the target family's
 # own next step, stated as one copy-pasteable line. The failure names the
 # instance, its actual kind, and that remedy, so the operator never has to
 # guess which surface reaches the engine they actually have.
@@ -273,7 +273,7 @@ rd_require_engine_kind() {
   local wanted="$1" remedy="$2" actual
   actual="$(rd_engine_kind)"
   [ "$actual" = "$wanted" ] && return 0
-  rd_fail "instance '${INSTANCE:-<unresolved>}' is a ${actual} engine; this target only reaches ${wanted} instances" \
+  rd_fail "instance '${INSTANCE:-<unresolved>}' is an ${actual} engine; this target only reaches ${wanted} instances" \
     "$remedy"
 }
 

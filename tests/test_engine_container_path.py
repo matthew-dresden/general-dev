@@ -403,7 +403,7 @@ def test_ensure_secrets_current_skips_the_aws_probe_for_ssh() -> None:
     """The freshness probe is an EC2 question; ssh returns before it."""
     body = _sh_function_body("rdc_ensure_secrets_current", _container_text())
     require_at = body.index("rd_require_remote_config")
-    kind_at = body.index('if [ "${KIND:-}" = "ssh" ]')
+    kind_at = body.index('if [ "$(rd_engine_kind)" = "ssh" ]')
     probe_at = body.index("ssm describe-parameters")
     assert require_at < kind_at < probe_at, (
         "the ssh branch must sit between the remote requirements and the aws probe"
@@ -421,7 +421,7 @@ def test_seed_volume_writes_the_payload_only_for_ssh() -> None:
     stdin heredoc, escaped, chowned; the EC2 clone heredoc writes none of it."""
     body = _sh_function_body("rdc_seed_volume", _container_text())
     clone_at = body.index("<<SEED")
-    guard_at = body.index('if [ "${KIND:-}" = "ssh" ]')
+    guard_at = body.index('if [ "$(rd_engine_kind)" = "ssh" ]')
     call_at = body.index("rdc_seed_config_payload")
     ok_at = body.index('rd_ok "checkout seeded')
     assert clone_at < guard_at < call_at < ok_at, (
@@ -464,7 +464,7 @@ def test_up_refresh_uses_the_forwards_cli_for_ssh() -> None:
     because one idles until interrupted and turns a Ctrl-C into a false
     success against a forward that has just closed."""
     body = _sh_function_body("rdc_up", _container_text())
-    ssh_at = body.index('if [ "$backend" = "remote" ] && [ "${KIND:-}" = "ssh" ]')
+    ssh_at = body.index('if [ "$backend" = "remote" ] && [ "$(rd_engine_kind)" = "ssh" ]')
     ssm_at = body.index('elif [ "$backend" = "remote" ]', ssh_at)
     ssh_branch = body[ssh_at:ssm_at]
     assert "devcontainer_config.forwards open" in ssh_branch

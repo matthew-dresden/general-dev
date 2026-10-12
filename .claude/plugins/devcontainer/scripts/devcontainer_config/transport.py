@@ -182,19 +182,18 @@ _SSM_FORWARD_TIMEOUT_DEFAULT_SECONDS = 30.0
 # E6-F2-S1-T3, Approach step 2: the build path's opt-in transport selector.
 # `resolve_transport` is the one function in this module that reads this
 # variable (the same one-reader convention `DOCKER_TLS_PORT_ENV_VAR` and
-# `SSM_FORWARD_TIMEOUT_ENV_VAR` already establish above). Since the cutover
-# there is one transport, so unset resolves to `TRANSPORT_SSM` and that is
-# the only accepted value. The selector is kept rather than deleted because
-# it is the seam a future transport is added at, and because a caller who
-# still exports the removed `ssh` value is told so rather than silently
-# redirected.
+# `SSM_FORWARD_TIMEOUT_ENV_VAR` already establish above). The selector is
+# kept rather than deleted because it is the seam a future transport is
+# added at, and because a caller who exports `ssh` here, where it does not
+# drive this path, is told so rather than silently redirected.
 DEVCONTAINER_TRANSPORT_ENV_VAR = "DEVCONTAINER_TRANSPORT"
 TRANSPORT_SSM = "ssm"
 _VALID_TRANSPORTS: tuple[str, ...] = (TRANSPORT_SSM,)
-# The value this selector accepted before the cutover. Named so the error
-# below can tell a caller who still exports it what happened, instead of
-# treating it like any other typo.
-_REMOVED_TRANSPORT = "ssh"
+# The value `make connect-start` dispatches on engine kind for: an ssh
+# engine's transport. It is refused here, where only the ssm path is
+# gated, so the error can tell a caller who exports it where the value
+# does belong instead of treating it like any other typo.
+_SSH_TRANSPORT = "ssh"
 
 # spec Section 13, decision D2: the port-forwarding document, never the SSH
 # document (`AWS-StartSSHSession`) the replaced transport used.
@@ -468,25 +467,27 @@ def resolve_transport() -> str:
     """The build path's transport selector.
 
     Reads `DEVCONTAINER_TRANSPORT_ENV_VAR` from the environment. Unset
-    resolves to `TRANSPORT_SSM`, which since the cutover is the only
-    transport there is. Any other value is a caller error and fails fast
-    rather than silently choosing for them.
+    resolves to `TRANSPORT_SSM`, the only transport this module drives.
+    Any other value is a caller error and fails fast rather than silently
+    choosing for them.
 
-    The removed `ssh` value gets its own message. A caller who exports it
-    out of habit, or from an old shell profile, has a different problem
-    from someone who made a typo, and telling them the transport was
-    removed is more useful than listing the accepted values at them.
+    The `ssh` value gets its own message. It is a first-class engine kind,
+    and `make connect-start` dispatches on it by engine kind, routing ssh
+    engines to `transport_ssh`; a caller who reaches this module with it
+    has aimed an ssh-engine value at the EC2/ssm path, and saying where the
+    value does belong is more useful than listing accepted values at them.
 
     Raises:
         TransportError: the variable is set to anything other than
             `TRANSPORT_SSM`.
     """
     raw = os.environ.get(DEVCONTAINER_TRANSPORT_ENV_VAR, TRANSPORT_SSM)
-    if raw == _REMOVED_TRANSPORT:
+    if raw == _SSH_TRANSPORT:
         raise TransportError(
-            f"ERROR: {DEVCONTAINER_TRANSPORT_ENV_VAR}={raw!r} was removed at cutover\n"
-            f"The SSH transport and its tunnel script no longer exist. The docker API is "
-            f"reached over an SSM port forward secured with mTLS.\n"
+            f"ERROR: {DEVCONTAINER_TRANSPORT_ENV_VAR}={raw!r} does not drive this path\n"
+            f"ssh is an engine kind, dispatched by engine kind at the make connect-start entry "
+            f"point; this module gates the EC2/ssm path, whose only accepted value is "
+            f"{TRANSPORT_SSM!r}.\n"
             f"Unset {DEVCONTAINER_TRANSPORT_ENV_VAR}, or set it to {TRANSPORT_SSM!r}."
         )
     if raw not in _VALID_TRANSPORTS:

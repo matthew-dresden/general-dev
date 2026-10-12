@@ -33,8 +33,8 @@ SSM_PREFIX="${PARAMETER_PREFIX%/}"
 # the checkout the container already mounts, and the container can be
 # refreshed without a rebuild. The resolver has already run (above), so the
 # project's workspace path is addressed on the engine this run resolved.
-# Every value rides stdin -- `cat >`, the same discipline rdc_push_creds
-# applies to every credential fragment -- never a docker exec's argv, where
+# Every value rides stdin (`cat >`, the same discipline rdc_push_creds
+# applies to every credential fragment), never a docker exec's argv, where
 # it would sit in the process table for the life of the call. The workspace
 # path is the same CONTAINER_WORKSPACES_ROOT + PROJECT_NAME derivation
 # container.sh uses; config-payload.sh sources the same default, so the
@@ -75,7 +75,7 @@ rd_deliver_config_payload_to_container() {
   # a global, not a local, for the same reason: the trap is evaluated when
   # the whole script exits, after this function's scope is gone, and under
   # set -u an unbound name there turns a successful delivery into a failed
-  # run -- the same shape the EC2 publish's RD_PUT_DIR below already uses.
+  # run, the same shape the EC2 publish's RD_PUT_DIR below already uses.
   RD_PAYLOAD_DIR="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/rd-push.XXXXXX")"
   trap 'rm -rf "$RD_PAYLOAD_DIR"' EXIT
   write_config_payload "$RD_PAYLOAD_DIR"

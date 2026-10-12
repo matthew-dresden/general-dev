@@ -3,17 +3,17 @@
 This module is the second transport `DEVCONTAINER_TRANSPORT` selects at
 `make connect-start`, beside `devcontainer_config.transport`'s SSM port
 forward: where that one reaches an EC2 instance's loopback daemon over
-`aws ssm start-session`, this one reaches a generic SSH engine -- the kind
-`remote-instances/<name>/engine.json` declares (see
-`devcontainer_config.instances`) -- over a plain local forward. The forward
+`aws ssm start-session`, this one reaches a generic SSH engine (the kind
+`remote-instances/<name>/engine.json` declares; see
+`devcontainer_config.instances`) over a plain local forward. The forward
 is `ssh -N -L`: `-N` executes no remote command, so the remote shell type is
 irrelevant, and the tunnel rides the operator's own ssh configuration,
-identity and agent untouched -- no key-file flag is ever built, and no SSH
+identity and agent untouched: no key-file flag is ever built, and no SSH
 configuration of any kind is read or written by this module. The destination
 after the local port differs by platform: a Linux endpoint typically serves
 an absolute Unix socket path (or a tcp address), while a Windows endpoint
-REQUIRES a tcp destination -- Windows OpenSSH cannot forward to named pipes
-or Unix sockets -- normally Docker Desktop's `tcp://localhost:2375` ("Expose
+REQUIRES a tcp destination (Windows OpenSSH cannot forward to named pipes
+or Unix sockets), normally Docker Desktop's `tcp://localhost:2375` ("Expose
 daemon on tcp://localhost:2375 without TLS"). `diagnose_forward_not_opened`
 states that guidance explicitly when a forward whose destination is a Unix
 socket path never opens, and `cli.py`'s engine-init `--docker-addr` help
@@ -22,20 +22,20 @@ manifest is written and when the forward fails.
 
 `connect` mirrors the ssm transport's connect flow with a plain docker
 context in place of the mTLS one: allocate (or reuse) the local port through
-`transport.allocate_local_port` -- the same record-is-the-context rule, so
-the context stays stable across reconnects -- launch the forward through the
+`transport.allocate_local_port` (the same record-is-the-context rule, so
+the context stays stable across reconnects), launch the forward through the
 same `ProcessLauncher` seam the ssm module uses
 (`transport.default_process_launcher`), wait until the local TCP port
 actually accepts a connection (`transport.tcp_ready_probe`, the same
 readiness-decided-by-a-connection-attempt contract), create or update the
 docker context named `--context` with a PLAIN endpoint
-`tcp://127.0.0.1:<port>` -- no `ca`, `cert` or `key`: the ssh engine names
-no certificate material -- activate it with `docker context use`, and
+`tcp://127.0.0.1:<port>` (no `ca`, `cert` or `key`: the ssh engine names
+no certificate material), activate it with `docker context use`, and
 confirm the whole path with a `docker version` handshake whose API floor and
 rootless-probe semantics are identical to `transport.handshake`'s. It then
-prints a `Connected:` line shaped like the ssm transport's -- the readiness
+prints a `Connected:` line shaped like the ssm transport's (the readiness
 marker `devcontainer_config.forwards` polls for, so the daemon lifecycle
-works unchanged -- and runs until interrupted. The two interrupt paths are
+works unchanged) and runs until interrupted. The two interrupt paths are
 deliberately different, and the module traps exactly one of them: SIGINT is
 handled in this process, where the interrupted wait tears the ssh child down
 cleanly; SIGTERM is never trapped here, and reaches the ssh child through
@@ -50,7 +50,7 @@ anywhere, the same rule `transport.py`'s own suite enforces: readiness is
 the port accepting a connection, bounded by `SSH_FORWARD_TIMEOUT` (default
 30 seconds, read fresh through `hostprobe.read_positive_seconds`, the one
 shared reader of that variable shape), and the wait between probe attempts
-blocks on the forward process's own stdout through `selectors` -- a real
+blocks on the forward process's own stdout through `selectors`, a real
 I/O-readiness wait, the same primitive `transport.wait_ready` rests on. An
 `ssh -N` forward announces nothing on stdout, so the stream is silent in
 normal operation and the bounded wait simply paces the probes; the moment
@@ -67,8 +67,8 @@ Every docker invocation is issued through an injected
 transport injects; `transport.subprocess_command_runner` is this module's
 production runner and `transport.default_process_launcher` its production
 launcher, so neither module declares a second, independent copy of the
-subprocess-backed seams. The manifest values this module forwards -- host,
-user, port, docker address -- are validated through
+subprocess-backed seams. The manifest values this module forwards (host,
+user, port, docker address) are validated through
 `instances.validate_engine_values`, the same single validation surface the
 manifest's read and write sides use, so a value the manifest would refuse
 never reaches an ssh argument vector at all. The handshake's failure
@@ -110,7 +110,7 @@ _SSH_BINARY = "ssh"
 # The pace of the readiness probes against the local port. The total wait is
 # bounded by `SSH_FORWARD_TIMEOUT`; between probes this module blocks on the
 # forward process's stdout through `selectors` for at most this many seconds
-# -- a bounded I/O-readiness wait, never a sleep -- so a forward that opens
+# (a bounded I/O-readiness wait, never a sleep), so a forward that opens
 # is noticed within one wait, and a child that dies or writes is noticed
 # immediately. The same cadence shape `devcontainer_config.forwards` uses
 # for its own log poll.
@@ -228,7 +228,7 @@ def _forward_argv_for(validated: Mapping[str, object], local_port: int) -> list[
     answer one), and `ExitOnForwardFailure=yes` makes ssh exit non-zero when
     the forward itself cannot be established rather than sitting there
     looking alive. `-p` appears only when the port differs from the default,
-    and the destination `<user>@<host>` is the final element -- the operator's
+    and the destination `<user>@<host>` is the final element, the operator's
     default identity, agent and configuration decide everything this vector
     deliberately does not mention.
     """
@@ -318,9 +318,9 @@ def diagnose_forward_not_opened(
     """The forward-never-opened diagnosis: the endpoint, the port, the platform rule.
 
     `summary` states the specific fact the caller observed (the deadline
-    elapsed, or the ssh process exited); everything else -- the instance,
+    elapsed, or the ssh process exited); everything else (the instance,
     the endpoint, the local port and, for a socket-path destination, the
-    Windows guidance -- is stated here, once.
+    Windows guidance) is stated here, once.
     """
     return (
         f"ERROR: the ssh forward for instance {instance!r} ({endpoint}) did not open\n"
@@ -339,7 +339,7 @@ def _diagnose_handshake_failure(
     Distinct from the forward diagnosis by design: a daemon that does not
     answer behind an open forward is a docker-destination problem, not a
     tunnel problem, and the remedy names the ssh forward only as the thing
-    to confirm -- never the ssm forward `transport.diagnose_handshake_failure`
+    to confirm, never the ssm forward `transport.diagnose_handshake_failure`
     speaks of, and never the certificate reissue that transport's
     certificate-bearing context would suggest.
     """
@@ -432,8 +432,8 @@ def wait_ready(
 
     Readiness is decided exactly as the ssm transport decides it: only a
     successful connection attempt (`probe`) counts, never the process being
-    alive. Between attempts this blocks on `forward_output` -- the ssh
-    process's stdout -- for at most the smaller of the remaining deadline
+    alive. Between attempts this blocks on `forward_output` (the ssh
+    process's stdout) for at most the smaller of the remaining deadline
     and one poll cadence; `ssh -N` writes nothing there in normal operation,
     so the wait simply spaces the probes, while data (an abnormal stdout) or
     EOF (the ssh process exited, its inherited stderr having already shown
@@ -513,7 +513,7 @@ def ensure_context(runner: CommandRunner, *, context_name: str, port: int) -> st
     """Create or update `context_name` to address `tcp://127.0.0.1:<port>`.
 
     An absent context is created; an existing context is updated in place,
-    whatever its current endpoint -- the context is this transport's record
+    whatever its current endpoint: the context is this transport's record
     of the forward, so updating it is the record being kept current, not a
     mutation of someone else's state. Raises naming the context and the
     underlying docker stderr, never a bare exit code.
@@ -585,7 +585,7 @@ def _ensure_api_version_floor(observed_api_version: str, context_name: str) -> N
     """Raise `DockerVersionFloorError` when the daemon's API version is below the floor.
 
     The floor is `transport.DOCKER_API_VERSION_FLOOR`, the same value the
-    ssm transport enforces -- the floor belongs to the API this platform
+    ssm transport enforces: the floor belongs to the API this platform
     requires, not to any one transport.
     """
     floor = transport.DOCKER_API_VERSION_FLOOR
@@ -662,7 +662,7 @@ def handshake(runner: CommandRunner, *, context_name: str) -> HandshakeResult:
     """Complete a docker version handshake against `context_name` (spec Section 4.2.1).
 
     The version call is retried until it answers, bounded overall by
-    `DOCKER_HANDSHAKE_TIMEOUT` -- every attempt shells out to a real docker
+    `DOCKER_HANDSHAKE_TIMEOUT`; every attempt shells out to a real docker
     CLI process, whose own fork/exec and dial cost paces the loop without
     this module adding a fixed delay, and the deadline check bounds the
     total regardless, exactly as `transport.handshake` documents for its
@@ -743,8 +743,8 @@ def _establish_forward(
     """Allocate the port, launch the ssh forward, and wait until the port answers.
 
     The port is allocated (or reused from the context's own record) through
-    `transport.allocate_local_port` -- the same single allocation site the
-    ssm transport uses -- and the forward argument vector is built from the
+    `transport.allocate_local_port` (the same single allocation site the
+    ssm transport uses), and the forward argument vector is built from the
     already-validated values at that port.
 
     Returns `None` only when a `KeyboardInterrupt` arrived before the
@@ -796,9 +796,9 @@ def _teardown_forward_on_error(process: subprocess.Popen[bytes]) -> Iterator[Non
     """Stop `process` if the wrapped block raises anything, then re-raise.
 
     The same discipline `transport._teardown_forward_on_error` enforces for
-    the ssm forward: every failure after the launch -- a docker context that
+    the ssm forward: every failure after the launch (a docker context that
     cannot be written, a handshake that cannot answer, an operator
-    interrupt -- stops the already-launched ssh child rather than orphaning
+    interrupt) stops the already-launched ssh child rather than orphaning
     it holding the allocated loopback port. Catches `BaseException`, not
     `Exception`, so a `KeyboardInterrupt` raised anywhere in the wrapped
     block is covered too; the caught exception is always re-raised
@@ -819,8 +819,8 @@ def _run_until_interrupted(process: subprocess.Popen[bytes]) -> None:
     pipe would eventually deadlock the child) for as long as the process
     keeps running, and the process is stopped on the way out regardless of
     which of the two ended the wait. The ssh child's stderr is inherited,
-    so its own diagnostics reach the operator's terminal -- or the daemon
-    log, under `make connect-start` -- directly.
+    so its own diagnostics reach the operator's terminal, or the daemon
+    log under `make connect-start`, directly.
     """
     try:
         if process.stdout is not None:
@@ -881,7 +881,7 @@ def _run_verify(args: argparse.Namespace) -> int:
 
     `make engine-verify` drives this: establish the forward exactly as
     `connect` does, create or update the plain `tcp://` context at the port
-    just allocated, complete the version handshake -- then stop the forward
+    just allocated, complete the version handshake, then stop the forward
     and report one verdict line. The context is left created (it is the
     record of the port allocation, and the next connect reuses the same
     port through it) but never activated: a proof must not switch the

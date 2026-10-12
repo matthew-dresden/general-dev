@@ -1361,6 +1361,36 @@ def test_engine_remove_without_confirm_refuses_before_anything_resolves() -> Non
     )
 
 
+def test_engine_and_all_refuses_on_a_resolver_loop_target() -> None:
+    """Proved live: ENGINE pins exactly one engine and ALL=1 enumerates every
+    configured instance, so a resolver-loop target refuses the combination
+    before any discovery or resolution runs, naming both selections."""
+    root = find_root(Path(__file__).resolve().parent)
+    make_path = shutil.which("make")
+    assert make_path is not None, "make must be installed on the machine running this suite"
+    environment = dict(os.environ)
+    environment["ENGINE"] = "local"
+    for inherited in ("MAKEFLAGS", "MAKELEVEL", "MFLAGS"):
+        environment.pop(inherited, None)
+    result = subprocess.run(
+        [make_path, "instance-status", "ALL=1"],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=float(os.environ.get("MAKEFILE_GUARD_TEST_TIMEOUT_SECONDS", "30")),
+    )
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "ENGINE=local" in combined, "the refusal must name the ENGINE value it refuses"
+    assert "ALL=1" in combined, "the refusal must name the fleet form it refuses"
+    assert "Could not resolve" not in combined, (
+        "the refusal must fire before the resolver, whose diagnosis would "
+        "otherwise answer for a run the caller did not ask for"
+    )
+
+
 @pytest.mark.parametrize(
     ("target", "ec2_remedy"),
     (

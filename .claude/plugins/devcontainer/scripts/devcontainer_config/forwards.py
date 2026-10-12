@@ -1,17 +1,26 @@
-"""Detached SSM port-forward lifecycle behind the make connect-* targets.
+"""Detached forward lifecycle behind the make connect-* targets.
 
-`make connect-start` opens the instance's SSM port forward as a detached
-daemon
+`make connect-start` opens an engine's forward as a detached daemon
 and returns as soon as the connection is confirmed, instead of holding the
-terminal: this module spawns `devcontainer_config.transport connect` in a
+terminal: this module spawns the transport's `connect` command in a
 new session (its stdout and stderr stream into a per-instance log), waits
 by polling for the transport's own "Connected:" announcement -- which is
 printed only after the docker context was created or updated and answered a
-TLS handshake through the tunnel -- and records the daemon's pid, command,
+handshake through the tunnel -- and records the daemon's pid, command,
 log path and forwarded port in a per-instance JSON record. The record lives
 beside the instance's certificate material (`instances.certs_dir`), so
 `make instance-destroy`'s cleanup removes it with everything else the
 instance scattered.
+
+The transport is chosen by kind, and the record remembers which: the `ssm`
+kind (the default) spawns `devcontainer_config.transport connect` against
+an EC2 instance id, and the `ssh` kind spawns
+`devcontainer_config.transport_ssh connect` against an SSH engine's
+manifest values (`instances.engine_manifest`). Both print the same
+readiness marker, so the open path cannot tell the difference and does not
+need to; `ForwardRecord.engine_kind` and the record's engine identifier
+(the EC2 id, or the `ssh://` endpoint) carry the distinction for status,
+stop and refresh.
 
 `make connect-start` is the open operation. The rest of the lifecycle
 reads and mutates that record: `status` reports
@@ -44,16 +53,23 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from devcontainer_config import instances, repo, transport
 from devcontainer_config.hostprobe import CommandResult, CommandRunner, read_positive_seconds
 
-# The transport command this module spawns and manages. The child composes
+# The transport commands this module spawns and manages. The child composes
 # its own aws/docker calls; this module only decides when and whether it ran.
 _TRANSPORT_MODULE = "devcontainer_config.transport"
+_TRANSPORT_SSH_MODULE = "devcontainer_config.transport_ssh"
 _TRANSPORT_COMMAND = "connect"
+
+# The ssm transport kind -- the default, and what every record written
+# before the field existed reads back as. The ssh kind is
+# `instances.ENGINE_KIND_SSH` (the same "ssh" string the engine manifest and
+# the resolved address block use).
+KIND_SSM = "ssm"
 
 # The line the transport prints only after the docker context answered a
 # TLS handshake through the freshly opened tunnel: the readiness marker
@@ -130,7 +146,13 @@ def time_sleep(seconds: float) -> None:
 
 @dataclasses.dataclass(frozen=True)
 class ForwardRecord:
-    """One running (or last-run) forward daemon, as recorded at open time."""
+    """One running (or last-run) forward daemon, as recorded at open time.
+
+    `instance_id` is the engine identifier: the EC2 instance id for an ssm
+    forward, or the `ssh://<user>@<host>:<port>` endpoint string for an ssh
+    forward. `engine_kind` says which: "ssm" (the default, and what every
+    record written before the field existed reads back as) or "ssh".
+    """
 
     pid: int
     instance: str
@@ -140,6 +162,7 @@ class ForwardRecord:
     argv: tuple[str, ...]
     log: str
     started_at: str
+    engine_kind: str = KIND_SSM
 
     def to_json(self) -> str:
         return json.dumps(dataclasses.asdict(self), indent=2, sort_keys=True) + "\n"
@@ -164,6 +187,7 @@ class ForwardRecord:
                 argv=tuple(str(arg) for arg in payload["argv"]),
                 log=str(payload["log"]),
                 started_at=str(payload["started_at"]),
+                engine_kind=str(payload.get("engine_kind", KIND_SSM)),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ForwardError(
@@ -188,7 +212,14 @@ class ForwardStatus:
 
 
 def child_argv(
-    instance_id: str, context: str, profile: str, region: str, *, python: str | None = None
+    instance_id: str,
+    context: str,
+    profile: str,
+    region: str,
+    *,
+    kind: str = KIND_SSM,
+    engine: Mapping[str, object] | None = None,
+    python: str | None = None,
 ) -> tuple[str, ...]:
     """The transport command one forward daemon runs, in full.
 
@@ -200,7 +231,43 @@ def child_argv(
     child's stdout buffer indefinitely -- the plugin's inherited stderr
     lines would reach the log first, and the poll would time out on a
     forward that was actually open.
+
+    `kind` selects the transport: the default `KIND_SSM` spawns
+    `devcontainer_config.transport connect` against the EC2 `instance_id`
+    exactly as before, while `instances.ENGINE_KIND_SSH` spawns
+    `devcontainer_config.transport_ssh connect` against the SSH engine
+    values in `engine` (a validated manifest dict, from
+    `instances.engine_manifest` or the caller). For the ssh form, the first
+    positional slot carries the INSTANCE NAME (the `--name` value) rather
+    than an EC2 id, and `profile`/`region` are unused -- an ssh engine opens
+    no AWS session -- but stay positional so every caller passes the same
+    five leading arguments for either kind.
     """
+    if kind == instances.ENGINE_KIND_SSH:
+        if engine is None:
+            raise ForwardError(
+                "kind 'ssh' requires the engine manifest values "
+                "(instances.engine_manifest); none were given"
+            )
+        return (
+            python or sys.executable,
+            "-u",
+            "-m",
+            _TRANSPORT_SSH_MODULE,
+            _TRANSPORT_COMMAND,
+            "--name",
+            instance_id,
+            "--host",
+            str(engine["host"]),
+            "--port",
+            str(engine["port"]),
+            "--user",
+            str(engine["user"]),
+            "--docker-addr",
+            str(engine["docker_addr"]),
+            "--context",
+            context,
+        )
     return (
         python or sys.executable,
         "-u",
@@ -395,6 +462,8 @@ def open_forward(
     region: str,
     root: Path,
     *,
+    kind: str = KIND_SSM,
+    engine: Mapping[str, object] | None = None,
     runner: CommandRunner | None = None,
     spawner: Spawner | None = None,
     poll_clock: Callable[[float], None] = time_sleep,
@@ -403,7 +472,8 @@ def open_forward(
 ) -> str:
     """Open one forward daemon and confirm it before returning.
 
-    Spawns the transport's connect command detached, polls for its
+    Spawns the transport's connect command detached (the ssm transport for
+    the default kind, the ssh transport for an SSH engine), polls for its
     "Connected:" announcement (printed only after the docker context
     answered a handshake through the tunnel), records the daemon -- pid,
     full command, log, and the forwarded port the context now carries --
@@ -411,14 +481,22 @@ def open_forward(
     daemon is alive and whose port answers is left untouched and reported;
     a stale record (daemon dead) is replaced by the new daemon and noted.
 
+    For `kind == instances.ENGINE_KIND_SSH`, `engine` carries the SSH
+    engine's values; when it is `None`, the manifest is read from `root`
+    (`instances.engine_manifest`). Either way the values are validated
+    through `instances.validate_engine_values` before any daemon is
+    spawned, and the record's engine identifier is the
+    `ssh://<user>@<host>:<port>` endpoint string rather than the EC2 id.
+
     Returns:
         A message naming what is open and where its log is.
 
     Raises:
         ForwardError: the docker context name carries no valid instance
-            name, the child died before announcing readiness, readiness was
-            not announced within the limit, or the forwarded port could not
-            be read from the docker context afterwards.
+            name, the engine values are missing or invalid, the child died
+            before announcing readiness, readiness was not announced within
+            the limit, or the forwarded port could not be read from the
+            docker context afterwards.
     """
     instance = instance_from_context_name(root, context)
     _validated(instance)
@@ -429,9 +507,27 @@ def open_forward(
             f"{stale.port}); nothing to do. Refresh it with: make connect-refresh "
             f"INSTANCE={instance}"
         )
+    if kind == instances.ENGINE_KIND_SSH:
+        values = engine if engine is not None else instances.engine_manifest(root, instance)
+        try:
+            validated = instances.validate_engine_values(
+                {
+                    "kind": instances.ENGINE_KIND_SSH,
+                    "host": values["host"],
+                    "user": values["user"],
+                    "port": values["port"],
+                    "docker_addr": values["docker_addr"],
+                }
+            )
+        except instances.InstancesError as exc:
+            raise ForwardError(f"the ssh engine values are unusable: {exc}") from exc
+        identifier = f"ssh://{validated['user']}@{validated['host']}:{validated['port']}"
+        argv = list(child_argv(instance, context, "", "", kind=kind, engine=validated))
+    else:
+        identifier = instance_id
+        argv = list(child_argv(instance_id, context, profile, region))
     spawn = spawner if spawner is not None else _default_spawner
     log_file = log_path(instance)
-    argv = child_argv(instance_id, context, profile, region)
     process = spawn(argv, log_file)
     _poll_open(
         process, log_file, poll_clock=poll_clock, poll_seconds=poll_seconds, poll_limit=poll_limit
@@ -440,12 +536,13 @@ def open_forward(
     record = ForwardRecord(
         pid=process.pid,
         instance=instance,
-        instance_id=instance_id,
+        instance_id=identifier,
         context=context,
         port=port,
         argv=tuple(argv),
         log=str(log_file),
         started_at=datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+        engine_kind=kind,
     )
     _write_record(record)
     note = ""
@@ -453,7 +550,7 @@ def open_forward(
         note = " (a stale record from a daemon that was not running was replaced)"
     return (
         f"forward for {instance!r} is open: pid {record.pid}, 127.0.0.1:{port} -> "
-        f"{instance_id}, log {log_file}{note}"
+        f"{identifier}, log {log_file}{note}"
     )
 
 
@@ -712,7 +809,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _usage() -> str:
     return (
         "usage: devcontainer_config.forwards open --instance-id ID --context CTX "
-        "--profile P --region R | status INSTANCE | stop INSTANCE | refresh INSTANCE | list"
+        "--profile P --region R | open --name NAME --host HOST --port PORT --user USER "
+        "--docker-addr ADDR --context CTX | status INSTANCE | stop INSTANCE | "
+        "refresh INSTANCE | list"
     )
 
 
@@ -722,26 +821,84 @@ def _require_args(rest: Sequence[str], count: int, what: str) -> list[str]:
     return list(rest)
 
 
-def _parse_open_flags(rest: Sequence[str]) -> dict[str, str]:
-    """--instance-id/--context/--profile/--region out of `rest`; anything else is an error."""
-    flags = ("--instance-id", "--context", "--profile", "--region")
+# The open command's two flag forms, one per transport kind. `--context` is
+# the one flag both share; the ssm form names the EC2 id and the AWS
+# session, the ssh form names the SSH engine's values.
+_SSM_OPEN_FLAGS = ("--instance-id", "--context", "--profile", "--region")
+_SSH_OPEN_FLAGS = ("--name", "--host", "--port", "--user", "--docker-addr", "--context")
+
+
+def _parse_open_flags(rest: Sequence[str]) -> tuple[dict[str, str], str]:
+    """`rest` parsed per kind: the ssm form or the ssh form, and which it was.
+
+    The kind is decided by which form's identifying flag is present:
+    `--instance-id` selects the ssm form, `--name` the ssh form, and mixing
+    the two -- or supplying neither -- is refused before anything is
+    spawned. Missing flags of the chosen form are refused the same way.
+
+    Raises:
+        ForwardError: a flag is unknown, the forms are mixed, or the chosen
+            form is missing required flags.
+    """
+    known = {*_SSM_OPEN_FLAGS, *_SSH_OPEN_FLAGS}
     values: dict[str, str] = {}
     index = 0
     while index < len(rest):
         flag = rest[index]
-        if flag not in flags or index + 1 >= len(rest):
-            raise ForwardError(f"open takes only {'/'.join(flags)} each with a value; got {flag!r}")
+        if flag not in known or index + 1 >= len(rest):
+            raise ForwardError(
+                f"open takes only {'/'.join(sorted(known))} each with a value; got {flag!r}"
+            )
         values[flag[2:]] = rest[index + 1]
         index += 2
+    has_instance_id = "instance-id" in values
+    has_name = "name" in values
+    if has_instance_id == has_name:
+        raise ForwardError(
+            "open takes exactly one transport form: the ssm form "
+            f"({'/'.join(_SSM_OPEN_FLAGS)}) or the ssh form "
+            f"({'/'.join(_SSH_OPEN_FLAGS)})"
+        )
+    flags = _SSM_OPEN_FLAGS if has_instance_id else _SSH_OPEN_FLAGS
     missing = sorted({flag[2:] for flag in flags} - set(values))
     if missing:
         raise ForwardError(f"open is missing required flags: {missing}")
-    return values
+    return values, (KIND_SSM if has_instance_id else instances.ENGINE_KIND_SSH)
+
+
+def _positive_port(raw: str) -> int:
+    """`raw` as a positive integer port, refusing anything else by name."""
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ForwardError(f"--port must be an integer; got {raw!r}") from exc
+    if value <= 0:
+        raise ForwardError(f"--port must be a positive integer; got {raw!r}")
+    return value
 
 
 def _run_open(rest: Sequence[str]) -> int:
-    values = _parse_open_flags(rest)
+    values, kind = _parse_open_flags(rest)
     root = repo.find_root(Path.cwd())
+    if kind == instances.ENGINE_KIND_SSH:
+        engine = {
+            "host": values["host"],
+            "user": values["user"],
+            "port": _positive_port(values["port"]),
+            "docker_addr": values["docker-addr"],
+        }
+        print(
+            open_forward(
+                values["name"],
+                values["context"],
+                "",
+                "",
+                root,
+                kind=kind,
+                engine=engine,
+            )
+        )
+        return 0
     print(
         open_forward(
             values["instance-id"], values["context"], values["profile"], values["region"], root

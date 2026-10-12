@@ -54,8 +54,9 @@ discriminator (`ENGINE_KIND_SSH` when the manifest exists, else
 by both the read side (`engine_manifest`) and the write side
 (`instance_ops.scaffold_engine`) so neither can accept what the other
 refuses; and `engine_endpoint` composes the canonical
-`ssh://<user>@<host>:<port>` string the transport work of a later unit will
-derive a docker context endpoint from. The kind-specific address block a
+`ssh://<user>@<host>:<port>` string the ssh transport
+(`devcontainer_config.transport_ssh`) derives its forward and docker
+context from. The kind-specific address block a
 resolved SSH engine prints (see `devcontainer_config.cli`
 `_print_address_block`) carries `ENGINE_`-prefixed lines instead of the
 Terragrunt/state/Parameter Store rows precisely because the shell export
@@ -627,10 +628,10 @@ def engine_manifest(root: Path, name: str) -> dict[str, object]:
 def engine_endpoint(root: Path, name: str) -> str:
     """`ssh://<user>@<host>:<port>`, the canonical endpoint string for an SSH engine.
 
-    The value a docker context will eventually point at is derived from
-    this string by the transport work of a later unit; this is the one
-    place the endpoint itself is composed, from the manifest's own
-    validated fields.
+    The value the ssh transport (`devcontainer_config.transport_ssh`) and
+    the resolved address block both present is composed from this string's
+    parts; this is the one place the endpoint itself is composed, from the
+    manifest's own validated fields.
     """
     values = engine_manifest(root, name)
     return f"ssh://{values['user']}@{values['host']}:{values['port']}"

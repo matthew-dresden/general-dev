@@ -1,0 +1,14 @@
+{
+  "name": "devcontainer",
+  "owner": {
+    "name": "Matthew Dresden",
+    "url": "https://github.com/matthew-dresden"
+  },
+  "plugins": [
+    {
+      "name": "devcontainer",
+      "source": "./",
+      "description": "Devcontainer platform skills, invoked as /devcontainer:<name>. Skills are discovered from the plugin's skills/ directory."
+    }
+  ]
+}

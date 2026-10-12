@@ -1,16 +1,13 @@
-"""`README.md` states the behavior changes, and names only things that exist.
+"""`README.md` describes only what exists, and names no removed surface.
 
-A README that still describes the removed transport is worse than one that says
+A README that still describes a removed transport is worse than one that says
 nothing: a reader follows it, the command fails, and they cannot tell whether
 they are holding it wrong or reading a stale document. These assertions cover
-the three ways that happens -- a behavior change that went unrecorded, a `make`
-target or skill named here that does not exist, and a removed identifier
-described as though it were still available.
+the ways that happens -- a `make` target or skill named here that does not
+exist, and a removed identifier described as though it were still available.
 
-The removed identifiers are deliberately allowed inside the "What changed"
-table and nowhere else. That table's entire job is to say what those things
-used to do and that they are gone, which it cannot do without naming them; a
-blanket scan would forbid the one place the name belongs.
+The README carries no change history: it documents the current state only,
+so the removed-identifier check is blanket, with no section exempted.
 
 Hermetic: reads files, runs nothing, and needs no docker, AWS or network.
 """
@@ -33,51 +30,9 @@ _SKILLS_DIR = _REPO_ROOT / ".agents" / "skills"
 # SKILL.md cross-reference uses.
 _SKILL_NAME_IN_TEXT = re.compile(r"(?<![\w-])gd-[a-z0-9]+(?:-[a-z0-9]+)*(?![\w-])")
 
-_BEHAVIOR_IDS = tuple(f"B{n}" for n in range(1, 12))
-_WHAT_CHANGED_HEADING = "## What changed"
-
 
 def _readme() -> str:
     return _README.read_text(encoding="utf-8")
-
-
-def _what_changed_table() -> str:
-    """The rows of the What changed table, and nothing else."""
-    text = _readme()
-    start = text.index(_WHAT_CHANGED_HEADING)
-    end = text.index("\n## ", start + len(_WHAT_CHANGED_HEADING))
-    return text[start:end]
-
-
-def _readme_outside_what_changed() -> str:
-    text = _readme()
-    table = _what_changed_table()
-    return text.replace(table, "")
-
-
-def test_the_readme_has_a_what_changed_section() -> None:
-    assert _WHAT_CHANGED_HEADING in _readme(), (
-        "AC-DOC-001: the README must carry a What changed section"
-    )
-
-
-@pytest.mark.parametrize("identifier", _BEHAVIOR_IDS)
-def test_each_behavior_change_has_a_row_with_both_halves(identifier: str) -> None:
-    """AC-DOC-001: one row per identifier, and neither half may be empty.
-
-    An identifier with an empty cell reads as "this changed, somehow", which
-    tells a reader less than omitting the row would.
-    """
-    rows = [
-        line
-        for line in _what_changed_table().splitlines()
-        if re.match(rf"^\|\s*{identifier}\s*\|", line)
-    ]
-    assert len(rows) == 1, f"expected exactly one row for {identifier}, found {len(rows)}"
-    cells = [cell.strip() for cell in rows[0].strip().strip("|").split("|")]
-    assert len(cells) == 3, f"{identifier} row must have identifier, was, and is-now cells: {cells}"
-    assert cells[1], f"{identifier} has an empty 'was' cell"
-    assert cells[2], f"{identifier} has an empty 'is now' cell"
 
 
 def test_every_make_target_named_in_the_readme_exists() -> None:
@@ -86,7 +41,7 @@ def test_every_make_target_named_in_the_readme_exists() -> None:
     defined = set(re.findall(r"^([A-Za-z0-9_.-]+):(?!=)", makefile, re.MULTILINE))
     assert defined, "no targets parsed from the Makefile; this assertion would be vacuous"
     missing = []
-    for line_number, line in enumerate(_readme_outside_what_changed().splitlines(), start=1):
+    for line_number, line in enumerate(_readme().splitlines(), start=1):
         for target in re.findall(r"`make ([a-z][a-z0-9-]*)", line):
             if target not in defined:
                 missing.append(f"line {line_number}: make {target}")
@@ -132,10 +87,14 @@ def test_the_remote_section_describes_the_transport_and_host_access() -> None:
 
 
 @pytest.mark.parametrize("token", ["make shell", "ssh", "tunnel"])
-def test_removed_things_are_named_only_where_they_are_declared_removed(token: str) -> None:
-    """AC-DOC-005: outside the What changed table, the README names none of them."""
-    haystack = _readme_outside_what_changed().lower()
+def test_removed_surfaces_are_named_nowhere(token: str) -> None:
+    """AC-DOC-005: the README documents current state only, so none of these appear.
+
+    There is no change-history table to exempt: a reader meeting one of these
+    tokens has found a description of something the platform does not offer.
+    """
+    haystack = _readme().lower()
     assert token not in haystack, (
-        f"README describes {token!r} outside the What changed table. It was removed at cutover; "
-        "the only place the name belongs is the row that says so."
+        f"README names {token!r}, a surface the platform does not offer. Remove the "
+        "reference: the README documents the current state only."
     )

@@ -17,25 +17,6 @@ by this repo and each appears as its own repository in Source Control with
 nothing to configure: VS Code's scan walks directories and never consults
 `.gitignore`, so an ignored clone is found like any other.
 
-## What changed
-
-Each row is a behavior an earlier version of this workspace had, and what it
-does now. The identifiers match Section 0 of the platform specification.
-
-| | Was | Is now |
-|---|---|---|
-| B1 | Remote engine reached over SSH inside SSM, requiring `REMOTE_SSH_KEY_PATH` and a key pair. | Remote engine reached over an SSM port forward with mutual TLS. No key pair exists. |
-| B2 | `make shell` opened an interactive shell on the EC2 host. | That target is removed. Host access is not available to the developer at all; `make exec` opens a shell inside a container. |
-| B3 | A developer with engine access could obtain root on the EC2 host, through the docker group on a rootful daemon. | Host root is unreachable. The daemon is rootless; containers still run as uid 0 inside a user namespace. |
-| B4 | `make remote`, `make build` and `make status` operated on one implicit instance. | The same targets accept `INSTANCE=<name>`, defaulting to `DEFAULT_REMOTE_INSTANCE`. |
-| B5 | API tokens were placed in `shell.env`, which was published wholesale to Parameter Store. | Tokens are named in the gitignored hostcreds manifest and resolved on the developer's machine -- the macOS keychain, git's own credential helper, or `aws configure export-credentials` -- by `make creds-init` and `make push-creds`. `shell.env` carries no credentials. |
-| B6 | `git commit --no-verify` succeeded. | Denied by a `PreToolUse` hook and by the pre-commit hook. |
-| B7 | `.claude/` was untracked in its entirety. | `.claude/` is tracked except `settings.local.json`, so the plugin and hooks arrive with a clone. |
-| B8 | The devcontainer image had no Terraform, Terragrunt or session-manager-plugin. | All three are installed by devcontainer features. An image rebuild is required. |
-| B9 | The instance's cloud-init user data was applied by hand, to an instance created in the console. | The instance is declared in Terraform and created by Terragrunt, and its user data is rendered from the module. |
-| B10 | `shell.env` was the only place project configuration lived. | Unchanged for configuration. Only credentials moved. |
-| B11 | Container state was visible only for the active engine, containers were named after the fact, and every lifecycle target acted on one container. | `make list-containers` sweeps every engine; `make build/up NAME=x` names at creation; the lifecycle targets take `ALL=1` (clean's fleet form gated behind `CONFIRM=destroy`), and teardown keeps an image a sibling container still uses. |
-
 ## Layout
 
 | Path | Purpose |
@@ -283,11 +264,10 @@ Every project gets its own container + volume on the shared engine.
 
 ## Caveats
 
-- This repo's `.devcontainer` began as a snapshot copied from an upstream
-  catalog and has since diverged substantially: asdf support is removed,
-  minikube is disabled, and the postcreate wrapper gained the SSM secret
-  bootstrap. It is self-managed now -- nothing regenerates it, so changes
-  here stay. (Provenance and license attribution: `NOTICE`.)
+- This repo's `.devcontainer` is self-managed: asdf is not installed,
+  minikube is disabled, and the postcreate wrapper carries the SSM secret
+  bootstrap. Nothing regenerates the directory, so changes here stay.
+  (Provenance and license attribution: `NOTICE`.)
 - Rotating a credential is `make creds-init` plus `make push-creds`, never a
   `shell.env` edit; after any `shell.env` change, re-run `make push-secrets`
   so the remote copies match.

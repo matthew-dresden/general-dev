@@ -4,9 +4,9 @@ Terraform module that provisions one remote devcontainer instance: a VPC and
 public subnet (optional), a zero-ingress security group and IAM role
 (optional), and the EC2 instance itself with its root volume and an optional
 second data volume. Every option this module supports is an input; nothing is
-selected by editing a `.tf` file (spec `devcontainer-platform.md` Section
-5.6). The deployments that consume this module live under
-`remote-instances/`; the module itself never contains a deployment (spec
+selected by editing a `.tf` file. The deployments that consume this module
+live under `remote-instances/`; the module itself never contains a
+deployment (spec
 Section 13, decision D6).
 
 This document is the reference for the developer or agent writing the
@@ -43,10 +43,8 @@ infrastructure from being created and, when it does, names the replacement
 input(s) that then become required.
 
 `var.create_security_group` and `var.create_iam_role` must be set to the same
-value. This narrows the two-column presentation in spec Section 5.6, which
-lists them as independently settable; the shipped module rejects any mixed
-setting at plan time (deviation recorded in this Task's Comments for the spec
-owner). The reason is structural, not a stricter policy choice: the security
+value: the shipped module rejects any mixed setting at plan time. The reason
+is structural, not a stricter policy choice: the security
 submodule creates the security group, the IAM role, its inline Parameter
 Store policy, the AWS-managed SSM policy attachment and the instance profile
 as a single unit with no internal toggle of its own (`E5-F1-S3`). Gating

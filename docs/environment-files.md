@@ -59,6 +59,74 @@ Read ~/.aws/config and .devcontainer/aws-profile-map.json.example, then build
 > account ID or SSO URL that looks plausible but is wrong fails at `aws sso
 > login`, not at provisioning, which is a slower and more confusing failure.
 
+### The interview route, with a worked example
+
+The `gd-env-setup-local` and `gd-env-setup-remote` skills ask a fixed
+question set -- the `FIELDS` schema in the plugin's `answers` module is its
+single source of truth, so every agent asks exactly these questions and
+nothing else. Conditional questions appear only when the branch they belong
+to is taken: `aws_profiles` when `aws_config_enabled` is true,
+`host_proxy_url` when `host_proxy` is true, and the three `remote_*` fields
+when the backend is remote. A worked local interview:
+
+```text
+agent: Which docker context is this machine's local engine?
+you:  orbstack
+
+agent: Your developer name, as tooling should label work?
+you:  Matthew Dresden
+
+agent: Git user and email for the container's global git config?
+you:  matthew-dresden / contact@matthewdresden.com
+
+agent: Configure AWS profiles in the container? (true/false)
+you:  true
+
+agent: For each profile: name, region, SSO start URL, SSO region,
+      account name, account id, role name -- one line per profile?
+you:  default us-east-1 https://<your-sso-portal>.awsapps.com/start
+      us-east-1 <account-name> <account-id> DeveloperAccess
+
+agent: Behind a corporate proxy? (true/false)
+you:  false
+```
+
+The placeholder-styled values above are illustrative -- your real answers
+carry the actual portal URL and twelve-digit account id, and validation
+refuses anything still bracketed.
+
+Nothing is written until every answer validates -- an unreplaced
+`<placeholder>`, an empty value, an account id that is not twelve digits,
+or a git provider carrying `https://` are each refused by name, and an
+abort after the first answer leaves the working tree exactly as it was.
+When every answer validates, `render` writes all three files in one pass.
+
+Remote adds three questions after the first (`i-` instance id, region,
+profile); the transcript is otherwise identical.
+
+### Where each file's content goes
+
+```mermaid
+flowchart TD
+  ex["committed examples\n(make init copies these)"]
+  se["shell.env\n+ aws-profile-map.json\n+ env-variables.json\n(gitignored, on the laptop)"]
+  hc["hostcreds.map.json\n(gitignored, names credentials only)"]
+  kc["macOS keychain /\ngit credential helper /\naws SSO session"]
+  ps["SSM Parameter Store\n/devcontainer/<project>/..."]
+  ctr["container"]
+
+  ex -- "fill or interview + render" --> se
+  hc -- "make creds-init stores\nwhat it names" --> kc
+  kc -- "make push-creds resolves\nand delivers over docker stdin" --> ctr
+  se -- "make push-secrets publishes\n(credential-free)" --> ps
+  ps -- "postCreate fetches via\ninstance role (remote builds)" --> ctr
+```
+
+Credentials never ride the Parameter Store path: it carries only the
+credential-free `shell.env` and profile map. See
+[Host credentials (hostcreds)](#host-credentials-hostcreds) below for the
+credential half.
+
 ## What each value does
 
 `shell.env.example` documents every variable inline. The ones that stop
@@ -318,7 +386,7 @@ unbounded lifetime.
 ### Certificate expiry warning
 
 `CERT_WARN_DAYS` (E6-F1-S1-T2) governs `make cert-status`'s warning window
-(spec Section 4.1.2, Section 7.3), read in exactly one place,
+, read in exactly one place,
 `certs._resolve_cert_warn_days`, and threaded from there into every
 `certs.classify` call the report makes -- never a second literal `14`
 anywhere else in `certs.py`.
@@ -374,7 +442,7 @@ The certificate authority and client material these variables govern is
 never stored in this repository: it lives outside the checkout entirely,
 under `certs.DEFAULT_CERTS_ROOT`/`instances.certs_root()`'s `<instance>/`
 directory (`$DOCKER_CONFIG/certs/<instance>/`, or
-`~/.docker/certs/<instance>/` when `DOCKER_CONFIG` is unset; spec Section
+`~/.docker/certs/<instance>/` when `DOCKER_CONFIG` is unset; the rule
 5.5), the same "outside the repository, not merely ignored" rule this
 document's other private files (`shell.env`,
 `.devcontainer/aws-profile-map.json`,
@@ -441,10 +509,10 @@ to request the default; leave it unset instead.
 
 `DOCKER_TLS_PORT` is the port the rootless docker daemon on the instance
 listens on, `127.0.0.1`-only, behind a security group with zero ingress
-rules (spec Section 5.6); `transport.py` reads it in exactly one place and
+rules; `transport.py` reads it in exactly one place and
 never hardcodes `2376` at any call site. The local end of the forward is a
 different, per-instance port: allocated and recorded in the instance's
-docker context endpoint (never a fixed number, spec Section 9), reused
+docker context endpoint (never a fixed number), reused
 across reconnects when that context already exists. `SSM_FORWARD_TIMEOUT`
 has two readers, and raising it affects both: `transport.wait_ready` bounds
 by it how long it waits for the session process to announce the port
@@ -553,7 +621,7 @@ moved location:
 | `ENGINE` | Unset | Addresses one engine explicitly instead of following the machine-wide active docker context: `local` names this machine's engine (`LOCAL_DOCKER_CONTEXT`), any other value must name an instance directory under `remote-instances/`, and every docker call the run makes is aimed at that engine's context without any `docker context use`. Read by the Makefile (exported to its recipes when set) and by `lib.sh`'s `rd_engine_context`, which derives the context through `instances.docker_context` and fails fast when the value names nothing this repository can address. Both `ENGINE=x make <target>` and `make <target> ENGINE=x` reach it. The three context switchers (`make local`, `make disconnect`, `make remote`) refuse under it. See `docs/environment-setup.md`'s "Working with several engines at once". |
 
 `DEFAULT_REMOTE_INSTANCE` is the second step of the instance-resolution
-order spec Section 4.1.1 fixes, evaluated once per resolution by
+order, evaluated once per resolution by
 `instances.resolve`:
 
 1. `INSTANCE` in the process environment. Every remote make target accepts
@@ -585,7 +653,7 @@ failure:
   and fails if `<name>` names no directory there; passing `INSTANCE=<name>
   ... resolve-instance --local-backend-active` is what produces the
   warning. A future caller that already knows the active backend (the
-  Makefile, per spec Section 1.1) passes `local_backend_active=True` to
+  Makefile) passes `local_backend_active=True` to
   `instances.resolve` directly instead of through this flag.
 - An empty (or absent) `remote-instances/` directory on a remote backend
   fails, directing the operator to `gd-env-setup-remote`.

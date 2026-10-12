@@ -1,7 +1,9 @@
 # general-dev
 
-Personal general-purpose development workspace. The same repo runs in two
-modes:
+Personal general-purpose development workspace: one repository that runs as
+a devcontainer either on this laptop's Docker engine or on a remote EC2
+engine, with the projects you work on cloned inside it as plain nested
+repositories.
 
 - **Local**. VS Code Dev Containers on the laptop's Docker engine (OrbStack).
 - **Remote**. VS Code Dev Containers against a Docker engine on EC2, reached
@@ -10,29 +12,6 @@ modes:
   sleeping, restarting, or losing connectivity. There is no key pair, and no
   interactive access to the host: `make exec` opens a shell in a container,
   which is the only shell this workspace offers.
-
-Project repos being worked on are **plain nested clones** inside the
-workspace, not submodules, and `repos/` is where they go. They are gitignored
-by this repo and each appears as its own repository in Source Control with
-nothing to configure: VS Code's scan walks directories and never consults
-`.gitignore`, so an ignored clone is found like any other.
-
-## Layout
-
-| Path | Purpose |
-|---|---|
-| `.devcontainer/` | Devcontainer definition (image + features), postcreate setup, shared shell functions |
-| `.devcontainer/hostcreds.map.json` (+ committed `.example`) | Hostcreds manifest, gitignored: every credential this machine pushes into the container, named with its source |
-| `.devcontainer/remote-docker/` | Remote EC2 engine: transport, certificate and secret entry points, instance config, see its [README](.devcontainer/remote-docker/README.md) |
-| `remote-instances/` | One Terragrunt deployment per remote engine, scaffolded by `make instance-init`; see its [README](remote-instances/README.md) |
-| `.devcontainer/nix-family-os/`, `wsl-family-os/` | Host-side proxy (tinyproxy) helpers for local mode |
-| `repos/` | Where project repositories are cloned. Only its `.gitkeep` is tracked |
-| `.agents/skills/` | Canonical agent-agnostic skills home (roster prefixed `gd-`); wired into an agent on this Mac by the `skills-*` make targets |
-| `.vscode/settings.json` | Workspace git-repo detection (nested clones) |
-| `docs/devcontainer.md` | Deep dive: setup flow, secrets, the devcontainer file contract |
-| `docs/environment-setup.md` | Ordered runbook: fresh machine to verified container, one verification per step |
-| `docs/skills.md` | The skill roster: families, flows, coverage guarantee, and installing it for an agent |
-| `CLAUDE.md` | Engineering standards for AI-assisted work in this repo |
 
 ## Quick start, local
 
@@ -43,57 +22,39 @@ bind-mounted, so an edit is visible on both sides at once.
 
 ```sh
 make init             # create the four gitignored config files from examples
-                      # (then fill their placeholders: First-time setup below)
 make creds-init       # store each keychain credential the hostcreds manifest names
 make local            # point docker and VS Code at the local engine
 make build            # build the container, run postCreate, push every credential
 make exec             # a shell inside the container
 ```
 
-**The skill route:** `gd-env-setup-local` prepares this machine, checking
-each host tool and stating any command it cannot run itself, and
-`gd-container-local` builds and opens the container. Both reach the same
-container the make targets produce.
-
-`make init` creates all four gitignored configuration files, hostcreds
-manifest included, from their committed examples. Fill them in (First-time
-setup below), store each keychain item with `make creds-init`, start the
-host proxy if `HOST_PROXY=true` (see `nix-family-os/README.md`), then VS Code
-→ **Reopen in Container**.
-
-## First-time setup
-
-Four gitignored files configure the container; each has a committed example,
-and `make init` copies all four in one go:
-
-```sh
-cp shell.env.example shell.env
-cp .devcontainer/aws-profile-map.json.example .devcontainer/aws-profile-map.json
-cp devcontainer-environment-variables.json.example devcontainer-environment-variables.json
-cp .devcontainer/hostcreds.map.json.example .devcontainer/hostcreds.map.json
-```
-
-Replace every `<PLACEHOLDER>` in the first three, then name your credentials in
-the hostcreds manifest and store each keychain item it names with
-`make creds-init`. What each value does, how to have Claude fill them out, and
-the differences between macOS, Linux and WSL are in
-[docs/environment-files.md](docs/environment-files.md); the full ordered
-sequence, with a verification step after each stage, is
-[docs/environment-setup.md](docs/environment-setup.md).
-
-Then, once per machine rather than once per container:
+Before `make build`, replace every `<PLACEHOLDER>` in the first three files
+`make init` created; what each value does is in
+[docs/environment-files.md](docs/environment-files.md). Then, once per
+machine rather than once per container:
 
 ```sh
 make keybindings      # Shift+Enter = newline in VS Code terminals
 ```
 
-Everything else the container needs it configures itself, but keybindings are
-resolved by the VS Code window, which runs on your machine even when the
-workspace is a container, so this one step cannot come from `devcontainer.json`.
-Reload the window afterwards. Running Claude Code's `/terminal-setup` from a
-container terminal writes the same binding into the *container's* home
-directory, where no VS Code process reads it, which is why it appears to do
-nothing.
+Keybindings are resolved by the VS Code window, which runs on your machine
+even when the workspace is a container, so this one step cannot come from
+`devcontainer.json` -- reload the window afterwards.
+
+**The skill route:** `gd-env-setup-local` prepares this machine, checking
+each host tool and stating any command it cannot run itself, and
+`gd-container-local` builds and opens the container. Both routes reach the
+same container the make targets produce.
+
+Deeper on each step:
+
+- Every configuration value, the macOS/Linux/WSL differences, and how to
+  have an agent fill them out: [docs/environment-files.md](docs/environment-files.md)
+- The full ordered runbook, fresh machine to verified container with one
+  verification per step: [docs/environment-setup.md](docs/environment-setup.md)
+- Behind a corporate proxy, the host-side proxy helpers:
+  [nix-family-os](.devcontainer/nix-family-os/README.md)
+  (Windows/WSL: [wsl-family-os](.devcontainer/wsl-family-os/README.md))
 
 ## Quick start, remote
 
@@ -103,80 +64,66 @@ the instance, and the only route to it is an SSM port forward, authenticated by
 IAM, carrying the docker API under mutual TLS. The certificate authenticates
 the client; IAM authorizes the session. Host access does not exist, by design.
 
-Two routes reach the same result. The `make` targets are the mechanism, and the
-The `gd-*` skills drive those same targets while asking for what they
-need and verifying each step; use whichever suits the moment.
-
-**Prerequisites (laptop):** aws CLI v2, session-manager-plugin, docker CLI, git.
-For `build`/`rebuild` additionally:
-
-```sh
-npm install -g @devcontainers/cli
-brew install jq
-```
-
-Missing tools fail fast with the install command.
+**Prerequisites (laptop):** aws CLI v2, session-manager-plugin, docker CLI,
+git; for `build`/`rebuild` additionally `npm install -g @devcontainers/cli`
+and `jq`. Missing tools fail fast with the install command.
 
 **The make route, in the order they are run:**
 
 ```sh
 make instance-init INSTANCE=<project>    # scaffold remote-instances/<project>/terragrunt.hcl
-                                         # then edit its inputs: instance type, volume
-                                         # sizes, availability zone, tags
+                                          # then edit its inputs: instance type, volume
+                                          # sizes, availability zone, tags
 make instance-deploy INSTANCE=<project>  # converge: provision, record the EC2 id, trust
-                                         # chain where missing, push secrets
+                                          # chain where missing, push secrets
 make remote INSTANCE=<project>           # open the SSM forward as a background daemon,
-                                         # point docker at the instance, return
+                                          # point docker at the instance, return
 make build INSTANCE=<project>            # clone into a volume on the engine, build, run postCreate
 make exec INSTANCE=<project>             # a shell inside the container
 ```
 
 `make instance-init` writes the one file a new instance needs and never
-deploys; `make instance-deploy` applies it and is safe to re-run. A deploy
-prints the follow-on chain above when it finishes. `make list-instances`
-lists every configured instance with its live status: EC2 state, recorded
-id, Parameter Store and certificate material, forward port, docker context.
+deploys; `make instance-deploy` applies it and is safe to re-run, and prints
+the follow-on chain above when it finishes. Then VS Code → **Dev Containers:
+Attach to Running Container…** -- the same way back after any disconnect; the
+container never stopped (`shutdownAction: "none"`).
 
-**The skill route:** `gd-env-setup-remote` performs the same
-provisioning and certificate steps and verifies each one before continuing;
-`gd-cert-lifecycle` owns the certificate lifecycle afterward, including
-renewal; `gd-instance-list` validates which engine is active; and
-`gd-container-local` builds and opens the container.
+**The skill route:** `gd-env-setup-remote` performs the same provisioning and
+certificate steps and verifies each one before continuing, `gd-cert-lifecycle`
+owns certificate renewal afterward, and `gd-instance-list` validates which
+engine is active. The full roster: [docs/skills.md](docs/skills.md).
 
-Anywhere the targets above omit `INSTANCE`, the resolver's order applies:
-an explicit `INSTANCE=` wins, then `DEFAULT_REMOTE_INSTANCE`, then a sole
-configured instance; with several configured and no selector, the command
-stops and names them instead of picking one. To address an engine without
-switching the context other terminals share, prefix `ENGINE=local` or
-`ENGINE=<instance-name>` -- see
-[docs/environment-setup.md](docs/environment-setup.md)'s "Working with
-several engines at once".
+Deeper on each step:
 
-`make build` blocks until the container is actually up and exits non-zero if
-the build or postCreate fails. It clones from **origin**, not from this
-machine, and refuses to start if the branch has unpushed commits, if
-`.devcontainer` has uncommitted changes, or if `shell.env` is newer than the
-copy in Parameter Store.
+- Which instance a command acts on when `INSTANCE` is omitted, and
+  addressing engines without switching context (`ENGINE=local|<name>`):
+  [environment-setup.md, "Working with several engines at
+  once"](docs/environment-setup.md)
+- Instance architecture, prerequisites and the daily connect/disconnect
+  workflow: [remote-docker README](.devcontainer/remote-docker/README.md)
+- Provisioning an instance by hand (IAM, network, user data):
+  [docs/ec2-requirements.md](docs/ec2-requirements.md)
 
-Then VS Code → **Dev Containers: Attach to Running Container…**. Reconnect the
-same way after any disconnect, the container never stopped
-(`shutdownAction: "none"`). The container bootstraps its environment files
-from Parameter Store via the instance role, and its credentials arrive by the
-hostcreds push: `make build`'s last step resolves every manifest entry on the
-laptop and delivers it over the same docker context the build just used --
-`make push-creds` re-runs that push alone, and `make up` runs it too -- so
-there is no manual seeding on either half.
+## Daily use
 
 | | |
 |---|---|
-| `make status` | context, container, image, volumes |
+| `make up` | from any state: refresh the forward (remote), build or start as needed, open VS Code |
+| `make status` | the active engine's backend, container, image and volumes |
+| `make list-containers` | every engine at once, one row per container this project owns |
 | `make stop` / `make start` / `make restart` | lifecycle; the checkout is untouched |
-| `make rename NAME=…` | readable container name |
-| `make check` | report uncommitted/unpushed work inside the volume |
+| `make rename NAME=…` (or `NAME=…` on `build`/`up`) | readable container names |
+| `make check` | report uncommitted/unpushed work inside a remote volume |
 | `make clean` / `make rebuild` | destroy / destroy and build again |
 | `make exec` | a shell inside the container, the only shell available |
 | `make cert-status` | client and CA expiry per instance |
 | `make disconnect` | point docker back at the local engine |
+
+The lifecycle targets also take `ALL=1` for the fleet form, one engine after
+the other; `make clean ALL=1` requires `CONFIRM=destroy`. `ENGINE=local` or
+`ENGINE=<instance-name>` addresses one engine without switching the context
+other terminals share: [environment-setup.md](docs/environment-setup.md)'s
+"Working with several engines at once".
 
 Terminals inside the container open in a shared tmux session, so a Claude
 session or long build survives closing VS Code. `tm-help` in the container
@@ -193,37 +140,16 @@ git clone https://github.com/<org>/<your-project>
 git clone https://github.com/<org>/<another-project>
 ```
 
-Each clone shows up as its own repo in Source Control, with nothing to add
-anywhere, and it appears the moment you clone it rather than at the next window
-open. `repos/` is ignored except for its `.gitkeep`, and being ignored does not
-hide a clone from the scan.
-
-That immediacy is the one thing `repos/` buys you. VS Code scans the workspace
-when the window opens, and separately watches for new `.git` directories, but
-it drops any whose path is already inside an open repository. This workspace
-root is itself a repository, so it claims every clone made under it and the
-watcher never fires. postCreate writes a `.gitmodules` naming `repos/` as a
-submodule path, the one case that lookup skips: the clone is left unclaimed and
-VS Code opens it as its own repository.
-
-A clone is itself a repository, so it claims anything beneath it in the same
-way. postCreate therefore walks every repository in the workspace and declares
-each one unclaimed in whichever repository encloses it, which is what makes a
-checkout nested inside a clone show up rather than disappear into its parent.
-No gitlink is created anywhere, so `git submodule status`, `update` and `sync`
-stay no-ops and `git clone --recurse-submodules` is unaffected. The files are
-generated, not committed, so every container rebuild recreates them.
-
-That walk is a snapshot of what exists when the container is built. `repos/` is
-declared as a whole directory, so anything cloned there later is still picked up
-immediately; a repository cloned later *inside another clone* waits for the next
-window open.
-
-To run a *different* project as its own remote devcontainer instead: push it to
+Each clone shows up as its own repo in Source Control the moment you clone
+it, with nothing to add anywhere -- even though `repos/` is gitignored. To
+run a *different* project as its own remote devcontainer instead: push it to
 GitHub, then from that repo's root run `make push-secrets` and `make build`
-(both derive the project name from the directory). Multiple projects, and
-multiple clones of one project, run side by side on the shared engine.
-Every project gets its own container + volume on the shared engine.
+(both derive the project name from the directory); every project gets its
+own container and volume on the shared engine.
+
+How VS Code discovers nested repositories, and what postCreate writes to
+make clones under clones visible: the Definition section of
+[devcontainer.md](docs/devcontainer.md).
 
 ## Conveniences
 
@@ -245,11 +171,7 @@ Every project gets its own container + volume on the shared engine.
   git and aws reachability for whichever sources the manifest names.
 - One remote engine per project under `remote-instances/`: the `make help`
   INSTANCES group scaffolds, converges, powers and retires them
-  (`make list-instances` shows every instance's live state), and
-  `ENGINE=local|<name>` addresses any engine from any terminal without
-  switching contexts -- see
-  [docs/environment-setup.md](docs/environment-setup.md)'s "Working with
-  several engines at once".
+  (`make list-instances` shows every instance's live state).
 - Claude Code starts on the classic renderer and never offers the flicker-free
   fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen`
   still opts in for the current container.
@@ -276,3 +198,22 @@ Every project gets its own container + volume on the shared engine.
   plus the fragments `make push-creds` writes inside the container. Parameter
   Store (`/devcontainer/<project>/…`) holds the credential-free `shell.env`
   and profile map. None of it is ever in git.
+
+## Layout
+
+| Path | Purpose |
+|---|---|
+| `.devcontainer/` | Devcontainer definition (image + features), postcreate setup, shared shell functions |
+| `.devcontainer/hostcreds.map.json` (+ committed `.example`) | Hostcreds manifest, gitignored: every credential this machine pushes into the container, named with its source |
+| `.devcontainer/remote-docker/` | Remote EC2 engine: transport, certificate and secret entry points, instance config, see its [README](.devcontainer/remote-docker/README.md) |
+| `remote-instances/` | One Terragrunt deployment per remote engine, scaffolded by `make instance-init`; see its [README](remote-instances/README.md) |
+| `.devcontainer/nix-family-os/`, `wsl-family-os/` | Host-side proxy (tinyproxy) helpers for local mode |
+| `repos/` | Where project repositories are cloned. Only its `.gitkeep` is tracked |
+| `.agents/skills/` | Canonical agent-agnostic skills home (roster prefixed `gd-`); wired into an agent on this Mac by the `skills-*` make targets |
+| `.vscode/settings.json` | Workspace git-repo detection (nested clones) |
+| `docs/devcontainer.md` | Deep dive: setup flow, secrets, nested repositories, the devcontainer file contract |
+| `docs/environment-setup.md` | Ordered runbook: fresh machine to verified container, one verification per step |
+| `docs/environment-files.md` | Every private configuration value and what it does |
+| `docs/ec2-requirements.md` | Provisioning an instance by hand: network, IAM, host configuration |
+| `docs/skills.md` | The skill roster: families, flows, coverage guarantee, and installing it for an agent |
+| `CLAUDE.md` | Engineering standards for AI-assisted work in this repo |

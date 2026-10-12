@@ -22,6 +22,10 @@ PROJECT_NAME="${PROJECT_NAME:-$(basename "$REPO_ROOT")}"
 SHELL_ENV_SOURCE="${SHELL_ENV_SOURCE:-${REPO_ROOT}/shell.env}"
 PROFILE_MAP_SOURCE="${PROFILE_MAP_SOURCE:-${REPO_ROOT}/.devcontainer/aws-profile-map.json}"
 SSM_PREFIX="${PARAMETER_PREFIX%/}"
+# The user every docker exec in the ssh delivery runs as, the same default
+# container.sh gives its own execs. The delivery branch dereferences it under
+# set -u, so it must exist here and not only in container.sh.
+: "${CONTAINER_USER:=vscode}"
 
 # The SSH engine's channel is the running container, not Parameter Store:
 # an engine declared by engine.json has no Parameter Store behind it, so the
@@ -35,35 +39,51 @@ SSM_PREFIX="${PARAMETER_PREFIX%/}"
 # path is the same CONTAINER_WORKSPACES_ROOT + PROJECT_NAME derivation
 # container.sh uses; config-payload.sh sources the same default, so the
 # BASH_ENV rewrite inside the payload and this destination agree by
-# construction.
+# construction. CONTAINER=<name> selects the receiving container by name or
+# id, with the same inspect-or-refuse discipline rdc_require_container
+# applies: the multi-container refusal below names that variable, so a run
+# that answers to it has to be honored here.
 rd_deliver_config_payload_to_container() {
-  local ids id count payload_dir workspace
+  local ids id count context workspace
   rd_require_cmd docker "Install the docker CLI: https://docs.docker.com/engine/install/"
-  ids="$(docker ps -aq --filter "label=devcontainer.project=${PROJECT_NAME}" --filter "status=running")"
-  [ -n "$ids" ] || rd_fail "No running container for project '${PROJECT_NAME}' can receive the configuration" \
-    "An SSH engine's config channel is the container itself, so one has to be running." \
-    "" \
-    "Start or build one:" \
-    "  ${RD_BOLD}make up${RD_RESET}"
-  count="$(printf '%s\n' "$ids" | wc -l | tr -d ' ')"
-  [ "$count" -eq 1 ] || rd_fail "${count} running containers for project '${PROJECT_NAME}' exist, so this cannot pick one" \
-    "Writing the configuration into the wrong one would leave the others stale." \
-    "" \
-    "Name the one you mean with ${RD_BOLD}CONTAINER=<name>${RD_RESET}, or tear the extras down first:" \
-    "  ${RD_BOLD}docker ps --filter label=devcontainer.project=${PROJECT_NAME}${RD_RESET}"
-  id="$(printf '%s\n' "$ids" | sed -n 1p)"
+  if [ -n "${CONTAINER:-}" ]; then
+    context="$(docker context show 2> /dev/null || printf 'unknown')"
+    id="$(docker inspect -f '{{.Id}}' "$CONTAINER" 2> /dev/null)" \
+      || rd_fail "There is no container named '${CONTAINER}' on context '${context}'" \
+        "CONTAINER selects an instance by name or id, and nothing here answers to that one." \
+        "" \
+        "What this engine has:  ${RD_BOLD}make status${RD_RESET}"
+  else
+    ids="$(docker ps -aq --filter "label=devcontainer.project=${PROJECT_NAME}" --filter "status=running")"
+    [ -n "$ids" ] || rd_fail "No running container for project '${PROJECT_NAME}' can receive the configuration" \
+      "An SSH engine's config channel is the container itself, so one has to be running." \
+      "" \
+      "Start or build one:" \
+      "  ${RD_BOLD}make up${RD_RESET}"
+    count="$(printf '%s\n' "$ids" | wc -l | tr -d ' ')"
+    [ "$count" -eq 1 ] || rd_fail "${count} running containers for project '${PROJECT_NAME}' exist, so this cannot pick one" \
+      "Writing the configuration into the wrong one would leave the others stale." \
+      "" \
+      "Name the one you mean with ${RD_BOLD}CONTAINER=<name>${RD_RESET}, or tear the extras down first:" \
+      "  ${RD_BOLD}docker ps --filter label=devcontainer.project=${PROJECT_NAME}${RD_RESET}"
+    id="$(printf '%s\n' "$ids" | sed -n 1p)"
+  fi
   workspace="${CONTAINER_WORKSPACES_ROOT}/${PROJECT_NAME}"
 
   # The payload directory is removed by an EXIT trap, not a RETURN: rd_fail
-  # exits, and a RETURN trap never runs on that path.
-  payload_dir="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/rd-push.XXXXXX")"
-  trap 'rm -rf "$payload_dir"' EXIT
-  write_config_payload "$payload_dir"
+  # exits, and a RETURN trap never runs on that path. The directory lives in
+  # a global, not a local, for the same reason: the trap is evaluated when
+  # the whole script exits, after this function's scope is gone, and under
+  # set -u an unbound name there turns a successful delivery into a failed
+  # run -- the same shape the EC2 publish's RD_PUT_DIR below already uses.
+  RD_PAYLOAD_DIR="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/rd-push.XXXXXX")"
+  trap 'rm -rf "$RD_PAYLOAD_DIR"' EXIT
+  write_config_payload "$RD_PAYLOAD_DIR"
 
   rd_log "Writing shell.env into the running container (${workspace}/shell.env)..."
   docker exec -i -u "$CONTAINER_USER" "$id" \
     sh -c "umask 077; mkdir -p '${workspace}/.devcontainer'; cat > '${workspace}/shell.env'" \
-    < "${payload_dir}/shell.env" \
+    < "${RD_PAYLOAD_DIR}/shell.env" \
     || rd_fail "shell.env could not be written into the container" \
       "Nothing else inside it was changed." \
       "" \
@@ -71,7 +91,7 @@ rd_deliver_config_payload_to_container() {
   rd_log "Writing aws-profile-map.json into the running container..."
   docker exec -i -u "$CONTAINER_USER" "$id" \
     sh -c "umask 077; cat > '${workspace}/.devcontainer/aws-profile-map.json'" \
-    < "${payload_dir}/.devcontainer/aws-profile-map.json" \
+    < "${RD_PAYLOAD_DIR}/.devcontainer/aws-profile-map.json" \
     || rd_fail "aws-profile-map.json could not be written into the container" \
       "Nothing else inside it was changed." \
       "" \

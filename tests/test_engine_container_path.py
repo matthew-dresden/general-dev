@@ -33,7 +33,16 @@ that one transform instead of carrying its own copy.
 push-secrets.sh (static): the ssh branch resolves first, delivers over
 stdin (`cat >`), verifies the files landed, and never touches Parameter
 Store; the workspace path comes from the shared derivation, not a re-derived
-`/devcontainer/<project>`.
+`/devcontainer/<project>`; the CONTAINER_USER default lives here, next to
+the execs that dereference it, not only in container.sh.
+
+push-secrets.sh (behavioral, the ssh delivery run for real): with a
+stand-in resolver exporting KIND=ssh, a docker stub that records every argv
+and captures `exec -i`'s stdin while refusing nothing, and real fixture
+sources, the run exits 0 with both payload files delivered into the running
+container -- the rendered transform and the verbatim profile map, as the
+defaulted or caller-pinned CONTAINER_USER -- honoring CONTAINER=<name> and
+refusing a name nothing answers to.
 """
 
 from __future__ import annotations
@@ -645,13 +654,17 @@ def test_push_secrets_ssh_branch_resolves_first_and_delivers_over_stdin() -> Non
     assert "docker exec -i" in delivery and "cat >" in delivery, (
         "values ride stdin, never a docker exec's argv"
     )
-    assert '< "${payload_dir}/shell.env"' in delivery, (
+    assert '< "${RD_PAYLOAD_DIR}/shell.env"' in delivery, (
         "shell.env is redirected from the rendered payload"
     )
-    assert '< "${payload_dir}/.devcontainer/aws-profile-map.json"' in delivery
+    assert '< "${RD_PAYLOAD_DIR}/.devcontainer/aws-profile-map.json"' in delivery
     assert "[ -s " in delivery, "the delivery verifies the files landed non-empty"
     assert "${CONTAINER_WORKSPACES_ROOT}/${PROJECT_NAME}" in delivery, (
         "the workspace path is the shared derivation, not a re-derived one"
+    )
+    assert ': "${CONTAINER_USER:=vscode}"' in text, (
+        "the delivery execs as CONTAINER_USER under set -u, so the default must "
+        "be assigned in this script and not only in container.sh"
     )
     assert '"/devcontainer/${PROJECT_NAME}"' not in text, (
         "no Parameter Store prefix is derived from PROJECT_NAME (the standing pin)"
@@ -680,3 +693,262 @@ def test_config_payload_is_sourced_by_both_consumers() -> None:
     for name, text in (("container.sh", container), ("push-secrets.sh", push)):
         assert "config-payload.sh" in text, f"{name} must source the shared transform"
         assert "write_config_payload" in text, f"{name} must render through it"
+
+
+# ---------------------------------------------------------------------------
+# push-secrets.sh: the ssh delivery, behaviorally.
+#
+# The static pins above describe the delivery without ever running it, which
+# is exactly how a reference to a variable the script never assigned
+# ($CONTAINER_USER, defaulted only in container.sh) survived: under set -u
+# the first exec died, and the run delivered nothing. These tests run
+# push-secrets.sh end to end against the stand-in resolver, a docker stub
+# that records every argv and captures `exec -i`'s stdin, and real fixture
+# sources -- then assert the payloads themselves reached the container paths,
+# not merely that the exit status said so.
+# ---------------------------------------------------------------------------
+
+
+# The delivery run's project name, pinned so the workspace assertions do not
+# depend on the checkout directory's own name, which is what PROJECT_NAME
+# falls back to.
+_DELIVERY_PROJECT = "delivery-proj"
+
+_DELIVERY_WORKSPACE = f"/workspaces/{_DELIVERY_PROJECT}"
+
+
+def _delivery_container_id() -> str:
+    return uuid.uuid4().hex * 2
+
+
+def _fake_docker_bin(bin_dir: Path) -> None:
+    """The docker stub the delivery runs answer to.
+
+    Appends one line of joined argv per call to $FAKE_DOCKER_LOG, captures
+    the stdin of each `exec -i` call into
+    $FAKE_DOCKER_CAPTURE_DIR/stdin-exec-<n> (n counts exec calls), answers
+    `ps` and `inspect` with $FAKE_DOCKER_CONTAINER_ID, and succeeds at
+    everything, refusing nothing. FAKE_DOCKER_INSPECT_FAILS=1 turns `inspect`
+    into a failure instead, for the refused-name path.
+    """
+    fake = bin_dir / "docker"
+    fake.write_text(
+        "#!/bin/sh\n"
+        "# Test stub: record argv, capture exec stdin, refuse nothing.\n"
+        "set -u\n"
+        'printf \'%s\\n\' "$*" >> "$FAKE_DOCKER_LOG"\n'
+        'if [ "$1" = context ]; then\n'
+        "  printf '%s\\n' \"${FAKE_DOCKER_CONTEXT:-stub-context}\"\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = inspect ] && [ "${FAKE_DOCKER_INSPECT_FAILS:-0}" = 1 ]; then\n'
+        "  exit 1\n"
+        "fi\n"
+        'if [ "$1" = exec ]; then\n'
+        '  n="$(grep -c \'^exec \' "$FAKE_DOCKER_LOG")"\n'
+        '  for arg in "$@"; do\n'
+        '    if [ "$arg" = -i ]; then\n'
+        '      cat > "${FAKE_DOCKER_CAPTURE_DIR}/stdin-exec-${n}"\n'
+        "      break\n"
+        "    fi\n"
+        "  done\n"
+        "fi\n"
+        'if [ "$1" = ps ] || [ "$1" = inspect ]; then\n'
+        "  printf '%s\\n' \"$FAKE_DOCKER_CONTAINER_ID\"\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+
+# Every variable the delivery run must default or resolve on its own: the
+# assertions have to be able to tell the script's own defaults (and the
+# stand-in resolver's block) from whatever this machine's environment leaks.
+_DELIVERY_RUN_UNSET = (
+    "CONTAINER_USER",
+    "CONTAINER",
+    "CONTAINER_WORKSPACES_ROOT",
+    "PROJECT_NAME",
+    "SHELL_ENV_SOURCE",
+    "PROFILE_MAP_SOURCE",
+    "REPO_SHELL_ENV",
+    "INSTANCE",
+    "ENGINE",
+    "KIND",
+    "REMOTE_DOCKER_CONTEXT",
+    "REMOTE_INSTANCE_ID",
+    "RD_INSTANCE_RESOLVED",
+    "ENGINE_HOST",
+    "ENGINE_PORT",
+    "ENGINE_USER",
+    "ENGINE_DOCKER_ADDR",
+    "ENGINE_ENDPOINT",
+)
+
+
+def _run_push_secrets(
+    tmp_path: Path, bin_dir: Path, extra_env: dict[str, str] | None = None
+) -> tuple[subprocess.CompletedProcess, list[str], Path]:
+    """push-secrets.sh end to end: stand-in resolver, docker stub, real fixtures.
+
+    The resolver answers `_resolver_block`'s ssh block; the fixture sources
+    `_write_fixture_sources` wrote are wired in through SHELL_ENV_SOURCE and,
+    so `rd_load_config`'s optional read of the repository's own shell.env
+    cannot leak machine values into the run, REPO_SHELL_ENV; the environment
+    is stripped of every variable the run must default or resolve itself.
+    Returns the completed run, the stub's argv log split into lines, and the
+    stdin capture directory.
+    """
+    _fake_docker_bin(bin_dir)
+    log = tmp_path / "docker-calls.log"
+    capture = tmp_path / "captured"
+    capture.mkdir(exist_ok=True)
+    env = dict(os.environ)
+    for var in _DELIVERY_RUN_UNSET:
+        env.pop(var, None)
+    env.update(
+        PATH=f"{bin_dir}:{env.get('PATH', '')}",
+        PROJECT_NAME=_DELIVERY_PROJECT,
+        SHELL_ENV_SOURCE=str(tmp_path / "shell.env"),
+        PROFILE_MAP_SOURCE=str(tmp_path / "aws-profile-map.json"),
+        REPO_SHELL_ENV=str(tmp_path / "shell.env"),
+        FAKE_DOCKER_LOG=str(log),
+        FAKE_DOCKER_CAPTURE_DIR=str(capture),
+        FAKE_DOCKER_CONTAINER_ID=_delivery_container_id(),
+    )
+    env.update(extra_env or {})
+    assert _BASH_BIN is not None
+    result = subprocess.run(
+        [_BASH_BIN, str(_PUSH_SECRETS_SH)],
+        capture_output=True,
+        text=True,
+        timeout=_timeout_seconds(),
+        env=env,
+    )
+    return result, log.read_text(encoding="utf-8").splitlines(), capture
+
+
+def _delivery_setup(tmp_path: Path) -> Path:
+    """Fixture sources plus the stand-in resolver; returns the stub bin dir."""
+    _write_fixture_sources(tmp_path)
+    return Path(_fake_resolver_bin(tmp_path, _resolver_block(tmp_path, kind="ssh")))
+
+
+def test_push_secrets_ssh_delivery_reaches_the_running_container(tmp_path: Path) -> None:
+    """The run that would have caught the unbound CONTAINER_USER: the ssh
+    delivery exits 0 and both payload files land in the running container.
+
+    With the stand-in resolver exporting KIND=ssh and the docker stub
+    refusing nothing, push-secrets.sh must exec as the default container
+    user (vscode), write both files at the shared workspace derivation
+    through `cat >`, and reach its own success line. The captured stdin
+    proves the rendered transform -- not just an exit status -- reached the
+    container: HOST_PROXY forced off, BASH_ENV repointed at the delivered
+    copy, the noise stripped, pass-through lines intact, the profile map
+    verbatim.
+    """
+    bin_dir = _delivery_setup(tmp_path)
+    result, calls, capture = _run_push_secrets(tmp_path, bin_dir)
+
+    assert result.returncode == 0, (
+        f"the delivery must succeed end to end; stderr={result.stderr[:400]!r}"
+    )
+    assert "Configuration delivered to the running" in result.stdout, (
+        f"the run must reach its own success line; stdout={result.stdout[-400:]!r}"
+    )
+
+    exec_calls = [call for call in calls if call.startswith("exec ")]
+    assert len(exec_calls) == 3, f"two stdin writes and one verify expected; got {calls}"
+    for call in exec_calls:
+        assert "-u vscode" in call, (
+            f"the default container user must be defined in this script and used; got {call!r}"
+        )
+    assert f"mkdir -p '{_DELIVERY_WORKSPACE}/.devcontainer'" in exec_calls[0]
+    assert f"cat > '{_DELIVERY_WORKSPACE}/shell.env'" in exec_calls[0]
+    assert f"cat > '{_DELIVERY_WORKSPACE}/.devcontainer/aws-profile-map.json'" in exec_calls[1]
+    assert "[ -s " in exec_calls[2], "the delivery verifies both files landed non-empty"
+
+    delivered_env = (capture / "stdin-exec-1").read_text(encoding="utf-8")
+    assert "export HOST_PROXY='false'" in delivered_env, (
+        "the transform must reach the container, not only the payload dir"
+    )
+    assert f"export BASH_ENV='{_DELIVERY_WORKSPACE}/shell.env'" in delivered_env, (
+        "BASH_ENV must be repointed at the copy the container just received"
+    )
+    assert "HTTP_PROXY" not in delivered_env and "#" not in delivered_env, (
+        "the container receives the stripped remote flavor"
+    )
+    assert "export LOCAL_DOCKER_CONTEXT='orbstack'" in delivered_env, "unrelated lines pass through"
+    delivered_map = (capture / "stdin-exec-2").read_bytes()
+    assert delivered_map == (tmp_path / "aws-profile-map.json").read_bytes(), (
+        "the profile map must reach the container verbatim"
+    )
+
+
+def test_push_secrets_ssh_delivery_honors_a_named_container_and_a_pinned_user(
+    tmp_path: Path,
+) -> None:
+    """CONTAINER=<name> selects the receiver by inspect, bypassing the label
+    scan, and a caller-pinned CONTAINER_USER wins over the default.
+
+    The multi-container refusal names CONTAINER=<name> as its remedy, so the
+    delivery has to honor it: this run never reaches `docker ps` (the stub's
+    log proves that), execs against the container the named one resolves to,
+    and rides `-u deployer` from the caller's environment into every exec --
+    the `:=` default may only fill an unset variable, never clobber a pinned
+    one.
+    """
+    bin_dir = _delivery_setup(tmp_path)
+    result, calls, capture = _run_push_secrets(
+        tmp_path,
+        bin_dir,
+        extra_env={"CONTAINER": "the-named-one", "CONTAINER_USER": "deployer"},
+    )
+
+    assert result.returncode == 0, f"stderr={result.stderr[:400]!r}"
+    assert calls[0].startswith("context show") and calls[1].startswith("inspect -f"), calls
+    assert "the-named-one" in calls[1], "the name the caller chose is what gets inspected"
+    assert not [call for call in calls if call.startswith("ps ")], (
+        "a named container must bypass the label scan entirely"
+    )
+    exec_calls = [call for call in calls if call.startswith("exec ")]
+    assert len(exec_calls) == 3, f"two stdin writes and one verify expected; got {calls}"
+    for call in exec_calls:
+        assert "-u deployer" in call, f"the pinned user must reach every exec; got {call!r}"
+    assert f"cat > '{_DELIVERY_WORKSPACE}/shell.env'" in exec_calls[0]
+    assert f"cat > '{_DELIVERY_WORKSPACE}/.devcontainer/aws-profile-map.json'" in exec_calls[1]
+    assert (
+        (capture / "stdin-exec-1")
+        .read_text(encoding="utf-8")
+        .startswith("export HOST_PROXY='false'")
+    )
+    assert (capture / "stdin-exec-2").read_bytes() == (
+        tmp_path / "aws-profile-map.json"
+    ).read_bytes()
+
+
+def test_push_secrets_ssh_delivery_refuses_a_container_that_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    """A named container must answer `docker inspect`, or the run refuses
+    with rdc_require_container's discipline before anything is delivered.
+
+    The refusal must not fall through to the label scan -- that would
+    deliver into a container the operator just ruled out -- and no exec call
+    may follow it.
+    """
+    bin_dir = _delivery_setup(tmp_path)
+    result, calls, _capture = _run_push_secrets(
+        tmp_path,
+        bin_dir,
+        extra_env={"CONTAINER": "missing-container", "FAKE_DOCKER_INSPECT_FAILS": "1"},
+    )
+
+    assert result.returncode != 0, "a name nothing answers to must refuse"
+    assert "There is no container named 'missing-container'" in result.stderr, (
+        f"the refusal must name the container and its discipline; stderr={result.stderr[-400:]!r}"
+    )
+    assert not [call for call in calls if call.startswith("exec ")], (
+        "nothing is delivered once the name is refused"
+    )

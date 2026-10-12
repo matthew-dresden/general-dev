@@ -378,7 +378,7 @@ The lifecycle is five targets:
 |---|---|
 | Scaffold the manifest | `make engine-init INSTANCE=<name> HOST=<host> USER=<user>` (`PORT=` and `DOCKER_ADDR=` optional; a Windows engine needs Docker Desktop exposed and `DOCKER_ADDR=tcp://localhost:2375`) |
 | Prove reachability | `make engine-verify INSTANCE=<name>`: opens the forward, handshakes docker through its context, closes the forward, prints the versions |
-| Open the forward | `make remote INSTANCE=<name>` (or `make connect-start INSTANCE=<name>`, which leaves the machine-wide context alone); the engine's own kind selects the transport, so an ssh engine needs no variable -- an explicit `DEVCONTAINER_TRANSPORT` that contradicts the kind is refused naming the conflict |
+| Open the forward | `make remote INSTANCE=<name>` (or `make connect-start INSTANCE=<name>`, which leaves the machine-wide context alone); the engine's own kind selects the transport, so an ssh engine needs no variable. An explicit `DEVCONTAINER_TRANSPORT` that contradicts the kind is refused naming the conflict |
 | Build | `make build INSTANCE=<name>` |
 | Retire | `make engine-remove INSTANCE=<name> CONFIRM=remove`, refused while a project container still exists on the engine |
 

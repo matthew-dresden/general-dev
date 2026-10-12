@@ -54,7 +54,7 @@ blocks on the forward process's own stdout through `selectors`, a real
 I/O-readiness wait, the same primitive `transport.wait_ready` rests on. An
 `ssh -N` forward normally announces nothing on stdout, so the stream is
 silent in normal operation and the bounded wait simply paces the probes.
-An EOF on that stream is the ssh process exiting -- unless the process is
+An EOF on that stream is the ssh process exiting, unless the process is
 still alive when the EOF arrives: a session-less OpenSSH client (observed
 on 10.x, which closes its stdout when it runs no remote command) closes
 its stdout while the forward runs, so `wait_ready` accepts a
@@ -432,7 +432,7 @@ def _pace(seconds: float) -> None:
     with nothing registered: the selector blocks for at most `seconds`
     (a real I/O wait, never a sleep) and returns once the slice has
     passed. This is the pacing of the probe loop for the one case the
-    stream cannot pace itself -- an `ssh` client that closed its stdout
+    stream cannot pace itself, an `ssh` client that closed its stdout
     while the forward process is still alive.
     """
     selector = selectors.DefaultSelector()
@@ -461,8 +461,8 @@ def wait_ready(
     and one poll cadence; `ssh -N` normally writes nothing there, so the
     wait simply spaces the probes, while data (an abnormal stdout) is
     reacted to immediately instead of waiting out the deadline. An EOF is
-    the ssh process exiting -- its inherited stderr having already shown
-    the operator why -- and raises at once, UNLESS `process_alive` was
+    the ssh process exiting, its inherited stderr having already shown
+    the operator why, and raises at once. UNLESS `process_alive` was
     given and answers True: a session-less OpenSSH client (observed on
     10.x) closes its stdout while the forward runs, so an EOF beside a
     live process means only that the stream went quiet. The wait then

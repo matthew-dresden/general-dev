@@ -490,7 +490,7 @@ to the `devcontainer_config.transport_ssh` forward and an `ec2` engine to
 the ssm forward whether or not the variable is set. The variable is a guard
 around that dispatch, never the selector: unset, the kind alone decides,
 which is why an operator naming an ssh engine never sets it; set, the value
-must agree with the kind -- an explicit `ssm` behind an ssh engine, or an
+must agree with the kind: an explicit `ssm` behind an ssh engine, or an
 explicit `ssh` behind an ec2 engine, is refused by name as the conflict it
 is. `transport.py`'s `resolve_transport`, which the ssm module's own
 `connect` subcommand calls, still accepts only

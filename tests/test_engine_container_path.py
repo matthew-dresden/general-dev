@@ -21,8 +21,9 @@ container.sh (static, the approach of `tests/test_container_fleet.py` and
 freshness probe is skipped for ssh; the volume seed writes both payload
 files over a stdin heredoc with `rdc_sh_escape`d values and a chown, only
 under the ssh guard, and the EC2 clone heredoc carries no payload write; the
-up-path refresh drives the forwards CLI's ssh flag form with no aws sso
-login text in that branch.
+up-path refresh drives the forwards CLI in both branches -- the ssh flag
+form for ssh, the instance-id form for ssm -- with no aws sso login text in
+the ssh branch and no foreground `transport connect` anywhere.
 
 config-payload.sh (behavioral): `write_config_payload` applies the exact
 transform push-secrets.sh has always published -- HOST_PROXY forced off,
@@ -453,7 +454,10 @@ def test_seed_volume_writes_the_payload_only_for_ssh() -> None:
 
 def test_up_refresh_uses_the_forwards_cli_for_ssh() -> None:
     """The ssh refresh drives `forwards open` with the ssh flag form; the ssm
-    branch keeps its `transport connect` call and its sso remedy, unchanged."""
+    branch drives the same daemonized opener with the instance-id flag form,
+    and keeps its sso remedy -- no foreground `transport connect` anywhere,
+    because one idles until interrupted and turns a Ctrl-C into a false
+    success against a forward that has just closed."""
     body = _sh_function_body("rdc_up", _container_text())
     ssh_at = body.index('if [ "$backend" = "remote" ] && [ "${KIND:-}" = "ssh" ]')
     ssm_at = body.index('elif [ "$backend" = "remote" ]', ssh_at)
@@ -469,7 +473,20 @@ def test_up_refresh_uses_the_forwards_cli_for_ssh() -> None:
     assert "make connect-refresh INSTANCE=" in ssh_branch, "the failure remedy names the refresh"
 
     ssm_branch = body[ssm_at : body.index("\n    else\n", ssm_at)]
-    assert "devcontainer_config.transport connect" in ssm_branch, "the ssm branch is unchanged"
+    assert "devcontainer_config.forwards open" in ssm_branch, (
+        "the ssm refresh must run the daemonized opener connect-start runs"
+    )
+    for flag in ("--instance-id", "--context", "--profile", "--region"):
+        assert flag in ssm_branch, f"the ssm refresh must carry the {flag} flag"
+    # The negative pin reads code, not the comment that explains the rule --
+    # the same non-comment discipline _non_comment_transport_call_sites applies.
+    ssm_code = "\n".join(
+        line for line in ssm_branch.splitlines() if not line.strip().startswith("#")
+    )
+    assert "transport connect" not in ssm_code, (
+        "no bare `transport connect` foreground invocation may remain: it idles "
+        "until interrupted, so an up against a dead forward blocks forever"
+    )
     assert "aws sso login" in ssm_branch, "the sso remedy belongs to the ssm branch alone"
 
     # The Windows guidance is keyed on a unix-path docker_addr inside rdc_up.

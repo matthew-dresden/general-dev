@@ -1119,8 +1119,14 @@ rdc_up() {
           ${ssh_addr_guidance[@]+"${ssh_addr_guidance[@]}"}
       rd_ok "ssh forward open"
     elif [ "$backend" = "remote" ]; then
-      rd_log "remote engine is not answering, refreshing the port forward"
-      PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" python3 -m devcontainer_config.transport connect \
+      # The daemonized opener, not a foreground `transport connect`: connect
+      # idles until interrupted, so an up against a dead forward blocked
+      # forever, and its exit 0 after a Ctrl-C read as success against a
+      # forward that had just closed. `forwards open` is idempotent, returns
+      # once the docker context answers through the forward, and carries its
+      # own diagnosis on failure -- the same invocation connect-start runs.
+      rd_log "remote engine is not answering, opening the ssm port forward"
+      PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" python3 -m devcontainer_config.forwards open \
         --instance-id "$REMOTE_INSTANCE_ID" --context "$REMOTE_DOCKER_CONTEXT" \
         --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null \
         || rd_fail "The port forward could not be refreshed, so the remote engine stays unreachable" \
@@ -1130,7 +1136,7 @@ rdc_up() {
           "  ${RD_BOLD}aws sso login --profile ${REMOTE_AWS_PROFILE}${RD_RESET}, then ${RD_BOLD}make up${RD_RESET}" \
           "" \
           "If the instance is stopped, start it, then ${RD_BOLD}make connect${RD_RESET}."
-      rd_ok "port forward refreshed"
+      rd_ok "ssm port forward open"
     else
       local diagnosis
       diagnosis="$(rd_engine_diagnosis "$(docker context show)")"

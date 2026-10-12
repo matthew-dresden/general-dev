@@ -117,7 +117,7 @@ operation and both entry points stay in step.
 
 | Script | Purpose |
 |---|---|
-| `devcontainer_config.transport` | Establish the SSM port forward, create or refresh the instance's docker context against the forwarded port, and switch to it. Reached through `make connect`. |
+| `devcontainer_config.transport` | Installs an instance's TLS material (`make cert-install`). Forward establishment is not here: `devcontainer_config.forwards` owns it (`make connect-start`, a background daemon that returns once docker answers), and `make up` reopens a dead forward through the same idempotent opener. |
 | `push-secrets.sh` | Transform local `shell.env` for remote use (the shared rules in `config-payload.sh`) and publish both secret files to SSM Parameter Store (`/devcontainer/<project>/…`). Against an SSH engine (`engine.json`) there is no Parameter Store: the same transform seeds the workspace volume at build time, and this script refreshes the two files in the running container instead. |
 | `config-payload.sh` | The remote transform of `shell.env` and the profile-map copy, rendered once and consumed by both channels: the Parameter Store publish (EC2) and the build-time volume seed (SSH engines). |
 | `container.sh` | Container lifecycle for the current project: status, start/stop/restart, unpushed-work check, teardown, rebuild report, and seeding the VS Code server (`vscode-server`, which `reopen` runs for you). |

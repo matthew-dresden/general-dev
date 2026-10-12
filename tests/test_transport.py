@@ -2327,30 +2327,34 @@ def _non_comment_transport_call_sites(root: Path) -> list[str]:
     return call_sites
 
 
-def test_build_path_contains_a_devcontainer_config_transport_call_site() -> None:
-    """AC-TEST-001, AC-FUNC-001: the build-path gap the Description names, asserted mechanically.
+def test_build_path_no_longer_invokes_the_foreground_transport_connect() -> None:
+    """The build path reaches the transport module only where it means to.
 
-    Before this task, `grep -rn devcontainer_config.transport Makefile
-    .devcontainer` returns only the two comment references the Description
-    names (`certs.py`, `hostprobe.py`) and no call site, so `make connect`
-    could never be pointed at the SSM transport no matter what
-    `DEVCONTAINER_TRANSPORT` was set to. This inspects the actual build
-    path files on disk (`Makefile`'s `connect` target and anything under
-    `.devcontainer/`) for a genuine, non-comment call site, rather than
-    inspecting `transport.py`'s own CLI, which existed on both sides of the
-    gap and cannot distinguish "reachable from the build path" from
-    "reachable if a caller already knew the incantation".
+    This test once pinned the opposite (AC-TEST-001, AC-FUNC-001: that the
+    build path could reach `transport connect` at all, the gap the older
+    Description named). The foreground `connect` idles until interrupted --
+    it blocked `make up` on a dead forward forever and read a Ctrl-C as
+    success against a forward that had just closed -- so every caller that
+    opened a forward through it, connect-start's dispatch and rdc_up's ssm
+    refresh alike, now goes through the daemonized `devcontainer_config.forwards
+    open` (pinned by test_makefile_contract and test_engine_container_path).
+    What remains to pin here, mechanically over the same inventory: the
+    module is still genuinely reached from the build path -- `certs.sh`'s
+    material install -- so this test's "no connect" half cannot pass because
+    the inventory went blind, and none of those call sites is the foreground
+    connect anymore.
     """
     call_sites = _non_comment_transport_call_sites(_repo_root())
 
     assert call_sites, (
         "grep -rn devcontainer_config.transport Makefile .devcontainer found no "
-        "non-comment call site: the build path cannot be pointed at the SSM transport."
+        "non-comment call site: the inventory this test reasons over is broken."
     )
-    assert any("devcontainer_config.transport connect" in site for site in call_sites), (
-        f"a devcontainer_config.transport reference exists ({call_sites}) but none of them "
-        "invoke the 'connect' entry point that wires ensure_context and handshake into the "
-        "forward."
+    assert not any("devcontainer_config.transport connect" in site for site in call_sites), (
+        f"a build-path call site still invokes the foreground 'transport connect' "
+        f"({call_sites}): the daemonized devcontainer_config.forwards open -- "
+        "idempotent, returning after readiness -- is the only forward opener the "
+        "build path may run."
     )
 
 

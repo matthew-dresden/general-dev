@@ -789,6 +789,17 @@ aws-profile-map.json                           /devcontainer/<project>/…      
   `${DEVCONTAINER_SSM_PREFIX:-/devcontainer/<workspace-basename>}/shell.env`
   (SecureString) and `…/aws-profile-map.json` (String), written with 0600 /
   default perms. Any failure is fatal with a message naming the remedy.
+- SSH-engine mode: an instance declared by
+  `remote-instances/<name>/engine.json` has no Parameter Store behind it, so
+  the container path never touches AWS. The build seeds the same transformed
+  payload straight into the workspace volume (`container.sh`, right after
+  the clone), so the wrapper finds `shell.env` on disk and skips the
+  Parameter Store bootstrap entirely; the payload is fresh on every rebuild.
+  `make push-secrets` against such an instance refreshes the two files in
+  the running container over stdin, so a config change needs no rebuild.
+  Both channels render through one shared transform
+  (`.devcontainer/remote-docker/config-payload.sh`), so the EC2 publish and
+  the SSH seed are byte-identical flavors.
 - The pushed `shell.env` is the local one transformed for remote: proxy
   disabled and removed (no laptop tinyproxy on EC2), `BASH_ENV` pointed at the
   remote workspace path, stale PATH prepends dropped.

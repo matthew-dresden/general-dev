@@ -38,7 +38,11 @@ flowchart LR
   across dockerd restarts; source lives in Docker volumes on the instance.
 - **Secrets:** never in git. `push-secrets.sh` publishes the local gitignored
   `shell.env` / `aws-profile-map.json` to SSM Parameter Store per project; the
-  postcreate wrapper fetches them on the instance via the instance role.
+  postcreate wrapper fetches them on the instance via the instance role. An
+  SSH engine (a `remote-instances/<name>/engine.json` manifest) runs with
+  zero AWS: the same transform is seeded into the workspace volume at build
+  time and refreshable in the running container with `make push-secrets`,
+  and Parameter Store is never involved.
 
 ### Questions this design answers
 
@@ -114,7 +118,8 @@ operation and both entry points stay in step.
 | Script | Purpose |
 |---|---|
 | `devcontainer_config.transport` | Establish the SSM port forward, create or refresh the instance's docker context against the forwarded port, and switch to it. Reached through `make connect`. |
-| `push-secrets.sh` | Transform local `shell.env` for remote use and publish both secret files to SSM Parameter Store (`/devcontainer/<project>/…`). |
+| `push-secrets.sh` | Transform local `shell.env` for remote use (the shared rules in `config-payload.sh`) and publish both secret files to SSM Parameter Store (`/devcontainer/<project>/…`). Against an SSH engine (`engine.json`) there is no Parameter Store: the same transform seeds the workspace volume at build time, and this script refreshes the two files in the running container instead. |
+| `config-payload.sh` | The remote transform of `shell.env` and the profile-map copy, rendered once and consumed by both channels: the Parameter Store publish (EC2) and the build-time volume seed (SSH engines). |
 | `container.sh` | Container lifecycle for the current project: status, start/stop/restart, unpushed-work check, teardown, rebuild report, and seeding the VS Code server (`vscode-server`, which `reopen` runs for you). |
 | `lib.sh` | Shared functions (sourced by the others), including the failure translation described below. |
 | `../resmon-disks.py` | Runs from `postAttachCommand`, by the absolute path postCreate links it to (`~/.local/bin/`), because an attached container gives the hook no workspace to run in. Points the Resource Monitor extension at the devices behind `/workspaces` and `/tmp`, resolved per host. |

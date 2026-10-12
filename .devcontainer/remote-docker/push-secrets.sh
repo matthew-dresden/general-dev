@@ -2,6 +2,10 @@
 
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+# The one remote transform of the configuration payload, shared with
+# container.sh's SSH-engine volume seed: sourcing it here is what keeps a
+# second copy of the rules from growing beside the first.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config-payload.sh"
 
 rd_load_config
 # Resolved, not derived, and resolved before the remote requirements below,
@@ -12,8 +16,6 @@ rd_load_config
 # that reason.
 rd_resolve_instance
 rd_require_remote_config
-rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
-rd_check_aws_auth
 
 REPO_ROOT="$(cd "${RD_DIR}/../.." && pwd)"
 PROJECT_NAME="${PROJECT_NAME:-$(basename "$REPO_ROOT")}"
@@ -21,25 +23,78 @@ SHELL_ENV_SOURCE="${SHELL_ENV_SOURCE:-${REPO_ROOT}/shell.env}"
 PROFILE_MAP_SOURCE="${PROFILE_MAP_SOURCE:-${REPO_ROOT}/.devcontainer/aws-profile-map.json}"
 SSM_PREFIX="${PARAMETER_PREFIX%/}"
 
-[ -f "$SHELL_ENV_SOURCE" ] || rd_die "shell.env not found at ${SHELL_ENV_SOURCE} (run 'make init' first)"
-[ -f "$PROFILE_MAP_SOURCE" ] || rd_die "aws-profile-map.json not found at ${PROFILE_MAP_SOURCE}"
+# The SSH engine's channel is the running container, not Parameter Store:
+# an engine declared by engine.json has no Parameter Store behind it, so the
+# same transformed payload the EC2 path publishes is written straight into
+# the checkout the container already mounts, and the container can be
+# refreshed without a rebuild. The resolver has already run (above), so the
+# project's workspace path is addressed on the engine this run resolved.
+# Every value rides stdin -- `cat >`, the same discipline rdc_push_creds
+# applies to every credential fragment -- never a docker exec's argv, where
+# it would sit in the process table for the life of the call. The workspace
+# path is the same CONTAINER_WORKSPACES_ROOT + PROJECT_NAME derivation
+# container.sh uses; config-payload.sh sources the same default, so the
+# BASH_ENV rewrite inside the payload and this destination agree by
+# construction.
+rd_deliver_config_payload_to_container() {
+  local ids id count payload_dir workspace
+  rd_require_cmd docker "Install the docker CLI: https://docs.docker.com/engine/install/"
+  ids="$(docker ps -aq --filter "label=devcontainer.project=${PROJECT_NAME}" --filter "status=running")"
+  [ -n "$ids" ] || rd_fail "No running container for project '${PROJECT_NAME}' can receive the configuration" \
+    "An SSH engine's config channel is the container itself, so one has to be running." \
+    "" \
+    "Start or build one:" \
+    "  ${RD_BOLD}make up${RD_RESET}"
+  count="$(printf '%s\n' "$ids" | wc -l | tr -d ' ')"
+  [ "$count" -eq 1 ] || rd_fail "${count} running containers for project '${PROJECT_NAME}' exist, so this cannot pick one" \
+    "Writing the configuration into the wrong one would leave the others stale." \
+    "" \
+    "Name the one you mean with ${RD_BOLD}CONTAINER=<name>${RD_RESET}, or tear the extras down first:" \
+    "  ${RD_BOLD}docker ps --filter label=devcontainer.project=${PROJECT_NAME}${RD_RESET}"
+  id="$(printf '%s\n' "$ids" | sed -n 1p)"
+  workspace="${CONTAINER_WORKSPACES_ROOT}/${PROJECT_NAME}"
 
-REMOTE_SHELL_ENV=$(sed \
-  -e "s|^export HOST_PROXY=.*|export HOST_PROXY='false'|" \
-  -e "s|^export BASH_ENV=.*|export BASH_ENV='/workspaces/${PROJECT_NAME}/shell.env'|" \
-  -e '/^export HOST_PROXY_URL=/d' \
-  -e '/^export HTTP_PROXY=/d' \
-  -e '/^export HTTPS_PROXY=/d' \
-  -e '/^export http_proxy=/d' \
-  -e '/^export https_proxy=/d' \
-  -e '/^export NO_PROXY=/d' \
-  -e '/^export no_proxy=/d' \
-  -e '/^export PATH=.*\.asdf/d' \
-  -e '/^export PATH=.*\.localscripts/d' \
-  -e '/^[[:space:]]*#/d' \
-  -e '/^[[:space:]]*$/d' \
-  "$SHELL_ENV_SOURCE")
-[ -n "$REMOTE_SHELL_ENV" ] || rd_die "transformed shell.env is empty"
+  # The payload directory is removed by an EXIT trap, not a RETURN: rd_fail
+  # exits, and a RETURN trap never runs on that path.
+  payload_dir="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/rd-push.XXXXXX")"
+  trap 'rm -rf "$payload_dir"' EXIT
+  write_config_payload "$payload_dir"
+
+  rd_log "Writing shell.env into the running container (${workspace}/shell.env)..."
+  docker exec -i -u "$CONTAINER_USER" "$id" \
+    sh -c "umask 077; mkdir -p '${workspace}/.devcontainer'; cat > '${workspace}/shell.env'" \
+    < "${payload_dir}/shell.env" \
+    || rd_fail "shell.env could not be written into the container" \
+      "Nothing else inside it was changed." \
+      "" \
+      "The container has to be running for this:  ${RD_BOLD}make start${RD_RESET}"
+  rd_log "Writing aws-profile-map.json into the running container..."
+  docker exec -i -u "$CONTAINER_USER" "$id" \
+    sh -c "umask 077; cat > '${workspace}/.devcontainer/aws-profile-map.json'" \
+    < "${payload_dir}/.devcontainer/aws-profile-map.json" \
+    || rd_fail "aws-profile-map.json could not be written into the container" \
+      "Nothing else inside it was changed." \
+      "" \
+      "The container has to be running for this:  ${RD_BOLD}make start${RD_RESET}"
+
+  # Trust nothing: prove both files landed non-empty, rather than trusting
+  # the exec's exit status.
+  docker exec -u "$CONTAINER_USER" "$id" \
+    sh -c "[ -s '${workspace}/shell.env' ] && [ -s '${workspace}/.devcontainer/aws-profile-map.json' ]" \
+    || rd_fail "The configuration files are missing or empty in the container" \
+      "They were written moments ago, so the container's filesystem is misbehaving." \
+      "" \
+      "Re-run:  ${RD_BOLD}make push-secrets${RD_RESET}"
+}
+
+if [ "${KIND:-}" = "ssh" ]; then
+  rd_deliver_config_payload_to_container
+  rd_ok "Configuration delivered to the running '${PROJECT_NAME}' container (SSH engine: no Parameter Store involved)."
+  exit 0
+fi
+
+rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+rd_check_aws_auth
 
 # The value travels inside a --cli-input-json document, never in argv:
 # shell.env carries every credential this repository has, and an argument is
@@ -60,6 +115,11 @@ REMOTE_SHELL_ENV=$(sed \
 RD_PUT_DIR="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/rd-put.XXXXXX")"
 trap 'rm -rf "$RD_PUT_DIR"' EXIT
 
+# The EC2 publish sources are the shared transform's output, byte-identical
+# to what this script's own inline sed produced before the SSH engine's
+# volume seed needed the same rules (config-payload.sh is the one owner).
+write_config_payload "$RD_PUT_DIR"
+
 rd_put_parameter() {
   local name="$1" type="$2" value="$3" document="${RD_PUT_DIR}/put-parameter.json"
   # printf, not a here-string: a here-string appends a newline, which would
@@ -75,9 +135,9 @@ rd_put_parameter() {
 }
 
 rd_log "Publishing ${SSM_PREFIX}/shell.env (SecureString)..."
-rd_put_parameter "${SSM_PREFIX}/shell.env" SecureString "$REMOTE_SHELL_ENV"
+rd_put_parameter "${SSM_PREFIX}/shell.env" SecureString "$(cat "${RD_PUT_DIR}/shell.env")"
 
 rd_log "Publishing ${SSM_PREFIX}/aws-profile-map.json (String)..."
-rd_put_parameter "${SSM_PREFIX}/aws-profile-map.json" String "$(cat "$PROFILE_MAP_SOURCE")"
+rd_put_parameter "${SSM_PREFIX}/aws-profile-map.json" String "$(cat "${RD_PUT_DIR}/.devcontainer/aws-profile-map.json")"
 
 rd_ok "Secrets published for project '${PROJECT_NAME}'. Remote workspaces of this project can now bootstrap."

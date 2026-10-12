@@ -71,12 +71,19 @@ rd_require_aws_config() {
 }
 
 rd_require_remote_config() {
-  # The id comes from the per-instance id store
-  # (~/.docker/certs/<name>/instance-id), exported by rd_resolve_instance;
-  # devcontainer_config.instance_ops.link_id is that store's only writer.
-  # No environment variable is read as a fallback: an empty value here is
-  # the not-yet-linked state, and the remedy is the command that records
-  # the id, not a variable to set.
+  # An SSH engine's manifest (remote-instances/<name>/engine.json) is its
+  # whole declaration: no EC2 id store and no AWS session exist behind it,
+  # so only the docker context the engine answers on is demanded.
+  if [ "${KIND:-ec2}" = "ssh" ]; then
+    : "${REMOTE_DOCKER_CONTEXT:?REMOTE_DOCKER_CONTEXT must be set}"
+    return 0
+  fi
+  # The EC2 requirements keep their exact shape: the id comes from the
+  # per-instance id store (~/.docker/certs/<name>/instance-id), exported by
+  # rd_resolve_instance; devcontainer_config.instance_ops.link_id is that
+  # store's only writer. No environment variable is read as a fallback: an
+  # empty value here is the not-yet-linked state, and the remedy is the
+  # command that records the id, not a variable to set.
   [ -n "${REMOTE_INSTANCE_ID:-}" ] || rd_die "no EC2 instance id is recorded for instance '${INSTANCE:-<unresolved>}'. Link it first: make instance-link INSTANCE=<name>"
   rd_require_aws_config
   : "${REMOTE_DOCKER_CONTEXT:?REMOTE_DOCKER_CONTEXT must be set}"
@@ -88,6 +95,12 @@ rd_require_cmd() {
 }
 
 rd_check_prereqs() {
+  # An SSH engine opens no AWS session: neither the aws CLI nor the SSM
+  # session-manager-plugin is on its path. Docker and jq are demanded by
+  # their own call sites, as before.
+  if [ "${KIND:-ec2}" = "ssh" ]; then
+    return 0
+  fi
   rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
   rd_require_cmd session-manager-plugin "Install: https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
 }
@@ -345,10 +358,15 @@ rd_engine_diagnosis() {
   local context="$1"
   # The forward-opening remedy must name the instance this run addresses:
   # a bare `make connect-start` refreshes whichever instance the resolver defaults
-  # to, which under ENGINE is not necessarily this one.
+  # to, which under ENGINE is not necessarily this one. The ssh remedy
+  # prefers a refresh over an open for the same reason an expired SSO
+  # session does: refresh re-runs the recorded command, so it can never
+  # point at a different engine than the tunnel that dropped.
   local forward_remedy="make connect-start"
+  local ssh_forward_remedy="make connect-refresh INSTANCE=${INSTANCE:-<unresolved>}"
   if [ -n "${ENGINE:-}" ] && [ "$ENGINE" != "local" ]; then
     forward_remedy="make remote INSTANCE=${ENGINE}"
+    ssh_forward_remedy="make remote INSTANCE=${ENGINE}"
   fi
   if ! command -v docker > /dev/null 2>&1; then
     printf 'the docker CLI is not installed on this machine.\n'
@@ -360,10 +378,20 @@ rd_engine_diagnosis() {
     printf 'start Docker (OrbStack, Docker Desktop, dockerd), or target the remote engine: make remote\n'
     return 0
   fi
-  if command -v aws > /dev/null 2>&1 \
+  # An SSH engine opens no AWS session, so the SSO check below is an EC2
+  # question only; running it for ssh would read an absent profile as an
+  # expired session and send the operator to sign in to something the engine
+  # never uses.
+  if [ "${KIND:-}" != "ssh" ] \
+    && command -v aws > /dev/null 2>&1 \
     && ! aws sts get-caller-identity --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null 2>&1; then
     printf 'the AWS session for profile '\''%s'\'' has expired, which breaks the port forward.\n' "$REMOTE_AWS_PROFILE"
     printf 'aws sso login --profile %s, then %s\n' "$REMOTE_AWS_PROFILE" "$forward_remedy"
+    return 0
+  fi
+  if [ "${KIND:-}" = "ssh" ]; then
+    printf 'the ssh forward to %s has dropped.\n' "${ENGINE_ENDPOINT:-<unresolved>}"
+    printf '%s reopens it\n' "$ssh_forward_remedy"
     return 0
   fi
   printf 'the SSM port forward to %s has dropped.\n' "$REMOTE_INSTANCE_ID"

@@ -276,16 +276,16 @@ help:
 	row "make rebuild"          "both"   "clean, then build. Prerequisites are checked before anything is destroyed."; \
 	row "make build-no-cache"   "both"   "build with the image rebuilt from scratch."; \
 	row "make rebuild-no-cache" "both"   "rebuild with the image rebuilt from scratch. Use when a feature or base image changed."; \
-	row "make clean"            "both"   "Destroy the container, its private volumes and its image. Shared volumes and the base image are kept."; \
+	row "make clean"            "both"   "Destroy the container, its private volumes and its image; the image is kept when a sibling still uses it. ALL=1 needs CONFIRM=destroy."; \
 	printf '\n\033[1mLIFECYCLE\033[0m\n'; \
-	row "make status"           "both"   "Backend, container, image and volumes. Read-only, so start here when something looks wrong."; \
+	row "make status"           "both"   "Backend, container, image and volumes. Read-only, so start here. ALL=1 reads every engine, one after the other."; \
 	row "make reopen"           "both"   "Open the container in VS Code. Local opens the folder; remote names the container to attach to."; \
 	row "make exec"             "both"   "Interactive shell inside the container. CONTAINER_SHELL picks which one."; \
 	row "make vscode-server"    "both"   "Fetch the VS Code server this machine needs inside the container. reopen does it for you."; \
-	row "make start / stop"     "both"   "Start or stop the container. The checkout survives either way."; \
-	row "make restart"          "both"   "Restart in place. Fixes a wedged container without rebuilding anything."; \
+	row "make start / stop"     "both"   "Start or stop the container. The checkout survives either way. ALL=1 for every engine."; \
+	row "make restart"          "both"   "Restart in place. Fixes a wedged container without rebuilding anything. ALL=1 for every engine."; \
 	row "make rename NAME=x"    "both"   "Give the container a readable name. New ones are <repo>-<devcontainerId>, which is too long to pick from a list."; \
-	row "make check"            "both"   "Remote: report uncommitted or unpushed work in the volume, non-zero when dirty. Local: a no-op, the container shares this folder."; \
+	row "make check"            "both"   "Remote: report uncommitted or unpushed work in the volume, non-zero when dirty. Local: a no-op. ALL=1 for every engine."; \
 	printf '\n\033[1mSECRETS AND CERTIFICATES\033[0m\n'; \
 	row "make push-creds"       "both"   "Resolve every hostcreds manifest entry on this machine and push it into the container. Git entries also seed ~/.git-credentials."; \
 	row "make creds-init"       "host"   "Prompt once per missing keychain item the hostcreds manifest names and store it. CREDS_INIT_ARGS='--stdin NAME' feeds one value from stdin."; \
@@ -312,7 +312,7 @@ help:
 	row "make skills-list"      "host"   "Show each agent scope: installed (target), native (project), or not installed. AGENT=opencode|claude|both SCOPE=global|project|runtime"; \
 	printf '\n\033[1mOPTIONS\033[0m\n'; \
 	row "ENGINE=local|<name>"   ""       "Address one engine explicitly (ENGINE=x make <target> or make <target> ENGINE=x): drive local and remote engines in parallel; unset follows the active context."; \
-	row "CONTAINER=<name>"      ""       "Pick one instance when several clones of this repo exist. 'make status' lists them."; \
+	row "CONTAINER=<name>"      ""       "Pick one container when several clones of this repo share an engine. 'make list-containers' lists them."; \
 	row "NAME=<x>"              ""       "Name the container build/up creates at creation; make rename NAME=x does the same after the fact."; \
 	row "FORCE=1"               ""       "Proceed past the unpushed-work and uncommitted-config guards."; \
 	row "SKIP_SECRETS_CHECK=1"  ""       "Do not compare shell.env against Parameter Store, and do not publish it."; \
@@ -465,23 +465,60 @@ disconnect:
 	}
 	@docker context use $(LOCAL_CONTEXT)
 
+# Fleet dispatcher for the container-level targets: $(1) is the container.sh
+# subcommand, whose name is also the make target's. The default is the
+# single-engine run every target always was. ALL=1 runs the subcommand once
+# per engine -- the local engine plus every configured instance, discovered
+# at run time, never parse time (the same discipline INSTANCE ?= follows) --
+# exporting RDC_ALL so the script takes every project container on that
+# engine instead of refusing ambiguity, and ENGINE so each iteration aims
+# one engine without touching the context other terminals share. CONTAINER
+# alongside ALL is refused, the one-or-the-other rule INSTANCE and ALL
+# enforce for the instance targets. clean gates its fleet form behind
+# CONFIRM=destroy (mirroring instance-destroy and bucket-delete): ALL=1
+# destroys every container this project owns on every engine, so the exact
+# confirming command is stated in the refusal; the per-container
+# unpushed-work guards still run, and FORCE=1 bypasses those too, exactly
+# as the single-container clean.
+define CONTAINER_FLEET_DISPATCH
+if [ "$(ALL)" = "1" ]; then \
+	if [ -n "$(CONTAINER)" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m pass CONTAINER=<name> or ALL=1, not both\n' >&2; \
+		printf '        ALL=1 already acts on every container this project owns, on every engine.\n' >&2; \
+		exit 2; \
+	fi; \
+	if [ "$(1)" = "clean" ] && [ "$(CONFIRM)" != "destroy" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m ALL=1 destroys every container of this project on every engine -- containers, private volumes and unshared images; confirm it: make clean ALL=1 CONFIRM=destroy\n' >&2; \
+		printf '        The unpushed-work guard still runs per container; FORCE=1 bypasses those too.\n' >&2; \
+		exit 1; \
+	fi; \
+	engines="local $$($(DISCOVER_INSTANCE_NAMES))"; \
+	for engine in $$engines; do \
+		printf '\033[0;36m[FLEET]\033[0m engine %s\n' "$$engine"; \
+		ENGINE="$$engine" RDC_ALL=1 INSTANCE="$(INSTANCE)" $(CONTAINER_SH) $(1) || exit 1; \
+	done; \
+else \
+	INSTANCE="$(INSTANCE)" $(CONTAINER_SH) $(1); \
+fi
+endef
+
 status:
-	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) status
+	@$(call CONTAINER_FLEET_DISPATCH,status)
 
 start:
-	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) start
+	@$(call CONTAINER_FLEET_DISPATCH,start)
 
 stop:
-	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) stop
+	@$(call CONTAINER_FLEET_DISPATCH,stop)
 
 restart:
-	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) restart
+	@$(call CONTAINER_FLEET_DISPATCH,restart)
 
 rename:
 	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) rename
 
 check:
-	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) check
+	@$(call CONTAINER_FLEET_DISPATCH,check)
 
 init:
 	@printf '\033[0;36m[INIT]\033[0m creating config files from their examples\n'
@@ -833,7 +870,7 @@ verify-container:
 	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) verify
 
 clean:
-	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) clean
+	@$(call CONTAINER_FLEET_DISPATCH,clean)
 
 rebuild:
 	@INSTANCE="$(INSTANCE)" $(CONTAINER_SH) rebuild

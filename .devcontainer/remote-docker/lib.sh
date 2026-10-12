@@ -464,7 +464,7 @@ rd_docker_failed() {
         "  ${RD_BOLD}docker system prune${RD_RESET}" \
         "" \
         "On the remote engine, inspect it directly first:" \
-        "  ${RD_BOLD}make shell${RD_RESET}, then  df -h /var/lib/docker  and  docker system df"
+        "  ${RD_BOLD}docker system df${RD_RESET}  (the active context aims it at the engine)"
       ;;
     *'permission denied while trying to connect'*)
       rd_fail "This account is not allowed to talk to the docker socket" \
@@ -585,5 +585,5 @@ rd_devcontainer_up() {
     "" \
     "  ${RD_BOLD}no space left on device${RD_RESET}" \
     "      the engine is full. Reclaim space with: docker system prune" \
-    "      On the remote engine, look first: make shell, then docker system df"
+    "      On the remote engine, look first: docker system df"
 }

@@ -299,50 +299,82 @@ rdc_rename() {
   rd_ok "renamed ${old} -> ${NAME}"
 }
 
-rdc_start() {
-  local id state
-  id="$(rdc_require_container)"
-  state="$(rdc_container_state "$id")"
-  if [ "$state" = "running" ]; then
-    rd_ok "container already running"
+# Container selection for the acting targets. The default is the
+# single-container contract rdc_require_container owns: exactly one project
+# container on this engine, CONTAINER=<name> to pick it when several clones
+# put more than one here. RDC_ALL (make's ALL=1) is the fleet form: every
+# container the project label owns on this engine, and CONTAINER alongside
+# it is refused -- the same one-or-the-other rule the instance targets
+# enforce for INSTANCE and ALL.
+rdc_selected_ids() {
+  if [ "${RDC_ALL:-0}" != "1" ]; then
+    rdc_require_container
     return 0
   fi
-  rd_log "starting container..."
+  [ -z "${CONTAINER:-}" ] || rd_fail "pass CONTAINER=<name> or ALL=1, not both" \
+    "ALL=1 already acts on every container this project owns on this engine, so" \
+    "naming one alongside it would narrow a run that asked to be broad."
+  local ids context
+  context="$(docker context show 2> /dev/null || printf 'unknown')"
+  ids="$(rdc_container_ids)"
+  [ -n "$ids" ] || rd_fail "No container for project '${PROJECT_NAME}' exists on context '${context}'" \
+    "The fleet form has nothing to act on here." \
+    "" \
+    "See every engine's containers:  ${RD_BOLD}make list-containers${RD_RESET}"
+  printf '%s\n' "$ids"
+}
+
+rdc_start_one() {
+  local id state
+  id="$1"
+  state="$(rdc_container_state "$id")"
+  if [ "$state" = "running" ]; then
+    rd_ok "$(rdc_container_name "$id") is already running"
+    return 0
+  fi
+  rd_log "starting $(rdc_container_name "$id")..."
   rd_docker start "$id" > /dev/null
-  rd_ok "started, reconnect with Dev Containers: Attach to Running Container..."
+  rd_ok "$(rdc_container_name "$id") started, reconnect with Dev Containers: Attach to Running Container..."
+}
+
+rdc_start() {
+  local id
+  for id in $(rdc_selected_ids); do rdc_start_one "$id"; done
+}
+
+rdc_stop_one() {
+  local id state
+  id="$1"
+  state="$(rdc_container_state "$id")"
+  if [ "$state" != "running" ]; then
+    rd_ok "$(rdc_container_name "$id") is already stopped (state: ${state})"
+    return 0
+  fi
+  rd_log "stopping $(rdc_container_name "$id")..."
+  rd_docker stop "$id" > /dev/null
+  rd_ok "$(rdc_container_name "$id") stopped, its volumes are untouched; 'make start' resumes it"
 }
 
 rdc_stop() {
-  local id state
-  id="$(rdc_require_container)"
-  state="$(rdc_container_state "$id")"
-  if [ "$state" != "running" ]; then
-    rd_ok "container already stopped (state: ${state})"
-    return 0
-  fi
-  rd_log "stopping container..."
-  rd_docker stop "$id" > /dev/null
-  rd_ok "stopped, the workspace volume is untouched; 'make start' resumes it"
+  local id
+  for id in $(rdc_selected_ids); do rdc_stop_one "$id"; done
 }
 
 rdc_restart() {
   local id
-  id="$(rdc_require_container)"
-  rd_log "restarting container..."
-  rd_docker restart "$id" > /dev/null
-  rd_ok "restarted, reconnect with Dev Containers: Attach to Running Container..."
+  for id in $(rdc_selected_ids); do
+    rd_log "restarting $(rdc_container_name "$id")..."
+    rd_docker restart "$id" > /dev/null
+    rd_ok "$(rdc_container_name "$id") restarted, reconnect with Dev Containers: Attach to Running Container..."
+  done
 }
 
-rdc_check() {
+rdc_check_one() {
   local id state dirty ahead
-  if [ "$(rdc_backend)" != "remote" ]; then
-    rd_ok "local backend, the container shares this working tree, nothing to check"
-    return 0
-  fi
-  id="$(rdc_require_container)"
+  id="$1"
   state="$(rdc_container_state "$id")"
   if [ "$state" != "running" ]; then
-    rd_log "container is '${state}', starting it to inspect the checkout"
+    rd_log "$(rdc_container_name "$id") is '${state}', starting it to inspect the checkout"
     rd_docker start "$id" > /dev/null
   fi
 
@@ -350,7 +382,7 @@ rdc_check() {
   ahead="$(rdc_exec_probe "$id" git -C "${CONTAINER_WORKSPACE}" log --oneline '@{upstream}..HEAD' 2> /dev/null || true)"
 
   if [ -z "$dirty" ] && [ -z "$ahead" ]; then
-    rd_ok "checkout in the volume is clean and pushed, safe to destroy"
+    rd_ok "checkout in $(rdc_container_name "$id")'s volume is clean and pushed, safe to destroy"
     return 0
   fi
   local lines
@@ -365,6 +397,15 @@ rdc_check() {
     "Or destroy it deliberately:  ${RD_BOLD}make clean FORCE=1${RD_RESET}"
   )
   rd_fail "The volume holds work that exists nowhere else" "${lines[@]}"
+}
+
+rdc_check() {
+  if [ "$(rdc_backend)" != "remote" ]; then
+    rd_ok "local backend, the container shares this working tree, nothing to check"
+    return 0
+  fi
+  local id
+  for id in $(rdc_selected_ids); do rdc_check_one "$id"; done
 }
 
 rdc_branch() {
@@ -528,7 +569,7 @@ SEED
       "      ${RD_BOLD}git push -u origin ${branch}${RD_RESET}" \
       "" \
       "  the engine cannot pull ${CLONE_IMAGE} or reach ${host}" \
-      "      check egress from the instance: ${RD_BOLD}make shell${RD_RESET}" \
+      "      check egress from the engine: ${RD_BOLD}docker pull ${CLONE_IMAGE}${RD_RESET}" \
       "" \
       "The partially created volume was removed, so a retry starts clean."
   }
@@ -883,7 +924,7 @@ mv -n \"\$incoming\" '${dir}/${commit}'
     "what this avoids. The reason is in the output above." \
     "" \
     "Check the container can reach the download service:" \
-    "  ${RD_BOLD}make shell${RD_RESET}, then ${RD_BOLD}curl -sSI ${url}${RD_RESET}" \
+    "  ${RD_BOLD}make exec${RD_RESET}, then ${RD_BOLD}curl -sSI ${url}${RD_RESET}" \
     "" \
     "To open the window and accept the slow transfer:" \
     "  ${RD_BOLD}SKIP_VSCODE_SERVER_SEED=1 make reopen${RD_RESET}"
@@ -1131,25 +1172,19 @@ rdc_build() {
   rdc_status
 }
 
-rdc_clean() {
-  local id name image volumes orphan existing
-  existing="$(rdc_container_ids)"
-  if [ -z "${CONTAINER:-}" ] && [ -z "$existing" ]; then
-    rd_log "no container for '${PROJECT_NAME}'"
-    orphan="$(rdc_workspace_volume)"
-    if docker volume inspect "$orphan" > /dev/null 2>&1; then
-      rd_log "removing orphaned workspace volume ${orphan}"
-      rd_docker volume rm "$orphan" > /dev/null
-    fi
-    rd_ok "nothing left to remove"
-    return 0
-  fi
-  id="$(rdc_require_container)"
-
+# One container's teardown: guards, container, its private volumes, then the
+# image only when no surviving container still uses it. Several containers
+# of this project share one image, so an unconditional rmi would either
+# fail mid-teardown (docker refuses an image a sibling still runs) or, once
+# it succeeded, strand the sibling without its image; the ancestor probe
+# runs after this container's removal so the probe cannot count the
+# container being torn down.
+rdc_clean_one() {
+  local id="$1" name image volumes
   if [ "${FORCE:-0}" != "1" ]; then
-    rdc_check
+    rdc_check_one "$id"
   else
-    rd_log "FORCE=1, skipping the unpushed-work check"
+    rd_log "FORCE=1, skipping the unpushed-work check for $(rdc_container_name "$id")"
   fi
 
   name="$(rdc_container_name "$id")"
@@ -1165,10 +1200,31 @@ rdc_clean() {
     rd_docker volume rm "$vol" > /dev/null
   done
 
-  rd_log "removing image ${image}"
-  rd_docker rmi "$image" > /dev/null
+  local kept=""
+  if [ -n "$(rd_docker ps -aq --filter "ancestor=${image}")" ]; then
+    kept=", the image was kept (another container still uses it)"
+  else
+    rd_log "removing image ${image}"
+    rd_docker rmi "$image" > /dev/null
+  fi
 
-  rd_ok "torn down, shared volumes (${SHARED_VOLUMES}), the VS Code server cache and the cached base image were kept"
+  rd_ok "torn down ${name}; shared volumes (${SHARED_VOLUMES}) and the VS Code server cache were kept${kept}"
+}
+
+rdc_clean() {
+  local existing orphan id
+  existing="$(rdc_container_ids)"
+  if [ -z "${CONTAINER:-}" ] && [ "${RDC_ALL:-0}" != "1" ] && [ -z "$existing" ]; then
+    rd_log "no container for '${PROJECT_NAME}'"
+    orphan="$(rdc_workspace_volume)"
+    if docker volume inspect "$orphan" > /dev/null 2>&1; then
+      rd_log "removing orphaned workspace volume ${orphan}"
+      rd_docker volume rm "$orphan" > /dev/null
+    fi
+    rd_ok "nothing left to remove"
+    return 0
+  fi
+  for id in $(rdc_selected_ids); do rdc_clean_one "$id"; done
 }
 
 rdc_rebuild() {

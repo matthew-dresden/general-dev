@@ -1,8 +1,8 @@
 {
   "name": "devcontainer",
   "owner": {
-    "name": "Caylent",
-    "url": "https://www.caylent.com"
+    "name": "Matthew Dresden",
+    "url": "https://github.com/matthew-dresden"
   },
   "plugins": [
     {

@@ -19,7 +19,7 @@ source "${WORK_DIR}/.devcontainer/devcontainer-functions.sh"
 
 fail_bootstrap() {
   log_error "shell.env not found in ${WORK_DIR} and Parameter Store bootstrap failed: $1"
-  log_error "  Local dev:  run 'cdevcontainer setup-devcontainer' to generate shell.env"
+  log_error "  Local dev:  run 'make init' to generate shell.env"
   log_error "  Remote dev: run 'make push-secrets' from your machine, then rebuild"
   exit 1
 }

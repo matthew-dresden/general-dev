@@ -20,6 +20,7 @@
 !/Makefile
 !/README.md
 !/LICENSE
+!/NOTICE
 !/shell.env.example
 !/devcontainer-environment-variables.json.example
 !/pyproject.toml

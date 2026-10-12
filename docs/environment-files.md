@@ -11,7 +11,7 @@ committed `.example` alongside it.
 |---|---|---|
 | `shell.env` | `shell.env.example` | Environment sourced by every shell in the container |
 | `.devcontainer/aws-profile-map.json` | `.devcontainer/aws-profile-map.json.example` | AWS SSO profiles, rendered into `~/.aws/config` |
-| `devcontainer-environment-variables.json` | `devcontainer-environment-variables.json.example` | `cdevcontainer` template input that regenerates the other two |
+| `devcontainer-environment-variables.json` | `devcontainer-environment-variables.json.example` | Saved answers for the setup interview; `render` regenerates the other two from them |
 | `.devcontainer/hostcreds.map.json` | `.devcontainer/hostcreds.map.json.example` | The hostcreds manifest: one entry per credential, naming its source |
 
 ```bash

@@ -61,18 +61,40 @@ def _target_recipes() -> dict[str, list[str]]:
 
 
 def _targets_reaching_the_remote_engine() -> set[str]:
+    """Targets whose recipe reaches container.sh/push-secrets.sh/certs.sh.
+
+    Either directly, or through `CONTAINER_FLEET_DISPATCH` -- the define the
+    container targets' fleet forms share, whose expansion invokes
+    `$(CONTAINER_SH)` once per engine. A recipe that only calls the define
+    still reaches the remote engine, so the parse must follow it or silently
+    drop every target the dispatcher absorbed.
+    """
     return {
         target
         for target, lines in _target_recipes().items()
-        if any(re.search(r"\$\((CONTAINER_SH|SECRETS_SH|CERTS_SH)\)", line) for line in lines)
+        if any(
+            re.search(r"\$\((CONTAINER_SH|SECRETS_SH|CERTS_SH)\)", line)
+            or "$(call CONTAINER_FLEET_DISPATCH," in line
+            for line in lines
+        )
     }
 
 
 def _targets_accepting_instance() -> set[str]:
+    """Targets whose recipe passes INSTANCE through, directly or via the dispatcher.
+
+    `CONTAINER_FLEET_DISPATCH` carries `INSTANCE="$(INSTANCE)"` into every
+    engine iteration itself, so a recipe calling it accepts an instance
+    exactly as a recipe naming `$(CONTAINER_SH)` with an explicit
+    `INSTANCE="$(INSTANCE)"` does.
+    """
     return {
         target
         for target, lines in _target_recipes().items()
-        if any('INSTANCE="$(INSTANCE)"' in line for line in lines)
+        if any(
+            'INSTANCE="$(INSTANCE)"' in line or "$(call CONTAINER_FLEET_DISPATCH," in line
+            for line in lines
+        )
     }
 
 

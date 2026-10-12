@@ -239,12 +239,62 @@ rdc_status() {
   printf '\n'
 }
 
+# NAME, when set, is the name build/up/rename gives the container. Docker
+# accepts [a-zA-Z0-9][a-zA-Z0-9_.-]* and nothing else, so anything outside
+# that shape is refused here -- before any build runs -- rather than
+# surfacing as docker's own error after minutes of image build. A name
+# another container already answers to is refused the same way: renaming
+# onto it would steal the name the other container is running under.
+rdc_validate_requested_name() {
+  [ -n "${NAME:-}" ] || return 0
+  local filtered invalid=0
+  case "$NAME" in
+    [a-zA-Z0-9]*) ;;
+    *) invalid=1 ;;
+  esac
+  filtered="$(printf '%s' "$NAME" | tr -cd 'a-zA-Z0-9_.-')"
+  [ "$filtered" = "$NAME" ] || invalid=1
+  [ "$invalid" -eq 0 ] || rd_fail "NAME '${NAME}' is not a name docker accepts" \
+    "A container name starts with a letter or digit and continues with letters," \
+    "digits, underscores, dots or hyphens." \
+    "" \
+    "Pick a name matching that shape, or drop NAME to keep the generated" \
+    "<${PROJECT_NAME}>-<devcontainerId> name."
+  if rd_docker inspect "$NAME" > /dev/null 2>&1; then
+    rd_fail "A container named '${NAME}' already exists on this engine" \
+      "Two containers cannot share a name, and renaming this one onto it would" \
+      "leave the other one unaddressable." \
+      "" \
+      "What this engine has:  ${RD_BOLD}make status${RD_RESET}" \
+      "Pick another name, or make rename NAME=<other> to rename the existing one."
+  fi
+}
+
+# The NAME= half of build/up: give a just-created (or just-started) container
+# the requested name, treating already-named as success so repeated
+# 'make up NAME=x' is idempotent. Unset NAME changes nothing. Validation
+# runs only when a rename is actually needed -- the collision check would
+# otherwise fire on the container that already carries the name.
+rdc_apply_requested_name() {
+  [ -n "${NAME:-}" ] || return 0
+  local id name
+  id="$(rdc_require_container)"
+  name="$(rdc_container_name "$id")"
+  [ "$name" != "$NAME" ] || { rd_ok "container is named '${NAME}'"; return 0; }
+  rdc_validate_requested_name
+  rd_docker rename "$id" "$NAME" > /dev/null
+  rd_ok "container named '${NAME}' (was '${name}')"
+}
+
 rdc_rename() {
   local id old
   [ -n "${NAME:-}" ] || rd_die "NAME is required, e.g.: make rename NAME=general-dev-review"
   id="$(rdc_require_container)"
   old="$(rdc_container_name "$id")"
+  # Before the validator's collision check, which would otherwise report the
+  # container's own name as a collision with a misleading remedy.
   [ "$old" != "$NAME" ] || rd_die "container is already named '${NAME}'"
+  rdc_validate_requested_name
   rd_docker rename "$id" "$NAME"
   rd_ok "renamed ${old} -> ${NAME}"
 }
@@ -913,6 +963,9 @@ rdc_exec_shell() {
 
 rdc_up() {
   rd_require_cmd docker "Install the docker CLI: https://docs.docker.com/engine/install/"
+  # Same fail-fast as build's: an unusable NAME costs nothing to refuse and
+  # a full build cycle to discover.
+  rdc_validate_requested_name
 
   local backend
   backend="$(rdc_backend)"
@@ -965,6 +1018,10 @@ rdc_up() {
       ;;
   esac
 
+  # NAME= names the container on the up path too -- idempotently, so
+  # 'make up NAME=x' on an already-named container is not an error. The
+  # no-container branch named its build through rdc_build already.
+  rdc_apply_requested_name
   rdc_push_creds
   rdc_status
   rdc_reopen
@@ -1049,6 +1106,9 @@ rdc_build_remote() {
 
 rdc_build() {
   rdc_build_prereqs
+  # Refuse an unusable NAME before any image builds: the check is instant,
+  # the build it would invalidate is not.
+  rdc_validate_requested_name
   local existing
   existing="$(rdc_container_ids)"
   [ -z "$existing" ] || rd_fail "A container for '${PROJECT_NAME}' already exists on this engine" \
@@ -1065,6 +1125,7 @@ rdc_build() {
     rdc_build_local
   fi
 
+  rdc_apply_requested_name
   rdc_push_creds
   rd_ok "container is up"
   rdc_status

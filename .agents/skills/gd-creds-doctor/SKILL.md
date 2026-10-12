@@ -1,6 +1,6 @@
 ---
 name: gd-creds-doctor
-description: Verifies the credential path end to end -- the hostcreds manifest loads, every keychain item it names exists, every entry reached the container, and every stored value rotates on request -- reporting each finding with the exact make target that fixes it and performing no repair of its own.
+description: Verifies the credential path end to end, checking that the hostcreds manifest loads and every keychain item it names exists, every entry reached the container, and every stored value rotates on request, reporting each finding with the exact make target that fixes it and performing no repair of its own.
 ---
 
 # gd-creds-doctor
@@ -8,7 +8,7 @@ description: Verifies the credential path end to end -- the hostcreds manifest l
 This skill is the creds family's standing read: the same four secrets checks
 `gd-env-doctor`'s `## Findings` defines, run on demand rather than as part of
 a full environment report, plus the one thing a doctor-shaped skill does not
-do -- driving the repair to green by naming the exact remediation target for
+do, driving the repair to green by naming the exact remediation target for
 each finding. It reports and repairs only through the make targets below; it
 never reads a credential value (presence probes only, `>/dev/null`), never
 edits the manifest, and never pushes a partial manifest.
@@ -18,9 +18,9 @@ secrets group owns their exact sources and remedies, and two copies would
 drift. This skill invokes that group's checks as its own first section and
 adds the repair loop. It is also the standing place for the
 `flow: credential expiry troubleshooting` flow of `docs/skills.md`'s Flows
-section: a credential the container reports as expired -- the rendered
+section: a credential the container reports as expired, whether the rendered
 fragment's own `notice: <NAME> expired; refresh with: make push-creds`
-line, or an SSO session a probe reports expired -- is diagnosed by the
+line, or an SSO session a probe reports expired, is diagnosed by the
 read step and cleared by the repair step (`make creds-init` to restage a
 keychain value, `aws sso login` to refresh the session, then
 `make push-creds`), each verified by the closing re-read.

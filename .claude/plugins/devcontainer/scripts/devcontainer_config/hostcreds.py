@@ -154,7 +154,7 @@ _CREDENTIAL_NAME_PATTERN: Pattern[str] = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # A manifest name becomes a shell variable the startup block exports, so a
 # name that is itself a shell or loader variable (PATH, LD_PRELOAD,
 # DYLD_INSERT_LIBRARIES) or one of the AWS variables an aws-export fragment
-# exports would silently shadow the real thing -- a keychain entry named
+# exports would silently shadow the real thing; a keychain entry named
 # AWS_SECRET_ACCESS_KEY would otherwise clobber the value parsed out of the
 # CLI's JSON document at startup. Checked for every source: the collision
 # is in the name, not in the source that produced the value.
@@ -179,8 +179,8 @@ DEFAULT_STORE_DIR_NAME = ".hostcreds"
 _STORE_DIR_NAME_PATTERN: Pattern[str] = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # The characters a label value must never carry. Labels reach shell text and
-# argv -- they are embedded in a fragment's comment header and passed to the
-# source commands -- and a newline would let a value escape the comment line
+# argv (they are embedded in a fragment's comment header and passed to the
+# source commands), and a newline would let a value escape the comment line
 # it was written onto (the rest of the line would then execute as shell),
 # while a quote of either kind would terminate the quoting the surrounding
 # text relies on.
@@ -944,8 +944,8 @@ def resolve(spec: CredentialSpec, runner: Runner) -> ResolvedCredential:
 
 
 # ---------------------------------------------------------------------------
-# The renderers. Both are pure functions of their inputs -- deterministic,
-# same text for same input -- because a caller detects a prior application
+# The renderers. Both are pure functions of their inputs, deterministic
+# with the same text for the same input, because a caller detects a prior application
 # by searching for MARKER / FRAGMENT_MARKER, which only works if rendering
 # twice is byte-identical.
 # ---------------------------------------------------------------------------
@@ -970,7 +970,7 @@ _STORE_DIR_TOKEN = "__HOSTCREDS_STORE_DIR__"
 # every brace-shaped piece instead of substituting the one thing that
 # actually varies. (The template is a plain, non-raw f-string on purpose:
 # `MARKER` interpolates at module load, and the one backslash sequence the
-# shell text needs -- printf's '%s\n' -- is spelled '\\n' so the rendered
+# shell text needs, printf's '%s\n', is spelled '\\n' so the rendered
 # text carries a literal backslash-n, exactly what printf wants.)
 #
 # The block's shape is driven by one measured constraint: in zsh, a `for`
@@ -983,16 +983,16 @@ _STORE_DIR_TOKEN = "__HOSTCREDS_STORE_DIR__"
 # swallowed nomatch diagnostic leaves the substitution empty and the
 # script running; in bash the literal pattern reaches the `[ -e ... ]`
 # guard and is skipped. The loop itself is a `while read` over a here-
-# document -- never a pipeline, whose `while` half would run in a subshell
-# and strand every fragment's exports there -- so sourcing happens in the
+# document, never a pipeline whose `while` half would run in a subshell
+# and strand every fragment's exports there, so sourcing happens in the
 # caller's own shell, and the fragments' own stderr (their expiry
 # notices) passes through untouched: only the glob probe is silenced.
 _BLOCK_TEMPLATE = f"""\
 {MARKER}
 # Sources every hostcreds credential fragment under "$HOME/{_STORE_DIR_TOKEN}/"
 # (written there by 'make push-creds' on the host). Each fragment exports its
-# credential's value through the export builtin -- no new process ever carries
-# a value in its argv -- or records that a git-source credential was stored in
+# credential's value through the export builtin, so no new process ever carries
+# a value in its argv, and records that a git-source credential was stored in
 # ~/.git-credentials instead. Fragments print their own expiry notices on
 # stderr; this block itself never prints anything, because a missing store
 # directory, or an empty one, is the ordinary state of a checkout whose

@@ -4,7 +4,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 rd_load_config
-# Resolved, not derived -- and resolved before the remote requirements below,
+# Resolved, not derived, and resolved before the remote requirements below,
 # so the EC2 id they demand is the one exported from the per-instance id
 # store by the resolver, never a stale environment value. This script
 # publishes secrets, so addressing the wrong instance writes them where
@@ -44,7 +44,7 @@ REMOTE_SHELL_ENV=$(sed \
 # The value travels inside a --cli-input-json document, never in argv:
 # shell.env carries every credential this repository has, and an argument is
 # visible in the process table to any other process on this machine for as
-# long as the call runs -- and is echoed back verbatim by rd_run's own error
+# long as the call runs, and is echoed back verbatim by rd_run's own error
 # translator. This is the same invariant devcontainer_config.certs'
 # ParameterStoreClient enforces for every put-parameter it issues: the value
 # travels in a 0600 --cli-input-json file:// document, never an argument.

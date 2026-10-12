@@ -1263,7 +1263,7 @@ _HUNK_HEADER_PATTERN = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 # `git diff-tree` emits the unquoted form below for a path with no byte an
 # unquoted path cannot represent literally. It falls back to the C-quoted
-# form when the path holds a double quote or a backslash -- run under
+# form when the path holds a double quote or a backslash, run under
 # `-c core.quotepath=false` (see `added_lines`), that is the only remaining
 # reason a path would be quoted, since that setting already stops a
 # non-ASCII byte alone from triggering it.
@@ -1275,12 +1275,12 @@ _DIFF_NEW_FILE_HEADER_QUOTED_PATTERN = re.compile(r'^\+\+\+ "((?:[^"\\]|\\.)*)"$
 # side of a deletion, and (since `added_lines` runs `-r` without rename
 # detection) the delete half of a rename as well. Neither header pattern
 # above matches it, and it must not be treated as an uninterpretable
-# header, because a section with no post-image contributes no `+` lines --
+# header, because a section with no post-image contributes no `+` lines;
 # there is nothing for an unresolved `current_path` to hide.
 _DIFF_DELETED_FILE_HEADER = "+++ /dev/null"
 
 # `git diff-tree -p` emits no `+++ `/hunk section at all for a file whose
-# first 8000 bytes hold a NUL byte -- git's own binary heuristic -- only
+# first 8000 bytes hold a NUL byte, git's own binary heuristic, only
 # this one line in place of everything else a file section would
 # otherwise carry. `.+` on the pre-image side is deliberately permissive
 # (mirroring the two file-header patterns above): only the post-image

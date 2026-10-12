@@ -447,9 +447,9 @@ def resolve(root: Path, *, local_backend_active: bool) -> Resolution:
 
 # The filename of the per-instance id store inside `certs_dir(name)`.
 # `devcontainer_config.instance_ops` (which declares the identical
-# `INSTANCE_ID_FILENAME` constant) is the SINGLE WRITER of this file --
-# `instance_ops.link_id` records, `instance_ops.unlink_id`/`cleanup` remove
-# -- and this module cannot import `instance_ops` to source the name from
+# `INSTANCE_ID_FILENAME` constant) is the SINGLE WRITER of this file;
+# `instance_ops.link_id` records and `instance_ops.unlink_id`/`cleanup` remove.
+# This module cannot import `instance_ops` to source the name from
 # it, because `instance_ops` already imports this module. The literal is
 # therefore restated here for the read side only, and
 # `tests/test_instances.py` pins the two constants equal so a rename on the

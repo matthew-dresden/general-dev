@@ -643,12 +643,17 @@ daemon's API version, which must be at least 1.44 for mTLS on a TCP
 listener with a rootless daemon, and whether it reports
 running rootless.
 
-**Two transports, one selector.** `make connect-start`
-reads `DEVCONTAINER_TRANSPORT` from the environment
-(`docs/environment-files.md`) and dispatches on it. The accepted values
-are `ssm`, the default, and `ssh`; any other value exits non-zero naming
-the variable, the offending value and the accepted values. Unset, or the
-explicit value `ssm`, runs
+**Two transports, one kind dispatch.** `make connect-start`
+resolves the instance, reads the engine's kind off the address block
+resolution exports (`docs/environment-files.md`) and opens the matching
+transport: an `ssh` engine (an `engine.json` manifest) runs the ssh form,
+an `ec2` instance the ssm form. `DEVCONTAINER_TRANSPORT` is a guard on
+that dispatch, never the selector: unset, the kind alone decides -- which
+is why an operator naming an ssh engine sets no variable; set, the value
+must agree with the kind (`ssm` behind an ec2 instance, `ssh` behind an
+ssh engine) or the run exits non-zero naming the conflict, and any other
+value exits non-zero naming the variable, the offending value and the
+accepted values. An EC2 instance -- or no instance named at all -- runs
 
 ```sh
 PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.forwards \
@@ -660,7 +665,7 @@ substituted from `config.env` and the instance's per-instance id store,
 the `instance-id` file under
 `<certs-root>/<instance>/`, written by `make instance-link` and recorded
 automatically by `make instance-deploy` at apply time, and that the
-`Makefile`'s own `connect` target issues for that value;
+`Makefile`'s own `connect` target issues behind its ssm route;
 `transport.resolve_transport` reads the identical
 `DEVCONTAINER_TRANSPORT` inside the transport's own connect handler too,
 refusing before touching AWS or docker at all unless it is `ssm`. This

@@ -378,7 +378,7 @@ The lifecycle is five targets:
 |---|---|
 | Scaffold the manifest | `make engine-init INSTANCE=<name> HOST=<host> USER=<user>` (`PORT=` and `DOCKER_ADDR=` optional; a Windows engine needs Docker Desktop exposed and `DOCKER_ADDR=tcp://localhost:2375`) |
 | Prove reachability | `make engine-verify INSTANCE=<name>`: opens the forward, handshakes docker through its context, closes the forward, prints the versions |
-| Open the forward | `make remote INSTANCE=<name> DEVCONTAINER_TRANSPORT=ssh` (or `make connect-start INSTANCE=<name> DEVCONTAINER_TRANSPORT=ssh`, which leaves the machine-wide context alone); the selector chooses the kind, and the ssm default refuses an ssh engine naming this command as the remedy |
+| Open the forward | `make remote INSTANCE=<name>` (or `make connect-start INSTANCE=<name>`, which leaves the machine-wide context alone); the engine's own kind selects the transport, so an ssh engine needs no variable -- an explicit `DEVCONTAINER_TRANSPORT` that contradicts the kind is refused naming the conflict |
 | Build | `make build INSTANCE=<name>` |
 | Retire | `make engine-remove INSTANCE=<name> CONFIRM=remove`, refused while a project container still exists on the engine |
 
@@ -500,8 +500,9 @@ terminal can run `make build ENGINE=local` while another runs
 `make build ENGINE=acme`, and a third drives a second instance. Each
 remote engine needs its forward open first: `make remote INSTANCE=<name>`
 opens it as a background daemon and returns once docker answers through
-it (an SSH engine adds `DEVCONTAINER_TRANSPORT=ssh`, per the ssh engine
-path above), and later `make connect-start ENGINE=<name>` re-opens a
+it (the engine's own kind picks the transport, per the ssh engine
+path above, so an ssh engine needs no variable), and later
+`make connect-start ENGINE=<name>` re-opens a
 single forward without touching what other terminals see. The forward
 daemon's lifecycle
 has its own targets: `make connect-status INSTANCE=<name>` (or `ALL=1`)

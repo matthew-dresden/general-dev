@@ -134,8 +134,10 @@ def _cert_status_recipe_body(makefile_text: str) -> str:
 def _connect_recipe_body(makefile_text: str) -> str:
     """The recipe lines (tab-indented) that follow the `connect-start:` target header.
 
-    E6-F2-S1-T4's own addition: the `connect-start` recipe now dispatches on
-    `DEVCONTAINER_TRANSPORT` instead of running `$(TUNNEL_SH)` unconditionally.
+    E6-F2-S1-T4's own addition: the `connect-start` recipe resolves the
+    instance and dispatches on the engine's kind (with `DEVCONTAINER_TRANSPORT`
+    surviving as a guard on that dispatch) instead of running `$(TUNNEL_SH)`
+    unconditionally.
     """
     match = re.search(r"^connect-start:.*\n((?:\t.*\n?)*)", makefile_text, re.MULTILINE)
     assert match is not None, "no connect-start target found in Makefile"
@@ -444,14 +446,16 @@ def test_cert_status_help_row_matches_the_two_roles_the_command_reports() -> Non
 
 
 # ---------------------------------------------------------------------------
-# E6-F2-S1-T4: the `connect` recipe dispatches on `DEVCONTAINER_TRANSPORT`
-# instead of running `$(TUNNEL_SH)` unconditionally, so the SSM port-forward
-# manager E6-F2-S1-T1 delivered (and the docker context E6-F2-S1-T2 delivered)
-# become reachable from the build path at all. `transport.py`'s own `connect`
-# subparser is E6-F2-S1-T3's, adapted after this recipe's interface lands
-# (Approach note), so these assertions are against the Makefile's dispatch
-# wiring only -- the source-side arguments and fail-fast behavior it is
-# already responsible for -- never against invoking the ssm branch for real.
+# E6-F2-S1-T4 delivered the `connect` recipe's dispatch; the F1 fix (the
+# defect real E2E against a Windows ssh endpoint found) made the engine's
+# own kind the selector: an unset DEVCONTAINER_TRANSPORT used to default to
+# ssm, so `make connect-start INSTANCE=<ssh-engine>` refused and pushed the
+# variable onto every ssh-engine invocation. The recipe now reads the kind
+# through rd_engine_kind and routes on it; the variable is a guard that must
+# agree with the kind when set. These assertions are against the Makefile's
+# dispatch wiring only -- the source-side arguments and fail-fast behavior
+# devcontainer_config.forwards is already responsible for -- never against
+# invoking either branch for real.
 # ---------------------------------------------------------------------------
 
 # `make connect-start` shells out with a bogus DEVCONTAINER_TRANSPORT value in a
@@ -462,10 +466,10 @@ def test_cert_status_help_row_matches_the_two_roles_the_command_reports() -> Non
 _CONNECT_REJECT_TEST_TIMEOUT_SECONDS_ENV_VAR = "MAKEFILE_CONNECT_TEST_TIMEOUT_SECONDS"
 
 
-def test_connect_recipe_dispatches_on_the_transport_selector() -> None:
-    """AC-FUNC-001 / AC-TEST-001: the recipe reads DEVCONTAINER_TRANSPORT and
-    names both branches through their existing Make variables, never a
-    duplicated literal path or module name.
+def test_connect_recipe_opens_through_forwards_and_names_the_transport_guard() -> None:
+    """AC-FUNC-001 / AC-TEST-001: the recipe reads DEVCONTAINER_TRANSPORT (as
+    the guard on the kind dispatch) and names both routes through their
+    existing Make variables, never a duplicated literal path or module name.
     """
     text = _makefile_text()
     recipe = _connect_recipe_body(text)
@@ -557,49 +561,57 @@ def test_context_prefix_assertion_message_names_the_current_prefix_owner() -> No
     )
 
 
-def test_connect_recipe_defaults_to_the_ssm_transport_when_unset() -> None:
-    """An unset DEVCONTAINER_TRANSPORT selects ssm, and both branches exist.
+def test_connect_recipe_dispatches_by_engine_kind_when_the_selector_is_unset() -> None:
+    """An unset DEVCONTAINER_TRANSPORT dispatches on the engine's kind, and both routes exist.
 
-    Before the cutover this asserted the opposite: an unset selector ran
-    `$(TUNNEL_SH)` bare so `make remote` and `make up` saw no behavior change
-    while both transports existed. The cutover deleted the SSH tunnel script, so the
-    default had to move rather than merely lose a branch -- otherwise an
-    operator who sets nothing gets a recipe that dispatches to a value its own
-    case statement rejects. Asserted against the recipe source, never by
-    invoking the ssm branch, which needs real AWS state. Updated when the SSH
-    engine kind landed its own transport (feature/ssh-engines, P2): the
-    `ssh)` branch -- banned between the cutover and that transport's arrival,
-    because the name then belonged to the removed tunnel -- is back as a
-    positive branch, routing an SSH engine through
-    `devcontainer_config.transport_ssh`, while the default stays `ssm`.
+    The selector began as the dispatch itself: unset meant ssm, so
+    `make connect-start INSTANCE=<ssh-engine>` refused and every ssh-engine
+    invocation had to carry the variable -- the F1 defect real E2E against a
+    Windows ssh endpoint found. The recipe now reads the resolved engine's
+    kind through rd_engine_kind and routes on it, so an unset selector runs
+    the route the engine itself names; the variable survives only as a
+    guard. Asserted against the recipe source, never by invoking either
+    route, which needs a real endpoint or real AWS state.
     """
     recipe = _connect_recipe_body(_makefile_text())
-    assert "DEVCONTAINER_TRANSPORT:-ssm" in recipe, (
-        "an unset DEVCONTAINER_TRANSPORT must default to ssm"
+    assert 'transport="$${DEVCONTAINER_TRANSPORT:-}"' in recipe, (
+        "an unset DEVCONTAINER_TRANSPORT must select nothing: the kind "
+        "dispatch alone decides, so the read must not substitute a default"
     )
-    assert "ssm)" in recipe and "ssh)" in recipe, (
-        "the case statement must carry both transport branches: ssm (the EC2 "
-        "SSM forward) and ssh (the SSH engine forward through "
-        "devcontainer_config.transport_ssh)"
+    assert 'kind="$$(rd_engine_kind)"' in recipe, (
+        "the dispatch must read the engine's kind through rd_engine_kind, "
+        "the one predicate, off the address block resolution exported"
+    )
+    assert 'case "$$route"' in recipe, (
+        "the routing decision must land in one route variable the final "
+        "case dispatches on, so the guards cannot run before the kind is known"
+    )
+    assert "ssh)" in recipe and "ssm)" in recipe, (
+        "the route case must carry both branches: ssh (the SSH engine "
+        "forward through devcontainer_config.forwards' ssh form) and ssm "
+        "(the EC2 SSM forward)"
     )
 
 
 def test_connect_recipe_keeps_the_aws_guards_inside_the_ssm_branch_only() -> None:
-    """Kind dispatch must not charge an ssh engine the ssm path's requirements.
+    """Kind dispatch must not charge an ssh engine the ssm route's requirements.
 
-    The ssh branch needs no EC2 id, no region and no profile: an SSH engine
+    The ssh route needs no EC2 id, no region and no profile: an SSH engine
     opens no AWS session. Every guard that exists to ensure the SSM session
-    can be opened therefore lives inside the `ssm)` branch alone -- textually,
-    between `ssm)` and the unrecognized-transport rejection -- and appears
-    nowhere before it, where the ssh branch (and the resolution block the
-    ssh branch shares) could execute it.
+    can be opened therefore lives inside the route case's `ssm)` branch
+    alone -- textually, after `case "$$route"`, which the run can only
+    reach once resolution has exported the kind -- and appears nowhere
+    before it, where the ssh route (and the resolution block the ssh route
+    shares) could execute it.
     """
     recipe = _connect_recipe_body(_makefile_text())
-    ssh_at = recipe.index("ssh)")
-    ssm_at = recipe.index("ssm)")
-    assert ssh_at < ssm_at, (
-        "the case statement must carry an ssh) branch before the ssm) branch; "
-        "splitting at ssm) below would be meaningless otherwise"
+    kind_at = recipe.index('kind="$$(rd_engine_kind)"')
+    route_case_at = recipe.index('case "$$route"')
+    ssh_open_at = recipe.index('--name "$$target"')
+    ssm_at = recipe.index("ssm)", route_case_at)
+    assert kind_at < route_case_at, "the kind must be read before the route case dispatches on it"
+    assert route_case_at < ssh_open_at, (
+        "the ssh route's forwards open must live inside the route case"
     )
     before_ssm = recipe[:ssm_at]
     ssm_branch = recipe[ssm_at:]
@@ -617,9 +629,17 @@ def test_connect_recipe_keeps_the_aws_guards_inside_the_ssm_branch_only() -> Non
         assert guard in ssm_branch, (
             f"the guard {guard!r} is gone from the ssm branch; the ssm forward still requires it"
         )
+    assert "--instance-id" not in before_ssm, (
+        "the ssm route's forwards open must carry the resolved id, and no "
+        "earlier line may invoke it"
+    )
+    assert "DEVCONTAINER_TRANSPORT=ssm" in before_ssm, (
+        "the ssh route's conflict refusal must name the guard value that "
+        "contradicts an ssh engine, so the remedy is copy-and-pasteable"
+    )
     assert "DEVCONTAINER_TRANSPORT=ssh" in before_ssm, (
-        "the ssh branch's own refusals must name the selector value that "
-        "selects them, so the remedy is copy-and-pasteable"
+        "the ec2 route's conflict refusal must name the guard value that "
+        "contradicts an EC2 engine, so the remedy is copy-and-pasteable"
     )
 
 

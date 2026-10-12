@@ -152,7 +152,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make connect-start INSTANCE=ci DEVCONTAINER_TRANSPORT=ssh
+          make connect-start INSTANCE=ci
           make connect-status INSTANCE=ci
 
       # The containers listing must show a healthy ci engine row. The
@@ -208,7 +208,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make connect-start INSTANCE=ci DEVCONTAINER_TRANSPORT=ssh
+          make connect-start INSTANCE=ci
           refusal="$(make engine-remove INSTANCE=ci 2>&1 || true)"
           printf '%s\n' "$refusal"
           if make engine-remove INSTANCE=ci > /dev/null 2>&1; then

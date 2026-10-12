@@ -1557,7 +1557,7 @@ def _verify_engine_holds_no_container(root: Path, name: str, runner: Runner, con
             f"ERROR: could not check the containers on engine {name!r} (context {context!r})\n"
             f"docker ps exited {result.returncode}: {_one_line(result.stderr)}\n"
             "The engine's forward may be down; open it with: make connect-start "
-            f"INSTANCE={name} DEVCONTAINER_TRANSPORT=ssh\n"
+            f"INSTANCE={name}\n"
             "Then re-run: make engine-remove INSTANCE=" + name + " CONFIRM=remove"
         )
     container_names = [line.strip() for line in result.stdout.splitlines() if line.strip()]

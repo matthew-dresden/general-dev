@@ -1,7 +1,7 @@
 """SSH transport: a managed `ssh -N -L` tunnel carrying the docker API.
 
-This module is the second transport `DEVCONTAINER_TRANSPORT` selects at
-`make connect-start`, beside `devcontainer_config.transport`'s SSM port
+This module is the second transport `make connect-start` opens, routed by
+the engine's own kind, beside `devcontainer_config.transport`'s SSM port
 forward: where that one reaches an EC2 instance's loopback daemon over
 `aws ssm start-session`, this one reaches a generic SSH engine (the kind
 `remote-instances/<name>/engine.json` declares; see

@@ -656,8 +656,8 @@ host, a user, and optional port and docker-socket values. No AWS, no
 Terragrunt, no Parameter Store, no certificates -- the manifest is the
 whole declaration, validated before anything is written. Never connects:
 the transport that consumes it, `devcontainer_config.transport_ssh`, runs
-later, at connect time (`make connect-start INSTANCE=<name>
-DEVCONTAINER_TRANSPORT=ssh`).
+later, at connect time (`make connect-start INSTANCE=<name>`, which
+dispatches on the engine's own kind).
 """
 
 _INSTANCE_LIST_DESCRIPTION = """List every configured instance with its live state.

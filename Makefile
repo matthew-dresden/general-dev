@@ -94,7 +94,7 @@ endef
 # states the same guidance and none of them restates the predicate. They are
 # comma-free on purpose: they ride $(call ...) arguments, which split on
 # commas.
-EC2_KIND_REMEDY := an ssh engine has no EC2 lifecycle to plan or deploy and no power state to stop or start; reach it with make engine-verify INSTANCE=<name> or remove it with make engine-remove INSTANCE=<name> CONFIRM=remove and connect with make connect-start INSTANCE=<name> DEVCONTAINER_TRANSPORT=ssh
+EC2_KIND_REMEDY := an ssh engine has no EC2 lifecycle to plan or deploy and no power state to stop or start; reach it with make engine-verify INSTANCE=<name> or remove it with make engine-remove INSTANCE=<name> CONFIRM=remove and connect with make connect-start INSTANCE=<name>
 BUCKET_KIND_REMEDY := state buckets belong to the EC2 fleet; an ssh engine has no state bucket and no engine-* equivalent for this target
 CERT_KIND_REMEDY := no TLS material exists for ssh engines; nothing to report for one
 
@@ -384,56 +384,74 @@ help:
 # whatever instance the resolver defaulted to opened regardless of what was
 # asked for. INSTANCE and ENGINE naming different engines is refused by the
 # resolver's own guard before anything opens. The transport is then chosen
-# by kind, from the resolved address block's KIND line: an SSH engine
-# (engine.json, KIND=ssh) opens through devcontainer_config.transport_ssh
-# with the engine's own values and no AWS requirement at all, while an EC2
-# instance opens the SSM forward through devcontainer_config.forwards' ssm
-# form -- the AWS guards live inside that branch only, so an ssh engine is
-# never asked for a region, a profile or an instance id. The daemon is
-# managed by devcontainer_config.forwards (spawn, readiness poll, record);
-# this recipe only resolves WHICH instance and hands the resolved values
-# over. The lifecycle companions: connect-start (this target),
-# connect-status, connect-stop, connect-refresh and connect-list. lib.sh is
-# sourced once, unconditionally, before the dispatch: the kind checks below
-# read the kind through rd_engine_kind, the one predicate, and the ssh
-# branch can only run for a resolved engine anyway.
+# by the engine's own kind, read through rd_engine_kind off the resolved
+# address block's KIND line: an SSH engine (engine.json, KIND=ssh) opens
+# through devcontainer_config.transport_ssh with the engine's own values and
+# no AWS requirement at all, while an EC2 instance opens the SSM forward
+# through devcontainer_config.forwards' ssm form -- the AWS guards live
+# inside that branch only, so an ssh engine is never asked for a region, a
+# profile or an instance id. DEVCONTAINER_TRANSPORT is a guard on that
+# dispatch, never the selector: unset, the kind alone decides, so an
+# operator naming an ssh engine never sets a variable; set, the value must
+# agree with the kind (ssm behind an ec2 engine, ssh behind an ssh engine)
+# or the run is refused naming the conflict, and any other value is refused
+# by name. The daemon is managed by devcontainer_config.forwards (spawn,
+# readiness poll, record); this recipe only resolves WHICH instance and
+# hands the resolved values over. The lifecycle companions: connect-start
+# (this target), connect-status, connect-stop, connect-refresh and
+# connect-list. lib.sh is sourced once, unconditionally, before the
+# dispatch: the kind checks below read the kind through rd_engine_kind, the
+# one predicate, and the ssh branch can only run for a resolved engine
+# anyway.
 connect-start:
 	@set -euo pipefail; \
 	$(PROXY_ENV) \
 	. $(RD_DIR)/lib.sh; \
-	transport="$${DEVCONTAINER_TRANSPORT:-ssm}"; \
+	transport="$${DEVCONTAINER_TRANSPORT:-}"; \
 	target=""; \
 	if [ -n "$(INSTANCE)" ]; then target="$(INSTANCE)"; \
 	elif [ -n "$${ENGINE:-}" ] && [ "$${ENGINE}" != "local" ]; then target="$${ENGINE}"; fi; \
 	if [ -n "$$target" ]; then \
 		INSTANCE="$$target" rd_resolve_instance; \
+		kind="$$(rd_engine_kind)"; \
 		ctx="$$(rd_engine_context)"; \
 		[ -n "$$ctx" ] || ctx="$${REMOTE_DOCKER_CONTEXT:-}"; \
 	else \
+		kind=""; \
 		ctx="$(REMOTE_CONTEXT)"; \
 	fi; \
 	case "$$transport" in \
-		ssh) \
-			if [ -z "$$target" ]; then \
-				printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT=ssh needs the engine named\n' >&2; \
-				printf '        The ssh form forwards the values of one resolved engine; run:\n' >&2; \
-				printf '        make connect-start INSTANCE=<name> DEVCONTAINER_TRANSPORT=ssh\n' >&2; \
-				exit 2; \
-			fi; \
-			if [ "$$(rd_engine_kind)" != "ssh" ]; then \
-				printf '\033[0;31m[ERROR]\033[0m instance %s is not an SSH engine; DEVCONTAINER_TRANSPORT=ssh needs a remote-instances/<name>/engine.json manifest\n' "$$target" >&2; \
-				printf '        Scaffold one: python3 -m devcontainer_config.cli engine-init %s --host <host> --user <user>\n' "$$target" >&2; \
+		ssh|ssm|"") ;; \
+		*) printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT="%s" is not recognized.\n' "$$transport" >&2; \
+		   printf '        Accepted values: ssm (the EC2 SSM forward) and ssh (the SSH engine forward).\n' >&2; \
+		   exit 1 ;; \
+	esac; \
+	route="ssm"; \
+	if [ -n "$$target" ]; then \
+		if [ "$$kind" = "ssh" ]; then \
+			route="ssh"; \
+			if [ "$$transport" = "ssm" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is an ssh engine; DEVCONTAINER_TRANSPORT=ssm selects the ssm transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to ssh.\n" >&2; \
 				exit 1; \
 			fi; \
+		elif [ "$$transport" = "ssh" ]; then \
+			printf '\033[0;31m[ERROR]\033[0m instance %s is an EC2 engine; DEVCONTAINER_TRANSPORT=ssh selects the ssh transport, which only reaches ssh engines\n' "$$target" >&2; \
+			printf '        Unset DEVCONTAINER_TRANSPORT or set it to ssm.\n' >&2; \
+			exit 1; \
+		fi; \
+	elif [ "$$transport" = "ssh" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT=ssh needs the engine named\n' >&2; \
+		printf '        The ssh form forwards the values of one resolved engine; run:\n' >&2; \
+		printf '        make connect-start INSTANCE=<name>\n' >&2; \
+		exit 2; \
+	fi; \
+	case "$$route" in \
+		ssh) \
 			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
 				--name "$$target" --host "$$ENGINE_HOST" --port "$$ENGINE_PORT" \
 				--user "$$ENGINE_USER" --docker-addr "$$ENGINE_DOCKER_ADDR" --context "$$ctx" ;; \
 		ssm) \
-			if [ "$$(rd_engine_kind)" = "ssh" ]; then \
-				printf '\033[0;31m[ERROR]\033[0m instance %s is an SSH engine; the ssm transport only reaches EC2 instances\n' "$$target" >&2; \
-				printf '        Run: make connect-start INSTANCE=%s DEVCONTAINER_TRANSPORT=ssh\n' "$$target" >&2; \
-				exit 1; \
-			fi; \
 			if [ -n "$$target" ]; then \
 				[ -n "$${REMOTE_INSTANCE_ID:-}" ] || { \
 					printf '\033[0;31m[ERROR]\033[0m no EC2 instance id is recorded for instance %s\n' "$$target" >&2; \
@@ -460,9 +478,6 @@ connect-start:
 			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
 				--instance-id "$$REMOTE_INSTANCE_ID" --context "$$ctx" \
 				--profile "$$REMOTE_AWS_PROFILE" --region "$$REMOTE_AWS_REGION" ;; \
-		*) printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT="%s" is not recognized.\n' "$$transport" >&2; \
-		   printf '        Accepted values: ssm (the EC2 SSM forward) and ssh (the SSH engine forward).\n' >&2; \
-		   exit 1 ;; \
 	esac
 
 # The forward daemon's lifecycle, one instance at a time or every configured

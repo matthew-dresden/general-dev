@@ -474,33 +474,40 @@ error; see `docs/devcontainer.md`'s "Transport" section.
 (E1-F3-S1-T1) is the docker-handshake probe `gd-instance-list`, `gd-env-setup-local` and
 `gd-env-setup-remote` share for their own, simpler "does the engine answer" check.
 
-`DEVCONTAINER_TRANSPORT` selects the transport for the `make connect-start` entry
-point. There are two transports, so the selector has two accepted
-values: `ssm`, the default, the SSM port forward to an EC2 instance, and
+`DEVCONTAINER_TRANSPORT` guards the transport `make connect-start` opens.
+There are two transports, so the guard has two accepted
+values: `ssm`, the SSM port forward to an EC2 instance, and
 `ssh`, the managed `ssh -N -L` forward to a generic SSH engine (an
 instance whose `remote-instances/<name>/engine.json` manifest declares
 it). A value outside that set is refused by name rather than silently
 redirected.
 
 It has two readers, and they dispatch differently by design: the Makefile's
-`connect-start` recipe reads the variable from the environment and dispatches on
-engine kind, accepting `ssm` and `ssh`, while `transport.py`'s `resolve_transport`,
-which the ssm module's own `connect` subcommand calls, accepts only
-`ssm`: the ssm transport remains opt-in, and the `ssh` value never
+`connect-start` recipe resolves the instance first and reads the engine's
+kind off the address block resolution exports (`rd_engine_kind` in lib.sh,
+the one predicate every kind-aware target reads), so an `ssh` engine routes
+to the `devcontainer_config.transport_ssh` forward and an `ec2` engine to
+the ssm forward whether or not the variable is set. The variable is a guard
+around that dispatch, never the selector: unset, the kind alone decides,
+which is why an operator naming an ssh engine never sets it; set, the value
+must agree with the kind -- an explicit `ssm` behind an ssh engine, or an
+explicit `ssh` behind an ec2 engine, is refused by name as the conflict it
+is. `transport.py`'s `resolve_transport`, which the ssm module's own
+`connect` subcommand calls, still accepts only
+`ssm`: the ssm transport remains opt-in there, and the `ssh` value never
 reaches that reader, because it routes to
 `devcontainer_config.transport_ssh`, which declares no selector of its
-own. Unset selects `ssm` at the Makefile. The literal `ssm` selects it
-explicitly. Any other non-empty value exits non-zero before any transport
+own. Any other non-empty value exits non-zero before any transport
 starts, printing an `ERROR:` line to stderr naming the variable, the
 offending value and the accepted values. No branch silently defaults.
 
 The one value the two readers do not agree on is the empty string: the
-Makefile's `${DEVCONTAINER_TRANSPORT:-ssm}` substitution treats a set-but-empty
-value the same as unset and selects `ssm`, while `resolve_transport`'s
+Makefile's `${DEVCONTAINER_TRANSPORT:-}` substitution treats a set-but-empty
+value the same as unset and dispatches on engine kind, while `resolve_transport`'s
 `os.environ.get` returns the empty string itself rather than the default, which
 is not in the accepted set, so it raises `TransportError` naming the empty
 value. Setting the variable to an explicit empty string is not a supported way
-to request the default; leave it unset instead.
+to state the guard; leave it unset instead.
 
 | Variable | Default | Defined in |
 |---|---|---|
@@ -510,7 +517,7 @@ to request the default; leave it unset instead.
 | `PORT_PROBE_TIMEOUT` | `2` | `transport.py`, read by `_port_has_live_listener` for the loopback connect that decides whether a recorded port is genuinely occupied |
 | `DOCKER_HANDSHAKE_TIMEOUT` | `30` | `hostprobe.py`'s `read_positive_seconds`, the one place its name, default and validation are declared; `transport.py`'s `handshake` (E6-F2-S1-T2) calls the same function rather than declaring its own copy |
 | `SSH_FORWARD_TIMEOUT` | `30` | `hostprobe.py`'s `read_positive_seconds`, the same shared reader; `transport_ssh.py`'s `wait_ready` bounds by it how long the local end of the `ssh -N -L` forward may take to accept a connection |
-| `DEVCONTAINER_TRANSPORT` | `ssm` | selector for `make connect-start`'s transport dispatch; the Makefile's `connect-start` recipe accepts `ssm` (the SSM forward to an EC2 instance, which `transport.py`'s `resolve_transport` also gates for the module's own `connect` subcommand) and `ssh` (the `devcontainer_config.transport_ssh` forward to an SSH engine); any other value is rejected by name |
+| `DEVCONTAINER_TRANSPORT` | (unset) | guard on `make connect-start`'s transport dispatch; the Makefile's `connect-start` recipe dispatches on the resolved engine's kind first -- `ssh` (the `devcontainer_config.transport_ssh` forward to an SSH engine) or `ssm` (the SSM forward to an EC2 instance, which `transport.py`'s `resolve_transport` also gates for the module's own `connect` subcommand) -- and the variable, when set, must agree with the kind or the run is refused naming the conflict; any other value is rejected by name |
 
 `DOCKER_TLS_PORT` is the port the rootless docker daemon on the instance
 listens on, `127.0.0.1`-only, behind a security group with zero ingress

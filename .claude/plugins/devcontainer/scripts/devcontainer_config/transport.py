@@ -125,15 +125,16 @@ just allocated, activates it (`_use_context`), and confirms it with a
 version handshake, so a caller of `connect` alone ends with a working,
 mTLS-secured `tcp://` context, already active, ready to build against
 (AC-FUNC-003). The `Makefile`'s `connect` target closes the second half: it
-reads `DEVCONTAINER_TRANSPORT` itself and dispatches to
-`python3 -m devcontainer_config.transport connect` only when it is `ssm`,
-leaving the SSH path untouched and still the default at the time.
+resolves the instance, reads the engine's kind, and opens the forward
+through `python3 -m devcontainer_config.forwards`, whose ssm form drives
+this module's transport -- `DEVCONTAINER_TRANSPORT` guards that dispatch;
+it never selects the route.
 `connect`'s own handler stays opt-in regardless of its caller, gated by
 `resolve_transport` reading the identical `DEVCONTAINER_TRANSPORT` variable
-(never a file edit): unset or `ssh` -- the default -- refuses before ever
-touching AWS or docker (`_require_ssm_transport_selected`), leaving
-the SSH path the only build path that ran, exactly as before this
-task (AC-FUNC-002); only the explicit value `ssm` lets `connect` proceed.
+(never a file edit): unset resolves to `ssm`, while `ssh` -- an engine
+kind, routed by kind at the make entry point -- refuses
+before ever touching AWS or docker (`_require_ssm_transport_selected`);
+only the explicit value `ssm` lets `connect` proceed.
 Nothing here ever writes the caller's own SSH client configuration file, or
 requires a key on the instance, in either case (AC-FUNC-004): this module
 never imported anything from the SSH path and never touches SSH at all.
@@ -1907,9 +1908,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     install_parser = subparsers.add_parser(
         "install-material",
-        help=(
-            "Have the instance fetch its published TLS material and start its docker daemon."
-        ),
+        help=("Have the instance fetch its published TLS material and start its docker daemon."),
     )
     install_parser.add_argument("--instance", required=True, help="The remote instance name.")
     install_parser.add_argument("--instance-id", required=True, help="The EC2 instance id (i-...).")

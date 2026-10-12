@@ -913,3 +913,24 @@ def test_main_open_refuses_a_non_integer_ssh_port(
 
     assert exit_code == 1
     assert "--port" in capsys.readouterr().err
+
+
+def test_default_spawner_creates_the_log_parent_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The daemon's log directory springs into existence with the daemon.
+
+    A first-ever forward on a machine has no `~/.docker/certs/<name>/`
+    behind it yet; the production spawner must create it before opening the
+    log, or `make connect-start` ends in a bare FileNotFoundError instead
+    of a daemon. This is the one test that drives the real spawner: the
+    child is a trivial interpreter exit, never a transport.
+    """
+    log_file = tmp_path / "fresh" / "engine-x" / "forward.log"
+    assert not log_file.parent.exists()
+
+    process = forwards._default_spawner(["true"], log_file)
+    process.wait()
+
+    assert process.returncode == 0
+    assert log_file.parent.is_dir()

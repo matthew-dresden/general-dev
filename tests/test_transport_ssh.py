@@ -85,13 +85,19 @@ class _FakeForwardProcess:
 
     `.stdout` is a real pipe read end: silent while the write end stays
     open (what `ssh -N` looks like in normal operation), EOF once the write
-    end is closed (the child exiting). `wait_ready` selects on it exactly
-    as it would a real subprocess's. The write end is kept referenced for
-    the object's lifetime so garbage collection never closes it early.
+    end is closed. An EOF alone is no longer the child exiting -- a
+    session-less OpenSSH 10.x client closes its stdout while the forward
+    runs -- so `exit_code` states the process's own liveness separately:
+    set, `poll()` answers it regardless of the stream; None (the default),
+    `poll()` answers terminated-or-alive exactly as before. `wait_ready`
+    selects on the pipe exactly as it would a real subprocess's. The write
+    end is kept referenced for the object's lifetime so garbage collection
+    never closes it early.
     """
 
-    def __init__(self, *, close_output: bool = False) -> None:
+    def __init__(self, *, close_output: bool = False, exit_code: int | None = None) -> None:
         self.terminated = False
+        self.exit_code = exit_code
         self.stdout, self._writer = _readiness_pipe()
         if close_output:
             self._writer.close()
@@ -106,6 +112,8 @@ class _FakeForwardProcess:
         self.terminated = True
 
     def poll(self) -> int | None:
+        if self.exit_code is not None:
+            return self.exit_code
         return 0 if self.terminated else None
 
 
@@ -420,6 +428,57 @@ def test_wait_ready_raises_the_death_diagnosis_when_the_child_exits_first() -> N
             endpoint=f"ssh://{_USER}@{_HOST}:{_PORT}",
             docker_addr=_SOCKET_ADDR,
             port=1,
+        )
+
+    assert f"ssh://{_USER}@{_HOST}:{_PORT}" in str(excinfo.value)
+    reader.close()
+
+
+def test_wait_ready_keeps_probing_when_the_client_closes_stdout_while_alive() -> None:
+    """EOF beside a live forward process is a quiet stream, not the child's death.
+
+    A session-less OpenSSH 10.x client closes its stdout while the forward
+    runs, so the EOF must be gated on `process_alive`: with the process
+    alive, the wait keeps probing the port and returns when it answers.
+    The write end is closed before the call, so the very first read sees
+    the EOF -- the old stream-is-liveness contract raised here.
+    """
+    transport_ssh = _import_transport_ssh()
+    reader, writer = _readiness_pipe()
+    writer.close()
+    port = _free_loopback_port()
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", port))
+        listener.listen(1)
+
+        transport_ssh.wait_ready(
+            transport_ssh.transport.tcp_ready_probe(port),
+            reader,
+            instance="engine-x",
+            endpoint=f"ssh://{_USER}@{_HOST}:{_PORT}",
+            docker_addr=_SOCKET_ADDR,
+            port=port,
+            process_alive=lambda: True,
+        )
+
+    reader.close()
+
+
+def test_wait_ready_raises_the_death_diagnosis_when_the_stream_closes_beside_a_dead_child() -> None:
+    """`process_alive` gates the EOF, and a dead child still names its diagnosis."""
+    transport_ssh = _import_transport_ssh()
+    reader, writer = _readiness_pipe()
+    writer.close()
+
+    with pytest.raises(transport_ssh.SSHForwardError, match="exited") as excinfo:
+        transport_ssh.wait_ready(
+            lambda timeout_seconds: False,
+            reader,
+            instance="engine-x",
+            endpoint=f"ssh://{_USER}@{_HOST}:{_PORT}",
+            docker_addr=_SOCKET_ADDR,
+            port=1,
+            process_alive=lambda: False,
         )
 
     assert f"ssh://{_USER}@{_HOST}:{_PORT}" in str(excinfo.value)
@@ -842,7 +901,10 @@ def test_main_connect_stops_the_forward_when_the_child_exits_before_readiness(
         monkeypatch,
         transport_ssh,
         runner=FakeRunner({}),
-        fake_process=_FakeForwardProcess(close_output=True),
+        # A closed stream beside a child that is itself gone (poll answers
+        # 255): the death diagnosis. A closed stream beside a LIVE child is
+        # the OpenSSH 10.x case the survival test below pins instead.
+        fake_process=_FakeForwardProcess(close_output=True, exit_code=255),
         timeout_env={"SSH_FORWARD_TIMEOUT": "5"},
     )
 
@@ -850,6 +912,66 @@ def test_main_connect_stops_the_forward_when_the_child_exits_before_readiness(
     assert fake_process.terminated
     captured = capsys.readouterr()
     assert "exited" in captured.err
+
+
+def test_main_connect_survives_a_client_that_closes_its_stdout_while_alive(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The OpenSSH 10.x session-less regression, pinned at the flow level.
+
+    A session-less client closes its stdout while the forward runs; the
+    connect flow must still reach readiness through the port probe, print
+    the Connected line, and leave the death diagnosis to the process's own
+    liveness rather than to the stream's EOF.
+    """
+    transport_ssh = _import_transport_ssh()
+    process = _FakeForwardProcess(close_output=True)
+    held: list[_FakeForwardProcess] = []
+
+    def fake_hold(running_process: _FakeForwardProcess) -> None:
+        held.append(running_process)
+        running_process.terminate()
+
+    monkeypatch.setattr(transport_ssh, "_run_until_interrupted", fake_hold)
+
+    def answer(command: tuple[str, ...]) -> object:
+        ok = transport_ssh.transport.CommandResult(exit_code=0)
+        if command == _context_inspect_command(_CONTEXT):
+            return _no_such_context_result(transport_ssh, _CONTEXT)
+        if command[:3] == ("docker", "context", "create"):
+            return ok
+        if command == ("docker", "context", "use", _CONTEXT):
+            return ok
+        if command == _version_command(_CONTEXT):
+            return transport_ssh.transport.CommandResult(
+                exit_code=0, stdout='{"Version":"28.6.0","ApiVersion":"1.51"}'
+            )
+        if command == _info_command(_CONTEXT):
+            return transport_ssh.transport.CommandResult(exit_code=0, stdout="[]")
+        raise AssertionError(f"unexpected command: {command}")
+
+    def allocate_and_listen(runner_arg: object, context_name: str) -> int:
+        port = _free_loopback_port()
+        listener.bind(("127.0.0.1", port))
+        listener.listen(1)
+        return port
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        monkeypatch.setattr(transport_ssh.transport, "allocate_local_port", allocate_and_listen)
+        monkeypatch.setattr(
+            transport_ssh.transport, "subprocess_command_runner", _RecordingRunner(answer)
+        )
+        monkeypatch.setattr(
+            transport_ssh.transport, "default_process_launcher", lambda command: process
+        )
+
+        exit_code = transport_ssh.main(_connect_argv())
+
+    assert exit_code == 0
+    assert held == [process]
+    captured = capsys.readouterr()
+    connected = [line for line in captured.out.splitlines() if line.startswith("Connected:")]
+    assert len(connected) == 1, "readiness must be reached despite the closed stdout"
 
 
 def test_main_connect_exits_cleanly_on_an_interrupt_before_readiness(

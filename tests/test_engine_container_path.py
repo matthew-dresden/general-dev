@@ -501,6 +501,30 @@ def test_up_refresh_uses_the_forwards_cli_for_ssh() -> None:
     )
 
 
+def test_status_backend_line_is_kind_aware_and_never_reads_the_ec2_id_for_ssh() -> None:
+    """The ssh Backend line reports the endpoint; the EC2 line keeps the id.
+
+    `make status ENGINE=<ssh engine>` runs under `set -u`, and lib.sh's
+    resolver deliberately leaves REMOTE_INSTANCE_ID unset for an ssh engine
+    (there is no EC2 id behind it), so a bare reference in the ssh branch
+    would end the run before the report printed. The parenthetical engine
+    identifier is the resolved endpoint there, and the EC2 branch keeps the
+    bare id exactly as it always read.
+    """
+    body = _sh_function_body("rdc_status", _container_text())
+    ssh_at = body.index('if [ "$(rd_engine_kind)" = "ssh" ]')
+    ssh_branch = body[ssh_at : body.index("\n    else\n", ssh_at)]
+    assert "ENGINE_ENDPOINT" in ssh_branch, (
+        "the ssh Backend line must identify the engine by its resolved endpoint"
+    )
+    assert "REMOTE_INSTANCE_ID" not in ssh_branch, (
+        "the resolver leaves REMOTE_INSTANCE_ID unset for an ssh engine; a bare "
+        "reference under set -u would abort `make status ENGINE=<ssh engine>`"
+    )
+    ec2_branch = body[body.index("\n    else\n", ssh_at) : body.index("\n  fi\n", ssh_at)]
+    assert "$REMOTE_INSTANCE_ID" in ec2_branch, "the EC2 Backend line keeps the instance id"
+
+
 # ---------------------------------------------------------------------------
 # config-payload.sh: the transform, behaviorally.
 # ---------------------------------------------------------------------------
@@ -973,4 +997,87 @@ def test_push_secrets_ssh_delivery_refuses_a_container_that_does_not_exist(
     )
     assert not [call for call in calls if call.startswith("exec ")], (
         "nothing is delivered once the name is refused"
+    )
+
+
+def test_clean_takes_the_no_container_branch_on_an_ssh_engine(tmp_path: Path) -> None:
+    """`clean` against an ssh engine holding no project container removes nothing.
+
+    The branch a CI runner's engine always takes: the docker stub answers no
+    project container ids and no orphaned workspace volume, so the run must
+    report nothing to remove and exit 0 -- never reaching a container guard
+    or a volume removal.
+    """
+    bin_dir = Path(_fake_resolver_bin(tmp_path, _resolver_block(tmp_path, kind="ssh")))
+    docker_stub = bin_dir / "docker"
+    docker_stub.write_text(
+        "#!/bin/sh\n"
+        "# Test stub: the clean path's docker surface, nothing more.\n"
+        "set -u\n"
+        'printf \'%s\\n\' "$*" >> "$FAKE_DOCKER_LOG"\n'
+        'if [ "$1" = context ]; then\n'
+        "  printf '%s\\n' \"${FAKE_DOCKER_CONTEXT:-stub-context}\"\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = ps ]; then\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = volume ]; then\n'
+        "  # inspect: the orphaned volume does not exist; rm: never reached\n"
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    docker_stub.chmod(0o755)
+    log = tmp_path / "docker-calls.log"
+
+    script = (
+        "set -euo pipefail\n"
+        f'export FAKE_DOCKER_CONTEXT="{_RESOLVER_CONTEXT}"\n'
+        f'export FAKE_DOCKER_LOG="{log}"\n'
+        'export INSTANCE="fake-inst"\n'
+        f'export REPO_SHELL_ENV="{tmp_path / "no-shell-env"}"\n'
+        f'"{_CONTAINER_SH}" clean\n'
+    )
+    assert _BASH_BIN is not None
+    env = dict(os.environ)
+    for var in (
+        "ENGINE",
+        "KIND",
+        "REMOTE_DOCKER_CONTEXT",
+        "REMOTE_INSTANCE_ID",
+        "RD_INSTANCE_RESOLVED",
+        "ENGINE_HOST",
+        "ENGINE_PORT",
+        "ENGINE_USER",
+        "ENGINE_DOCKER_ADDR",
+        "ENGINE_ENDPOINT",
+        "LOCAL_DOCKER_CONTEXT",
+        "PROJECT_NAME",
+    ):
+        env.pop(var, None)
+    env.update(
+        PATH=f"{bin_dir}:{env.get('PATH', '')}",
+        PROJECT_NAME="clean-proj",
+    )
+    result = subprocess.run(
+        [_BASH_BIN, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=_timeout_seconds(),
+        env=env,
+    )
+
+    assert result.returncode == 0, (
+        f"the no-container clean must succeed; stdout={result.stdout[-400:]!r} "
+        f"stderr={result.stderr[-400:]!r}"
+    )
+    assert "nothing left to remove" in result.stdout
+    calls = log.read_text(encoding="utf-8").splitlines()
+    assert any("ps -aq" in call and "devcontainer.project=clean-proj" in call for call in calls), (
+        f"the project container lookup must run through the stub; calls={calls!r}"
+    )
+    assert not any("volume rm" in call for call in calls), (
+        f"nothing may be removed when no container exists; calls={calls!r}"
     )

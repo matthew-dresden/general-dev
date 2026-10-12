@@ -112,6 +112,16 @@ rd_resolve_instance_quiet() {
   rd_require_engine_instance_agreement
   [ -n "${RD_INSTANCE_RESOLVED:-}" ] && return 0
 
+  # The caller's INSTANCE, captured before the resolver runs. Resolution
+  # later fills INSTANCE from the four-step default order even when the
+  # caller named nothing, so the agreement guard must never compare ENGINE
+  # against the post-resolution value: under ENGINE=local the sole-directory
+  # default names a remote instance INSTANCE never carried, and the guard
+  # would refuse a run the caller asked for coherently. RD_INSTANCE_CALLER is
+  # that guard's comparison basis whenever resolution has run.
+  RD_INSTANCE_CALLER="${INSTANCE:-}"
+  export RD_INSTANCE_CALLER
+
   local repo_root scripts_dir block line resolver_env
   repo_root="$(cd "${RD_DIR}/../.." && pwd)"
   scripts_dir="${repo_root}/.claude/plugins/devcontainer/scripts"
@@ -132,15 +142,22 @@ rd_resolve_instance_quiet() {
 
   # Only KEY=VALUE lines are consumed; a warning the resolver printed to
   # stderr has already reached the caller and must not be eval'd.
-  # DOCKER_CONTEXT is the one line skipped under ENGINE: the entry points'
-  # prelude has already pinned the process to the context rd_engine_context
-  # derived from ENGINE, and the resolver's block -- resolved from whatever
-  # the four-step order defaulted to, which under ENGINE=local is not
-  # necessarily the pinned engine -- must not clobber that pin and split the
-  # run across two engines (rd_docker's --context aimed at one, every plain
-  # docker call and child process aimed at another).
+  # DOCKER_CONTEXT is the one line translated rather than exported: the
+  # block's value names the resolved instance's engine, which is exactly
+  # what REMOTE_DOCKER_CONTEXT means -- the name backend classification
+  # compares the active context against. Exporting it as DOCKER_CONTEXT
+  # would re-aim every plain docker call, and `docker context show` itself,
+  # at the resolved instance's engine even when the machine-wide active
+  # context (or an ENGINE=local pin) said otherwise, which classified
+  # container-level targets as remote against the operator's explicit
+  # `make local`. The pin under ENGINE survives by the same translation: the
+  # process's DOCKER_CONTEXT stays whatever the prelude pinned (or unset),
+  # and REMOTE_DOCKER_CONTEXT -- informational, never a pin -- carries the
+  # block's value.
   while IFS= read -r line; do
-    if [ -n "${ENGINE:-}" ] && [ "${line%%=*}" = "DOCKER_CONTEXT" ]; then
+    if [ "${line%%=*}" = "DOCKER_CONTEXT" ]; then
+      REMOTE_DOCKER_CONTEXT="${line#DOCKER_CONTEXT=}"
+      export REMOTE_DOCKER_CONTEXT
       continue
     fi
     case "$line" in
@@ -197,15 +214,26 @@ rd_resolve_instance() {
 # prevent, so it is refused loudly instead of silently preferring one of them.
 # The same value is the redundant-but-consistent spelling and passes; either
 # variable alone passes, because each has its own resolution rule.
+# The comparison names the caller's INSTANCE, never the resolver's default:
+# after resolution INSTANCE also carries the four-step order's choice, which
+# the caller never made, so RD_INSTANCE_CALLER (captured by
+# rd_resolve_instance_quiet before the resolver runs) is the basis whenever
+# resolution has run; before it has, INSTANCE still holds only what the
+# caller provided.
 rd_require_engine_instance_agreement() {
-  [ -n "${INSTANCE:-}" ] && [ -n "${ENGINE:-}" ] || return 0
-  [ "$INSTANCE" = "$ENGINE" ] && return 0
-  rd_fail "INSTANCE='${INSTANCE}' and ENGINE='${ENGINE}' name different engines" \
+  # ${RD_INSTANCE_CALLER-...}, dash only: the capture is exported even when
+  # the caller named nothing, and that empty value is meaningful -- it is
+  # the "no caller choice to disagree with" case, not one the :- form may
+  # read as never-captured.
+  local named="${RD_INSTANCE_CALLER-${INSTANCE:-}}"
+  [ -n "$named" ] && [ -n "${ENGINE:-}" ] || return 0
+  [ "$named" = "$ENGINE" ] && return 0
+  rd_fail "INSTANCE='${named}' and ENGINE='${ENGINE}' name different engines" \
     "One run addresses one engine: INSTANCE resolves the address block, ENGINE pins" \
     "docker. Naming two different engines would resolve one while aiming at the other." \
     "" \
     "Set one of the two, not both:" \
-    "  ${RD_BOLD}make <target> INSTANCE=${INSTANCE}${RD_RESET}" \
+    "  ${RD_BOLD}make <target> INSTANCE=${named}${RD_RESET}" \
     "  ${RD_BOLD}make <target> ENGINE=${ENGINE}${RD_RESET}" \
     "" \
     "What is configured:       ${RD_BOLD}make list-instances${RD_RESET}"

@@ -1148,23 +1148,28 @@ if command -v docker > /dev/null 2>&1; then
   fi
 
   # Resolve once, here, and let every downstream reader use the result. The
-  # two names below were previously derived from PROJECT_NAME independently
+  # SSM prefix below was previously derived from PROJECT_NAME independently
   # by this script and by push-secrets.sh, which meant two callers could
   # address different instances while each believed it was addressing "the"
-  # one. Assigning them from the single resolved block removes that split
-  # without rewriting every use site.
+  # one. Assigning it from the single resolved block removes that split
+  # without rewriting every use site. REMOTE_DOCKER_CONTEXT comes from the
+  # same block too: the resolver's export loop translates the block's
+  # DOCKER_CONTEXT line into it, so the resolved instance's context reaches
+  # backend classification without ever being exported as DOCKER_CONTEXT --
+  # an export that would have re-aimed every plain docker call at the
+  # resolved instance's engine even when the active context named another.
   if rd_resolve_instance_quiet; then
-    REMOTE_DOCKER_CONTEXT="$DOCKER_CONTEXT"
     DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
-    export REMOTE_DOCKER_CONTEXT DEVCONTAINER_SSM_PREFIX
+    export DEVCONTAINER_SSM_PREFIX
   fi
 
-  # Re-assert the ENGINE pin. The resolver's export loop now skips
-  # DOCKER_CONTEXT under ENGINE, but that skip is lib.sh's promise, not this
-  # script's assumption: anything that ever exports DOCKER_CONTEXT between the
-  # pin above and here would silently re-aim the plain docker calls and child
-  # processes at a different engine than rd_docker's --context. One cheap,
-  # idempotent re-derivation closes that window for good.
+  # Re-assert the ENGINE pin. The resolver's export loop now translates its
+  # DOCKER_CONTEXT line into REMOTE_DOCKER_CONTEXT rather than exporting it,
+  # but that translation is lib.sh's promise, not this script's assumption:
+  # anything that ever exports DOCKER_CONTEXT between the pin above and here
+  # would silently re-aim the plain docker calls and child processes at a
+  # different engine than rd_docker's --context. One cheap, idempotent
+  # re-derivation closes that window for good.
   if [ -n "${ENGINE:-}" ]; then
     DOCKER_CONTEXT="$(rd_engine_context)"
     export DOCKER_CONTEXT

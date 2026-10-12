@@ -185,10 +185,25 @@ def test_certs_sh_writes_material_under_the_resolved_certificate_directory() -> 
 
 
 def test_container_sh_consumes_the_resolved_block() -> None:
+    """The resolved instance's context arrives as REMOTE_DOCKER_CONTEXT, translated by the resolver.
+
+    container.sh must not assign REMOTE_DOCKER_CONTEXT itself: the value
+    comes from the resolved block's DOCKER_CONTEXT line, which
+    rd_resolve_instance_quiet's export loop translates -- an assignment here
+    would be a second derivation of a value the single resolver already
+    owns, the split this suite exists to prevent.
+    """
     text = _CONTAINER_SH.read_text(encoding="utf-8")
     assert "rd_resolve_instance" in text
-    assert 'REMOTE_DOCKER_CONTEXT="$DOCKER_CONTEXT"' in text, (
-        "container.sh must take its docker context from the resolved block"
+    assert 'REMOTE_DOCKER_CONTEXT="$DOCKER_CONTEXT"' not in text, (
+        "container.sh must not copy DOCKER_CONTEXT into REMOTE_DOCKER_CONTEXT: the "
+        "resolver's export loop translates the block's DOCKER_CONTEXT line already"
+    )
+    lib = _LIB_SH.read_text(encoding="utf-8")
+    quiet = lib[lib.index("rd_resolve_instance_quiet() {") : lib.index("rd_resolve_instance() {")]
+    assert 'REMOTE_DOCKER_CONTEXT="${line#DOCKER_CONTEXT=}"' in quiet, (
+        "the resolver must translate the block's DOCKER_CONTEXT line into "
+        "REMOTE_DOCKER_CONTEXT, the name backend classification compares against"
     )
 
 
@@ -292,15 +307,17 @@ def test_the_backend_is_classified_only_after_the_instance_is_resolved() -> None
     """
     # Scoped to the top-level dispatch block. Earlier `rdc_backend` calls sit
     # inside function bodies, which run when those functions are called, long
-    # after this block has already assigned the value they read.
+    # after this block has already run the resolver whose translation sets
+    # the value they read.
     text = _CONTAINER_SH.read_text(encoding="utf-8")
     dispatch = text[text.index('RDC_COMMAND="${1:-}"') :]
     resolve_at = dispatch.index("rd_resolve_instance_quiet")
-    assign_at = dispatch.index('REMOTE_DOCKER_CONTEXT="$DOCKER_CONTEXT"')
     classify_at = dispatch.index('[ "$(rdc_backend)" = "remote" ]')
-    assert resolve_at < assign_at < classify_at, (
-        "the backend must be classified only after REMOTE_DOCKER_CONTEXT has been assigned "
-        "from the resolved block, or the comparison reads a config default"
+    assert resolve_at < classify_at, (
+        "the backend must be classified only after the resolver has run -- the "
+        "resolver's translation of the block's DOCKER_CONTEXT into "
+        "REMOTE_DOCKER_CONTEXT is what the comparison must read, or it reads "
+        "a config default"
     )
 
 

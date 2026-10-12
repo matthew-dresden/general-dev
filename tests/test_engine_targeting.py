@@ -33,18 +33,28 @@ classifies -- the variable docker itself reads ahead of the current context,
 which is what carries the plain docker calls and the devcontainer CLI's own
 invocations along.
 
-The resolver cannot undo that pin: its export loop leaves DOCKER_CONTEXT
-alone under ENGINE (its block was resolved from whatever the four-step order
-defaulted to, which under ENGINE=local is not the pinned engine), and
-container.sh re-asserts the pin after the resolver returns, so no export
-between prelude and dispatch can split the run across two engines. Pinned
-behaviorally: with a stand-in resolver whose block names a different
-context, a pinned run survives resolution still pointing at its pin.
+The resolver cannot undo that pin: its export loop translates the block's
+DOCKER_CONTEXT line into REMOTE_DOCKER_CONTEXT -- informational, the name
+backend classification compares the active context against -- and never
+exports it as DOCKER_CONTEXT, so no resolution can re-aim the process's
+plain docker calls at an engine the active context (or an ENGINE=local
+pin) did not name, and container.sh re-asserts the pin after the resolver
+returns, so no export between prelude and dispatch can split the run
+across two engines. Pinned behaviorally: with a stand-in resolver whose
+block names a different context, a pinned run survives resolution still
+pointing at its pin, and an unpinned run never carries the block's context
+as DOCKER_CONTEXT.
 
 INSTANCE and ENGINE name engines too. Naming two different ones would
 resolve one engine's addresses while aiming docker at another, so lib.sh
 refuses it loudly (rd_fail naming both values and telling the caller to set
 one); the same value is the redundant-but-consistent spelling and passes.
+The comparison names the caller's INSTANCE, never the resolver's default:
+resolution fills INSTANCE from the four-step order even when the caller
+named nothing, so rd_resolve_instance_quiet captures the caller's value in
+RD_INSTANCE_CALLER first and the guard compares against that -- under
+ENGINE=local the sole-directory default otherwise names a remote instance
+the caller never chose and refuses a coherent run.
 
 `make local`, `make remote` and `make disconnect` switch the machine-wide
 docker context -- the exact state ENGINE exists to leave untouched -- so
@@ -334,7 +344,8 @@ def _run_lib_snippet(path_prepend: str, snippet: str) -> subprocess.CompletedPro
     """
     script = (
         "set -euo pipefail\n"
-        "unset ENGINE INSTANCE DOCKER_CONTEXT REMOTE_INSTANCE_ID RD_INSTANCE_RESOLVED\n"
+        "unset ENGINE INSTANCE DOCKER_CONTEXT REMOTE_DOCKER_CONTEXT"
+        " REMOTE_INSTANCE_ID RD_INSTANCE_RESOLVED RD_INSTANCE_CALLER\n"
         f'source "{_LIB_SH}"\n'
         f"{snippet}"
     )
@@ -349,24 +360,29 @@ def _run_lib_snippet(path_prepend: str, snippet: str) -> subprocess.CompletedPro
     )
 
 
-def test_the_resolver_export_loop_leaves_docker_context_alone_under_engine() -> None:
-    """The skip is inside the consumption loop and conditioned on ENGINE.
+def test_the_resolver_export_loop_translates_docker_context_into_the_remote_name() -> None:
+    """The translation is inside the consumption loop and unconditional.
 
-    Without it, exporting the resolver's DOCKER_CONTEXT would re-aim every
-    plain docker call and child process at the four-step default's engine
-    while rd_docker's `--context` still carried ENGINE's -- the split the
-    prelude's pin exists to prevent.
+    Exporting the resolver's DOCKER_CONTEXT -- under any ENGINE -- would
+    re-aim every plain docker call, and `docker context show` itself, at the
+    four-step default's engine even when the machine-wide active context (or
+    an ENGINE=local pin) named another, which classified container-level
+    targets as remote against the operator's explicit `make local`. The
+    block's value is REMOTE_DOCKER_CONTEXT, the informational name backend
+    classification compares against -- never a pin.
     """
     lib = _lib_text()
     quiet = lib[lib.index("rd_resolve_instance_quiet() {") : lib.index("rd_resolve_instance() {")]
     loop_at = quiet.index("while IFS= read -r line")
     loop = quiet[loop_at : quiet.index("EOF_BLOCK", loop_at)]
-    engine_at = loop.index('[ -n "${ENGINE:-}" ]')
-    skip_at = loop.index('[ "${line%%=*}" = "DOCKER_CONTEXT" ]')
+    translate_at = loop.index('[ "${line%%=*}" = "DOCKER_CONTEXT" ]')
+    remote_at = loop.index('REMOTE_DOCKER_CONTEXT="${line#DOCKER_CONTEXT=}"')
     continue_at = loop.index("continue")
-    assert engine_at < skip_at < continue_at, (
-        "the export loop must skip the DOCKER_CONTEXT line -- and only under "
-        "ENGINE -- so the resolver can never clobber the prelude's pin"
+    export_at = loop.index('case "$line" in')
+    assert translate_at < remote_at < continue_at < export_at, (
+        "the export loop must translate the DOCKER_CONTEXT line into "
+        "REMOTE_DOCKER_CONTEXT before the generic export case can see it, "
+        "with no ENGINE condition -- the block's context is never a pin"
     )
 
 
@@ -375,7 +391,9 @@ def test_the_engine_pin_survives_the_resolver(tmp_path: Path) -> None:
 
     The stand-in resolver's block names a different context; if the export
     loop ever exported it under ENGINE, the printed pin would be the
-    resolver's value instead.
+    resolver's value instead. The block's context still reaches
+    REMOTE_DOCKER_CONTEXT -- informational, never a pin -- which is what
+    the second assertion observes.
     """
     bin_dir = _fake_resolver_bin(tmp_path, _fake_resolver_block(tmp_path))
     result = _run_lib_snippet(
@@ -384,12 +402,15 @@ def test_the_engine_pin_survives_the_resolver(tmp_path: Path) -> None:
         "export DOCKER_CONTEXT\n"
         "ENGINE=fake-engine\n"
         "rd_resolve_instance_quiet\n"
-        'printf \'pin=%s instance=%s id=%s\\n\' "$DOCKER_CONTEXT" "$INSTANCE"'
-        ' "$REMOTE_INSTANCE_ID"\n',
+        "printf 'pin=%s remote=%s instance=%s id=%s\\n' \"$DOCKER_CONTEXT\""
+        ' "$REMOTE_DOCKER_CONTEXT" "$INSTANCE" "$REMOTE_INSTANCE_ID"\n',
     )
     assert result.returncode == 0, f"resolution must succeed; stderr={result.stderr[:400]!r}"
     assert f"pin={_PINNED_CONTEXT}" in result.stdout, (
         f"the resolver clobbered the ENGINE pin: stdout={result.stdout!r}"
+    )
+    assert f"remote={_RESOLVER_CONTEXT}" in result.stdout, (
+        "the block's context must still reach REMOTE_DOCKER_CONTEXT under ENGINE"
     )
     assert "instance=fake-inst" in result.stdout, (
         "the rest of the resolved block must still be consumed"
@@ -397,20 +418,66 @@ def test_the_engine_pin_survives_the_resolver(tmp_path: Path) -> None:
     assert "id=i-" in result.stdout, "the id-store read must still run"
 
 
-def test_the_resolver_still_exports_docker_context_when_engine_is_unset(tmp_path: Path) -> None:
-    """Behavioral regression guard for the skip: unset ENGINE changes nothing.
+def test_the_resolver_translates_docker_context_when_engine_is_unset(tmp_path: Path) -> None:
+    """Behavioral regression guard for the translation: unset ENGINE changes nothing.
 
-    The prelude only pins under ENGINE, so the resolver's DOCKER_CONTEXT
-    remains the value the ENGINE-unset world has always consumed.
+    The prelude only pins under ENGINE, so an unpinned process must never
+    carry the block's context as DOCKER_CONTEXT either -- it follows the
+    machine-wide active context -- while REMOTE_DOCKER_CONTEXT, the name
+    backend classification compares against, still gets the block's value.
     """
     bin_dir = _fake_resolver_bin(tmp_path, _fake_resolver_block(tmp_path))
     result = _run_lib_snippet(
         bin_dir,
-        "ENGINE=\nrd_resolve_instance_quiet\nprintf 'ctx=%s\\n' \"$DOCKER_CONTEXT\"\n",
+        "ENGINE=\nrd_resolve_instance_quiet\n"
+        'printf \'ctx=%s remote=%s\\n\' "${DOCKER_CONTEXT:-<unset>}" "$REMOTE_DOCKER_CONTEXT"\n',
     )
     assert result.returncode == 0, f"resolution must succeed; stderr={result.stderr[:400]!r}"
-    assert f"ctx={_RESOLVER_CONTEXT}" in result.stdout, (
-        f"with ENGINE unset the resolver's context must still be exported; got {result.stdout!r}"
+    assert f"ctx=<unset> remote={_RESOLVER_CONTEXT}" in result.stdout, (
+        "with ENGINE unset the block's context must land in REMOTE_DOCKER_CONTEXT "
+        f"only, never in DOCKER_CONTEXT; got {result.stdout!r}"
+    )
+
+
+def test_the_agreement_guard_ignores_the_resolvers_default_instance(tmp_path: Path) -> None:
+    """Behavioral: ENGINE=local survives a resolver that defaults INSTANCE.
+
+    The four-step order fills INSTANCE from the sole configured directory
+    even when the caller named nothing, so after resolution INSTANCE names a
+    remote instance an ENGINE=local run never chose. The guard compares the
+    caller's captured value instead, and the run stays coherent.
+    """
+    bin_dir = _fake_resolver_bin(tmp_path, _fake_resolver_block(tmp_path))
+    result = _run_lib_snippet(
+        bin_dir,
+        "LOCAL_DOCKER_CONTEXT=orbstack\n"
+        "ENGINE=local\n"
+        "rd_resolve_instance_quiet\n"
+        "rd_engine_context\n",
+    )
+    assert result.returncode == 0, (
+        f"ENGINE=local must survive resolution; stderr={result.stderr[:400]!r}"
+    )
+    assert result.stdout.strip() == "orbstack", (
+        f"ENGINE=local must still resolve to the local context after the "
+        f"resolver defaulted INSTANCE; got {result.stdout!r}"
+    )
+
+
+def test_the_agreement_guard_still_refuses_a_caller_named_mismatch(tmp_path: Path) -> None:
+    """Behavioral: the caller's own mismatched pair is still refused after resolution.
+
+    Capturing RD_INSTANCE_CALLER narrows the guard to the caller's choice;
+    it must not also swallow a mismatch the caller themselves named.
+    """
+    bin_dir = _fake_resolver_bin(tmp_path, _fake_resolver_block(tmp_path))
+    result = _run_lib_snippet(
+        bin_dir,
+        "INSTANCE=other-engine\nENGINE=fake-engine\nrd_resolve_instance_quiet\n",
+    )
+    assert result.returncode != 0, "a caller-named INSTANCE/ENGINE mismatch must still refuse"
+    assert "name different engines" in result.stderr, (
+        f"the refusal must be the agreement guard's; stderr={result.stderr[:400]!r}"
     )
 
 

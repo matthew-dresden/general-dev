@@ -189,8 +189,8 @@ EC2 reference, troubleshooting) live in
   directory would collide on `data/Machine/.devport-<build>` and the connection
   token. `configure_vscode_server_dir` in postCreate aborts the build if that
   path is not a mount point, so a config that stopped mounting it cannot go
-  unnoticed, and then proves the container user can write it. It no longer
-  chowns anything: the Dockerfile owns that, and a chown running after VS Code
+  unnoticed, and then proves the container user can write it. It chowns
+  nothing: the Dockerfile owns that, and a chown running after VS Code
   has already tried to install the server is too late to be the fix. A volume
   that an earlier build left root-owned with content in it keeps that ownership,
   since Docker only initializes an empty one, and the write check is what says
@@ -253,8 +253,8 @@ EC2 reference, troubleshooting) live in
   depth, and nothing outside the workspace is ever adopted. Gitignored clones
   are found too: the extension's traversal filters on folder name, excluding
   `.git` and `git.repositoryScanIgnoredFolders`, and never reads `.gitignore`.
-  Nothing needs listing in `git.scanRepositories`, which is why that setting is
-  no longer used. Clone into `repos/`, or anywhere else under the workspace.
+  Nothing sets `git.scanRepositories`, because there is nothing to list.
+  Clone into `repos/`, or anywhere else under the workspace.
   Workspace settings override the devcontainer defaults, so both files carry
   the same values.
 - That scan only runs at window open. Between scans the extension watches for
@@ -548,9 +548,9 @@ the build with the container otherwise complete: fix the credential
 no rebuild is needed. `make verify-container` re-checks the pushed state
 inside the container at any time, on either engine.
 
-asdf was removed entirely (it managed zero tools; Python/Node come from
-features). If a future project needs asdf, that support must be reintroduced
-deliberately, nothing references it anymore.
+The image carries no asdf: Python and Node come from devcontainer features,
+and nothing else references asdf. A project that wants it must add that
+support deliberately.
 
 ## Certificate lifecycle
 
@@ -628,9 +628,9 @@ port>` and carry the `ca`, `cert` and `key` files spec Section 5.5 fixes
 under `<certs-root>/<instance>/`. An
 existing context is updated in place rather than deleted and recreated; an
 existing context whose endpoint is `ssh://` is refused by name and left
-completely untouched. Nothing creates such a context any more, but one may
-survive on a machine that used the transport removed at cutover, and silently
-rewriting it would destroy the only record of what that machine was pointed at.
+completely untouched. Nothing creates such a context; one that survives on a
+machine is the only record of what that machine was pointed at, and silently
+rewriting it would destroy that record.
 VS Code Dev Containers needs no transport of its own: it follows the active
 docker context, so pointing the context at the forward points the editor at it
 too.
@@ -644,12 +644,12 @@ running rootless.
 
 **One build path, and a selector kept for the next one.** `make connect-start`
 reads `DEVCONTAINER_TRANSPORT` from the environment
-(`docs/environment-files.md`) and dispatches on it. Since the cutover there is
-one accepted value, `ssm`, which is also the default; any other value, including
-the `ssh` that used to be the default, exits non-zero naming the variable, the
+(`docs/environment-files.md`) and dispatches on it. There is one accepted
+value, `ssm`, which is also the default; any other value, including a
+leftover `ssh`, exits non-zero naming the variable, the
 offending value and the accepted value. The selector is kept rather than
 removed because it is the seam a future transport is added at, and because a
-caller who exports the old value out of habit is told so instead of being
+caller who exports a stale value is told so instead of being
 silently redirected. Unset, or the explicit value `ssm`, runs
 
 ```sh
@@ -699,7 +699,7 @@ any context name that does not start with it, since that prefix is the
 single place the bare instance name is recovered for certificate lookup.
 
 **The SAN requirement, and its symptom.** TLS validates the name the
-*client* used to dial the daemon, and the client dials `127.0.0.1` through
+*client* dials the daemon with, and the client dials `127.0.0.1` through
 the loopback forward, so the server certificate must carry `IP:127.0.0.1`
 and `DNS:localhost` -- never the instance's own hostname or private
 address. A server certificate issued for either of those produces a
@@ -804,10 +804,8 @@ verification step after each stage, is `docs/environment-setup.md`.
 
 ## devcontainer file contract
 
-- `.devcontainer/` contents began as a snapshot copied from an upstream
-  catalog and have since diverged substantially (see the README caveats and
-  `NOTICE` for provenance and license attribution). Nothing regenerates the
-  directory: it is self-managed, and changes here stay.
+- `.devcontainer/` is self-managed: nothing regenerates the directory, and
+  changes here stay (provenance and license attribution: `NOTICE`).
 - `shell.env` + `devcontainer-environment-variables.json` come from `make
   init` (or the `gd-env-setup-local` interview, whose `render` step writes
   the same files from your answers). After changing either, re-run

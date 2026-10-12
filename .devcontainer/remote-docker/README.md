@@ -119,10 +119,9 @@ They ask what they need, state any command they cannot run themselves, and
 verify the result rather than assuming it.
 
 The `make` targets run from the repository root and cover the whole lifecycle;
-`make help` documents them. There are no shell aliases: the pair that once
-existed wrapped `make connect` and `make disconnect`, and a third wrapped a
-`make shell` that no longer exists, so they are one more thing to keep in step
-with the Makefile for no capability the Makefile does not already give.
+`make help` documents them. There are no shell aliases: the Makefile already
+gives every capability an alias would wrap, and aliases are one more thing to
+keep in step with it.
 
 To drive several engines at once -- one per project instance under
 `remote-instances/`, plus this machine's own -- prefix `ENGINE=local` or
@@ -183,12 +182,9 @@ works with `git ls-remote` and fails if the remote rejects it.
 > The credential is stored in a file on the shared engine. Anyone with docker
 > access to that instance can read it.
 
-postCreate no longer writes any credential. It only sets `credential.helper
+postCreate writes no credential. It only sets `credential.helper
 store` and the SSH→HTTPS URL rewrite; `GIT_AUTH_METHOD`, `GIT_TOKEN` and the
-ssh-key path in `shell.env` are no longer consulted. That replaced a setup
-which had to be rotated by hand and failed silently, and which wrote `.netrc`
-while configuring the `store` helper, so it never authenticated anything even
-when the token was valid.
+ssh-key path in `shell.env` are never consulted.
 
 To check a container's credentials directly, with no VS Code window attached:
 

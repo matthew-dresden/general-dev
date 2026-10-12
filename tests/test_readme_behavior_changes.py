@@ -33,7 +33,7 @@ _SKILLS_DIR = _REPO_ROOT / ".agents" / "skills"
 # SKILL.md cross-reference uses.
 _SKILL_NAME_IN_TEXT = re.compile(r"(?<![\w-])gd-[a-z0-9]+(?:-[a-z0-9]+)*(?![\w-])")
 
-_BEHAVIOR_IDS = tuple(f"B{n}" for n in range(1, 11))
+_BEHAVIOR_IDS = tuple(f"B{n}" for n in range(1, 12))
 _WHAT_CHANGED_HEADING = "## What changed"
 
 

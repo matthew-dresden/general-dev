@@ -277,7 +277,7 @@ At this point the environment is complete. Day to day:
 | Goal | Do this |
 |---|---|
 | A shell inside the container | `make exec` |
-| What state is anything in | `make status` (read-only, start here when something looks wrong) |
+| What state is anything in | `make status` (read-only, the active engine), `make list-containers` (every engine at once) |
 | Pause / resume the container | `make stop`, `make start` (the checkout survives either) |
 | Refresh pushed credentials after a rotation or an SSO re-login | `make push-creds` (`make up` does it too, plus its own engine checks) |
 | Rebuild from scratch | `make rebuild` (credentials re-push automatically, see step 8) |
@@ -308,7 +308,7 @@ every stage:
 | Provision and converge | `make instance-deploy INSTANCE=<project>` | Terragrunt apply, id link, trust chain where missing, secret push |
 | Open the forward | `make remote INSTANCE=<project>` | Opens the SSM forward as a background daemon, points docker at the engine; returns once docker answers through it |
 | Build and open | `make build INSTANCE=<project>`, then `make reopen INSTANCE=<project>` | Clone into a volume on the engine, build, run postCreate, attach VS Code |
-| Day to day | `make status`, `stop`, `start`, `exec` with `INSTANCE=<project>` | Container lifecycle; the checkout survives all of it |
+| Day to day | `make status`, `stop`, `start`, `exec` with `INSTANCE=<project>`; `make list-containers` for the every-engine view | Container lifecycle; the checkout survives all of it |
 | Pause to save cost | `make instance-stop INSTANCE=<project>`, later `make instance-start INSTANCE=<project>` | Stops and starts the EC2 instance; containers, volumes and checkouts survive |
 | Retire | `make instance-destroy INSTANCE=<project>` | Terragrunt destroy plus cleanup of parameters, certificates, context and id |
 
@@ -317,6 +317,17 @@ point: EC2 state, recorded id, Parameter Store and certificate material,
 forwarded port, docker context. `make instance-status INSTANCE=<name>`
 narrows it to one instance; the targets that accept it also take `ALL=1`
 for every configured instance at once.
+
+The container side mirrors both shapes. `make list-containers` sweeps every
+engine -- the local one plus every configured instance's -- and reports one
+row per container this project's label owns, with per-engine reachability;
+an engine that cannot answer names itself and the sweep keeps going, and
+the exit code says whether every engine answered. The lifecycle targets
+take `ALL=1` for the fleet form, one engine after the other, fail-fast on
+the first that cannot answer; `make clean ALL=1` additionally requires
+`CONFIRM=destroy`. `make build NAME=x` (or `make up NAME=x`) names the
+container at creation instead of leaving the `<repo>-<devcontainerId>`
+default for a later `make rename`.
 
 ### What scaffold and deploy do
 

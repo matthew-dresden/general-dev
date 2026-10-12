@@ -1,6 +1,6 @@
 ---
 name: gd-skills-scope
-description: Decides and records which scope an agent surface receives -- the global symlink, the in-repo project adapters, or the printed one-shot runtime incantation -- by writing agent-surface configuration, never by moving or deleting canonical files, and verifies the scoped set resolves; drives the make skills-list target.
+description: Decides and records which scope an agent surface receives (the global symlink, the in-repo project adapters, or the printed one-shot runtime incantation) by writing agent-surface configuration, never by moving or deleting canonical files, and verifies the scoped set resolves; drives the make skills-list target.
 ---
 
 # gd-skills-scope
@@ -8,9 +8,9 @@ description: Decides and records which scope an agent surface receives -- the gl
 The roster is organized in families (see `gd-help`): a laptop-repair agent
 needs the env- and creds- families but not instance-; a fleet-operations
 agent needs instance- and container- but not skills-. Scoping is a property
-of the consumer, so it is recorded where the consumer reads it -- the
+of the consumer, so it is recorded where the consumer reads it: the
 agent's skill directory, the repository's in-repo adapters, or a one-shot
-runtime override -- never by deleting from `.agents/skills`.
+runtime override, never by deleting from `.agents/skills`.
 
 This family's scoping surface is the choice of AGENT and SCOPE on the
 native Mac (no devcontainer, docker or AWS involvement):
@@ -20,9 +20,9 @@ native Mac (no devcontainer, docker or AWS involvement):
 - `SCOPE=project` scopes the agents that work inside this checkout:
   opencode natively, Claude Code through the tracked plugin symlink.
 - `SCOPE=runtime` scopes a single launch with a printed (never executed)
-  one-shot incantation: `OPENCODE_CONFIG` for opencode -- whose JSON
-  replaces the project config, so it embeds the provider/model block from
-  `.devcontainer/opencode.json` read at generation time -- and a
+  one-shot incantation: an `OPENCODE_CONFIG` JSON for opencode, which
+  replaces the project config and so embeds the provider/model block from
+  `.devcontainer/opencode.json` read at generation time, and a
   `--settings` JSON for Claude Code (printed only when the installed build
   advertises the flag; otherwise an explicit unsupported message with the
   manual fallback).

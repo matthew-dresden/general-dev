@@ -1,13 +1,13 @@
 ---
 name: gd-creds-rotate
-description: Replaces one stored credential -- deletes the old keychain item, stores the replacement through make creds-init, re-pushes with make push-creds, and verifies by re-reading the keychain and re-running make verify-container; never accepts, renders or transmits a value on a command line.
+description: Replaces one stored credential by deleting the old keychain item, storing the replacement through make creds-init, re-pushes with make push-creds, and verifies by re-reading the keychain and re-running make verify-container; never accepts, renders or transmits a value on a command line.
 ---
 
 # gd-creds-rotate
 
 This skill is the rotate operation of the creds family, split out from
 `gd-creds-setup` so the standing setup surface stays add-and-deliver while
-rotation -- the operation with a destructive half -- has its own contract.
+rotation, the operation with a destructive half, has its own contract.
 The value discipline is the one `gd-creds-setup`'s `## Value handling`
 states, unchanged: a value is never placed in a command's arguments, never
 rendered into the conversation, and a request to see one is answered with

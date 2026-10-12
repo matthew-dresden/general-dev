@@ -12,7 +12,7 @@ Everything `gd-instance-list` does not cover"; and it ends by "A findings list, 
 with a remedy". `gd-instance-list` (E4-F2-S2-T1) owns the thirteen checks in Section
 4.2.1 and `## Checks` table; this skill does not restate one of them,
 since two copies of that contract would drift apart (this document's own
-Section 3 obligation) -- it invokes `gd-instance-list` first and
+Section 3 obligation); it invokes `gd-instance-list` first and
 carries its verdict forward as a single summary line (`## Report shape`
 states the exact shape), never reproducing engine's own per-check `##
 Verdict` table a second time, then reports the state engine has no reason
@@ -39,15 +39,15 @@ remote backend); that question belongs to `gd-instance-list`, not to this skill,
 does not appear in a `## Questions` table here and this skill's own
 Description column in Section 4.2 correctly reads `Nothing`.
 
-`gd-env-doctor` reports; it does not act. Section 4.2's interaction contract --
+`gd-env-doctor` reports; it does not act. Section 4.2's interaction contract,
 "Where a skill cannot act itself, it states the exact command, waits, then
-verifies the result before continuing. Nothing is assumed to have worked."
--- governs every other skill's own repair actions, but this skill never
+verifies the result before continuing. Nothing is assumed to have worked.",
+governs every other skill's own repair actions, but this skill never
 performs one (see `## What this skill fixes itself`), so it never itself
 waits or re-probes mid-run. Instead every remedy below names the exact
 command or skill invocation that fixes the condition, the operator (or the
 named skill) runs it, and re-invokes `gd-env-doctor` for a fresh,
-independently recomputed report -- the "wait, then verify" half of the
+independently recomputed report. The "wait, then verify" half of the
 contract happens across two separate invocations of this skill rather than
 inside one. A `gd-env-doctor` run is one-shot: it never repeats an action, and it
 never reports a finding as fixed without that fresh re-run confirming it.
@@ -78,7 +78,7 @@ same thing `found` names (the value or condition `verify.Finding` itself
 encountered), and this table has no column standing in for `prevents` at
 all, since a finding's own text already states the condition it guards
 against. A row whose owning module does not implement its check yet
-reports `NOT RUN` instead of a value, never `ok` -- the same convention
+reports `NOT RUN` instead of a value, never `ok`; the same convention
 `gd-instance-list`'s own `## Verdict` section states and this document
 does not restate a second time; see `## Report shape` below for what that
 looks like.
@@ -89,7 +89,7 @@ Section 5.2 makes `shell.env`'s content a rule of the file, not a
 suggestion: "Phase 1 changes only what it is allowed to contain: identity
 and configuration, never a credential." `verify` already owns whether the
 three private files are complete, placeholder-free and internally
-consistent (spec Section 4.5) -- that is exactly `gd-instance-list`'s
+consistent (spec Section 4.5), which is exactly `gd-instance-list`'s
 own check "the three files complete and consistent" (its `## Checks` row,
 Section 4.2.1), so this skill carries that result forward from the engine
 verdict above rather than calling `verify.verify_all` a second time and
@@ -100,14 +100,14 @@ place:
 
 | Finding | Source | Remedy |
 |---|---|---|
-| `shell.env`'s active configuration holds no credential-shaped value | `secrets.scan_lines` (`devcontainer_config.secrets`) run over `shell.env`'s active `export` lines -- the same scope `verify._active_configuration_text` already isolates for the placeholder check, reused here rather than re-deriving it -- restricted to the seven credential-bearing detectors in `secrets.PATTERNS` (`aws-access-key-id`, `aws-secret-access-key`, `private-key-block`, `github-token`, `slack-token`, `bearer-token`, `hostcreds-value`). The three printable detectors (`sso-portal-url`, `account-id`, `ec2-instance-id`) are excluded: `shell.env` legitimately carries a resolved AWS account or instance identifier as configuration, not a credential, so flagging one would be a false positive by design. `shell-env-line` is excluded too: it needs a comparison source this scan is not a comparison against. | Name the manifest entry the value belongs to (the `hostcreds-value` finding names the credential), add it to the hostcreds manifest and store it with `make creds-init` (never on a command line), then delete the offending `export` line from `shell.env` by hand (this skill never edits it) and re-run `gd-env-doctor` to confirm. `gd-creds-setup` owns this step: its Add row (`## Invocation map`) is the same manifest-plus-creds-init flow. The finding names only the variable and, via `secrets.render_finding`, a redacted, safe-to-paste rendering of the match -- never the value itself. |
+| `shell.env`'s active configuration holds no credential-shaped value | `secrets.scan_lines` (`devcontainer_config.secrets`) run over `shell.env`'s active `export` lines, the same scope `verify._active_configuration_text` already isolates for the placeholder check, reused here rather than re-deriving it, restricted to the seven credential-bearing detectors in `secrets.PATTERNS` (`aws-access-key-id`, `aws-secret-access-key`, `private-key-block`, `github-token`, `slack-token`, `bearer-token`, `hostcreds-value`). The three printable detectors (`sso-portal-url`, `account-id`, `ec2-instance-id`) are excluded: `shell.env` legitimately carries a resolved AWS account or instance identifier as configuration, not a credential, so flagging one would be a false positive by design. `shell-env-line` is excluded too: it needs a comparison source this scan is not a comparison against. | Name the manifest entry the value belongs to (the `hostcreds-value` finding names the credential), add it to the hostcreds manifest and store it with `make creds-init` (never on a command line), then delete the offending `export` line from `shell.env` by hand (this skill never edits it) and re-run `gd-env-doctor` to confirm. `gd-creds-setup` owns this step: its Add row (`## Invocation map`) is the same manifest-plus-creds-init flow. The finding names only the variable and, via `secrets.render_finding`, a redacted, safe-to-paste rendering of the match, never the value itself. |
 
 ### Secrets
 
 The hostcreds mechanism is the only credential path this skill checks: the
 manifest the checkout declares, the keychain items it names, and the
 credentials the container actually received. Every check names an exact
-remedy, never a fallback -- a credential that cannot be resolved fails
+remedy, never a fallback: a credential that cannot be resolved fails
 `make push-creds` outright, and this skill reports that fact rather than
 probing a second store.
 
@@ -115,7 +115,7 @@ probing a second store.
 |---|---|---|
 | The hostcreds manifest loads | `devcontainer_config.hostcreds.load_manifest`, exercised read-only by `creds-fragments --print-git-hosts` (`python3 -m devcontainer_config.cli`, PYTHONPATH set to the plugin scripts directory) | A missing manifest is created by `make init` from its committed example; a malformed one fails with a `ManifestError` naming the path and every problem at once. Fix the manifest, then re-run `gd-env-doctor`. |
 | Every keychain credential the manifest names exists | One `security find-generic-password -w -s <service>` probe per keychain entry, the identical argv `hostcreds.keychain_find_argv` builds (`>/dev/null`: presence only, never the value) | A missing item is a prompt away: run `make creds-init`, which prompts once per missing item, stores it and re-probes; then re-run `gd-env-doctor`. |
-| Every manifest entry resolved and reached the container | `make verify-container` (the container-side check `make push-creds` delivers: fragment modes, startup block, git and aws reachability) | A credential that failed to resolve failed `make push-creds` naming itself and its remedy (an expired SSO session for `aws-export` entries -- `aws sso login` -- or a missing keychain item -- `make creds-init`); fix it, re-push, then re-run `gd-env-doctor`. A container is never shipped a subset of the manifest. |
+| Every manifest entry resolved and reached the container | `make verify-container` (the container-side check `make push-creds` delivers: fragment modes, startup block, git and aws reachability) | A credential that failed to resolve failed `make push-creds` naming itself and its remedy (an expired SSO session for `aws-export` entries, remedied by `aws sso login`, or a missing keychain item, remedied by `make creds-init`); fix it, re-push, then re-run `gd-env-doctor`. A container is never shipped a subset of the manifest. |
 | Every manifest name is a valid environment-variable identifier | Every `CredentialSpec.name` cross-checked against the identifier rule `hostcreds.load_manifest` itself enforces | `load_manifest` rejects an invalid name outright with a `ManifestError`, so a row here can only fail alongside the manifest-load row above; rename the entry, then re-run `gd-env-doctor`. |
 
 ### Container state
@@ -139,16 +139,16 @@ side:
 
 | Finding | Source | Remedy |
 |---|---|---|
-| Every variable in a committed `.example` file is present in the rendered private file | `NOT RUN`. No function of this name exists in this repository yet, the same gap `gd-instance-list`'s own introduction discloses for disk headroom and `HOST_PROXY`: this row states the check's exact contract -- diff the export names in `repo.example_for(relative)` against the export names `verify._ACTIVE_EXPORT_LINE` finds in the rendered file -- and names `verify` as the module a future work unit extends to own it, since Section 4.5 already gives `verify` the "written configuration is complete" responsibility this comparison extends. | Once implemented: re-render with `gd-env-setup-local` or `gd-env-setup-remote` (moving the three existing private files aside first, since the setup skills always call `render.write_all` with `overwrite=False`, so it refuses and names every existing path rather than replacing one already on disk), then re-run `gd-env-doctor`. |
+| Every variable in a committed `.example` file is present in the rendered private file | `NOT RUN`. No function of this name exists in this repository yet, the same gap `gd-instance-list`'s own introduction discloses for disk headroom and `HOST_PROXY`: this row states the check's exact contract: diff the export names in `repo.example_for(relative)` against the export names `verify._ACTIVE_EXPORT_LINE` finds in the rendered file, and names `verify` as the module a future work unit extends to own it, since Section 4.5 already gives `verify` the "written configuration is complete" responsibility this comparison extends. | Once implemented: re-render with `gd-env-setup-local` or `gd-env-setup-remote` (moving the three existing private files aside first, since the setup skills always call `render.write_all` with `overwrite=False`, so it refuses and names every existing path rather than replacing one already on disk), then re-run `gd-env-doctor`. |
 | The Parameter Store copy of `shell.env` agrees with the local one | `NOT RUN`. Nothing today fetches `/devcontainer/<instance>/shell.env` back from Parameter Store for comparison; `push-secrets.sh` (`make push-secrets`) publishes it and the shell-side `fetch_parameter` bootstrap (Section 3.5) reads it once at container creation, but neither compares the two. This row names a future work unit as the owner of that comparison. | Once the comparison itself is implemented: `make push-secrets` (`push-secrets.sh`) already republishes the local `shell.env` and `aws-profile-map.json` to Parameter Store, so a finding here is resolved the same way, then re-run `gd-env-doctor`. |
-| The active docker context's certificate paths match the material on disk | `NOT RUN`. Owned by the `certs` module (spec Section 4.5): `certs.py` (E6-F1-S1-T1, E6-F1-S1-T2) now implements both generation and the inspection/expiry arithmetic (`certs.status_rows`, `certs.classify`), but this comparison -- whether the docker context's *configured TLS paths* still point at where the certificate files actually live -- is a distinct check that no function in this repository performs yet. This is a different condition from `gd-instance-list`'s own check "client and CA certificates present and unexpired": engine asks whether the certificate files themselves are present and unexpired, this row asks whether the docker context's configured TLS paths still point at where those files actually live under `instances.certs_root()`'s `<instance>/` directory (`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/` when `DOCKER_CONFIG` is unset). | Once implemented: reissue or realign the certificate material with the `gd-cert-lifecycle` skill (Section 4.2's roster; already authored, E4-F3-S2-T2), then re-run `gd-env-doctor`. |
-| Hooks installed on the host are also installed inside the container | `githooks.hooks_status(root)` (`devcontainer_config.githooks`) run on the host, compared against the identical call run inside the container. For a local backend the two are definitionally equal, since the container mounts the host's working tree directly (the same fact `rdc_check`'s local-branch row above states); for a remote backend, run inside the container over the resolved docker context with `rdc_exec` (`container.sh`, the same helper `rdc_check` already uses): `rdc_exec <container-id> sh -c "cd '<CONTAINER_WORKSPACE>' && env PYTHONPATH=<CONTAINER_WORKSPACE>/.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.cli hooks-check"`, where `<CONTAINER_WORKSPACE>` is `repo.container_workspace(root)`. The explicit `cd` is required, not cosmetic: `cli._run_hooks_check` resolves the repository with `repo.find_root(Path.cwd())`, and `rdc_exec` forwards everything after the container id straight through as the command (`rd_docker exec -u "$CONTAINER_USER" "$id" "$@"`, `container.sh:86-89`), so there is no way to inject a bare `-w` after the container id; without the `cd`, the process starts at `/`, where `find_root` fails with "is not inside a git repository" instead of reporting hook drift -- the same `sh -c "cd '${CONTAINER_WORKSPACE}' && ..."` pattern `container.sh`'s own `rdc_exec_probe` call already uses (line 479). This is exactly the gap AC-4.7 (Section 4.6) exists to prevent: "Hooks are installed on the host by `make hooks-install` and inside the container by postCreate, so a commit made from a container terminal is guarded identically." | Re-run `make hooks-install` on whichever side (host or container, named by which `hooks-check` failed) reports drift, then re-run `gd-env-doctor`. |
+| The active docker context's certificate paths match the material on disk | `NOT RUN`. Owned by the `certs` module (spec Section 4.5): `certs.py` (E6-F1-S1-T1, E6-F1-S1-T2) now implements both generation and the inspection/expiry arithmetic (`certs.status_rows`, `certs.classify`), but this comparison, whether the docker context's *configured TLS paths* still point at where the certificate files actually live, is a distinct check that no function in this repository performs yet. This is a different condition from `gd-instance-list`'s own check "client and CA certificates present and unexpired": engine asks whether the certificate files themselves are present and unexpired, this row asks whether the docker context's configured TLS paths still point at where those files actually live under `instances.certs_root()`'s `<instance>/` directory (`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/` when `DOCKER_CONFIG` is unset). | Once implemented: reissue or realign the certificate material with the `gd-cert-lifecycle` skill (Section 4.2's roster; already authored, E4-F3-S2-T2), then re-run `gd-env-doctor`. |
+| Hooks installed on the host are also installed inside the container | `githooks.hooks_status(root)` (`devcontainer_config.githooks`) run on the host, compared against the identical call run inside the container. For a local backend the two are definitionally equal, since the container mounts the host's working tree directly (the same fact `rdc_check`'s local-branch row above states); for a remote backend, run inside the container over the resolved docker context with `rdc_exec` (`container.sh`, the same helper `rdc_check` already uses): `rdc_exec <container-id> sh -c "cd '<CONTAINER_WORKSPACE>' && env PYTHONPATH=<CONTAINER_WORKSPACE>/.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.cli hooks-check"`, where `<CONTAINER_WORKSPACE>` is `repo.container_workspace(root)`. The explicit `cd` is required, not cosmetic: `cli._run_hooks_check` resolves the repository with `repo.find_root(Path.cwd())`, and `rdc_exec` forwards everything after the container id straight through as the command (`rd_docker exec -u "$CONTAINER_USER" "$id" "$@"`, `container.sh:86-89`), so there is no way to inject a bare `-w` after the container id; without the `cd`, the process starts at `/`, where `find_root` fails with "is not inside a git repository" instead of reporting hook drift, the same `sh -c "cd '${CONTAINER_WORKSPACE}' && ..."` pattern `container.sh`'s own `rdc_exec_probe` call already uses (line 479). This is exactly the gap AC-4.7 (Section 4.6) exists to prevent: "Hooks are installed on the host by `make hooks-install` and inside the container by postCreate, so a commit made from a container terminal is guarded identically." | Re-run `make hooks-install` on whichever side (host or container, named by which `hooks-check` failed) reports drift, then re-run `gd-env-doctor`. |
 
 ## Procedure
 
 1. Run `gd-instance-list`. Carry its result forward faithfully as the
-   single summary line `## Report shape` states -- pass, warn, fail, or a
-   partial run naming what it never reached -- without restating any of its
+   single summary line `## Report shape` states (pass, warn, fail, or a
+   partial run naming what it never reached) without restating any of its
    thirteen `## Checks` rows, or its own `## Verdict` table's rows, as a row
    of this skill's own `## Findings` table (AC-FUNC-003). If the
    invocation produces no verdict at all, report that condition instead of
@@ -187,7 +187,7 @@ Verdict` table; it never reproduces that table's own rows here, since doing
 so a second time is exactly the duplication Section 3 forbids. The line
 states how many of the checks that ran reported `ok`, and names every one
 that reported anything else (`NOT RUN`, a `WARN`, or the failure that
-stopped the run) -- shown below as engine's own local-backend verdict
+stopped the run), shown below as engine's own local-backend verdict
 reports it today, per its own `## Verdict` and introduction: four of its six
 local checks `ok`, and `disk headroom` and `HOST_PROXY agrees with a
 reachable proxy` reporting `NOT RUN`, since neither probe exists in this
@@ -224,7 +224,7 @@ No repair performed. 0 findings need a remedy.
 
 A run that finds something never says `ok` for the row that failed: it
 prints the same failure text and remedy `## Findings` states for that row,
-in place of `ok`, and continues to every remaining row regardless -- unlike
+in place of `ok`, and continues to every remaining row regardless. Unlike
 `gd-instance-list`'s stop-at-the-first-failure walk, nothing here ever
 depends on an earlier row succeeding.
 
@@ -239,13 +239,13 @@ skill invocation that fixes the condition instead.
 
 | Condition | Behavior |
 |---|---|
-| A precondition check fails | This skill has no fail-fast precondition of its own to stop at: the only precondition-shaped input it consumes is `gd-instance-list`'s own verdict (`## Procedure` step 1), carried forward faithfully as the single `ENGINE` summary line `## Report shape` states. Unlike every other skill in this platform, a failure in that carried-forward verdict does not stop this skill's own remaining steps -- configuration, secrets, container state and drift all still run and are still reported, because `doctor`'s job is a complete list, not a gate. |
-| The engine verdict cannot be obtained at all (`gd-instance-list`'s invocation produces no verdict, as distinct from a verdict that itself reports a failure or a partial run) | Print the `ENGINE` line as `NOT RUN`, naming that its thirteen checks did not run, and report no overall health for that line -- the same `NOT RUN` discipline `## Findings`' own drift rows already use for a check with no owning module yet, never a fabricated `ok`. This skill's own remaining steps still run per the row above, and the trailing summary line must never read as a clean bill in this case, since none of the thirteen checks that would justify one ran: reporting the rest as healthy would be a silent failure of the delegation. |
+| A precondition check fails | This skill has no fail-fast precondition of its own to stop at: the only precondition-shaped input it consumes is `gd-instance-list`'s own verdict (`## Procedure` step 1), carried forward faithfully as the single `ENGINE` summary line `## Report shape` states. Unlike every other skill in this platform, a failure in that carried-forward verdict does not stop this skill's own remaining steps: configuration, secrets, container state and drift all still run and are still reported, because `doctor`'s job is a complete list, not a gate. |
+| The engine verdict cannot be obtained at all (`gd-instance-list`'s invocation produces no verdict, as distinct from a verdict that itself reports a failure or a partial run) | Print the `ENGINE` line as `NOT RUN`, naming that its thirteen checks did not run, and report no overall health for that line, the same `NOT RUN` discipline `## Findings`' own drift rows already use for a check with no owning module yet, never a fabricated `ok`. This skill's own remaining steps still run per the row above, and the trailing summary line must never read as a clean bill in this case, since none of the thirteen checks that would justify one ran: reporting the rest as healthy would be a silent failure of the delegation. |
 | An action the skill took did not verify | Not applicable: this skill performs no action of its own (`## What this skill fixes itself` is empty), so there is no resulting machine state to report and nothing to retry, silently or otherwise. The machine is always exactly as it was before this skill ran. |
 | A step needs the operator (SSO, `sudo`, a key) | This skill never waits inline, because it has no in-progress action to resume: every remedy in `## Findings` names the exact command, the operator (or the named skill) runs it, and re-invokes `gd-env-doctor` for a fresh, independently recomputed report. Never assumes a remedy succeeded without that fresh run confirming it. |
 | A gate is reached (Section 4.4) | This skill reaches no Section 4.4 gate: it creates no AWS resource, runs no `terragrunt apply` or `terragrunt destroy`, and performs no phase-4 cutover. `GATE-APPLY`, `GATE-CUTOVER` and `GATE-DESTROY` are `gd-env-setup-remote`'s and a future teardown skill's concern, not this one's. |
 | An answer fails validation | This skill asks nothing of its own (Section 4.2's own roster row: "Asks: Nothing") and never calls `answers.validate`, so this condition never arises for it. |
-| The operator aborts | Leaves no partial state: this skill writes nothing, creates nothing and deletes nothing at any point in its run, so an interrupted run (stopped before its findings list finishes printing) leaves the repository, every docker context and every AWS resource exactly as they were -- except for whatever `gd-instance-list`'s own two narrow self-fixes already did under its own verdict before this skill was interrupted, which is engine's own state to account for, not a new state this skill introduces. |
+| The operator aborts | Leaves no partial state: this skill writes nothing, creates nothing and deletes nothing at any point in its run, so an interrupted run (stopped before its findings list finishes printing) leaves the repository, every docker context and every AWS resource exactly as they were, except for whatever `gd-instance-list`'s own two narrow self-fixes already did under its own verdict before this skill was interrupted, which is engine's own state to account for, not a new state this skill introduces. |
 
 ## Related specifications
 
@@ -272,10 +272,10 @@ skill invocation that fixes the condition instead.
   skill's drift group checks, and the exact sentence its remedy exists to
   satisfy.
 - Section 5.2: `shell.env` holds identity and configuration, never a
-  credential -- the rule this skill's one new configuration finding
+  credential, the rule this skill's one new configuration finding
   enforces that `verify` does not.
 - Section 5.4: one backend, no offline store, nothing degrades to a local
-  copy -- why every secrets finding above names `aws sso login` or an
+  copy, which is why every secrets finding above names `aws sso login` or an
   IAM grant and never a fallback.
 - AC-4.3 (Section 4.3): a credential value is never printed; this
   skill's own secrets findings read only names, sources and probe exit

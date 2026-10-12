@@ -1,6 +1,6 @@
 ---
 name: gd-env-setup-remote
-description: Configures this laptop to reach a remote EC2 docker engine over an SSM port forward secured with mTLS -- no SSH anywhere -- then verifies the result.
+description: Configures this laptop to reach a remote EC2 docker engine over an SSM port forward secured with mTLS, with no SSH anywhere, then verifies the result.
 ---
 
 # gd-env-setup-remote
@@ -10,7 +10,7 @@ Section 2, G2: G1 for a remote instance, with no SSH anywhere. `<name>` is
 the human-chosen instance name (spec Section 9's addressing pattern:
 `remote-instances/<name>/`, docker context `<repo-slug>-<name>`
 (`general-dev-<name>` in this repository), Parameter prefix
-`/devcontainer/<name>/`, certificates under `<certs-root>/<name>/` --
+`/devcontainer/<name>/`, certificates under `<certs-root>/<name>/`:
 `$DOCKER_CONFIG/certs/<name>/`, or `~/.docker/certs/<name>/` when
 `DOCKER_CONFIG` is unset; `<certs-root>` stands for that root throughout
 this document); `remote_instance_id` is the separate schema
@@ -18,24 +18,24 @@ field recording the actual EC2 instance id once resolved. This skill is
 `gd-env-setup-local` plus the remote fields and the remote work: it
 asks everything `gd-env-setup-local` asks, plus instance name, id, region and
 profile, and it decides nothing about what a valid answer looks like, what
-a rendered file contains, or what "complete" means -- `answers`, `render`
+a rendered file contains, or what "complete" means. `answers`, `render`
 and `verify` (`.claude/plugins/devcontainer/scripts/devcontainer_config/`)
 own those questions, and `hostprobe` owns every fact about this machine.
 Certificate generation and instance resolution are owned by the `certs` and
 `instances` modules of that same section (spec Section 4.5). `certs`
-(E6-F1-S1-T1, E6-F1-S1-T2) now exists for both generation -- `certs.create_ca`,
+(E6-F1-S1-T1, E6-F1-S1-T2) now exists for both generation (`certs.create_ca`,
 `certs.issue_server`, `certs.issue_client` and `certs.publication_set`, which
-Procedure step 9 below calls directly -- and inspection/expiry status
+Procedure step 9 below calls directly) and inspection/expiry status
 (`certs.status_rows`, `certs.classify`), the same functions `make cert-status`
 calls. `transport` (E6-F2-S1-T1) owns the SSM port forward itself: SSM agent
 status, per-instance local port allocation, the `aws ssm start-session`
 argument vector and its readiness detection, which Procedure steps 7 and 11
 through 12 below call directly. `instances` (E8-F1-S1-T1) now owns instance
 discovery, the resolution order and the Section 9 addressing derivations named
-in the paragraph above -- `instances.discover`, `instances.resolve`,
+in the paragraph above: `instances.discover`, `instances.resolve`,
 `instances.docker_context_prefix`, `instances.docker_context`,
 `instances.parameter_prefix`, `instances.certs_root` and `instances.certs_dir`
--- deriving every `<repo-slug>-<name>`, `<certs-root>/<name>/` and
+, deriving every `<repo-slug>-<name>`, `<certs-root>/<name>/` and
 `/devcontainer/<name>/` path this document uses. Procedure step 7 below never
 calls `instances.resolve`: `instances.resolve`'s `INSTANCE` /
 `DEFAULT_REMOTE_INSTANCE` / sole-directory order selects among
@@ -45,14 +45,14 @@ this skill's own `<name>` comes from the operator's `gd-env-setup-remote
 INSTANCE=<name>` invocation directly, never from a call to `instances.resolve`
 here.
 
-Where this skill cannot act itself -- a browser SSO login, an AWS resource
-that only an operator may create or destroy -- it states the exact
+Where this skill cannot act itself (a browser SSO login, an AWS resource
+that only an operator may create or destroy), it states the exact
 command, waits for the operator to run it, then verifies the result itself
 before continuing (spec Section 4.2's interaction contract). For a browser
 SSO login this means: state `aws sso login --profile <profile>` with the
 answered profile substituted, wait for the operator to complete the login
 in their browser, then re-probe with `hostprobe.probe_aws_identity` before
-continuing -- it never hands the operator back the whole
+continuing; it never hands the operator back the whole
 `gd-env-setup-remote` invocation to force a re-check, and it never
 assumes the login succeeded.
 
@@ -149,7 +149,7 @@ continuing.
    instance_id=<remote_instance_id>, profile=<remote_aws_profile>,
    region=<remote_aws_region>)`
    (`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`,
-   E6-F2-S1-T1), which raises for any status other than `Online` -- naming
+   E6-F2-S1-T1), which raises for any status other than `Online`, naming
    either the reported ping status, or that SSM has no record of the
    instance at all, meaning it is stopped, terminated, or the configured id
    is wrong. This step never calls `instances.resolve`: that function
@@ -158,15 +158,15 @@ continuing.
    `DEFAULT_REMOTE_INSTANCE` / sole-directory order), whereas this skill's
    `<name>` comes directly from the operator's `gd-env-setup-remote
    INSTANCE=<name>` invocation and `remote_instance_id` is the separate,
-   already-answered EC2 id -- neither is something to resolve here. On a
+   already-answered EC2 id; neither is something to resolve here. On a
    first run, `remote-instances/<name>` does not exist until step 8 creates
    it, so calling `instances.resolve` at this point would raise
    `NoInstancesConfiguredError` telling the operator to run this very
    skill. On failure, follow the `## Checks` remedy above: stop naming the
    instance id and the agent state, and do not attempt the forward.
 8. If provisioning or changing this instance's `remote-instances/<name>`
-   Terragrunt state is needed to proceed -- creating it for the first time,
-   per spec Section 2 G5, or changing a resource that module owns -- reach
+   Terragrunt state is needed to proceed (creating it for the first time,
+   per spec Section 2 G5, or changing a resource that module owns), reach
    PRECHECK-APPLY: present the plan output, wait for the operator's explicit
    confirmation, and record both before continuing. This skill never runs
    `terragrunt apply` on its own confirmation and never proceeds past
@@ -217,7 +217,7 @@ continuing.
     that timeout raises naming the instance, the local port and
     `SSM_FORWARD_TIMEOUT`; it is never retried silently, and this skill never
     reports a forward established because the session process is merely
-    still alive -- only `wait_ready` observing the local port accept a
+    still alive; only `wait_ready` observing the local port accept a
     connection does that.
 13. Complete the docker version handshake against the new context, bounded
     by `DOCKER_HANDSHAKE_TIMEOUT` (the same deadline

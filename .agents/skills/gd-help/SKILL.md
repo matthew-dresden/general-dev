@@ -1,13 +1,13 @@
 ---
 name: gd-help
-description: The roster index -- maps the skill hierarchy and its seven families, names the one skill to invoke for a stated goal, and points at the make targets each family drives; reads only, changes nothing, and is itself the entry point every other skill names when the right skill is unclear.
+description: The roster index, mapping the skill hierarchy and its seven families, names the one skill to invoke for a stated goal, and points at the make targets each family drives; reads only, changes nothing, and is itself the entry point every other skill names when the right skill is unclear.
 ---
 
 # gd-help
 
 This skill is the roster's front door: given a goal in the operator's words,
 it names the one skill to invoke and the make targets that skill drives. It
-performs nothing itself -- every row below is a pointer, and the canonical
+performs nothing itself; every row below is a pointer, and the canonical
 table it indexes is the roster in `docs/skills.md`, which
 `tests/test_skill_lint.py` pins to the directories actually present, so
 this index cannot name a skill that does not exist.

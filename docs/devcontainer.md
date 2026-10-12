@@ -648,12 +648,12 @@ resolves the instance, reads the engine's kind off the address block
 resolution exports (`docs/environment-files.md`) and opens the matching
 transport: an `ssh` engine (an `engine.json` manifest) runs the ssh form,
 an `ec2` instance the ssm form. `DEVCONTAINER_TRANSPORT` is a guard on
-that dispatch, never the selector: unset, the kind alone decides -- which
+that dispatch, never the selector: unset, the kind alone decides, which
 is why an operator naming an ssh engine sets no variable; set, the value
 must agree with the kind (`ssm` behind an ec2 instance, `ssh` behind an
 ssh engine) or the run exits non-zero naming the conflict, and any other
 value exits non-zero naming the variable, the offending value and the
-accepted values. An EC2 instance -- or no instance named at all -- runs
+accepted values. An EC2 instance, or no instance named at all, runs
 
 ```sh
 PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.forwards \

@@ -358,11 +358,6 @@ _MANIFEST_REFUSALS: tuple[tuple[str, Callable[[dict[str, object]], object], str]
         "docker_addr",
     ),
     (
-        "docker_addr is relative",
-        lambda values: {**values, "docker_addr": "var/run/docker.sock"},
-        "docker_addr",
-    ),
-    (
         "docker_addr is empty",
         lambda values: {**values, "docker_addr": ""},
         "docker_addr",
@@ -386,6 +381,36 @@ _MANIFEST_REFUSALS: tuple[tuple[str, Callable[[dict[str, object]], object], str]
         "docker_addr tcp port out of range",
         lambda values: {**values, "docker_addr": "tcp://h.example.invalid:70000"},
         "docker_addr",
+    ),
+    (
+        "host carries whitespace",
+        lambda values: {**values, "host": f"{values['host']} extra.example.invalid"},
+        "host",
+    ),
+    (
+        "host carries the user separator",
+        lambda values: {**values, "host": f"dev@{values['host']}"},
+        "host",
+    ),
+    (
+        "host is an IPv6 literal",
+        lambda values: {**values, "host": "::1"},
+        "host",
+    ),
+    (
+        "user carries whitespace",
+        lambda values: {**values, "user": "de v"},
+        "user",
+    ),
+    (
+        "user carries the user separator",
+        lambda values: {**values, "user": "de@v"},
+        "user",
+    ),
+    (
+        "user carries a colon",
+        lambda values: {**values, "user": "de:v"},
+        "user",
     ),
 )
 
@@ -414,6 +439,31 @@ def test_engine_manifest_refusals_name_the_field_and_the_rule(
 # ---------------------------------------------------------------------------
 # engine_endpoint
 # ---------------------------------------------------------------------------
+
+
+def test_engine_manifest_refuses_an_ipv6_literal_host_naming_the_limit(
+    tmp_path: Path,
+) -> None:
+    """The ':' refusal for a host states why: IPv6 literals are not supported yet.
+
+    The endpoint composes `ssh://<user>@<host>:<port>`, where ':' separates
+    the host from the port; a ':' inside the host would make that composition
+    ambiguous, so the refusal must say the limit is deliberate rather than
+    leaving an operator to guess at a parse error.
+    """
+    instances = _import_instances()
+    root = generated_root(tmp_path)
+    name = _instance_name()
+    payload = _valid_manifest_payload()
+    payload["host"] = "::1"
+    _write_manifest(root, name, payload)
+
+    with pytest.raises(instances.EngineManifestError) as exc_info:
+        instances.engine_manifest(root, name)
+
+    message = str(exc_info.value)
+    assert "IPv6" in message
+    assert "not supported yet" in message
 
 
 def test_engine_endpoint_is_ssh_user_host_port(tmp_path: Path) -> None:

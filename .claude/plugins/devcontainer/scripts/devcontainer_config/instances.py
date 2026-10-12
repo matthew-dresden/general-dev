@@ -477,10 +477,13 @@ def _field_refusal(field: str, rule: str) -> EngineManifestError:
 def _validated_tcp_addr(value: str) -> str:
     """`value` as a `tcp://<host>:<port>` docker address, or a refusal.
 
-    The host must be non-empty and the port must be digits within the same
-    `MIN_ENGINE_PORT`..`MAX_ENGINE_PORT` bound the `port` field obeys, so a
-    docker endpoint derived from this value later can never be malformed at
-    transport time when the manifest already said so here.
+    The host must be non-empty, must not itself carry ':' (a ':' in the host
+    part would make it an IPv6 literal, which the forward and endpoint
+    composition cannot express yet -- the same limit the `host` field
+    refuses, stated the same way), and the port must be digits within the
+    same `MIN_ENGINE_PORT`..`MAX_ENGINE_PORT` bound the `port` field obeys,
+    so a docker endpoint derived from this value later can never be
+    malformed at transport time when the manifest already said so here.
     """
     remainder = value[len(_TCP_ADDR_PREFIX) :]
     host, separator, port_text = remainder.rpartition(":")
@@ -488,6 +491,13 @@ def _validated_tcp_addr(value: str) -> str:
         raise _field_refusal(
             "docker_addr",
             "A 'tcp://<host>:<port>' docker address must carry <host>:<port> after the scheme.",
+        )
+    if ":" in host:
+        raise _field_refusal(
+            "docker_addr",
+            "The host part of a 'tcp://<host>:<port>' docker address must not carry "
+            "':': it would be parsed as an IPv6 literal, and IPv6 literal hosts are "
+            "not supported yet.",
         )
     if not port_text.isdigit():
         raise _field_refusal(
@@ -533,7 +543,8 @@ def validate_engine_values(payload: object) -> dict[str, object]:
             present, must be an integer (a boolean is not) within
             `MIN_ENGINE_PORT`..`MAX_ENGINE_PORT`; `docker_addr`, when
             present, must be either an absolute Unix socket path
-            (starting with '/') or a `tcp://<host>:<port>` URL.
+            (starting with '/') or a `tcp://<host>:<port>` URL whose host
+            part carries no ':' (an IPv6 literal is refused the same way).
     """
     if not isinstance(payload, dict):
         raise EngineManifestError(

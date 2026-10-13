@@ -660,8 +660,8 @@ def test_status_backend_line_is_kind_aware_and_never_reads_the_ec2_id_for_ssh() 
     bare id exactly as it always read.
     """
     body = _sh_function_body("rdc_status", _container_text())
-    ssh_at = body.index('if [ "$(rd_engine_kind)" = "ssh" ]')
-    ssh_branch = body[ssh_at : body.index("\n    else\n", ssh_at)]
+    case_at = body.index('case "$(rd_engine_kind)" in')
+    ssh_branch = body[body.index("      ssh)", case_at) : body.index("      azure)", case_at)]
     assert "ENGINE_ENDPOINT" in ssh_branch, (
         "the ssh Backend line must identify the engine by its resolved endpoint"
     )
@@ -669,8 +669,18 @@ def test_status_backend_line_is_kind_aware_and_never_reads_the_ec2_id_for_ssh() 
         "the resolver leaves REMOTE_INSTANCE_ID unset for an ssh engine; a bare "
         "reference under set -u would abort `make status ENGINE=<ssh engine>`"
     )
-    ec2_branch = body[body.index("\n    else\n", ssh_at) : body.index("\n  fi\n", ssh_at)]
-    assert "$REMOTE_INSTANCE_ID" in ec2_branch, "the EC2 Backend line keeps the instance id"
+    azure_branch = body[body.index("      azure)", case_at) : body.index("      *)", case_at)]
+    assert "REMOTE_INSTANCE_ID" not in azure_branch, (
+        "the resolver leaves REMOTE_INSTANCE_ID unset for an azure engine too; a bare "
+        "reference under set -u would abort `make status INSTANCE=<azure instance>`"
+    )
+    ec2_branch = body[body.index("      *)", case_at) : body.index("    esac", case_at)]
+    assert "REMOTE_INSTANCE_ID" in ec2_branch, "the EC2 Backend line keeps the instance id"
+    assert "${REMOTE_INSTANCE_ID:-" in ec2_branch, (
+        "the id is read defaulted: the resolver unsets REMOTE_INSTANCE_ID for an EC2 "
+        "instance that was never linked, and a bare reference under set -u would abort "
+        "`make status` for exactly that instance"
+    )
 
 
 def test_dispatch_prelude_clears_the_ssm_prefix_for_an_ssh_engine() -> None:

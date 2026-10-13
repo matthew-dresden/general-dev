@@ -209,13 +209,12 @@ AZURE_LISTENER_START_TIMEOUT_ENV_VAR = "AZURE_LISTENER_START_TIMEOUT"
 _AZURE_LISTENER_START_TIMEOUT_DEFAULT_SECONDS = 240.0
 _LISTENER_START_SCRIPT = "systemctl start gd-relay; systemctl is-active --quiet gd-relay"
 
-# The run-command poll: one state read every _RUN_COMMAND_POLL_SECONDS,
-# bounded by the deadline above -- never a fixed wait outside the loop.
-_RUN_COMMAND_POLL_SECONDS = 5.0
-_RUN_COMMAND_SUCCESS_STATE = "Succeeded"
-_RUN_COMMAND_RUNNING_STATES = frozenset(
-    {"", "Pending", "Starting", "Running", "Updating", "UpdateInProgress"}
-)
+# The provisioning code the synchronous install invoke must answer with
+# (the agent ran the script) plus the sentinel the script prints as its
+# own final line (every step inside it succeeded) -- the answer carries
+# no script exit code, so the script signs its own success.
+_RUN_COMMAND_SUCCESS_CODE = "ProvisioningState/succeeded"
+_INSTALL_OK_SENTINEL = "gd-install-ok"
 
 # One accept backlog, one pipe chunk: both plain stdlib defaults, named so
 # the bridge loop reads as the pipe it is.
@@ -263,9 +262,10 @@ class MaterialInstallError(RelayTransportError):
     """The VM's TLS-material install did not reach `Succeeded`.
 
     Raised for a run command that ended in a terminal failure state, one
-    that outlived `AZURE_MATERIAL_INSTALL_TIMEOUT`, or a poll answer this
-    module cannot read. The message carries the instance view's own error
-    or the recorded run-command name, whichever distinguishes the cause.
+    that outlived `AZURE_MATERIAL_INSTALL_TIMEOUT`, or an answer this
+    module cannot read. The message carries the instance view's own error,
+    the deadline variable that would extend the run, or the raw answer,
+    whichever distinguishes the cause.
     """
 
 
@@ -651,11 +651,17 @@ def build_install_commands(instance: str, *, vault_url: str, daemon_user: str) -
     file's mode is set explicitly after it.
     """
     lines = list(transport.tls_dir_prepare_lines(daemon_user))
+    # No double quotes inside the command substitution: the strictest
+    # parsers on the path -- the mac's bash 3.2 and the VM's dash -- both
+    # mis-nest quotes inside "$(...)" inside "..." (the mac reuses the
+    # outer quote context), so the fetch stays single-quoted and the JSON
+    # key reaches python as an argv word instead of a quoted literal.
     lines.append(
         f"token=\"$(curl -sf -H 'Metadata:true' --connect-timeout 2 "
         f"'{_IDENTITY_ENDPOINT}/metadata/identity/oauth2/token"
-        f'?api-version={_IDENTITY_TOKEN_API_VERSION}&resource={_KEYVAULT_RESOURCE}"'
-        ' | python3 -c \'import json,sys; print(json.load(sys.stdin)["access_token"])\'")'
+        f"?api-version={_IDENTITY_TOKEN_API_VERSION}&resource={_KEYVAULT_RESOURCE}'"
+        " | python3 -c 'import json,sys; print(json.load(sys.stdin)[sys.argv[1]])' "
+        'access_token)"'
     )
     for filename, secret_name in certs.AZURE_PUBLISHABLE.items():
         mode = "0600" if filename == certs.SERVER_KEY_FILENAME else "0644"
@@ -667,6 +673,11 @@ def build_install_commands(instance: str, *, vault_url: str, daemon_user: str) -
         )
         lines.append(f'chmod {mode} "$dir/{filename}"')
     lines.extend(transport.rootless_daemon_restart_lines())
+    # The success sentinel: the run-command answer reports the agent's
+    # provisioning state, not the script's own exit code, so the script
+    # ends by printing a token whose presence in the answer's output is
+    # what the caller reads as "every step above ran".
+    lines.append(f"echo {_INSTALL_OK_SENTINEL}")
     return tuple(lines)
 
 
@@ -693,21 +704,20 @@ def _material_install_timeout_seconds() -> float:
         ) from exc
 
 
-def _run_az(runner: CommandRunner, argv: Sequence[str], *, deadline: float | None) -> CommandResult:
-    """One `az` call through the runner seam, with the module's az diagnoses.
+def _run_az(runner: CommandRunner, argv: Sequence[str]) -> CommandResult:
+    """One small `az` read through the runner seam, with the module's az diagnoses.
 
     The binary is prefixed here, once, so every call site names only the
-    subcommand it means. `deadline` bounds the call when the caller has a
-    budget (the run-command poll does) and is `None` for the small,
-    loop-bounded state reads the readiness poll issues -- the poll's own
-    deadline governs those, not any single call's.
+    subcommand it means. The reads routed through here are deliberately
+    unbounded per call -- the readiness poll's own deadline governs the
+    whole wait, not any single read -- so no per-call timeout is taken.
 
     Raises:
         RelayConfigError: `az` is not on PATH, or the call failed -- the
             authentication cause names `az login`, the same remedy every
             other az refusal in this module carries.
     """
-    result = runner((_AZ_BINARY, *argv), deadline)
+    result = runner((_AZ_BINARY, *argv), None)
     if result.binary_missing:
         raise RelayConfigError(
             f"ERROR: {_AZ_BINARY} is not on PATH\nInstall the Azure CLI, then retry."
@@ -722,26 +732,35 @@ def _run_az(runner: CommandRunner, argv: Sequence[str], *, deadline: float | Non
     return result
 
 
-def _execution_state(stdout: str) -> tuple[str, str]:
-    """The `(executionState, failure detail)` pair the --instance-view JSON carries.
+def _invoke_outcome(stdout: str) -> tuple[bool, str]:
+    """Whether the install invoke's answer means success, and its detail.
+
+    The synchronous `az vm run-command invoke` answer is a `value` list of
+    agent statuses whose `code` carries the provisioning state and whose
+    `message` carries the script's `[stdout]`/`[stderr]` blocks. Success is
+    the provisioning state reaching `ProvisioningState/succeeded` AND the
+    script's own `gd-install-ok` sentinel appearing in the message -- the
+    answer carries no script exit code, so the script signs its own
+    success and a script that died early simply never signs.
 
     Raises:
-        MaterialInstallError: the output is not the instance-view shape this
-            poll reads, so the poll cannot tell running from terminal.
+        MaterialInstallError: the answer is not the shape this module
+            reads, so it cannot tell success from failure.
     """
     try:
-        payload = json.loads(stdout)
-        view = payload["instanceView"]
-        state = str(view["executionState"])
+        statuses = json.loads(stdout)["value"]
+        codes = [str(entry["code"]) for entry in statuses]
+        messages = "\n".join(str(entry.get("message") or "") for entry in statuses)
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise MaterialInstallError(
-            "ERROR: az vm run-command show produced unparsable output: "
+            "ERROR: az vm run-command invoke produced unparsable output: "
             f"{stdout.strip()!r}\n"
             "Run the command manually and investigate why its output does not match the "
             "expected shape."
         ) from exc
-    detail = str(view.get("error") or "").strip() or str(view.get("output") or "").strip()
-    return state, detail
+    provisioned = _RUN_COMMAND_SUCCESS_CODE in codes
+    signed = _INSTALL_OK_SENTINEL in messages
+    return provisioned and signed, messages
 
 
 def install_material(
@@ -749,19 +768,17 @@ def install_material(
     *,
     instance: str,
     daemon_user: str,
-    clock: Callable[[], float] = time.monotonic,
-    pace: Callable[[float], None] = time.sleep,
 ) -> None:
     """Have the VM pull its published TLS material from its vault and start its daemon.
 
     The azure twin of `transport.install_material`: the script is issued
-    through one `az vm run-command invoke --no-wait` (the script travels on
-    a 0600 `--scripts @file`, removed before this function returns; its
-    name is az's own, read back from the invoke answer), then the run
-    command's instance view is polled -- one small read every
-    `_RUN_COMMAND_POLL_SECONDS`, bounded by the
-    `AZURE_MATERIAL_INSTALL_TIMEOUT` deadline -- until the execution state
-    is `Succeeded` or terminal.
+    through one synchronous `az vm run-command invoke` (the script travels
+    on a 0600 `--scripts @file`, removed before this function returns).
+    The invoke itself is the waiter -- az blocks until the VM agent reports
+    the script terminal and answers with the run command's own JSON, whose
+    instance view carries the execution state -- so there is no poll loop,
+    only the answer's shape to read. `AZURE_MATERIAL_INSTALL_TIMEOUT`
+    bounds the call.
 
     Raises:
         RelayConfigError: the instance's engine address record is missing,
@@ -769,7 +786,7 @@ def install_material(
             `az` call failed outright.
         MaterialInstallError: the run command ended in a state other than
             `Succeeded` (the message carries the instance view's own error),
-            outlived the deadline, or answered a poll in an unparsable shape.
+            outlived the deadline, or answered in an unparsable shape.
     """
     address = load_relay_address(instance)
     resource_group = _address_str(address, _RESOURCE_GROUP_KEY, instance=instance)
@@ -784,9 +801,14 @@ def install_material(
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write("\n".join(commands))
             handle.write("\n")
-        started = _run_az(
-            runner,
+        # The binary is prefixed here rather than routing through `_run_az`:
+        # this call site carries its own diagnoses -- a timeout must name
+        # the variable that extends it, not the generic az-failure one --
+        # the same reason `start_listener` below bypasses the shared
+        # classifier.
+        completed = runner(
             (
+                _AZ_BINARY,
                 "vm",
                 "run-command",
                 "invoke",
@@ -798,65 +820,42 @@ def install_material(
                 "RunShellScript",
                 "--scripts",
                 f"@{script_path}",
-                "--no-wait",
-            ),
-            deadline=timeout_seconds,
-        )
-    try:
-        run_command_name = str(json.loads(started.stdout)["name"])
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        raise MaterialInstallError(
-            "ERROR: az vm run-command invoke produced unparsable output: "
-            f"{started.stdout.strip()!r}\n"
-            "Run the command manually and investigate why its output does not match the "
-            "expected shape."
-        ) from exc
-
-    deadline = clock() + timeout_seconds
-    while True:
-        remaining = deadline - clock()
-        if remaining <= 0:
-            raise MaterialInstallError(
-                f"ERROR: installing TLS material on {vm_name} did not finish in "
-                f"{timeout_seconds:g}s\n"
-                f"The run command is still recorded as {run_command_name}; inspect it with "
-                f"'az vm run-command show --run-command-name {run_command_name} "
-                f"--resource-group {resource_group} --vm-name {vm_name} --instance-view'.\n"
-                f"Raise {AZURE_MATERIAL_INSTALL_TIMEOUT_ENV_VAR} if this instance is "
-                "simply slow."
-            )
-        view = _run_az(
-            runner,
-            (
-                "vm",
-                "run-command",
-                "show",
-                "--run-command-name",
-                run_command_name,
-                "--resource-group",
-                resource_group,
-                "--vm-name",
-                vm_name,
-                "--instance-view",
                 "--output",
                 "json",
             ),
-            deadline=remaining,
+            timeout_seconds,
         )
-        state, detail = _execution_state(view.stdout)
-        if state == _RUN_COMMAND_SUCCESS_STATE:
-            return
-        if state not in _RUN_COMMAND_RUNNING_STATES:
-            raise MaterialInstallError(
-                f"ERROR: installing TLS material on {vm_name} reported {state}\n"
-                f"{detail}\n"
-                f"Publish the material first if it is missing: "
-                f"make cert-publish INSTANCE={instance}\n"
-                f"Full output: 'az vm run-command show --run-command-name "
-                f"{run_command_name} --resource-group {resource_group} "
-                f"--vm-name {vm_name} --instance-view'."
-            )
-        pace(_RUN_COMMAND_POLL_SECONDS)
+
+    if completed.binary_missing:
+        raise RelayConfigError(
+            f"ERROR: {_AZ_BINARY} is not on PATH\nInstall the Azure CLI, then retry."
+        )
+    if completed.timed_out:
+        raise MaterialInstallError(
+            f"ERROR: installing TLS material on {vm_name} did not finish in "
+            f"{timeout_seconds:g}s\n"
+            "The run command is synchronous, so the VM agent answered nothing within the "
+            "deadline.\n"
+            f"Raise {AZURE_MATERIAL_INSTALL_TIMEOUT_ENV_VAR} if this instance is simply slow, "
+            "then rerun with: make cert-install INSTANCE=" + instance
+        )
+    if completed.exit_code != 0:
+        raise RelayConfigError(
+            "ERROR: az vm run-command invoke failed\n"
+            f"{completed.stderr.strip()}\n"
+            "If the failure is an authentication one, run 'az login' to refresh the "
+            "credentials, then retry."
+        )
+
+    succeeded, detail = _invoke_outcome(completed.stdout)
+    if not succeeded:
+        raise MaterialInstallError(
+            f"ERROR: installing TLS material on {vm_name} did not complete\n"
+            f"{detail}\n"
+            f"Publish the material first if it is missing: "
+            f"make cert-publish INSTANCE={instance}\n"
+            "Rerun with: make cert-install INSTANCE=" + instance
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1050,7 +1049,7 @@ def vm_power_state(resource_group: str, vm_name: str, runner: CommandRunner) -> 
         RelayConfigError: `az` is not on PATH, or the call failed (the
             authentication cause names `az login`).
     """
-    result = _run_az(runner, build_vm_power_argv(resource_group, vm_name), deadline=None)
+    result = _run_az(runner, build_vm_power_argv(resource_group, vm_name))
     return result.stdout.strip()
 
 
@@ -1060,7 +1059,7 @@ def vm_agent_status(resource_group: str, vm_name: str, runner: CommandRunner) ->
     Raises:
         RelayConfigError: `az` is not on PATH, or the call failed.
     """
-    result = _run_az(runner, build_vm_agent_argv(resource_group, vm_name), deadline=None)
+    result = _run_az(runner, build_vm_agent_argv(resource_group, vm_name))
     return result.stdout.strip()
 
 

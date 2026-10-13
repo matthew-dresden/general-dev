@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 import pytest
 from devcontainer_config import state_store
 from devcontainer_config.state_store import StateStoreError
+_PRINCIPAL_ID_HINT = "00000000-0000-0000-0000-{:012d}".format(1)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -402,6 +403,20 @@ def test_a_404_marker_also_answers_the_bootstrap_form(tmp_path: Path) -> None:
     assert state_store.init_form(root, instance, runner) == "bootstrap"
 
 
+def test_the_live_not_found_wording_answers_the_bootstrap_form(tmp_path: Path) -> None:
+    """The live CLI wording: `az storage account show` answers a missing
+    account with `ERROR: Storage account '<name>' not found.` and exit 2,
+    not with an ARM ResourceNotFound payload."""
+    root = _root_with_root_hcl(tmp_path)
+    instance = _instance_name()
+    _seed_azure_instance(root, instance)
+    runner = _FakeRunner()
+    runner.queue(_ok(f"{_subscription()}\n"))
+    runner.queue(_err("ERROR: Storage account 'tgstatex' not found.", returncode=2))
+
+    assert state_store.init_form(root, instance, runner) == "bootstrap"
+
+
 def test_a_provisioning_state_that_is_not_succeeded_raises(tmp_path: Path) -> None:
     root = _root_with_root_hcl(tmp_path)
     instance = _instance_name()
@@ -471,19 +486,24 @@ def test_ensure_creates_group_account_and_container_when_all_missing(
     runner.queue(_ok())  # group create
     runner.queue(_err("(ResourceNotFound) not found", returncode=3))  # account probe
     runner.queue(_ok())  # account create
+    runner.queue(
+        _ok("/subscriptions/s/resourceGroups/rg-x/providers/Microsoft.Storage/storageAccounts/n\n")
+    )
+    runner.queue(_ok(_PRINCIPAL_ID_HINT + "\n"))  # signed-in principal
+    runner.queue(_ok("0\n"))  # the blob data role is not held yet
+    runner.queue(_ok())  # role assignment create
     runner.queue(_err("(ContainerNotFound) The specified container does not exist.", returncode=3))
     runner.queue(_ok())  # container create
 
     messages = state_store.ensure(root, instance, runner)
 
-    assert len(messages) == 4
+    assert len(messages) == 5
     assert "created resource group" in messages[0]
     assert "created storage account" in messages[1]
-    assert "created blob container tfstate" in messages[2]
-    assert ".state-store.json" in messages[3]
+    assert "granted Storage Blob Data Contributor" in messages[2]
+    assert "created blob container tfstate" in messages[3]
+    assert ".state-store.json" in messages[4]
     rg = state_store.state_resource_group(instance)
-    name = state_store.storage_account_name(root, instance, _FakeRunner()) if False else None
-    del name
     create_account = runner.calls[4]
     assert create_account[:4] == ("az", "storage", "account", "create")
     assert "--resource-group" in create_account
@@ -494,7 +514,7 @@ def test_ensure_creates_group_account_and_container_when_all_missing(
     assert create_account[create_account.index("--sku") + 1] == "Standard_LRS"
     assert "--allow-blob-public-access" in create_account
     assert create_account[create_account.index("--allow-blob-public-access") + 1] == "false"
-    create_container = runner.calls[6]
+    create_container = runner.calls[10]
     assert create_container[:4] == ("az", "storage", "container", "create")
     assert "--auth-mode" in create_container
     assert create_container[create_container.index("--auth-mode") + 1] == "login"
@@ -512,6 +532,9 @@ def test_ensure_writes_the_sidecar_the_azure_root_reads(tmp_path: Path) -> None:
     runner.queue(_ok(f"{subscription}\n"))
     runner.queue(_ok())  # group exists
     runner.queue(_ok("Succeeded\n"))  # account exists and succeeded
+    runner.queue(_ok("/subscriptions/s/resourceGroups/rg-x/providers/Microsoft.Storage/storageAccounts/n\n"))
+    runner.queue(_ok(_PRINCIPAL_ID_HINT + "\n"))  # signed-in principal
+    runner.queue(_ok("1\n"))  # the blob data role is already held
     runner.queue(_ok())  # container exists
 
     state_store.ensure(root, instance, runner)
@@ -535,6 +558,9 @@ def test_ensure_replaces_a_stale_sidecar(tmp_path: Path) -> None:
     runner.queue(_ok(f"{_subscription()}\n"))
     runner.queue(_ok())  # group exists
     runner.queue(_ok("Succeeded\n"))  # account exists
+    runner.queue(_ok("/subscriptions/s/resourceGroups/rg-x/providers/Microsoft.Storage/storageAccounts/n\n"))
+    runner.queue(_ok(_PRINCIPAL_ID_HINT + "\n"))  # signed-in principal
+    runner.queue(_ok("1\n"))  # the blob data role is already held
     runner.queue(_ok())  # container exists
 
     state_store.ensure(root, instance, runner)
@@ -564,15 +590,19 @@ def test_ensure_is_idempotent_when_everything_exists(tmp_path: Path) -> None:
     runner.queue(_ok(f"{_subscription()}\n"))  # the name's subscription lookup
     runner.queue(_ok())  # group exists
     runner.queue(_ok("Succeeded\n"))  # account exists and succeeded
+    runner.queue(_ok("/subscriptions/s/resourceGroups/rg-x/providers/Microsoft.Storage/storageAccounts/n\n"))
+    runner.queue(_ok(_PRINCIPAL_ID_HINT + "\n"))  # signed-in principal
+    runner.queue(_ok("1\n"))  # the blob data role is already held
     runner.queue(_ok())  # container exists
 
     messages = state_store.ensure(root, instance, runner)
 
-    assert len(messages) == 4
+    assert len(messages) == 5
     assert "already exists" in messages[0]
     assert "already exists" in messages[1]
-    assert "already exists" in messages[2]
-    assert ".state-store.json" in messages[3], (
+    assert "already holds Storage Blob Data Contributor" in messages[2]
+    assert "already exists" in messages[3]
+    assert ".state-store.json" in messages[4], (
         "the side-car is rewritten even when the store already exists: it is the "
         "handoff terragrunt reads, and it must name the store that was just probed"
     )
@@ -865,6 +895,9 @@ def test_main_ensure_prints_one_message_per_step(
     runner.queue(_ok(f"{_subscription()}\n"))
     runner.queue(_ok())  # group exists
     runner.queue(_ok("Succeeded\n"))  # account exists
+    runner.queue(_ok("/subscriptions/s/resourceGroups/rg-x/providers/Microsoft.Storage/storageAccounts/n\n"))
+    runner.queue(_ok(_PRINCIPAL_ID_HINT + "\n"))  # signed-in principal
+    runner.queue(_ok("1\n"))  # the blob data role is already held
     runner.queue(_ok())  # container exists
     monkeypatch.setattr(state_store, "subprocess_runner", runner)
 

@@ -131,10 +131,20 @@ STATE_GROUP_SUFFIX = "-state"
 
 # Substrings the az CLI's own error output carries when the thing a probe
 # names does not exist. Anything else a probe answers is raised with the
-# command and its raw output, never interpreted as "missing".
-_MISSING_ACCOUNT_MARKERS: tuple[str, ...] = ("ResourceNotFound", "(404)", "404")
-_MISSING_GROUP_MARKERS: tuple[str, ...] = ("ResourceGroupNotFound", "(404)", "404")
-_MISSING_CONTAINER_MARKERS: tuple[str, ...] = ("ContainerNotFound", "(404)", "404")
+# command and its raw output, never interpreted as "missing". The "not
+# found" forms are the live wording: `az storage account show` answers
+# `ERROR: Storage account '<name>' not found.` with exit 2, and the group
+# and container probes answer in the same shape, rather than the ARM
+# ResourceNotFound payloads the REST surface produces.
+_MISSING_ACCOUNT_MARKERS: tuple[str, ...] = ("ResourceNotFound", "(404)", "404", "not found")
+_MISSING_GROUP_MARKERS: tuple[str, ...] = (
+    "ResourceGroupNotFound",
+    "(404)",
+    "404",
+    "could not be found",
+    "not found",
+)
+_MISSING_CONTAINER_MARKERS: tuple[str, ...] = ("ContainerNotFound", "(404)", "404", "not found")
 
 # The provisioning state a created account must answer with before the
 # container step may run against it.
@@ -588,6 +598,114 @@ def _ensure_container(runner: Runner, name: str) -> str:
     return f"created blob container {STATE_CONTAINER_NAME} in {name}"
 
 
+# The data-plane role the caller's own identity needs on the state account:
+# the azurerm backend lists and writes blobs as the signed-in principal, and
+# ownership of the subscription is a control-plane fact that confers no blob
+# data rights (the same separation the relay's Sender role taught).
+_STATE_BLOB_ROLE = "Storage Blob Data Contributor"
+
+
+def _signed_in_principal(runner: Runner) -> str:
+    """The object id of whoever is running this command.
+
+    A user login answers `az ad signed-in-user show`; a service principal
+    (the CI path) has no such object, and its identity is the client id
+    `az account show` reports in `user.name`, which `az role assignment
+    create --assignee` accepts as-is.
+    """
+    user_probe = _probe_result(
+        runner,
+        [AZ_EXECUTABLE, "ad", "signed-in-user", "show", "--query", "id", "--output", "tsv"],
+        "the signed-in principal probe",
+    )
+    if user_probe.returncode == 0:
+        return user_probe.stdout.strip()
+    account_probe = _probe_result(
+        runner,
+        [AZ_EXECUTABLE, "account", "show", "--query", "user.name", "--output", "tsv"],
+        "the account principal probe",
+    )
+    if account_probe.returncode != 0:
+        raise StateStoreError(
+            "could not resolve the signed-in principal: neither `az ad signed-in-user show` "
+            f"nor `az account show --query user.name` answered\n{_combined_output(account_probe)}"
+        )
+    return account_probe.stdout.strip()
+
+
+def _ensure_state_blob_role(runner: Runner, name: str, group: str) -> str:
+    """Grant the caller's identity the state account's blob data role, once.
+
+    Probed by assignment, not by intent: an existing grant answers a count
+    above zero and is left alone. The grant is what the backend's
+    `use_azuread_auth` stands on, so without it `terraform init` dies in a
+    403 listing blobs; with it, note that azure's role propagation can take
+    a few minutes to reach every front end before the first init succeeds.
+    """
+    account_argv = [
+        AZ_EXECUTABLE,
+        "storage",
+        "account",
+        "show",
+        "--name",
+        name,
+        "--resource-group",
+        group,
+        "--query",
+        "id",
+        "--output",
+        "tsv",
+    ]
+    account_result = _probe_result(runner, account_argv, f"the account id probe for {name!r}")
+    if account_result.returncode != 0:
+        raise StateStoreError(
+            f"reading the state account id for {name!r} failed: "
+            f"{' '.join(account_argv)} exited {account_result.returncode}\n{_combined_output(account_result)}"
+        )
+    scope = account_result.stdout.strip()
+    principal = _signed_in_principal(runner)
+    held_argv = [
+        AZ_EXECUTABLE,
+        "role",
+        "assignment",
+        "list",
+        "--assignee",
+        principal,
+        "--scope",
+        scope,
+        "--role",
+        _STATE_BLOB_ROLE,
+        "--query",
+        "length([])",
+        "--output",
+        "tsv",
+    ]
+    held_result = _probe_result(runner, held_argv, f"the role assignment probe for {name!r}")
+    if held_result.returncode == 0 and held_result.stdout.strip() not in ("", "0"):
+        return f"the signed-in principal already holds {_STATE_BLOB_ROLE} on {name}"
+    grant_argv = [
+        AZ_EXECUTABLE,
+        "role",
+        "assignment",
+        "create",
+        "--assignee",
+        principal,
+        "--role",
+        _STATE_BLOB_ROLE,
+        "--scope",
+        scope,
+        "--output",
+        "none",
+    ]
+    granted = _probe_result(runner, grant_argv, f"the role assignment for {name!r}")
+    if granted.returncode != 0:
+        raise StateStoreError(
+            f"granting {_STATE_BLOB_ROLE} on {name!r} failed: {' '.join(grant_argv)} "
+            f"exited {granted.returncode}\n{_combined_output(granted)}"
+        )
+    return f"granted {_STATE_BLOB_ROLE} on {name} to the signed-in principal"
+
+
 def sidecar_path(root: Path, instance: str) -> Path:
     """`remote-instances/<instance>/.state-store.json`, the Terragrunt handoff file.
 
@@ -684,6 +802,7 @@ def ensure(root: Path, instance: str, runner: Runner) -> tuple[str, ...]:
     messages = [
         _ensure_resource_group(runner, group, location),
         _ensure_storage_account(runner, name, group, location),
+        _ensure_state_blob_role(runner, name, group),
         _ensure_container(runner, name),
         _write_sidecar(root, instance, resource_group=group, storage_account=name),
     ]

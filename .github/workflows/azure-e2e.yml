@@ -67,8 +67,7 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list > /dev/null
           sudo apt-get update
           sudo apt-get install -y terraform
-          TG_URL=$(curl -fsSL https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest | python3 -c "import json,sys; print(json.load(sys.stdin)['assets'][0]['browser_download_url'])")
-          sudo curl -fsSL "$TG_URL" -o /usr/local/bin/terragrunt
+          sudo curl -fsSL https://github.com/gruntwork-io/terragrunt/releases/latest/download/terragrunt_linux_amd64 -o /usr/local/bin/terragrunt
           sudo chmod +x /usr/local/bin/terragrunt
           terraform version
           terragrunt --version

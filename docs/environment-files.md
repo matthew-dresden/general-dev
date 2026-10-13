@@ -475,23 +475,27 @@ error; see `docs/devcontainer.md`'s "Transport" section.
 `gd-env-setup-remote` share for their own, simpler "does the engine answer" check.
 
 `DEVCONTAINER_TRANSPORT` guards the transport `make connect-start` opens.
-There are two transports, so the guard has two accepted
-values: `ssm`, the SSM port forward to an EC2 instance, and
+There are three transports, so the guard has three accepted
+values: `ssm`, the SSM port forward to an EC2 instance,
 `ssh`, the managed `ssh -N -L` forward to a generic SSH engine (an
 instance whose `remote-instances/<name>/engine.json` manifest declares
-it). A value outside that set is refused by name rather than silently
-redirected.
+it), and `relay`, the azure relay forward to an azure engine (whose
+relay address record the deploy writes). A value outside that set is
+refused by name rather than silently redirected.
 
 It has two readers, and they dispatch differently by design: the Makefile's
 `connect-start` recipe resolves the instance first and reads the engine's
 kind off the address block resolution exports (`rd_engine_kind` in lib.sh,
 the one predicate every kind-aware target reads), so an `ssh` engine routes
-to the `devcontainer_config.transport_ssh` forward and an `ec2` engine to
-the ssm forward whether or not the variable is set. The variable is a guard
-around that dispatch, never the selector: unset, the kind alone decides,
-which is why an operator naming an ssh engine never sets it; set, the value
-must agree with the kind: an explicit `ssm` behind an ssh engine, or an
-explicit `ssh` behind an ec2 engine, is refused by name as the conflict it
+to the `devcontainer_config.transport_ssh` forward, an `azure` engine to
+the `devcontainer_config.transport_azure` relay forward, and an `ec2`
+engine to the ssm forward whether or not the variable is set. The variable
+is a guard around that dispatch, never the selector: unset, the kind alone
+decides, which is why an operator naming an ssh engine never sets it; set,
+the value must agree with the kind: an explicit `ssm` behind an ssh engine
+or an azure engine, an explicit `ssh` behind an ec2 engine or an azure
+engine, or an explicit `relay` behind an ssh engine or an ec2 engine, is
+refused by name as the conflict it
 is. `transport.py`'s `resolve_transport`, which the ssm module's own
 `connect` subcommand calls, still accepts only
 `ssm`: the ssm transport remains opt-in there, and the `ssh` value never
@@ -517,7 +521,7 @@ to state the guard; leave it unset instead.
 | `PORT_PROBE_TIMEOUT` | `2` | `transport.py`, read by `_port_has_live_listener` for the loopback connect that decides whether a recorded port is genuinely occupied |
 | `DOCKER_HANDSHAKE_TIMEOUT` | `30` | `hostprobe.py`'s `read_positive_seconds`, the one place its name, default and validation are declared; `transport.py`'s `handshake` (E6-F2-S1-T2) calls the same function rather than declaring its own copy |
 | `SSH_FORWARD_TIMEOUT` | `30` | `hostprobe.py`'s `read_positive_seconds`, the same shared reader; `transport_ssh.py`'s `wait_ready` bounds by it how long the local end of the `ssh -N -L` forward may take to accept a connection |
-| `DEVCONTAINER_TRANSPORT` | (unset) | guard on `make connect-start`'s transport dispatch; the Makefile's `connect-start` recipe dispatches on the resolved engine's kind first -- `ssh` (the `devcontainer_config.transport_ssh` forward to an SSH engine) or `ssm` (the SSM forward to an EC2 instance, which `transport.py`'s `resolve_transport` also gates for the module's own `connect` subcommand) -- and the variable, when set, must agree with the kind or the run is refused naming the conflict; any other value is rejected by name |
+| `DEVCONTAINER_TRANSPORT` | (unset) | guard on `make connect-start`'s transport dispatch; the Makefile's `connect-start` recipe dispatches on the resolved engine's kind first -- `ssh` (the `devcontainer_config.transport_ssh` forward to an SSH engine), `relay` (the `devcontainer_config.transport_azure` relay forward to an azure engine) or `ssm` (the SSM forward to an EC2 instance, which `transport.py`'s `resolve_transport` also gates for the module's own `connect` subcommand) -- and the variable, when set, must agree with the kind or the run is refused naming the conflict; any other value is rejected by name |
 
 `DOCKER_TLS_PORT` is the port the rootless docker daemon on the instance
 listens on, `127.0.0.1`-only, behind a security group with zero ingress

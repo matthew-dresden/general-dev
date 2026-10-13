@@ -643,16 +643,18 @@ daemon's API version, which must be at least 1.44 for mTLS on a TCP
 listener with a rootless daemon, and whether it reports
 running rootless.
 
-**Two transports, one kind dispatch.** `make connect-start`
+**Three transports, one kind dispatch.** `make connect-start`
 resolves the instance, reads the engine's kind off the address block
 resolution exports (`docs/environment-files.md`) and opens the matching
 transport: an `ssh` engine (an `engine.json` manifest) runs the ssh form,
-an `ec2` instance the ssm form. `DEVCONTAINER_TRANSPORT` is a guard on
+an `azure` engine the azure relay form, an `ec2` instance the ssm form.
+`DEVCONTAINER_TRANSPORT` is a guard on
 that dispatch, never the selector: unset, the kind alone decides, which
 is why an operator naming an ssh engine sets no variable; set, the value
 must agree with the kind (`ssm` behind an ec2 instance, `ssh` behind an
-ssh engine) or the run exits non-zero naming the conflict, and any other
-value exits non-zero naming the variable, the offending value and the
+ssh engine, `relay` behind an azure engine, each contradiction refused
+symmetrically) or the run exits non-zero naming the conflict, and any
+other value exits non-zero naming the variable, the offending value and the
 accepted values. An EC2 instance, or no instance named at all, runs
 
 ```sh

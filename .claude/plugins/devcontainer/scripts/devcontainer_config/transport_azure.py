@@ -231,7 +231,7 @@ _IDENTITY_ENDPOINT = "http://169.254.169.254"
 # read through `read_positive_seconds` from the environment rather than a
 # literal, the same shape `transport`'s own MATERIAL_INSTALL_TIMEOUT takes.
 AZURE_MATERIAL_INSTALL_TIMEOUT_ENV_VAR = "AZURE_MATERIAL_INSTALL_TIMEOUT"
-_AZURE_MATERIAL_INSTALL_TIMEOUT_DEFAULT_SECONDS = 300.0
+_AZURE_MATERIAL_INSTALL_TIMEOUT_DEFAULT_SECONDS = 900.0
 
 # The connect-time listener start: the run-command script is the start plus
 # the activity assert (the assert is what makes the script's own exit
@@ -764,24 +764,25 @@ def build_install_commands(instance: str, *, vault_url: str, daemon_user: str) -
     `umask 077` precedes the first fetch and each file's mode is set
     explicitly after it.
     """
-    lines = list(transport.tls_dir_prepare_lines(daemon_user))
     # cloud-init writes /etc/general-dev-provisioned as its very last step,
-    # so a present marker means rootless docker is installed and its user
-    # service exists -- neither of which the azure VM agent's "Ready" tells
-    # you (the agent answers before runcmd is halfway through apt). The
-    # wait is bounded well inside this script's own run-command budget:
-    # AZURE_MATERIAL_INSTALL_TIMEOUT governs the whole invoke, so a VM
-    # still provisioning at ~4 minutes needs that variable raised, and the
-    # failure says so.
-    lines.append(
-        "for _i in $(seq 1 48); do [ -f /etc/general-dev-provisioned ] && break; sleep 5; done"
-    )
-    lines.append(
+    # so a present marker means rootless docker is installed and the daemon
+    # user exists -- neither of which the azure VM agent's "Ready" tells you
+    # (the agent answers before runcmd is halfway through apt). The wait
+    # LEADS the script, because the directory preparation below names that
+    # user and dies on an absent account; it is bounded well inside this
+    # script's own run-command budget: AZURE_MATERIAL_INSTALL_TIMEOUT
+    # governs the whole invoke, so a VM still provisioning at ~4 minutes
+    # needs that variable raised, and the failure says so. The loop's test
+    # carries its own else-branch sleep so the compound always exits zero
+    # and `set -e` cannot kill the script before its own guard runs.
+    lines = [
+        "for _i in $(seq 1 48); do [ -f /etc/general-dev-provisioned ] && break || sleep 5; done",
         "[ -f /etc/general-dev-provisioned ] || { "
         'echo "cloud-init has not finished provisioning (no '
         "/etc/general-dev-provisioned marker); retry once the VM finishes "
-        'bootstrapping, or raise AZURE_MATERIAL_INSTALL_TIMEOUT"; exit 1; }'
-    )
+        'bootstrapping, or raise AZURE_MATERIAL_INSTALL_TIMEOUT"; exit 1; }',
+    ]
+    lines.extend(transport.tls_dir_prepare_lines(daemon_user))
     # No double quotes inside the command substitution: the strictest
     # parsers on the path -- the mac's bash 3.2 and the VM's dash -- both
     # mis-nest quotes inside "$(...)" inside "..." (the mac reuses the

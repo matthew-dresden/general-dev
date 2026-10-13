@@ -1583,6 +1583,31 @@ def test_fleet_wide_state_target_expands_the_fleet_state_guard(
     )
 
 
+def test_bucket_delete_single_instance_arm_keeps_the_predicate_refusal() -> None:
+    """The non-ALL arm resolves one named instance and refuses an ssh engine
+    through the one predicate, naming the bucket remedy.
+
+    The ALL=1 arm's fleet guard is pinned above; this is the other half of
+    the same per-kind contract, and it rides the shared predicate rather
+    than a second refusal. The refusal sits inside the resolver's kind
+    check's else branch, after the azure arm, exactly as the other
+    single-instance EC2 arms place theirs.
+    """
+    recipe = _target_recipe_body(_makefile_text(), "bucket-delete")
+    assert recipe.count('rd_require_engine_kind ec2 "$(BUCKET_KIND_REMEDY)"') == 1, (
+        "the single-instance EC2 refusal must appear exactly once, in the non-ALL arm"
+    )
+    resolve_at = recipe.index("rd_resolve_instance")
+    azure_at = recipe.index('if [ "$$(rd_engine_kind)" = "azure" ]; then', resolve_at)
+    else_at = recipe.index("else", azure_at)
+    refusal_at = recipe.index('rd_require_engine_kind ec2 "$(BUCKET_KIND_REMEDY)"')
+    assert azure_at < else_at < refusal_at, (
+        "bucket-delete's single-instance EC2 arm must keep the "
+        "rd_require_engine_kind refusal naming the BUCKET_KIND_REMEDY, inside "
+        "the resolve's kind check's else branch"
+    )
+
+
 def test_cert_status_refuses_only_ssh_engines_fleet_wide() -> None:
     """cert-status renders both remote kinds (EC2 and azure carry TLS material
     locally), so instead of the mixed-refusing fleet guard it loops the fleet
@@ -1800,4 +1825,96 @@ def test_instance_link_refuses_azure_naming_the_deploy_remedy() -> None:
     assert "make instance-deploy INSTANCE=" in branch
     assert 'rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"' in recipe, (
         "the ssh kind still rides the shared EC2 remedy"
+    )
+
+
+def test_a_failed_plan_prints_its_output_and_names_the_force_unlock_remedy() -> None:
+    """A killed deploy's stale lock is actionable, not discarded.
+
+    A deploy killed mid-plan leaves the state backend's lock in place, and
+    the next plan dies acquiring it -- under the captured assignment the
+    output naming `Error acquiring the state lock` and the lease id used to
+    be thrown away with the failing subshell. The recipe now prints the
+    captured output to stderr and names `terragrunt force-unlock <lock-id>`
+    run from the instance directory, reading the id from that output; the
+    azure arm's `terragrunt output -json` capture gets the same treatment.
+    The success path is untouched: the outcome-summary guard still greps
+    the same plan_log after a successful plan.
+    """
+    recipe = _target_recipe_body(_makefile_text(), "instance-deploy")
+    plan_at = recipe.index("plan_log=$$(terragrunt plan -out=tfplan.deploy 2>&1) || {")
+    print_at = recipe.index("printf '%s\\n' \"$$plan_log\" >&2", plan_at)
+    remedy_at = recipe.index("terragrunt force-unlock <lock-id>", plan_at)
+    directory_at = recipe.index("cd remote-instances/%s", plan_at)
+    assert print_at < directory_at < remedy_at, (
+        "the plan-failure arm must print the captured output and name "
+        "terragrunt force-unlock <lock-id> run from the instance directory"
+    )
+    assert (
+        "printf '%s\\n' \"$$plan_log\" | grep -qE 'No changes\\.|To perform exactly these actions'"
+        in recipe
+    ), "the success path's outcome-summary guard must survive unchanged"
+    output_at = recipe.index("outputs_json=$$(terragrunt output -json) || {")
+    output_print_at = recipe.index("printf '%s\\n' \"$$outputs_json\" >&2", output_at)
+    output_remedy_at = recipe.index("terragrunt force-unlock <lock-id>", output_at)
+    assert output_print_at < output_remedy_at, (
+        "the azure arm's failed output capture must print what it captured "
+        "before naming the same force-unlock remedy"
+    )
+
+
+def test_deploy_gate_reinstalls_onto_a_replaced_azure_vm() -> None:
+    """The installed marker, once present, must name the VM that is running.
+
+    CONFIRM=replace replaces the VM while the vault secrets and the marker
+    survive, so a marker's bare presence no longer proves the daemon
+    material exists anywhere: the fresh VM has none. On azure the gate
+    reads the engine address record's vm_resource_id and reinstalls when
+    the marker's recorded id differs from the record; on EC2 the gate
+    keeps the marker's bare presence, because an EC2 marker carries no
+    resource id.
+    """
+    recipe = _target_recipe_body(_makefile_text(), "instance-deploy")
+    assert 'marker="$$HOME/.docker/certs/$$name/installed"' in recipe, (
+        "the converge gate must read the installed marker through the named "
+        "path, so the recorded-id comparison and the presence check test the "
+        "same file"
+    )
+    assert (
+        'if [ "$$params_present" != "true" ] || [ ! -f "$$marker" ]; '
+        "then install_needed=1; fi;" in recipe
+    ), "the marker-absent half of the gate keeps the condition it always had"
+    azure_gate_at = recipe.index('[ "$$install_needed" = "0" ] && [ "$$kind" = "azure" ]')
+    record_at = recipe.index("instances.engine_address", azure_gate_at)
+    compare_at = recipe.index('[ "$$(cat "$$marker")" = "$$recorded_vm" ] || install_needed=1')
+    assert azure_gate_at < record_at < compare_at, (
+        "the recorded-id comparison must sit inside the azure branch alone, "
+        "reading the engine address record before comparing the marker against it"
+    )
+
+
+def test_cert_install_marker_carries_the_vm_resource_id_on_azure_only() -> None:
+    """On azure the marker records the VM the material was installed on;
+    on EC2 it stays the bare marker the converge has always checked."""
+    recipe = _target_recipe_body(_makefile_text(), "cert-install")
+    install_at = recipe.index("$(CERTS_SH) install")
+    marker_if_at = recipe.index('if [ "$$kind" = "azure" ]; then', install_at)
+    else_at = recipe.index("else", marker_if_at)
+    azure_arm = recipe[marker_if_at:else_at]
+    ec2_arm = recipe[else_at : recipe.index("fi", else_at)]
+    assert "instances.engine_address" in azure_arm, (
+        "the azure arm must read the engine address record, the same accessor "
+        "style the deploy recipe writes it with"
+    )
+    assert "vm_resource_id" in azure_arm, (
+        "the azure marker must record the record's vm_resource_id, so converge "
+        "can tell an install performed on a replaced-away VM from one performed "
+        "on the VM now running"
+    )
+    assert 'touch "$$HOME/.docker/certs/$(INSTANCE)/installed"' in ec2_arm, (
+        "the EC2 arm keeps the bare marker it has always written"
+    )
+    assert "instances.engine_address" not in ec2_arm, (
+        "the recorded-id write is the azure arm's alone: EC2 has no resource "
+        "id for the marker to carry"
     )

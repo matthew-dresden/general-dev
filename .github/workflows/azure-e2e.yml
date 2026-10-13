@@ -12,7 +12,9 @@
 #   1. Create an app registration; note its application (client) id.
 #   2. Add a federated credential on it for this repo:
 #      organization: matthew-dresden, repository: general-dev,
-#      entity-type: pull-request (or the environment/branch you dispatch from).
+#      entity-type: branch, branch: main (or an environment credential;
+#      never a pull-request subject, so a future PR-triggered job could
+#      never mint this subscription-Owner token).
 #   3. Grant the app Owner (or Contributor + Role Administrator) on the
 #      subscription the engine deploys into.
 #   4. Set repository variables: AZURE_CLIENT_ID, AZURE_TENANT_ID,
@@ -78,7 +80,9 @@ jobs:
       - name: Record the deploying principal's object id
         run: |
           set -euo pipefail
-          oid=$(az ad signed-in-user show --query id -o tsv)
+          # The OIDC login is a service principal, not a user: its object id
+          # comes from the app registration the client id names.
+          oid=$(az ad sp show --id "${{ vars.AZURE_CLIENT_ID }}" --query id -o tsv)
           echo "PRINCIPAL_OBJECT_ID=$oid" >> "$GITHUB_ENV"
 
       - name: Scaffold the disposable azure instance

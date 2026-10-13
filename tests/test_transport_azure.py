@@ -299,7 +299,10 @@ def test_handshake_error_401_names_az_login_and_the_refresh_remedy() -> None:
     assert _TOKEN not in str(error)
 
 
-def test_handshake_error_404_no_listener_names_the_connect_start_remedy() -> None:
+def test_handshake_error_404_no_listener_names_the_connect_refresh_remedy() -> None:
+    """The listener is started by the daemon's recorded command, so the remedy
+    is the refresh -- `connect-start` on a live daemon answers that nothing
+    is to do, a dead end the message must not name."""
     transport_azure = _import_transport_azure()
     error = transport_azure.RelayHandshakeError(
         status=404,
@@ -308,7 +311,8 @@ def test_handshake_error_404_no_listener_names_the_connect_start_remedy() -> Non
     )
     message = str(error)
     assert "The relay listener is not running" in message
-    assert f"make connect-start INSTANCE={_NAME} which starts it" in message
+    assert f"make connect-refresh INSTANCE={_NAME}" in message
+    assert "make connect-start" not in message
 
 
 def test_handshake_error_404_sender_wait_timeout_names_the_same_remedy() -> None:
@@ -374,6 +378,103 @@ def test_parse_token_payload_returns_the_pair_and_refuses_gaps() -> None:
     for bad_stdout in ('{"expiresOn": 1}', '{"accessToken": ""}', "not json", "[]"):
         with pytest.raises(transport_azure.RelayConfigError):
             transport_azure.parse_token_payload(bad_stdout)
+
+
+def test_parse_token_payload_prefers_the_epoch_expires_on_field() -> None:
+    """The epoch field is absolute; the deprecated string is wall-clock in the
+    local zone, so when the CLI prints both, the epoch wins."""
+    transport_azure = _import_transport_azure()
+    token, expiry = transport_azure.parse_token_payload(
+        '{"accessToken": "abc", "expires_on": 1893456000, '
+        '"expiresOn": "2020-01-01 00:00:00.000000"}'
+    )
+    assert (token, expiry) == ("abc", 1893456000.0), (
+        "the epoch expires_on must win over the deprecated local-string expiresOn"
+    )
+    token, expiry = transport_azure.parse_token_payload(
+        '{"accessToken": "abc", "expires_on": 1893456000}'
+    )
+    assert (token, expiry) == ("abc", 1893456000.0)
+    parsed = transport_azure.parse_token_payload(
+        '{"accessToken": "abc", "expiresOn": "2026-10-13 12:00:00.000000"}'
+    )
+    assert parsed[0] == "abc" and parsed[1] > 0, "the string shape remains the fallback"
+
+
+def test_token_fetch_is_bounded_by_azure_token_fetch_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The az token fetch carries a deadline, never an unbounded wait."""
+    transport_azure = _import_transport_azure()
+    monkeypatch.delenv(transport_azure.AZURE_TOKEN_FETCH_TIMEOUT_ENV_VAR, raising=False)
+    timeouts: list[float | None] = []
+
+    def answer(command: Sequence[str], timeout_seconds: float | None) -> CommandResult:
+        del command
+        timeouts.append(timeout_seconds)
+        return CommandResult(exit_code=0, stdout='{"accessToken": "t", "expiresOn": 100}')
+
+    transport_azure.fetch_relay_token(answer)
+    assert timeouts == [transport_azure._AZURE_TOKEN_FETCH_TIMEOUT_DEFAULT_SECONDS]
+    monkeypatch.setenv(transport_azure.AZURE_TOKEN_FETCH_TIMEOUT_ENV_VAR, "7.5")
+    timeouts.clear()
+    transport_azure.fetch_relay_token(answer)
+    assert timeouts == [7.5]
+
+
+def test_a_hung_token_fetch_raises_naming_the_variable_and_the_az_login_remedy() -> None:
+    """A hung az (a browser prompt nobody watches) fails this one attempt."""
+    transport_azure = _import_transport_azure()
+
+    class _Hanging:
+        def __call__(self, command: Sequence[str], timeout_seconds: float | None) -> CommandResult:
+            del command
+            assert timeout_seconds is not None, "the fetch must never be issued unbounded"
+            return CommandResult(exit_code=-1, timed_out=True)
+
+    with pytest.raises(transport_azure.RelayTransportError) as exc_info:
+        transport_azure.fetch_relay_token(_Hanging())
+
+    message = str(exc_info.value)
+    assert transport_azure.AZURE_TOKEN_FETCH_TIMEOUT_ENV_VAR in message
+    assert "az login" in message
+
+
+def test_an_unusable_token_fetch_timeout_names_the_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_azure = _import_transport_azure()
+    monkeypatch.setenv(transport_azure.AZURE_TOKEN_FETCH_TIMEOUT_ENV_VAR, "nope")
+
+    with pytest.raises(transport_azure.RelayTransportError, match="AZURE_TOKEN_FETCH_TIMEOUT"):
+        transport_azure.fetch_relay_token(RecordingRunner(lambda _command: _ok()))
+
+
+def test_a_failed_token_fetch_leaves_the_cache_retryable() -> None:
+    """A timed-out fetch must neither poison the cache nor leave a stale token
+    cached: the cache ends empty, so the next get() mints fresh."""
+    transport_azure = _import_transport_azure()
+    outcomes: list[CommandResult] = [
+        CommandResult(exit_code=0, stdout='{"accessToken": "stale", "expiresOn": 1893456000}'),
+        CommandResult(exit_code=-1, timed_out=True),
+        CommandResult(exit_code=0, stdout='{"accessToken": "fresh", "expiresOn": 1893456000}'),
+    ]
+    fetches: list[float | None] = []
+
+    def scripted(command: Sequence[str], timeout_seconds: float | None) -> CommandResult:
+        del command
+        fetches.append(timeout_seconds)
+        return outcomes.pop(0)
+
+    now = [1000.0]
+    cache = transport_azure.TokenCache(scripted, clock=lambda: now[0])
+    assert cache.get() == "stale"
+    now[0] = 1893456000.0  # past the refresh margin: the next get must fetch
+    with pytest.raises(transport_azure.RelayTransportError) as exc_info:
+        cache.get()
+    assert transport_azure.AZURE_TOKEN_FETCH_TIMEOUT_ENV_VAR in str(exc_info.value)
+    assert cache.get() == "fresh", "the retry mints fresh, never re-serves the stale token"
+    assert len(fetches) == 3
 
 
 def test_fetch_relay_token_classifies_missing_binary_and_failure() -> None:
@@ -477,16 +578,99 @@ def test_relay_values_refuses_missing_keys_naming_the_deploy_remedy() -> None:
     assert f"make instance-deploy INSTANCE={_NAME}" in message
 
 
-def test_relay_values_refuses_a_namespace_with_a_scheme_or_path() -> None:
+@pytest.mark.parametrize(
+    ("namespace",),
+    [
+        ("https://evil.example",),
+        ("a/b",),
+        ("gd-x.servicebus.windows.net?sb-hc-token=x",),
+        ("gd-x.servicebus.windows.net#frag",),
+        ("GD-X.servicebus.windows.net",),
+        ("gd x",),
+        ("gd-x.evil.example",),
+    ],
+)
+def test_relay_values_refuses_a_namespace_outside_the_strict_shape(
+    namespace: str,
+) -> None:
+    """A scheme, path, query, fragment, uppercase or foreign host in the
+    namespace could aim the token-bearing dial somewhere else."""
     transport_azure = _import_transport_azure()
-    with pytest.raises(transport_azure.RelayConfigError):
+    with pytest.raises(transport_azure.RelayConfigError) as exc_info:
         transport_azure.relay_values(
-            {"relay_namespace": "https://evil.example", "hybrid_connection": "hc"},
+            {"relay_namespace": namespace, "hybrid_connection": _HYBRID_CONNECTION},
             instance=_NAME,
         )
-    with pytest.raises(transport_azure.RelayConfigError):
+    message = str(exc_info.value)
+    assert "relay_namespace" in message
+    assert namespace in message
+    assert "engine-address.json" in message
+    assert f"make instance-deploy INSTANCE={_NAME}" in message
+
+
+@pytest.mark.parametrize(
+    ("hybrid_connection",),
+    [
+        ("gd;x",),
+        ("gd$x",),
+        ("gd`x",),
+        ("gd x",),
+        ("gd/x",),
+        ("gd?x",),
+        ("a" * 65,),
+    ],
+)
+def test_relay_values_refuses_a_hybrid_connection_outside_the_strict_shape(
+    hybrid_connection: str,
+) -> None:
+    """The name is composed into the dial URL unchecked-free: shell
+    metacharacters, separators and over-length names are refused."""
+    transport_azure = _import_transport_azure()
+    with pytest.raises(transport_azure.RelayConfigError) as exc_info:
         transport_azure.relay_values(
-            {"relay_namespace": "a/b", "hybrid_connection": "hc"}, instance=_NAME
+            {"relay_namespace": _NAMESPACE, "hybrid_connection": hybrid_connection},
+            instance=_NAME,
+        )
+    message = str(exc_info.value)
+    assert "hybrid_connection" in message
+    assert "engine-address.json" in message
+    assert f"make instance-deploy INSTANCE={_NAME}" in message
+
+
+@pytest.mark.parametrize("namespace", [_NAMESPACE, "gd-azrelay"])
+@pytest.mark.parametrize("hybrid_connection", [_HYBRID_CONNECTION, "gd0"])
+def test_relay_values_accepts_the_strict_good_forms(namespace: str, hybrid_connection: str) -> None:
+    """The deploy's FQDN form and the bare label both pass, as does the
+    `gd-<instance>` hybrid-connection shape."""
+    transport_azure = _import_transport_azure()
+    assert transport_azure.relay_values(
+        {"relay_namespace": namespace, "hybrid_connection": hybrid_connection},
+        instance=_NAME,
+    ) == (namespace, hybrid_connection)
+
+
+def test_a_vault_uri_outside_the_strict_shape_is_refused() -> None:
+    """The vault URI is composed into shell the VM's root runs, so anything
+    but the standard Key Vault REST host is refused, naming the field and
+    the record file."""
+    transport_azure = _import_transport_azure()
+    for bad in (
+        "http://gd-vault.vault.azure.net",
+        "https://gd-vault.vault.azure.net/secrets/x",
+        "https://gd-vault.vault.azure.net?x=1",
+        "https://evil.example",
+        "https://gd_vault.vault.azure.net",
+    ):
+        with pytest.raises(transport_azure.RelayConfigError) as exc_info:
+            transport_azure.vault_url({"vault_uri": bad}, instance=_NAME)
+        message = str(exc_info.value)
+        assert "vault_uri" in message
+        assert bad in message
+        assert "engine-address.json" in message
+        assert f"make instance-deploy INSTANCE={_NAME}" in message
+    for good in ("https://gd-vault.vault.azure.net", "https://gd-vault.vault.azure.net/"):
+        assert transport_azure.vault_url({"vault_uri": good}, instance=_NAME) == (
+            "https://gd-vault.vault.azure.net"
         )
 
 
@@ -604,7 +788,7 @@ def test_open_relay_sender_diagnoses_the_refusal_naming_the_instance(
             instance=_NAME,
             timeout_seconds=1.0,
         )
-    assert f"make connect-start INSTANCE={_NAME}" in str(exc_info.value)
+    assert f"make connect-refresh INSTANCE={_NAME}" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
@@ -841,6 +1025,29 @@ def test_relay_websocket_aggregates_fragmented_messages() -> None:
         server.close()
 
 
+def test_a_frame_declaring_more_than_the_ceiling_is_refused_before_its_payload() -> None:
+    """A crafted oversized 64-bit length header fails this one read, naming
+    the declared size and the ceiling, without any payload being buffered."""
+    transport_azure = _import_transport_azure()
+    assert transport_azure._MAX_FRAME_BYTES == 16 * 1024 * 1024
+    local, remote = socket.socketpair()
+    # Bypass the handshake: recv_frame reads only through _socket and _buffer.
+    websocket = object.__new__(transport_azure.RelayWebSocket)
+    websocket._socket = local
+    websocket._buffer = bytearray()
+    declared = 17 * 1024 * 1024
+    try:
+        remote.sendall(struct.pack("!BB", 0x82, 127) + struct.pack("!Q", declared))
+        with pytest.raises(transport_azure.RelayProtocolError) as exc_info:
+            websocket.recv_frame()
+        message = str(exc_info.value)
+        assert str(declared) in message
+        assert str(transport_azure._MAX_FRAME_BYTES) in message
+    finally:
+        local.close()
+        remote.close()
+
+
 # ---------------------------------------------------------------------------
 # The bridge and the accept loop: per-connection isolation over loopback.
 # ---------------------------------------------------------------------------
@@ -972,6 +1179,294 @@ def test_accept_loop_survives_a_failing_sender_and_keeps_serving(
     captured = capsys.readouterr()
     assert "relay: a connection through" in captured.err
     registry.close_all()
+
+
+# ---------------------------------------------------------------------------
+# The half-close contract: stdin's EOF must not kill stdout (`docker exec
+# -i`). The EOF crosses the relay as ONE empty-payload binary frame -- never
+# a close frame -- the receiver half-closes its TCP write side, and the pipe
+# is torn down only when both directions have ended, a close frame arrives,
+# or a socket error kills it.
+# ---------------------------------------------------------------------------
+
+
+class _FakeBridgeWebSocket:
+    """A RelayWebSocket double: scripted incoming messages, recorded frames."""
+
+    def __init__(self, messages: list[tuple[int, bytes] | None]) -> None:
+        self._messages = list(messages)
+        self.frames: list[tuple[int, bytes]] = []
+        self.close_calls = 0
+
+    def recv_message(self) -> tuple[int, bytes] | None:
+        if not self._messages:
+            raise AssertionError("the bridge read past the scripted messages")
+        return self._messages.pop(0)
+
+    def send_frame(self, opcode: int, payload: bytes, *, fin: bool = True) -> None:
+        del fin
+        self.frames.append((opcode, payload))
+
+    def send_close(self, code: int = 1000) -> None:
+        self.frames.append((0x8, struct.pack("!H", code)))
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def test_pump_forwards_tcp_eof_as_one_empty_frame_and_keeps_the_pipe_alive() -> None:
+    """The client's stdin ending sends exactly one sentinel and ends the pump
+    thread -- never a close frame, never a shutdown of the loopback socket,
+    whose read side is the stdout the CLI still reads."""
+    transport_azure = _import_transport_azure()
+    local, remote = socket.socketpair()
+    websocket = _FakeBridgeWebSocket([])
+    bridge = transport_azure._Bridge(local, websocket)  # type: ignore[arg-type]
+    pump = threading.Thread(
+        target=transport_azure._pump_tcp_to_websocket,
+        args=(bridge, local, websocket),  # type: ignore[arg-type]
+        daemon=True,
+    )
+    try:
+        pump.start()
+        remote.shutdown(socket.SHUT_WR)  # the client's stdin reaches EOF
+        _wait_until(lambda: bool(websocket.frames), _HANG_GUARD_SECONDS, "the EOF sentinel")
+        _wait_until(lambda: not pump.is_alive(), _HANG_GUARD_SECONDS, "the pump ending")
+        assert websocket.frames == [(0x2, b"")], (
+            "exactly one empty-payload binary frame, never a close frame"
+        )
+        assert websocket.close_calls == 0, "a stdin EOF must not end the websocket"
+        remote.settimeout(0.2)
+        try:
+            chunk = remote.recv(1)
+        except TimeoutError:
+            chunk = None
+        assert chunk is None or chunk, (
+            "the loopback write half must stay open for the stdout direction"
+        )
+    finally:
+        local.close()
+        remote.close()
+
+
+def test_the_sentinel_and_shutdown_are_guarded_to_one_per_direction() -> None:
+    transport_azure = _import_transport_azure()
+    local, remote = socket.socketpair()
+    websocket = _FakeBridgeWebSocket([])
+    bridge = transport_azure._Bridge(local, websocket)  # type: ignore[arg-type]
+    try:
+        assert bridge.note_peer_eof() is False, "one direction's EOF alone keeps the pipe open"
+        bridge.forward_tcp_eof()
+        bridge.forward_tcp_eof()
+        assert websocket.frames == [(0x2, b"")], "at most one sentinel per direction"
+        bridge.shut_tcp_write()
+        bridge.shut_tcp_write()
+        assert bridge.note_peer_eof() is True, (
+            "both directions having ended is what finishes the pipe"
+        )
+        assert remote.recv(1) == b"", "the write half is shut exactly once"
+    finally:
+        local.close()
+        remote.close()
+
+
+def test_bridge_half_closes_the_client_when_the_peer_sends_the_sentinel() -> None:
+    """An empty-payload binary frame from the peer becomes EOF toward the
+    local docker CLI, while the bridge keeps reading until the close."""
+    transport_azure = _import_transport_azure()
+    local, remote = socket.socketpair()
+    websocket = _FakeBridgeWebSocket(
+        [(transport_azure._OP_BINARY, b"stdout-payload"), (transport_azure._OP_BINARY, b""), None]
+    )
+    try:
+        transport_azure.bridge_connection(
+            local,
+            sender_opener=lambda: websocket,  # type: ignore[arg-type,return-value]
+            registry=transport_azure._BridgeRegistry(),
+            namespace=_NAMESPACE,
+        )
+        remote.settimeout(_HANG_GUARD_SECONDS)
+        assert remote.recv(65536) == b"stdout-payload"
+        assert remote.recv(1) == b"", "the sentinel half-closes the client's write side"
+        assert websocket.close_calls == 1, "the later peer close tears the pipe down"
+    finally:
+        local.close()
+        remote.close()
+
+
+class _ScriptedRelayPeer:
+    """One relay-service stand-in for a single scripted connection.
+
+    Completes the upgrade handshake, records every client frame it receives
+    (setting `sentinel_seen` on the empty-payload binary one), and lets the
+    test drive server frames -- stdout payloads and a final close -- through
+    the same socket.
+    """
+
+    def __init__(self) -> None:
+        self.acceptor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.acceptor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.acceptor.bind(("127.0.0.1", 0))
+        self.acceptor.listen(1)
+        self.port = int(self.acceptor.getsockname()[1])
+        self.sentinel_seen = threading.Event()
+        self.frames: list[tuple[int, bytes]] = []
+        self._conn: socket.socket | None = None
+        self._buffer = bytearray()
+        self.thread = threading.Thread(target=self._serve_one, daemon=True)
+
+    def start(self) -> int:
+        self.thread.start()
+        return self.port
+
+    def _read_exact(self, count: int) -> bytes:
+        conn = self._conn
+        assert conn is not None
+        while len(self._buffer) < count:
+            chunk = conn.recv(65536)
+            if not chunk:
+                raise ConnectionError("test peer: client closed")
+            self._buffer.extend(chunk)
+        out = bytes(self._buffer[:count])
+        del self._buffer[:count]
+        return out
+
+    def _serve_one(self) -> None:
+        try:
+            conn, _ = self.acceptor.accept()
+            self._conn = conn
+            buffer = bytearray()
+            while b"\r\n\r\n" not in buffer:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                buffer.extend(chunk)
+            head, _, rest = bytes(buffer).partition(b"\r\n\r\n")
+            key_line = next(
+                line
+                for line in head.decode("ascii", errors="replace").split("\r\n")
+                if line.startswith("Sec-WebSocket-Key: ")
+            )
+            client_key = key_line.split(": ", 1)[1]
+            accept = base64.b64encode(
+                hashlib.sha1(
+                    (client_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+                ).digest()
+            ).decode("ascii")
+            conn.sendall(
+                (
+                    "HTTP/1.1 101 Switching Protocols\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Accept: {accept}\r\n"
+                    "\r\n"
+                ).encode("ascii")
+            )
+            self._buffer = bytearray(rest)
+            while True:
+                first, second = self._read_exact(2)
+                opcode = first & 0x0F
+                masked = bool(second & 0x80)
+                length = second & 0x7F
+                if length == 126:
+                    (length,) = struct.unpack("!H", self._read_exact(2))
+                elif length == 127:
+                    (length,) = struct.unpack("!Q", self._read_exact(8))
+                mask = self._read_exact(4) if masked else b""
+                payload = self._read_exact(length) if length else b""
+                if masked:
+                    payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+                if opcode == 0x8:
+                    return
+                self.frames.append((opcode, payload))
+                if opcode == 0x2 and not payload:
+                    self.sentinel_seen.set()
+        except (OSError, ConnectionError):
+            pass
+
+    def _send_server_frame(self, opcode: int, payload: bytes) -> None:
+        conn = self._conn
+        assert conn is not None
+        first = 0x80 | opcode
+        length = len(payload)
+        if length <= 125:
+            header = struct.pack("!BB", first, length)
+        elif length <= 0xFFFF:
+            header = struct.pack("!BBH", first, 126, length)
+        else:
+            header = struct.pack("!BBQ", first, 127, length)
+        conn.sendall(header + payload)
+
+    def send_stdout(self, payload: bytes) -> None:
+        self._send_server_frame(0x2, payload)
+
+    def send_close_frame(self) -> None:
+        self._send_server_frame(0x8, struct.pack("!H", 1000))
+
+    def close(self) -> None:
+        try:
+            self.acceptor.close()
+        except OSError:
+            pass
+
+
+def test_bridge_keeps_stdout_flowing_after_stdin_eof(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `docker exec -i` contract, end to end over loopback: the client
+    half-closes its write side, the relay peer receives the one sentinel --
+    never a close frame -- and the stdout frames it sends afterwards still
+    reach the client. Only the peer's close frame ends the bridge."""
+    transport_azure = _import_transport_azure()
+    monkeypatch.setenv("RELAY_DIAL_TIMEOUT", str(_HANG_GUARD_SECONDS))
+    peer = _ScriptedRelayPeer()
+    relay_port = peer.start()
+    acceptor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    acceptor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    acceptor.bind(("127.0.0.1", 0))
+    acceptor.listen(1)
+    bridge_port = int(acceptor.getsockname()[1])
+    registry = transport_azure._BridgeRegistry()
+    try:
+        # The test plays the docker CLI: it dials the acceptor, and the
+        # accepted server-side socket is the one the bridge serves.
+        dialer = socket.create_connection(("127.0.0.1", bridge_port), timeout=_HANG_GUARD_SECONDS)
+        client, _ = acceptor.accept()
+        bridge_thread = threading.Thread(
+            target=transport_azure.bridge_connection,
+            args=(client,),
+            kwargs={
+                "sender_opener": _loopback_sender_opener(transport_azure, relay_port),
+                "registry": registry,
+                "namespace": _NAMESPACE,
+            },
+            daemon=True,
+        )
+        bridge_thread.start()
+        dialer.sendall(b"stdin-bytes")
+        dialer.shutdown(socket.SHUT_WR)  # stdin done; stdout still wanted
+        _wait_until(peer.sentinel_seen.is_set, _HANG_GUARD_SECONDS, "the EOF sentinel at the peer")
+        sentinels = [payload for opcode, payload in peer.frames if opcode == 0x2 and not payload]
+        assert sentinels == [b""], "exactly one empty-payload frame, never a close"
+        peer.send_stdout(b"stdout-1")
+        peer.send_stdout(b"stdout-2")
+        received = b""
+        dialer.settimeout(_HANG_GUARD_SECONDS)
+        while received != b"stdout-1stdout-2":
+            chunk = dialer.recv(65536)
+            if not chunk:
+                break
+            received += chunk
+        assert received == b"stdout-1stdout-2", "stdout must flow after stdin's EOF"
+        peer.send_close_frame()
+        _wait_until(
+            lambda: not bridge_thread.is_alive(),
+            _HANG_GUARD_SECONDS,
+            "the peer's close frame ending the bridge",
+        )
+        assert dialer.recv(1) == b"", "the close tears the pipe down to a client EOF"
+    finally:
+        acceptor.close()
+        peer.close()
+        registry.close_all()
 
 
 def test_serve_until_stopped_swallows_a_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1637,6 +2132,33 @@ def test_the_script_never_briefly_world_readables_the_key(
     assert f'chmod 0600 "$dir/{certs.SERVER_KEY_FILENAME}"' in script
     assert f'chmod 0644 "$dir/{certs.SERVER_CERT_FILENAME}"' in script
     assert f'chmod 0644 "$dir/{certs.CA_CERT_FILENAME}"' in script
+
+
+def test_the_script_reaches_curl_with_the_bearer_token_off_argv() -> None:
+    """The token rides stdin (`-H @-`), never a shell-expanded argv header.
+
+    A `-H "Authorization: Bearer $token"` sits in the process table for the
+    whole fetch; the printf-into-`-H @-` form keeps it off argv. Every
+    secret fetch line carries the form, and the bearer text appears in the
+    script only inside the printf format string.
+    """
+    _write_install_address(_NAME)
+    runner = _InstallRunner()
+
+    _install(runner)
+
+    script = runner.script_text
+    assert script is not None
+    assert '-H "Authorization: Bearer $token"' not in script
+    fetch_lines = [line for line in script.splitlines() if "secrets/tls-" in line]
+    assert fetch_lines, "the script must fetch the published secrets"
+    printf_form = "printf 'Authorization: Bearer %s\\n' \"$token\" | curl -sf -H @- "
+    for line in fetch_lines:
+        assert line.startswith(printf_form), f"a fetch line expanded the token into argv: {line!r}"
+        assert "-H @-" in line
+    assert script.count("Authorization: Bearer") == script.count(printf_form.rstrip()), (
+        "the bearer text appears only inside the stdin printf, never an argv header"
+    )
 
 
 def test_the_script_starts_the_daemon_after_the_material_is_written(

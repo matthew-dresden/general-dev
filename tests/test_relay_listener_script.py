@@ -139,6 +139,73 @@ def test_listener_bridges_to_the_target_with_the_pipe_discipline() -> None:
     assert "tcp.close" in bridge.group(1)
 
 
+def test_listener_bridge_half_close_discipline() -> None:
+    """`docker exec -i`: stdin's EOF must not kill the stdout still flowing.
+
+    The pump forwards the target's EOF as ONE empty-payload binary frame --
+    guarded to one per direction, never a close frame and never a local
+    shutdown on that path -- and the peer's sentinel half-closes the target
+    write side, with the pipe torn down once BOTH directions have ended.
+    """
+    text = _listener_text()
+    bridge = re.search(r"def bridge_to_target\(.*?\n(.*?)\n\ndef ", text, re.DOTALL)
+    assert bridge is not None, "no bridge_to_target function found"
+    body = bridge.group(1)
+    assert 'websocket.send_frame(OP_BINARY, b"")' in body, (
+        "the EOF sentinel is the empty-payload binary frame"
+    )
+    assert body.count("eof_forwarded.is_set()") == 2, (
+        "one guard on the sentinel send, one on the both-EOF completion"
+    )
+    assert "elif opcode == OP_BINARY:" in body, "the peer's sentinel arrives as binary"
+    assert "tcp.shutdown(socket.SHUT_WR)" in body, (
+        "the sentinel half-closes the write side toward docker"
+    )
+    assert "target_write_shut.is_set()" in body, "the shutdown is guarded to once"
+    pump = re.search(r"def tcp_to_websocket\(\) -> None:\n(.*?)\n\n", body, re.DOTALL)
+    assert pump is not None, "no tcp_to_websocket pump found"
+    assert "send_close" not in pump.group(1), (
+        "the pump's EOF path must not close the websocket: the reverse direction "
+        "may still be mid-flight"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The frame-length ceiling.
+# ---------------------------------------------------------------------------
+
+
+def test_listener_refuses_frames_declaring_more_than_the_ceiling() -> None:
+    """A corrupt or hostile 64-bit length must fail one read, never the buffer."""
+    text = _listener_text()
+    assert "MAX_FRAME_BYTES = 16 * 1024 * 1024" in text
+    recv = re.search(r"def recv_frame\(.*?\n(.*?)\n\n    def send_frame", text, re.DOTALL)
+    assert recv is not None, "no recv_frame found"
+    body = recv.group(1)
+    assert "if length > MAX_FRAME_BYTES:" in body, (
+        "the ceiling is checked once the declared length is decoded, before any "
+        "payload byte is read"
+    )
+    assert "raise ValueError" in body, "an oversized declaration fails the read"
+    assert "declared a {length}-byte frame" in text, "the error names the declared size"
+
+
+# ---------------------------------------------------------------------------
+# The token never reaches the journal through a handshake failure.
+# ---------------------------------------------------------------------------
+
+
+def test_listener_redacts_its_token_from_logged_handshake_failures() -> None:
+    """The systemd journal is permanent: the same scrubbing the laptop side
+    applies keeps this script's own token out of every logged body and
+    status line."""
+    text = _listener_text()
+    assert "def redact(text: str, token: str | None) -> str:" in text
+    assert "status_line=redact(status_line, token)," in text
+    assert 'body=redact(head.decode("latin-1"), token),' in text
+    assert "text.replace(token" in text, "the redactor substitutes the token itself"
+
+
 # ---------------------------------------------------------------------------
 # The identity credential: IMDS, short timeout, bounded backoff.
 # ---------------------------------------------------------------------------

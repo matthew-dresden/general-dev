@@ -89,4 +89,16 @@ module "compute" {
   relay_namespace           = local.relay_namespace
   hybrid_connection         = local.hybrid_connection
   tags                      = var.tags
+
+  # The instance must not boot before the platform unit's network security
+  # group is associated with its subnet. The compute module's inputs already
+  # reference the identity, namespace and hybrid connection outputs, but the
+  # subnet association feeds no output compute consumes, so without an
+  # explicit edge a first apply could boot the VM into the window where no
+  # group is attached -- and while it is absent, azure's implicit default
+  # admits inbound traffic the zero-inbound group exists to deny. The
+  # dependency names the whole security module rather than the one resource:
+  # the association has no output of its own, and the whole-module edge is
+  # what keeps this block true whatever the platform unit's internals grow.
+  depends_on = [module.security]
 }

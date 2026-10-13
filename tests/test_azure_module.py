@@ -16,10 +16,12 @@ zero-inbound doctrine; the absence of any `azurerm_public_ip` resource is
 the no-public-address doctrine; the eight root outputs are the names the
 deploy flow's azure branch reads (pinned here against the Makefile's own
 required list, so the two sides cannot drift); and the cloud-config's
-enable-not-start discipline for both daemons is what keeps provisioning
-from depending on material it does not deliver (the TLS material) or from
-accruing listener-hours (the relay listener, started on demand by the
-connect flow).
+daemon discipline is what keeps provisioning from depending on material it
+does not deliver (the rootless daemon, enabled but never started -- its
+first start reads TLS material this template never writes) or from paying
+for idle listener-hours (the relay listener, installed and daemon-reloaded
+only, never enabled -- an enabled unit's [Install] section would start it
+at every reboot -- and started exclusively on demand by the connect flow).
 
 The root-azure.hcl consistency test is the azure counterpart of
 `tests/test_state_bucket_name.py`: the storage account name is composed
@@ -119,6 +121,42 @@ def test_terraform_fmt_is_clean() -> None:
 # ---------------------------------------------------------------------------
 # The security doctrine: zero inbound, no public address.
 # ---------------------------------------------------------------------------
+
+
+def test_the_subnet_pins_its_default_outbound_access() -> None:
+    """The subnet declares `default_outbound_access_enabled = true`.
+
+    The egress the cloud-config's apt, curl and relay steps depend on is a
+    declared property of the module, not an inherited default: ARM API
+    versions after 2026-03-31 default new virtual networks to private, and
+    the provider's ~> 4.0 constraint would adopt that silently on a future
+    upgrade if the value were left unset.
+    """
+    text = _read(_AZURE / "modules" / "network" / "main.tf")
+    match = re.search(r'resource "azurerm_subnet" "this" \{(.*?)\n\}', text, re.DOTALL)
+    assert match is not None, "no azurerm_subnet resource found"
+    assert re.search(
+        r"^\s*default_outbound_access_enabled = true\s*$", match.group(1), re.MULTILINE
+    ), (
+        "the subnet must pin default_outbound_access_enabled = true: the cloud-init's "
+        "apt, curl and relay steps depend on the platform egress, which newer ARM API "
+        "versions default away and a provider upgrade would otherwise remove silently"
+    )
+
+
+def test_the_nsg_comment_states_the_true_inbound_boundary() -> None:
+    """The doctrine comment names what the empty list does and does not deny."""
+    text = _read(_SECURITY_MAIN)
+    assert "AllowVnetInBound" in text, (
+        "the doctrine comment must name azure's AllowVnetInBound default: "
+        "vnet-internal reachability is governed by the platform's built-in "
+        "defaults, not by the empty rule list, and a comment claiming "
+        "otherwise understates the boundary"
+    )
+    assert "nothing on the internet, the vnet or any peer network" not in text, (
+        "the false claim that no vnet or peer packet can connect must not "
+        "return: azure's AllowVnetInBound default stands beside the empty list"
+    )
 
 
 def test_the_nsg_declares_zero_security_rules() -> None:
@@ -254,10 +292,30 @@ def test_cloud_init_enables_never_starts_docker() -> None:
     assert "systemctl --user stop docker.service" in text
 
 
-def test_cloud_init_enables_never_starts_the_relay_listener() -> None:
-    """The listener unit is enabled, not started: the connect flow starts it on demand."""
+def test_cloud_init_installs_the_relay_unit_without_enabling_or_starting_it() -> None:
+    """The unit is installed and daemon-reloaded only; started on demand alone.
+
+    Enabling the unit would arm its [Install] WantedBy=multi-user.target,
+    starting the listener at every reboot and accruing up to the listener
+    script's whole idle window of billable listener-hours per boot with
+    nothing to forward. The connect flow's `systemctl start` needs no
+    enablement behind it, so provisioning leaves the unit installed under
+    its own name and out of every boot graph.
+    """
     text = _read_code(_CLOUD_INIT)
-    assert "systemctl enable gd-relay.service" in text
+    assert (
+        "install -m 0644 /opt/gd-relay/gd-relay.service /etc/systemd/system/gd-relay.service"
+        in text
+    ), "the unit must be installed into /etc/systemd/system by provisioning"
+    assert "systemctl daemon-reload" in text, (
+        "the installed unit must be picked up by a daemon-reload, the only "
+        "systemd state change provisioning makes for it"
+    )
+    assert not re.search(r"systemctl enable gd-relay", text), (
+        "the unit must not be enabled: an enabled unit starts at every reboot "
+        "and accrues listener-hours with nothing to forward; the connect flow's "
+        "systemctl start needs no enablement"
+    )
     assert not re.search(r"systemctl start gd-relay", text), (
         "provisioning must not start gd-relay: the unit is started on demand by the "
         "connect flow's run command, because listener-hours bill while it is connected"
@@ -284,6 +342,32 @@ def test_cloud_init_has_no_aws_surface() -> None:
             f"the azure cloud-config carries the aws twin's {absent!r}; the azure "
             "surface pulls its material through the identity endpoint instead"
         )
+
+
+def test_cloud_init_locates_the_data_disk_by_lun_first() -> None:
+    """The deterministic by-LUN handle is preferred; the scan is the guarded fallback.
+
+    The compute module attaches the data disk at LUN 0, and azure presents
+    it at /dev/disk/azure/scsi1/lun0 -- a path that cannot race waagent's
+    temp-disk formatting the way the lsblk empty-disk scan can on sizes
+    that carry a temporary disk. The scan survives as the fallback for a
+    platform shape that presents the disk elsewhere, and it keeps its
+    exactly-one assertion.
+    """
+    text = _read_code(_CLOUD_INIT)
+    assert "/dev/disk/azure/scsi1/lun0" in text, (
+        "the data disk must be located first through /dev/disk/azure/scsi1/lun0, "
+        "the deterministic handle for the LUN 0 the compute module pins"
+    )
+    assert "expected exactly 1 empty data disk" in text, (
+        "the fallback scan keeps its exactly-one-empty-disk assertion"
+    )
+    lun_at = text.index("/dev/disk/azure/scsi1/lun0")
+    scan_at = text.index("expected exactly 1 empty data disk")
+    assert lun_at < scan_at, (
+        "the by-LUN handle must be tried before the lsblk scan: the scan is the "
+        "fallback, and it is the arm that can race waagent's temp-disk format"
+    )
 
 
 def test_the_compute_module_passes_the_base64_payloads_into_the_template() -> None:
@@ -326,8 +410,12 @@ def test_root_variables_carry_the_composition_validations() -> None:
     ):
         assert fragment in text, f"missing validation message: {fragment!r}"
     # The azure naming law: lowercase alphanumerics and dashes, letter
-    # first, bounded so the derived -vault and -relay names stay legal.
+    # first, bounded so the derived -vault and -relay names stay legal --
+    # and no consecutive dashes, azure's own vault-naming ban, which a
+    # shape-only check would admit and the vault's creation would then
+    # refuse at apply.
     assert 'can(regex("^[a-z][a-z0-9-]{0,17}$", var.name_prefix))' in text
+    assert '!can(regex("--", var.name_prefix))' in text
 
 
 def test_compute_variables_carry_the_daemon_validations() -> None:
@@ -500,6 +588,32 @@ def test_the_security_unit_carries_the_platform_role_grants() -> None:
 def test_the_hybrid_connection_is_keyed_to_the_instance() -> None:
     text = _read(_SECURITY_MAIN)
     assert 'name                          = "gd-${var.instance_name}"' in text
+
+
+def test_the_instance_name_validation_refuses_a_trailing_dash() -> None:
+    """The hybrid connection is the gd- junction: it must end alphanumeric."""
+    text = _read(_AZURE / "modules" / "security" / "variables.tf")
+    assert '!can(regex("-$", var.instance_name))' in text, (
+        "the security module must refuse a trailing dash on var.instance_name: "
+        "the hybrid connection name is the junction gd-<instance_name> and a "
+        "relay hybrid connection name must end in an alphanumeric character, "
+        "so the refusal belongs at plan time in the module, not at apply time "
+        "in azure"
+    )
+
+
+def test_the_compute_module_depends_on_the_platform_unit() -> None:
+    """The VM must not boot before the subnet's network security group attaches."""
+    text = _read(_AZURE / "remote-azure-vm.tf")
+    match = re.search(r'module "compute" \{(.*?)\n\}', text, re.DOTALL)
+    assert match is not None, "no compute module block found in the root composition"
+    assert "depends_on = [module.security]" in match.group(1), (
+        "the compute module must depend on the platform unit: the subnet "
+        "association feeds no output compute consumes, so without the explicit "
+        "edge a first apply can boot the VM into the unassociated window, where "
+        "azure's implicit default admits inbound traffic the zero-inbound group "
+        "exists to deny"
+    )
 
 
 def test_every_submodule_declares_the_version_floors() -> None:

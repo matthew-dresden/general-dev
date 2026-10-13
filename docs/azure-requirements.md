@@ -68,9 +68,11 @@ Choose one:
 
 The subnet carries no service endpoint, NAT gateway or load balancer of any
 kind. The instance's only outbound need is its own egress path (package
-installs, image pulls, the relay's control channel), which Azure's default
-outbound route provides; Section 6 states why nothing needs to reach this
-instance from outside.
+installs, image pulls, the relay's control channel), which the deployment
+pins on the subnet explicitly (`default_outbound_access_enabled`), because
+Azure defaults new virtual networks to private — no default egress — for
+ARM API versions after 2026-03-31; Section 6 states why nothing needs to
+reach this instance from outside.
 
 **B. An existing network you already operate.** Skip the table above and use
 your own resource group and subnet unchanged, provided the subnet has a
@@ -94,9 +96,9 @@ another, so they are provisioned together.
 |---|---|---|
 | Network security group | Attached to the subnet from 2.1. Zero inbound security rules of any kind — the rule list is empty, and that emptiness is the control. Outbound: Azure's default allow-all outbound | fixed |
 | User-assigned managed identity | One identity, in the resource group from 2.1 | fixed, named from `var.name_prefix` |
-| Key Vault | One vault, name derived by appending `-vault` to the prefix given. Purge protection and RBAC authorization on. The identity above carries exactly one data role on it: Key Vault Secrets User | `var.name_prefix`, at most 18 lowercase alphanumeric or dash characters beginning with a letter and not ending with a dash, so the derived `-vault` name stays inside Azure's 3-24 vault-name law |
+| Key Vault | One vault, name derived by appending `-vault` to the prefix given. Purge protection and RBAC authorization on. The identity above carries exactly one data role on it: Key Vault Secrets User | `var.name_prefix`, at most 18 lowercase alphanumeric or dash characters beginning with a letter, not ending with a dash and carrying no consecutive dashes (Azure's vault naming law bans consecutive hyphens), so the derived `-vault` name stays inside Azure's 3-24 vault-name law |
 | Relay namespace | One Relay namespace, name derived by appending `-relay` to the prefix given, in the region from 2.1. The identity above carries exactly one role on it: Azure Relay Listener | `var.name_prefix` (the same prefix; the derived `-relay` name stays inside the namespace naming law) |
-| Hybrid connection | One hybrid connection inside that namespace, named as given | `var.instance_name`, for example `devcontainer-remote-prod` |
+| Hybrid connection | One hybrid connection inside that namespace, named as given | `var.instance_name`, for example `devcontainer-remote-prod`, not ending with a dash (the connection name is `gd-` plus this value, and a hybrid connection name must end alphanumeric) |
 | Identity role assignments | Key Vault Secrets User on the vault, and Azure Relay Listener on the namespace, both scoped to the managed identity above — and nothing else | fixed |
 | Operator grants | The Entra object ids given are each granted exactly one role: Azure Relay Sender on the relay namespace (who may open the sender half of the hybrid connection), Key Vault Secrets Officer on the vault (who may publish the instance's TLS material and configuration secrets) | `var.relay_sender_object_ids` and `var.keyvault_officer_object_ids`, each a list of Entra object ids, for example `["<entra-object-id>"]` |
 
@@ -256,10 +258,12 @@ would have.
     step 9 replaces with the new filesystem's own root ownership:
     `chown <daemon-user>:<daemon-user> <data-root>`. Skipping this chown
     leaves the data-root owned by root, and the unprivileged rootless
-    daemon cannot write to it. Azure presents attached data disks at
-    `/dev/sd*` names whose letters are allocation-order dependent, so
-    locate the disk by scanning for exactly one empty disk rather than by
-    trusting a device literal.
+    daemon cannot write to it. Locate the disk deterministically first: a
+    managed data disk attached at LUN 0 is presented at
+    `/dev/disk/azure/scsi1/lun0`, a path stable across VM sizes and boots.
+    Only when that path is absent, fall back to scanning for exactly one
+    empty disk rather than trusting a `/dev/sd*` device literal, whose
+    letters are allocation-order dependent.
 11. Install rootless docker for the daemon user, then stop the daemon it
     starts automatically; it is reconfigured and re-enabled next. The
     daemon user has no interactive login shell (step 5), so run both
@@ -325,12 +329,16 @@ would have.
     `/opt/gd-relay/gd-relay-listener.py` and its systemd unit at
     `/opt/gd-relay/gd-relay.service` (the requester supplies both from the
     repository's `provider/azure/modules/compute/` directory), copy the
-    unit into `/etc/systemd/system/`, and **enable but do not start** it:
-    `systemctl enable gd-relay.service`. Azure bills listener-hours while a
-    hybrid connection has a connected listener, so a listener started at
-    boot with nothing to forward would accrue them from first boot; the
-    developer's own connect flow starts the unit on demand, and the
-    listener stops itself after an idle stretch.
+    unit into `/etc/systemd/system/`, reload systemd
+    (`systemctl daemon-reload`), and **enable nothing and start nothing**:
+    the unit is installed, never enabled. Enabling it would start the
+    listener at every reboot — its `[Install]` section targets
+    `multi-user.target` — and Azure bills listener-hours while a hybrid
+    connection has a connected listener, so a listener enabled at boot with
+    nothing to forward would accrue them from every boot; the developer's
+    own connect flow starts the unit on demand (`systemctl start` needs no
+    enablement behind it), and the listener stops itself after an idle
+    stretch.
 15. Once every step above has succeeded, write a UTC timestamp to
     `/etc/general-dev-provisioned`. This file's presence, and only its
     presence, is the signal the instance is ready to hand back; nothing
@@ -397,7 +405,7 @@ provisioning or configuration item above did not take effect.
 | Data disk mounted | On the host: `mountpoint -q <data-root> && echo mounted` | `mounted` (only if a second data disk was provisioned per 2.3) |
 | Daemon configuration | On the host: `cat /home/<daemon-user>/.config/docker/daemon.json` | `data-root` matches the path given, `tls: true`, `tlsverify: true`, TCP host at the loopback address and port given |
 | Daemon enabled, not started | On the host: `runuser -u <daemon-user> -- env HOME=/home/<daemon-user> XDG_RUNTIME_DIR=/run/user/<uid> DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus systemctl --user is-enabled docker.service` | `enabled` (the daemon is not expected to be running yet; Section 4 covers what happens next) |
-| Relay listener installed, enabled, not started | On the host: `cat /etc/default/gd-relay`, then `systemctl is-enabled gd-relay.service; systemctl is-active gd-relay.service` | The environment file carries the three names from step 14; the unit reports `enabled` and `inactive` — starting it is the requester's connect flow's job, never provisioning's |
+| Relay listener installed, not enabled, not started | On the host: `cat /etc/default/gd-relay`, then `systemctl is-enabled gd-relay.service; systemctl is-active gd-relay.service` | The environment file carries the three names from step 14; the unit reports `disabled` and `inactive` — it is never enabled and never started by provisioning; starting it is the requester's connect flow's job |
 | Provisioning completed | On the host: `cat /etc/general-dev-provisioned` | A single UTC timestamp; its presence alone confirms every step in Section 3 succeeded |
 
 ## 6. What is explicitly not needed

@@ -321,7 +321,7 @@ def test_open_raises_when_the_forwarded_port_cannot_be_read(tmp_path: Path) -> N
         raise instances.InstancesError("docker context 'general-dev-x' not found")
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(forwards.instances, "forwarded_port", broken_port_reader)
+        mp.setattr(forwards, "_context_port_runner", broken_port_reader)
         with pytest.raises(ForwardError, match="forwarded port"):
             forwards.open_forward(
                 "i-abc",
@@ -332,6 +332,170 @@ def test_open_raises_when_the_forwarded_port_cannot_be_read(tmp_path: Path) -> N
                 spawner=spawner,
                 poll_clock=lambda _seconds: None,
             )
+
+
+# ---------------------------------------------------------------------------
+# The open budget: FORWARD_OPEN_TIMEOUT_SECONDS governs the open poll, the
+# relay kind's default sits above the listener start its connect flow runs
+# synchronously (the transport's own 240s budget would always exhaust the
+# generic 60s default first), an explicit value wins for every kind, and
+# the exhaustion message names the variable that widens the budget.
+# ---------------------------------------------------------------------------
+
+
+def test_open_poll_limit_converts_the_env_timeouts_into_polls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(forwards.OPEN_TIMEOUT_ENV_VAR, "5")
+    assert forwards._open_poll_limit() == 10
+    monkeypatch.setenv(forwards.STOP_TIMEOUT_ENV_VAR, "4")
+    assert forwards._stop_poll_limit() == 8
+    monkeypatch.setenv(forwards.OPEN_TIMEOUT_ENV_VAR, "not-a-number")
+    with pytest.raises(ForwardError, match="FORWARD_OPEN_TIMEOUT_SECONDS"):
+        forwards._open_poll_limit()
+    monkeypatch.setenv(forwards.STOP_TIMEOUT_ENV_VAR, "0")
+    with pytest.raises(ForwardError, match="FORWARD_STOP_TIMEOUT_SECONDS"):
+        forwards._stop_poll_limit()
+
+
+def test_open_poll_limit_gives_the_relay_kind_the_larger_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(forwards.OPEN_TIMEOUT_ENV_VAR, raising=False)
+    assert forwards._open_poll_limit() == forwards._OPEN_POLL_LIMIT_DEFAULT
+    relay_default = forwards._open_poll_limit(relay=True)
+    assert relay_default == forwards._OPEN_POLL_LIMIT_RELAY_DEFAULT
+    assert relay_default * forwards.OPEN_POLL_SECONDS > 240, (
+        "the relay default must exceed the listener start's 240-second budget"
+    )
+    # An explicit value wins for the relay kind too.
+    monkeypatch.setenv(forwards.OPEN_TIMEOUT_ENV_VAR, "30")
+    assert forwards._open_poll_limit(relay=True) == 60
+
+
+def test_ssm_open_exhausts_at_the_default_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp_path = _git_root(tmp_path)
+    spawner = _Spawner(announce=False)
+    polls: list[float] = []
+    monkeypatch.delenv(forwards.OPEN_TIMEOUT_ENV_VAR, raising=False)
+
+    with pytest.raises(ForwardError, match="announced no readiness"):
+        forwards.open_forward(
+            "i-abc",
+            "general-dev-x",
+            "profile",
+            "us-east-1",
+            tmp_path,
+            spawner=spawner,
+            poll_clock=polls.append,
+        )
+
+    assert len(polls) == forwards._OPEN_POLL_LIMIT_DEFAULT
+    assert spawner.process.terminated
+
+
+def test_relay_open_uses_the_relay_budget_and_names_the_env_var_on_exhaustion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cold relay connect starts the VM listener before the marker prints:
+    the open must budget above that start, and the exhaustion must say which
+    variable widens the wait."""
+    tmp_path = _git_root(tmp_path)
+    _write_relay_address("x")
+    spawner = _Spawner(announce=False)
+    polls: list[float] = []
+    monkeypatch.delenv(forwards.OPEN_TIMEOUT_ENV_VAR, raising=False)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", _context_port_stub)
+        with pytest.raises(ForwardError) as exc_info:
+            forwards.open_forward(
+                "unused-for-relay",
+                "general-dev-x",
+                "",
+                "",
+                tmp_path,
+                kind=forwards.KIND_RELAY,
+                spawner=spawner,
+                poll_clock=polls.append,
+            )
+
+    assert len(polls) == forwards._OPEN_POLL_LIMIT_RELAY_DEFAULT, (
+        "the relay kind runs the 600-poll (300s) default, not the generic 60s one"
+    )
+    assert forwards.OPEN_TIMEOUT_ENV_VAR in str(exc_info.value)
+    assert spawner.process.terminated, "a hung spawn must still be stopped, never orphaned"
+
+
+def test_an_env_override_wins_over_every_kind_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp_path = _git_root(tmp_path)
+    spawner = _Spawner(announce=False)
+    polls: list[float] = []
+    monkeypatch.setenv(forwards.OPEN_TIMEOUT_ENV_VAR, "10")
+
+    with pytest.raises(ForwardError, match="announced no readiness"):
+        forwards.open_forward(
+            "i-abc",
+            "general-dev-x",
+            "profile",
+            "us-east-1",
+            tmp_path,
+            spawner=spawner,
+            poll_clock=polls.append,
+        )
+
+    assert len(polls) == 20, "10 seconds at the 0.5s cadence"
+
+
+def test_refresh_takes_the_relay_budget_from_the_recorded_engine_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refresh re-runs a relay daemon's recorded command, listener start
+    included, so the record's own kind must select the larger budget."""
+    tmp_path = _git_root(tmp_path)
+    _write_relay_address("x")
+
+    def runner(_command: object, _timeout: float | None) -> CommandResult:
+        return CommandResult(
+            exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", runner)
+        forwards.open_forward(
+            "unused-for-relay",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=forwards.KIND_RELAY,
+            spawner=_Spawner(pid=781),
+            poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
+        )
+    record = forwards.read_record("x")
+    assert record is not None and record.engine_kind == forwards.KIND_RELAY
+
+    silent = _Spawner(announce=False)
+    polls: list[float] = []
+    monkeypatch.delenv(forwards.OPEN_TIMEOUT_ENV_VAR, raising=False)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", runner)
+        with pytest.raises(ForwardError, match="announced no readiness"):
+            forwards.refresh_forward(
+                "x",
+                tmp_path,
+                spawner=silent,
+                poll_clock=polls.append,
+                port_probe=lambda _port: True,
+            )
+
+    assert len(polls) == forwards._OPEN_POLL_LIMIT_RELAY_DEFAULT
+    assert silent.process.terminated
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +788,26 @@ def test_stop_raises_when_the_port_probe_cannot_answer(tmp_path: Path) -> None:
             listening_probe=lambda _port: None,
             poll_clock=lambda _seconds: None,
         )
+
+
+def test_stop_reads_its_budget_from_forward_stop_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stop path's port-closed wait is the env var's, not a silent default."""
+    _record(tmp_path, "x", pid=4242, port=51368)
+    probes: list[int] = []
+    monkeypatch.setenv(forwards.STOP_TIMEOUT_ENV_VAR, "2")
+
+    with pytest.raises(ForwardError, match="still listening"):
+        forwards.stop_forward(
+            "x",
+            send_signal=lambda _pid, _sig: None,
+            alive_probe=lambda _pid: False,
+            listening_probe=lambda _port: probes.append(_port) or True,
+            poll_clock=lambda _seconds: None,
+        )
+
+    assert len(probes) == 4, "2 seconds at the 0.5s cadence"
 
 
 # ---------------------------------------------------------------------------

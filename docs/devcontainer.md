@@ -764,6 +764,23 @@ requirement, and completes the same `docker version` handshake. No AWS
 value is required here either: an azure engine's addressing record, not an
 instance id or a region, is what this branch reads.
 
+**A killed deploy leaves the state lock behind.** `make instance-deploy`
+runs Terragrunt, whose state backend takes one lock per instance while a
+plan or apply runs, and a deploy killed mid-plan — an interrupted
+terminal, a closed laptop — can leave that lock in place. The next
+deploy's plan then fails acquiring it, naming `Error acquiring the state
+lock` and the lock id; Terragrunt can also exit zero on a plan that
+actually failed, so the deploy does not trust the exit status: a plan
+that produces no success marker, or fails outright, has its captured
+output printed to stderr along with the remedy. The remedy is the lock id
+that output names: from the instance's own directory run
+`cd remote-instances/<name> && terragrunt force-unlock <lock-id>`, then
+re-run the deploy. `terragrunt output -json` after an azure apply is
+captured the same way and gets the same treatment. A lock is never forced
+as a matter of course: force-unlocking while another operation genuinely
+holds it is what invites concurrent state writes, so the id always comes
+from the failed run's own printed output.
+
 **The SAN requirement, and its symptom.** TLS validates the name the
 *client* dials the daemon with, and the client dials `127.0.0.1` through
 the loopback forward, so the server certificate must carry `IP:127.0.0.1`

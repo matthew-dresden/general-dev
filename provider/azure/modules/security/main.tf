@@ -55,12 +55,17 @@ resource "azurerm_network_security_group" "this" {
   resource_group_name = var.resource_group_name
 
   # The empty rule list IS the security property: zero inbound rules, so
-  # nothing on the internet, the vnet or any peer network can open a
-  # connection to anything in this subnet. Azure's default outbound rules
-  # remain, which is what the instance's own outbound paths (package
-  # installs, image pulls, the relay listener's control channel, the vault
-  # pulls) need. Any rule added here is a deliberate, reviewed change to
-  # that doctrine, not a default.
+  # the group removes what an unassociated subnet would inherit and the
+  # internet-facing posture is deny by default (there is no public IP to
+  # address from the internet anyway). One honest boundary remains: azure's
+  # own built-in default rules stand beside this list, and AllowVnetInBound
+  # admits vnet-internal traffic, so reachability from inside the vnet or a
+  # peered network is governed by those defaults, not by this module --
+  # narrowing that is a security_rule this composition has deliberately
+  # never carried. Azure's default outbound rules remain, which is what the
+  # instance's own outbound paths (package installs, image pulls, the relay
+  # listener's control channel, the vault pulls) need. Any rule added here
+  # is a deliberate, reviewed change to that doctrine, not a default.
   security_rule = []
 
   tags = merge(var.tags, {
@@ -95,18 +100,29 @@ resource "azurerm_key_vault" "this" {
   # policy exists that a later edit could widen in place.
   rbac_authorization_enabled = true
 
-  # Azure's minimum retention; the vault holds one instance's TLS material,
-  # and a deleted vault is recoverable for this window so a stray delete
-  # does not strand the daemon's certificate reference.
+  # Azure's minimum retention. Destroying the deployment soft-deletes this
+  # vault rather than erasing it, and the name stays reserved for these 7
+  # days: a destroy followed by a redeploy with the same name_prefix fails
+  # vault creation with a name-in-use error until the soft-deleted vault is
+  # purged -- `az keyvault purge --name <name_prefix>-vault` -- or the
+  # window lapses. The recoverability window is the same property: a stray
+  # delete does not strand the daemon's certificate reference.
   soft_delete_retention_days = 7
 
-  # Public network access stays enabled, and that is not an exposure: the
-  # endpoint authorizes through RBAC alone (no access policies, and no
-  # keys -- the certificate material is pulled by the VM over its managed
-  # identity), and the VM has no public IP, so the pulls leave the subnet
-  # over azure's own egress path. Network-wide private endpoints are a
-  # later hardening input away, not a default this composition pretends to
-  # have.
+  # Public network access stays enabled, and that is a deliberate boundary,
+  # not an oversight: authorization is azure RBAC alone (no access
+  # policies, and no keys -- the certificate material is pulled by the VM
+  # over its managed identity) from any network that can reach the
+  # endpoint, and what the vault holds makes that boundary material. One
+  # instance's vault carries its published TLS material AND its shell-env
+  # secrets -- every project credential the container's build and runtime
+  # consume -- so the boundary's entire weight rests on the role
+  # assignments this module declares: the VM identity's read-only Secrets
+  # User, and the operators' Officer grant. A principal holding neither
+  # role learns nothing from holding the vault's URI. The VM has no public
+  # IP, so its own pulls leave the subnet over azure's egress path.
+  # Network-wide private endpoints are a later hardening input away, not a
+  # default this composition pretends to have.
   public_network_access_enabled = true
 
   tags = merge(var.tags, {

@@ -503,7 +503,15 @@ def test_postcreate_azure_bootstrap_pulls_through_the_managed_identity() -> None
     fetch_body = _sh_function_body("fetch_key_vault_secret", _postcreate_text())
     assert "https://${DEVCONTAINER_VAULT_NAME}.vault.azure.net/secrets/${secret}" in fetch_body
     assert "api-version=${DEVCONTAINER_KEYVAULT_API_VERSION}" in fetch_body
-    assert "Authorization: Bearer ${token}" in fetch_body
+    assert "printf 'Authorization: Bearer %s\\n' \"${token}\"" in fetch_body
+    assert "-H @-" in fetch_body, (
+        "the bearer header reaches curl through stdin (`-H @-`), never as an argv word"
+    )
+    command_lines = [line for line in fetch_body.splitlines() if not line.strip().startswith("#")]
+    assert all('-H "Authorization: Bearer' not in line for line in command_lines), (
+        "a shell-expanded Authorization header sits in the process table for the "
+        "whole fetch, readable by anything that can list processes"
+    )
     assert '["value"]' in fetch_body, "the Key Vault answer is JSON; the secret value is extracted"
     assert "was 'make push-secrets' run for this project?" in fetch_body, (
         "the remedy discipline the aws arm applies is the azure arm's too"

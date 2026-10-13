@@ -45,6 +45,16 @@ variable "instance_name" {
     default: no instance name is a literal inside this module.
   EOT
   type        = string
+
+  validation {
+    # The hybrid connection this module creates is the junction
+    # "gd-" + var.instance_name, and a hybrid connection name must end in
+    # an alphanumeric character; a trailing dash on the instance name
+    # would leave azure refusing the connection's own creation at apply.
+    # Refusing it here fails the plan naming the junction instead.
+    condition     = !can(regex("-$", var.instance_name))
+    error_message = "var.instance_name (${var.instance_name}) must not end with a dash: the hybrid connection name is the junction \"gd-${var.instance_name}\" and a relay hybrid connection name must end in an alphanumeric character."
+  }
 }
 
 variable "name_prefix" {

@@ -44,9 +44,19 @@ resource "azurerm_subnet" "this" {
   virtual_network_name = azurerm_virtual_network.this.name
   address_prefixes     = [var.subnet_cidr]
 
-  # Azure's default outbound path for a subnet carries the standard
-  # platform egress; unlike AWS there is no internet-gateway object to
-  # create or route table to wire for an outbound-capable subnet, so none
-  # is declared here. The security module associates the subnet's network
-  # security group; this module associates nothing.
+  # The platform egress is pinned, not inherited: the compute module's
+  # cloud-init -- the package_update/packages install, the curl of the
+  # docker apt signing key, the container image pulls and the relay
+  # listener's outbound control channel -- all depend on the subnet
+  # carrying a default outbound path, and ARM API versions after
+  # 2026-03-31 default new virtual networks to private (no default
+  # egress), a default the azurerm provider's ~> 4.0 constraint would
+  # otherwise adopt silently on a future provider upgrade. Stating the
+  # value here makes the egress a declared property of this module on
+  # whichever side of that date the resolved provider sits. Unlike AWS
+  # there is no internet-gateway object to create or route table to wire
+  # for an outbound-capable subnet, so none is declared here. The security
+  # module associates the subnet's network security group; this module
+  # associates nothing.
+  default_outbound_access_enabled = true
 }

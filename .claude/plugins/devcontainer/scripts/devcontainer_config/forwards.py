@@ -40,7 +40,11 @@ instance.
 Readiness and shutdown are poll-based, never a fixed wait: the caller
 injects the clock and the limits, and the timeouts are configurable through
 `FORWARD_OPEN_TIMEOUT_SECONDS` and `FORWARD_STOP_TIMEOUT_SECONDS` (read in
-exactly one place, through `hostprobe.read_positive_seconds`). Readiness
+exactly one place each, through `hostprobe.read_positive_seconds`). An
+unset `FORWARD_OPEN_TIMEOUT_SECONDS` gives a relay-kind open or refresh a
+larger default budget than the other kinds, because the relay transport's
+connect flow runs one synchronous listener start before its readiness
+marker prints, and a cold start legitimately outlasts the generic budget. Readiness
 rests on two independent confirmations, either of which alone is enough to
 reject a forward: the "Connected:" marker can only be read from the current
 attempt's own log (every spawn empties the log first), and the recorded
@@ -66,7 +70,12 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from devcontainer_config import instances, repo, transport, transport_azure, transport_ssh
-from devcontainer_config.hostprobe import CommandResult, CommandRunner, read_positive_seconds
+from devcontainer_config.hostprobe import (
+    CommandResult,
+    CommandRunner,
+    HostProbeError,
+    read_positive_seconds,
+)
 
 # The transport commands this module spawns and manages. The child composes
 # its own aws/docker/az calls; this module only decides when and whether it
@@ -100,9 +109,16 @@ FORWARD_LOG_FILENAME = "forward.log"
 # polls, `OPEN_POLL_SECONDS` apart, before an unannounced child is stopped
 # and reported. `FORWARD_OPEN_TIMEOUT_SECONDS` (read through
 # `read_positive_seconds`, the one shared reader of this variable shape)
-# overrides the timeout main converts into the poll count.
+# overrides the timeout main converts into the poll count. The relay kind's
+# default is larger because its connect flow runs one synchronous
+# `az vm run-command` listener start before the readiness marker prints --
+# a cold start is bounded by the transport's own AZURE_LISTENER_START_TIMEOUT
+# (default 240 seconds), so the generic budget would always exhaust first
+# and kill a daemon that was about to announce; 600 polls is 300 seconds at
+# the default cadence, above that listener budget with headroom.
 OPEN_POLL_SECONDS = 0.5
 _OPEN_POLL_LIMIT_DEFAULT = 120  # 60 seconds at the default cadence
+_OPEN_POLL_LIMIT_RELAY_DEFAULT = 600  # 300 seconds at the default cadence
 OPEN_TIMEOUT_ENV_VAR = "FORWARD_OPEN_TIMEOUT_SECONDS"
 
 # The stop poll: SIGINT first, then SIGTERM to a holdout, then SIGKILL, and
@@ -466,7 +482,8 @@ def _poll_open(
     _stop_child(process)
     raise ForwardError(
         f"the forward daemon announced no readiness within {poll_limit} polls at "
-        f"{poll_seconds}s intervals; it was stopped. Its log, {log_file}:\n"
+        f"{poll_seconds}s intervals; it was stopped. Raise {OPEN_TIMEOUT_ENV_VAR} "
+        f"(in seconds) to wait longer. Its log, {log_file}:\n"
         f"{_log_tail(log_file)}"
     )
 
@@ -600,7 +617,7 @@ def open_forward(
     spawner: Spawner | None = None,
     poll_clock: Callable[[float], None] = time_sleep,
     poll_seconds: float = OPEN_POLL_SECONDS,
-    poll_limit: int = _OPEN_POLL_LIMIT_DEFAULT,
+    poll_limit: int | None = None,
     port_probe: Callable[[int], bool] | None = None,
 ) -> str:
     """Open one forward daemon and confirm it before returning.
@@ -696,7 +713,9 @@ def open_forward(
         spawner=spawn,
         poll_clock=poll_clock,
         poll_seconds=poll_seconds,
-        poll_limit=poll_limit,
+        poll_limit=poll_limit
+        if poll_limit is not None
+        else _open_poll_limit(relay=kind == KIND_RELAY),
     )
     port = _recorded_port(root, instance, runner)
     _verify_port_ready(
@@ -755,7 +774,7 @@ def stop_forward(
     listening_probe: Callable[[int], bool | None] | None = None,
     poll_clock: Callable[[float], None] = time_sleep,
     poll_seconds: float = STOP_POLL_SECONDS,
-    poll_limit: int = _STOP_POLL_LIMIT_DEFAULT,
+    poll_limit: int | None = None,
 ) -> str:
     """Stop one forward daemon and verify the tunnel is actually closed.
 
@@ -791,7 +810,13 @@ def stop_forward(
     else:
         stopped = f"forward for {instance!r} was not running (pid {record.pid} is gone)"
     _terminate_tree(record.pid, send, alive, poll_clock, poll_seconds)
-    _verify_port_closed(record.port, listening, poll_clock, poll_seconds, poll_limit)
+    _verify_port_closed(
+        record.port,
+        listening,
+        poll_clock,
+        poll_seconds,
+        poll_limit if poll_limit is not None else _stop_poll_limit(),
+    )
     _remove_record(instance)
     return stopped
 
@@ -873,7 +898,7 @@ def refresh_forward(
     spawner: Spawner | None = None,
     poll_clock: Callable[[float], None] = time_sleep,
     poll_seconds: float = OPEN_POLL_SECONDS,
-    open_poll_limit: int = _OPEN_POLL_LIMIT_DEFAULT,
+    open_poll_limit: int | None = None,
     port_probe: Callable[[int], bool] | None = None,
 ) -> str:
     """Stop and re-open one forward from its own recorded command.
@@ -884,7 +909,11 @@ def refresh_forward(
     never re-open a different tunnel than the one that expired. The re-open
     passes through the same spawn, log reset, readiness poll and port
     verification `open_forward` uses, so the fresh daemon is confirmed by
-    the same two independent answers before the record is rewritten.
+    the same two independent answers before the record is rewritten. The
+    re-open's budget comes from `FORWARD_OPEN_TIMEOUT_SECONDS` like any
+    open's, with the record's own engine kind selecting the relay default --
+    a relay refresh re-runs the recorded command's listener start, whose
+    cold start needs the same larger budget a relay open gets.
 
     Raises:
         ForwardError: there is no record to refresh, or the stop or the
@@ -907,7 +936,11 @@ def refresh_forward(
         spawner=spawn,
         poll_clock=poll_clock,
         poll_seconds=poll_seconds,
-        poll_limit=open_poll_limit,
+        poll_limit=(
+            open_poll_limit
+            if open_poll_limit is not None
+            else _open_poll_limit(relay=record.engine_kind == KIND_RELAY)
+        ),
     )
     port = _recorded_port(root, instance, runner)
     _verify_port_ready(
@@ -933,17 +966,40 @@ def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
 
 
-def _open_poll_limit() -> int:
-    timeout = read_positive_seconds(
-        OPEN_TIMEOUT_ENV_VAR, float(_OPEN_POLL_LIMIT_DEFAULT * OPEN_POLL_SECONDS)
-    )
+def _open_poll_limit(*, relay: bool = False) -> int:
+    """The open poll's budget, in polls, from `FORWARD_OPEN_TIMEOUT_SECONDS`.
+
+    Unset, a relay open or refresh gets the relay default -- above the
+    listener start its connect flow runs synchronously -- and every other
+    kind the generic default; an explicitly set value wins for every kind.
+
+    Raises:
+        ForwardError: the variable is set to something that is not a
+            finite positive number of seconds.
+    """
+    default_limit = _OPEN_POLL_LIMIT_RELAY_DEFAULT if relay else _OPEN_POLL_LIMIT_DEFAULT
+    try:
+        timeout = read_positive_seconds(
+            OPEN_TIMEOUT_ENV_VAR, float(default_limit * OPEN_POLL_SECONDS)
+        )
+    except HostProbeError as exc:
+        raise ForwardError(f"{OPEN_TIMEOUT_ENV_VAR} is unusable: {exc}") from exc
     return max(1, round(timeout / OPEN_POLL_SECONDS))
 
 
 def _stop_poll_limit() -> int:
-    timeout = read_positive_seconds(
-        STOP_TIMEOUT_ENV_VAR, float(_STOP_POLL_LIMIT_DEFAULT * STOP_POLL_SECONDS)
-    )
+    """The stop path's port-closed budget, from `FORWARD_STOP_TIMEOUT_SECONDS`.
+
+    Raises:
+        ForwardError: the variable is set to something that is not a
+            finite positive number of seconds.
+    """
+    try:
+        timeout = read_positive_seconds(
+            STOP_TIMEOUT_ENV_VAR, float(_STOP_POLL_LIMIT_DEFAULT * STOP_POLL_SECONDS)
+        )
+    except HostProbeError as exc:
+        raise ForwardError(f"{STOP_TIMEOUT_ENV_VAR} is unusable: {exc}") from exc
     return max(1, round(timeout / STOP_POLL_SECONDS))
 
 

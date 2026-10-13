@@ -130,6 +130,8 @@ from devcontainer_config import (
     instances,
     repo,
     skills_install,
+    transport,
+    transport_azure,
 )
 from devcontainer_config.githooks import (
     HOOK_NAMES,
@@ -429,8 +431,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     instance_init_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
     instance_init_parser.add_argument(
-        "--region", default=_DEFAULT_REGION, help=_INSTANCE_INIT_REGION_HELP
+        "--cloud",
+        choices=(instances.ENGINE_KIND_EC2, instances.ENGINE_KIND_AZURE),
+        default=instances.ENGINE_KIND_EC2,
+        help=_INSTANCE_INIT_CLOUD_HELP,
     )
+    instance_init_parser.add_argument(
+        "--location", metavar="LOCATION", help=_INSTANCE_INIT_LOCATION_HELP
+    )
+    instance_init_parser.add_argument(
+        "--vm-size",
+        metavar="VM_SIZE",
+        default=instance_ops.DEFAULT_AZURE_VM_SIZE,
+        help=_INSTANCE_INIT_VM_SIZE_HELP,
+    )
+    # instance-init's --region defaults to None rather than _DEFAULT_REGION:
+    # "no region was given" must survive the parse, because the azure scaffold
+    # refuses a region outright and the EC2 scaffold applies the default
+    # itself. The other parsers keep the constant default.
+    instance_init_parser.add_argument("--region", default=None, help=_INSTANCE_INIT_REGION_HELP)
     instance_init_parser.add_argument("--ami", metavar="AMI_ID", help=_AMI_HELP)
     instance_init_parser.set_defaults(handler=_run_instance_init)
 
@@ -634,6 +653,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     skills_list_parser.set_defaults(handler=_run_skills_list)
 
+    secrets_vault_parser = subparsers.add_parser(
+        "secrets-vault",
+        help="Print the azure Key Vault name recorded for one instance's engine address.",
+        description=_SECRETS_VAULT_DESCRIPTION,
+    )
+    secrets_vault_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    secrets_vault_parser.set_defaults(handler=_run_secrets_vault)
+
+    azure_wait_agent_parser = subparsers.add_parser(
+        "azure-wait-agent",
+        help="Wait until one azure instance's VM reports running and its VM agent Ready.",
+        description=_AZURE_WAIT_AGENT_DESCRIPTION,
+    )
+    azure_wait_agent_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    azure_wait_agent_parser.set_defaults(handler=_run_azure_wait_agent)
+
     return parser
 
 
@@ -710,8 +745,10 @@ Terragrunt/backend concern.
 
 # The region default every aws-touching instance subcommand applies, the same
 # default the make instance-* targets apply (spec Section 4.5's worked
-# example). Declared once so the four parsers that use it cannot drift.
-_DEFAULT_REGION = "us-east-1"
+# example). Sourced from `instance_ops.DEFAULT_REGION`, the one definition
+# site, so the four parsers that use it and the scaffold's own default
+# cannot drift.
+_DEFAULT_REGION = instance_ops.DEFAULT_REGION
 
 _INSTANCE_NAME_HELP = "The instance name (a project name, e.g. acme)."
 
@@ -725,11 +762,29 @@ _REGION_HELP = (
 # AMI from SSM and to derive the availability_zone it writes, while the
 # deployment itself runs in whatever REMOTE_AWS_REGION names at make
 # instance-deploy time. Sharing the generic wording would let a scaffold-time
-# flag read as the deployment region, which it is not.
+# flag read as the deployment region, which it is not. The default is
+# us-east-1 -- instance_ops.DEFAULT_REGION, applied by the scaffold when the
+# flag is omitted.
 _INSTANCE_INIT_REGION_HELP = (
     "Region for the scaffold-time AMI lookup and the written availability "
     "zone ONLY (default: us-east-1). Not the deployment region: the "
-    "deployment runs in REMOTE_AWS_REGION, which has no default."
+    "deployment runs in REMOTE_AWS_REGION, which has no default. EC2 only: "
+    "the azure kind refuses it and takes --location instead."
+)
+
+_INSTANCE_INIT_CLOUD_HELP = (
+    "Which cloud the scaffold writes the deployment for: ec2 (the default) "
+    "or azure. Azure requires --location, and the azure kind is reached "
+    "through an azure relay rather than SSM."
+)
+
+_INSTANCE_INIT_LOCATION_HELP = (
+    "The azure location the VM and its vnet deploy into (required when --cloud azure; no default)."
+)
+
+_INSTANCE_INIT_VM_SIZE_HELP = (
+    "The azure VM size the scaffold writes "
+    f"(default: {instance_ops.DEFAULT_AZURE_VM_SIZE}); --cloud azure only."
 )
 
 _AMI_HELP = (
@@ -812,9 +867,10 @@ def _instance_row_values(row: instance_ops.InstanceState, root: Path) -> tuple[s
 
     The STATE column is kind-aware: an SSH engine row carries the
     reachability probe's answer (`ok`/`unreachable`), the one liveness
-    question its kind has, while an EC2 row carries the EC2 power state.
-    The EC2-only probes an ssh engine never ran (`ec2_state`,
-    `params_present`) stay None there, which renders as the same dash an
+    question its kind has; an azure row carries the VM power state its
+    instance view reported; and an EC2 row carries the EC2 power state.
+    The kind-only probes a row never ran (`ec2_state` on azure, and the
+    reverse) stay None there, which renders as the same dash an
     unanswerable probe gets.
     """
     if row.context_exists is True:
@@ -825,6 +881,8 @@ def _instance_row_values(row: instance_ops.InstanceState, root: Path) -> tuple[s
         context = "-"
     if row.engine_reachable is not None:
         state_column = "ok" if row.engine_reachable else "unreachable"
+    elif row.azure_state is not None:
+        state_column = row.azure_state
     else:
         state_column = row.ec2_state or "-"
     return (
@@ -876,13 +934,24 @@ def _report_probe_failures(rows: Sequence[instance_ops.InstanceState]) -> int:
 def _run_instance_init(args: argparse.Namespace) -> int:
     """Scaffold the one file a new instance requires; print the guidance verbatim.
 
-    `instance_ops.scaffold` raises `ScaffoldError` on any refusal, which
+    `instance_ops.scaffold` raises `ScaffoldError` on any refusal (an
+    invalid name, an unknown cloud, an azure input missing or an EC2-only
+    one given to azure, an existing directory, an unresolvable AMI), which
     `main` converts into exit 1 -- there is no failure this handler reports
-    as anything but that exception.
+    as anything but that exception. `region` is passed through unset when
+    the flag was omitted, so the scaffold sees "not given" and applies its
+    own EC2 default.
     """
     root = repo.find_root(Path.cwd())
     result = instance_ops.scaffold(
-        root, args.name, region=args.region, ami=args.ami, runner=instance_ops.subprocess_runner
+        root,
+        args.name,
+        cloud=args.cloud,
+        region=args.region,
+        ami=args.ami,
+        location=args.location,
+        vm_size=args.vm_size,
+        runner=instance_ops.subprocess_runner,
     )
     for message in result.messages:
         print(message)
@@ -1157,12 +1226,16 @@ def _print_address_block(root: Path, name: str) -> None:
     The block is kind-specific, keyed on `instances.read_kind`: an EC2
     instance prints exactly the six rows it always printed (Terragrunt
     directory, state key, docker context, parameter prefix, certificate
-    directory; every line the existing consumers pin), while an SSH
+    directory; every line the existing consumers pin), an SSH
     engine prints `ENGINE_`-prefixed lines from its manifest instead of the
-    Terragrunt/state/Parameter Store rows that do not exist for it. The
-    `ENGINE_` prefix is what lets the shell export loop consume the block
-    unchanged: it exports every `KEY=value` line generically, so the new
-    keys need no shell change.
+    Terragrunt/state/Parameter Store rows that do not exist for it, and the
+    azure kind prints the Terragrunt/docker-context/certificate rows
+    without the state-key and Parameter Store rows -- its deployment state
+    lives behind the shared azure layer and its relay carries no SSM
+    material, so those two derivations name nothing the kind addresses.
+    The `ENGINE_` prefix is what lets the shell export loop consume the
+    block unchanged: it exports every `KEY=value` line generically, so the
+    new keys need no shell change.
 
     `forwarded_port` is deliberately excluded: it needs a real docker
     context (AC-FUNC-009 names only "the statically derivable half"), and
@@ -1181,6 +1254,13 @@ def _print_address_block(root: Path, name: str) -> None:
         print(f"ENGINE_USER={values['user']}")
         print(f"ENGINE_DOCKER_ADDR={values['docker_addr']}")
         print(f"ENGINE_ENDPOINT={instances.engine_endpoint(root, name)}")
+        return
+    if kind == instances.ENGINE_KIND_AZURE:
+        print(f"INSTANCE={name}")
+        print(f"KIND={kind}")
+        print(f"TERRAGRUNT_DIR={instances.terragrunt_dir(root, name)}")
+        print(f"DOCKER_CONTEXT={instances.docker_context(root, name)}")
+        print(f"CERTS_DIR={instances.certs_dir(name)}")
         return
     print(f"INSTANCE={name}")
     print(f"TERRAGRUNT_DIR={instances.terragrunt_dir(root, name)}")
@@ -1518,6 +1598,66 @@ def _run_skills_list(args: argparse.Namespace) -> int:
     return 0
 
 
+_SECRETS_VAULT_DESCRIPTION = """Print the azure Key Vault name one instance's address record has.
+
+The one reader of the record's vault name that the shell entry points
+consume: push-secrets.sh publishes the configuration payload there, and
+container.sh's staleness probe compares against it. The record is written
+by the deploy, so a missing record -- or one whose vault name has not been
+written yet -- fails naming `make instance-deploy` as the remedy, the same
+refusal every other accessor on that record raises.
+"""
+
+
+def _run_secrets_vault(args: argparse.Namespace) -> int:
+    """Print `instances.engine_vault_name`'s answer, one line, nothing else."""
+    root = repo.find_root(Path.cwd())
+    print(instances.engine_vault_name(root, args.name))
+    return 0
+
+
+_AZURE_WAIT_AGENT_DESCRIPTION = """Wait for one azure instance's VM to become drivable.
+
+The bounded readiness poll `make cert-install` runs before the install arm
+touches the VM: a freshly started VM's agent answers before the platform
+has finished reporting it running, and an install issued too early fails
+on a daemon that does not exist yet. The engine address record names the
+VM (`resource_group` and `vm_name`, written by the deploy), and the poll
+itself is `transport_azure.wait_agent_ready` -- the one home of the
+instance-view reads -- bounded by AZURE_AGENT_READY_TIMEOUT.
+"""
+
+
+def _run_azure_wait_agent(args: argparse.Namespace) -> int:
+    """Poll the record's VM until it reports running with its VM agent Ready.
+
+    The record is read through `instances.engine_address` (a missing or
+    half-written record fails naming the deploy that rewrites it), and the
+    poll runs through `transport_azure.wait_agent_ready` on the production
+    runner. Everything it waits for is an answer the platform gives, so
+    this handler prints only the confirmed outcome.
+    """
+    root = repo.find_root(Path.cwd())
+    address = instances.engine_address(root, args.name)
+    resource_group = address.get("resource_group")
+    vm_name = address.get("vm_name")
+    if (
+        not isinstance(resource_group, str)
+        or not resource_group
+        or not isinstance(vm_name, str)
+        or not vm_name
+    ):
+        raise instances.EngineAddressError(
+            f"ERROR: the engine address record for instance {args.name!r} carries no "
+            "usable 'resource_group'/'vm_name' pair\n"
+            f"The readiness poll reads both from {instances.engine_address_path(args.name)}.\n"
+            f"Redeploy to write it: make instance-deploy INSTANCE={args.name}"
+        )
+    transport_azure.wait_agent_ready(resource_group, vm_name, transport.subprocess_command_runner)
+    print(f"{args.name}: VM running and its VM agent reports Ready.")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Parse `argv`, run the selected command, and exit the process.
 
@@ -1542,6 +1682,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         instance_ops.InstanceOpsError,
         hostcreds.HostCredsError,
         skills_install.SkillsInstallError,
+        transport_azure.RelayTransportError,
     ) as exc:
         print(str(exc), file=sys.stderr)
         exit_code = 1

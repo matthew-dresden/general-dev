@@ -89,31 +89,51 @@ fi
 endef
 
 # The kind refusals. rd_engine_kind/rd_require_engine_kind (lib.sh) are the
-# one predicate and the one refusal; these three constants are the per-family
+# one predicate and the one refusal; these constants are the per-family
 # remedies the refusals name, declared once so every target of a family
 # states the same guidance and none of them restates the predicate. They are
 # comma-free on purpose: they ride $(call ...) arguments, which split on
 # commas.
 EC2_KIND_REMEDY := an ssh engine has no EC2 lifecycle to plan or deploy and no power state to stop or start; reach it with make engine-verify INSTANCE=<name> or remove it with make engine-remove INSTANCE=<name> CONFIRM=remove and connect with make connect-start INSTANCE=<name>
-BUCKET_KIND_REMEDY := state buckets belong to the EC2 fleet; an ssh engine has no state bucket and no engine-* equivalent for this target
+BUCKET_KIND_REMEDY := state stores are per kind: EC2 buckets answer to the aws CLI and azure storage accounts to the az CLI; an ssh engine has neither and no engine-* equivalent for this target
 CERT_KIND_REMEDY := no TLS material exists for ssh engines; nothing to report for one
 
-# The fleet-wide kind guard, for the surfaces that address no single
-# instance but only reach EC2 state (bucket-list, bucket-delete ALL=1,
-# cert-status): every configured instance must be the EC2 kind before the
-# surface runs. The refusal fires on the first ssh engine and names it --
-# fail-fast fleet semantics, never a silent skip -- so a fleet mixing kinds
-# is refused here on purpose and the help rows say to mix fleets
-# deliberately. $(1) is the remedy line rd_require_engine_kind prints.
-define FLEET_EC2_KIND_GUARD
+# The fleet-wide state-surface guard, for the surfaces that address no
+# single instance (bucket-list, bucket-delete ALL=1): the state surfaces are
+# per kind -- the EC2 fleet's buckets answer to the aws CLI, the azure
+# fleet's storage accounts to the az CLI -- so the guard resolves every
+# configured instance fresh and answers with the one kind the fleet carries,
+# in fleet_kind, for the caller to dispatch on. A fleet mixing kinds is
+# refused naming them, with the per-kind instruction -- fail-fast, never a
+# silent skip; a fleet of ssh engines is refused with the family's remedy
+# ($(1)), because neither surface reaches one. An empty fleet reads as the
+# EC2 kind the surfaces have always served, so an empty listing still
+# reaches its nothing-configured branch unchanged.
+define FLEET_STATE_KIND_GUARD
 . $(RD_DIR)/lib.sh; \
 names=$$($(DISCOVER_INSTANCE_NAMES)) || exit 1; \
+kinds=""; \
 while IFS= read -r name; do \
 	[ -n "$$name" ] || continue; \
 	unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
 	INSTANCE="$$name" rd_resolve_instance; \
-	rd_require_engine_kind ec2 "$(1)"; \
-done <<< "$$names"
+	kinds="$$kinds $$(rd_engine_kind)"; \
+done <<< "$$names"; \
+set -- $$kinds; \
+if [ $$# -eq 0 ]; then \
+	fleet_kind="ec2"; \
+elif [ $$# -eq 1 ] && [ "$$1" = "ssh" ]; then \
+	rd_fail "every configured instance is an ssh engine" \
+		"$(1)"; \
+elif [ $$# -eq 1 ]; then \
+	fleet_kind="$$1"; \
+else \
+	rd_fail "this fleet mixes engine kinds ($$kinds)" \
+		"state surfaces are per kind and neither has a mixed-fleet form; run them" \
+		"per kind instead: with only EC2 instances configured the surface answers" \
+		"to the aws CLI, with only azure ones to the az CLI, and one instance's" \
+		"store is deleted per instance: make bucket-delete INSTANCE=<name>."; \
+fi
 endef
 
 # The instance names `instances.discover` reports, one per line, sorted --
@@ -138,22 +158,34 @@ endef
 # (make expands them textually; the shell sees one function definition per
 # run). tg_init <name> cds into the instance's directory -- always from
 # $(CURDIR), so consecutive iterations never nest relative paths -- then
-# decides the init form BEFORE running any Terragrunt, from one explicit
-# probe instead of a caught error: devcontainer_config.state_bucket composes
-# the backend bucket's name from remote-instances/root.hcl's own template
-# (the single declaration of it), probes the bucket with `aws s3api
-# head-bucket`, and prints `bootstrap` when the bucket is confirmed missing
-# and `plain` otherwise. `bootstrap` runs `terragrunt init
-# --backend-bootstrap`, which provisions the bucket on the first run; every
-# other probe outcome -- a 403 on a bucket this identity cannot see, a
-# failed account lookup, anything unexpected -- is raised by the module with
-# the command and its raw output, so the run stops loudly instead of
-# retrying behind the failure. Neither init form is retried, and neither
-# failure is swallowed: both end the target at the step that failed.
+# does the init work the instance's engine kind needs, from the kind the
+# directory itself declares. The azure kind has no --backend-bootstrap form
+# (Terragrunt's azurerm backend bootstraps nothing): its state store -- one
+# storage account and its `tfstate` blob container per instance, in a
+# dedicated resource group that stands outside the deployment's lifecycle --
+# is ensured by devcontainer_config.state_store before any Terragrunt
+# command runs, probing each resource and creating it only when confirmed
+# missing, every other probe answer raised with the command and its raw
+# output. The EC2 kind decides the init form BEFORE running any Terragrunt,
+# from one explicit probe instead of a caught error:
+# devcontainer_config.state_bucket composes the backend bucket's name from
+# remote-instances/root.hcl's own template (the single declaration of it),
+# probes the bucket with `aws s3api head-bucket`, and prints `bootstrap`
+# when the bucket is confirmed missing and `plain` otherwise. `bootstrap`
+# runs `terragrunt init --backend-bootstrap`, which provisions the bucket on
+# the first run; every other probe outcome -- a 403 on a bucket this
+# identity cannot see, a failed account lookup, anything unexpected -- is
+# raised by the module with the command and its raw output, so the run stops
+# loudly instead of retrying behind the failure. Neither init form is
+# retried, and neither failure is swallowed: both end the target at the step
+# that failed.
 #
-# REMOTE_AWS_REGION has no default here (see REMOTE_AWS_REGION_GUARD): the
-# helper requires it fail-fast before the first Terragrunt call, because
-# root.hcl derives each instance's state bucket name from it.
+# REMOTE_AWS_REGION has no default on the EC2 branch (see
+# REMOTE_AWS_REGION_GUARD): the helper requires it fail-fast before the
+# first Terragrunt call, because root.hcl derives each instance's state
+# bucket name from it. The azure branch expands no region guard: az is
+# ambiently logged in and its storage account takes the location the
+# scaffold pins, so there is no region for it to require.
 define TERRAGRUNT_INIT_HELPER
 tg_init() { \
 	name="$$1"; \
@@ -164,13 +196,18 @@ tg_init() { \
 		exit 1; \
 	fi; \
 	cd "$$dir" || exit 1; \
-	$(REMOTE_AWS_REGION_GUARD) \
-	export TG_NON_INTERACTIVE=true; \
-	init_form=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket init-form "$(CURDIR)" "$$name") || exit 1; \
-	if [ "$$init_form" = "bootstrap" ]; then \
-		echo y | terragrunt init --backend-bootstrap -input=false || exit 1; \
+	kind=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.read_kind(repo.find_root(Path.cwd()), '$$name'))"); \
+	if [ "$$kind" = "azure" ]; then \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_store ensure "$(CURDIR)" "$$name" || exit 1; \
 	else \
-		terragrunt init -input=false || exit 1; \
+		$(REMOTE_AWS_REGION_GUARD) \
+		export TG_NON_INTERACTIVE=true; \
+		init_form=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket init-form "$(CURDIR)" "$$name") || exit 1; \
+		if [ "$$init_form" = "bootstrap" ]; then \
+			echo y | terragrunt init --backend-bootstrap -input=false || exit 1; \
+		else \
+			terragrunt init -input=false || exit 1; \
+		fi; \
 	fi; \
 }
 endef
@@ -291,30 +328,30 @@ help:
 	note "INSTANCES" "one remote engine per project under remote-instances/; instance names are project names (e.g. acme)"; \
 	row "make list-instances"   "host"   "List every instance with live status: EC2 state, id, params, certs, forward, context; ssh engines answer reachability instead."; \
 	row "make list-containers"  "host"   "Every container this project owns, local engine plus every instance's, with per-engine reachability."; \
-	row "make instance-init"    "host"   "Scaffold <project>'s directory; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= for the AMI/AZ lookup only; the deployment region is REMOTE_AWS_REGION]"; \
-	row "make instance-deploy"  "remote" "Converge: provision, link id, trust chain if missing, push secrets. Refuses instance replacement without CONFIRM=replace. INSTANCE= | ALL=1"; \
+	row "make instance-init"    "host"   "Writes <project>'s scaffold; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= AMI/AZ lookup; deploys in REMOTE_AWS_REGION]. Azure: CLOUD=azure LOCATION=<location> [VM_SIZE=]"; \
+	row "make instance-deploy"  "remote" "Converge: provision, record the engine address (EC2 links the id, azure the record), trust chain, push secrets. Refuses replacement without CONFIRM=replace. INSTANCE= | ALL=1"; \
 	row "make instance-status"  "host"   "One instance's live state, or every instance with ALL=1. INSTANCE=<instance-name> | ALL=1"; \
-	row "make instance-plan"    "remote" "Terragrunt plan per instance; bootstraps the instance's state bucket on first run. INSTANCE=<instance-name> | ALL=1"; \
-	row "make instance-stop"    "remote" "Stop the EC2 instance and wait until it reports stopped. INSTANCE=<instance-name> | ALL=1"; \
-	row "make instance-start"   "remote" "Start it again and wait for its SSM agent to report ready. INSTANCE=<instance-name> | ALL=1"; \
-	row "make instance-destroy" "remote" "Destroy + cleanup params, certs, context, id. CONFIRM=destroy only for ALL=1. INSTANCE=<instance-name> | ALL=1"; \
-	row "make instance-link"    "host"   "Save the instance's EC2 id for other targets. Deploy does this automatically; run it only after re-provisioning outside make. INSTANCE_ID=<id>"; \
+	row "make instance-plan"    "remote" "Terragrunt plan per instance; bootstraps the state bucket (EC2) or ensures the azure state store on first run. INSTANCE=<instance-name> | ALL=1"; \
+	row "make instance-stop"    "remote" "Stop the instance's VM (EC2 or azure) and wait until it reports down. INSTANCE=<instance-name> | ALL=1"; \
+	row "make instance-start"   "remote" "Start it again and wait for its engine agent to report ready. INSTANCE=<instance-name> | ALL=1"; \
+	row "make instance-destroy" "remote" "Destroy + cleanup context, certs (and EC2 params). CONFIRM=destroy only for ALL=1. INSTANCE=<instance-name> | ALL=1"; \
+	row "make instance-link"    "host"   "EC2 only: save the instance's EC2 id; deploy does this automatically. Azure has no id: the deploy writes its record. INSTANCE_ID=<id>"; \
 	row "make engine-init"      "host"   "Scaffold an ssh engine manifest (engine.json). INSTANCE=<name> HOST=<host> USER=<user> [PORT=22] [DOCKER_ADDR=/var/run/docker.sock; a Windows engine needs tcp://localhost:2375]"; \
 	row "make engine-verify"    "host"   "One-shot ssh engine reachability proof: opens the forward, handshakes docker through its context, closes the forward. The ssh engine's connect-start."; \
 	row "make engine-remove"    "host"   "Remove an ssh engine whole: forward, docker context, local state, registration. Needs CONFIRM=remove; refuses while a project container exists on the engine."; \
 	row "make cert-ca"          "host"   "Create this instance's certificate authority. Once per instance; refuses if one exists."; \
 	row "make cert-client"      "host"   "Issue the client certificate 'make connect-start' presents. Run after cert-ca, and again at renewal."; \
-	row "make cert-publish"     "remote" "Issue server material and publish it to Parameter Store. The daemon needs it to open its listener."; \
+	row "make cert-publish"     "remote" "Issue server material and publish it to the engine's store (Parameter Store, or Key Vault for azure). The daemon needs it to open its listener."; \
 	row "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."; \
-	row "make cert-status"      "host"   "Client and CA expiry per instance. EC2 engines only; no TLS material exists for ssh engines."; \
-	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."; \
-	row "make connect-start"    "remote" "Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json engines); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
+	row "make cert-status"      "host"   "Client and CA expiry per instance. Remote engines only (EC2 and azure); ssh engines carry no TLS material."; \
+	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to the engine's store (Parameter Store, or Key Vault for azure). Remote builds do this when needed."; \
+	row "make connect-start"    "remote" "Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json, relay for azure engines); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
 	row "make connect-status"   "host"   "Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1"; \
 	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \
 	row "make connect-refresh"  "host"   "Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1"; \
 	row "make connect-list"     "host"   "Every instance's forward: pid, port, listening or not."; \
-	row "make bucket-list"      "host"   "Every state bucket this fleet's naming template matches: name, configured or orphaned. REMOTE_AWS_REGION required. EC2 engines only; refuses if any ssh engine is configured."; \
-	row "make bucket-delete"    "host"   "Purge + delete state buckets: INSTANCE=<name>, or ALL=1 CONFIRM=delete for every one in REMOTE_AWS_REGION. REMOTE_AWS_REGION required. EC2 engines only; a mixed fleet is refused."; \
+	row "make bucket-list"      "host"   "Every state store this fleet's naming template matches (EC2 buckets, azure accounts): name, configured or orphaned. Per kind; mixed fleet refused. EC2 needs REMOTE_AWS_REGION."; \
+	row "make bucket-delete"    "host"   "Purge + delete state stores: INSTANCE=<name> (EC2 bucket or azure account), or ALL=1 CONFIRM=delete for every one. Per kind; mixed fleet refused. EC2 needs REMOTE_AWS_REGION."; \
 	row "make remote"           "host"   "Point them at the remote engine ($(REMOTE_CONTEXT)): ensures the engine's forward in the background, then switches docker. INSTANCE=<name> targets that instance."; \
 	note "BUILD" "every target blocks until the container is up and exits non-zero if anything fails"; \
 	row "make build"            "both"   "Create the container for the active backend. Refuses if one already exists."; \
@@ -402,7 +439,10 @@ help:
 # connect-list. lib.sh is sourced once, unconditionally, before the
 # dispatch: the kind checks below read the kind through rd_engine_kind, the
 # one predicate, and the ssh branch can only run for a resolved engine
-# anyway.
+# anyway. The azure kind (KIND=azure) routes to the relay form, which
+# carries only the name and the context: the transport reads the relay
+# address record the deploy wrote, so the relay branch needs no env guards
+# at all -- engine-address.json is the config.
 connect-start:
 	@set -euo pipefail; \
 	$(PROXY_ENV) \
@@ -421,9 +461,9 @@ connect-start:
 		ctx="$(REMOTE_CONTEXT)"; \
 	fi; \
 	case "$$transport" in \
-		ssh|ssm|"") ;; \
+		ssh|ssm|relay|"") ;; \
 		*) printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT="%s" is not recognized.\n' "$$transport" >&2; \
-		   printf '        Accepted values: ssm (the EC2 SSM forward) and ssh (the SSH engine forward).\n' >&2; \
+		   printf '        Accepted values: ssm (the EC2 SSM forward), ssh (the SSH engine forward), and relay (the azure relay forward).\n' >&2; \
 		   exit 1 ;; \
 	esac; \
 	route="ssm"; \
@@ -435,8 +475,29 @@ connect-start:
 				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to ssh.\n" >&2; \
 				exit 1; \
 			fi; \
+			if [ "$$transport" = "relay" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is an ssh engine; DEVCONTAINER_TRANSPORT=relay selects the azure relay transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to ssh.\n" >&2; \
+				exit 1; \
+			fi; \
+		elif [ "$$kind" = "azure" ]; then \
+			route="relay"; \
+			if [ "$$transport" = "ssm" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is an azure engine; DEVCONTAINER_TRANSPORT=ssm selects the ssm transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to relay.\n" >&2; \
+				exit 1; \
+			fi; \
+			if [ "$$transport" = "ssh" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is an azure engine; DEVCONTAINER_TRANSPORT=ssh selects the ssh transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to relay.\n" >&2; \
+				exit 1; \
+			fi; \
 		elif [ "$$transport" = "ssh" ]; then \
 			printf '\033[0;31m[ERROR]\033[0m instance %s is an EC2 engine; DEVCONTAINER_TRANSPORT=ssh selects the ssh transport, which only reaches ssh engines\n' "$$target" >&2; \
+			printf '        Unset DEVCONTAINER_TRANSPORT or set it to ssm.\n' >&2; \
+			exit 1; \
+		elif [ "$$transport" = "relay" ]; then \
+			printf '\033[0;31m[ERROR]\033[0m instance %s is an EC2 engine; DEVCONTAINER_TRANSPORT=relay selects the azure relay transport, which only reaches azure engines\n' "$$target" >&2; \
 			printf '        Unset DEVCONTAINER_TRANSPORT or set it to ssm.\n' >&2; \
 			exit 1; \
 		fi; \
@@ -445,8 +506,16 @@ connect-start:
 		printf '        The ssh form forwards the values of one resolved engine; run:\n' >&2; \
 		printf '        make connect-start INSTANCE=<name>\n' >&2; \
 		exit 2; \
+	elif [ "$$transport" = "relay" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT=relay needs the engine named\n' >&2; \
+		printf '        The relay form forwards one resolved azure engine; run:\n' >&2; \
+		printf '        make connect-start INSTANCE=<name>\n' >&2; \
+		exit 2; \
 	fi; \
 	case "$$route" in \
+		relay) \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
+				--name "$$target" --context "$$ctx" ;; \
 		ssh) \
 			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
 				--name "$$target" --host "$$ENGINE_HOST" --port "$$ENGINE_PORT" \
@@ -522,39 +591,58 @@ connect-refresh:
 connect-list:
 	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards list
 
-# State buckets: one per instance, named tg-state-<instance>-<region>-<account>-<suffix>
-# (the template and its committed suffix live in remote-instances/root.hcl,
-# which is the only place both are declared). list shows every bucket in the
+# State stores: one per instance, named from the template and its committed
+# suffix in remote-instances/root.hcl (the only place both are declared --
+# the EC2 bucket is tg-state-<instance>-<region>-<account>-<suffix>, the
+# azure storage account composes its lowercase-alphanumeric form around the
+# same per-instance naming idea). Read-only listing, and deletion, of the
+# fleet's stores. Both are per kind, decided by FLEET_STATE_KIND_GUARD
+# above: an all-EC2 fleet's buckets list and delete through
+# devcontainer_config.state_bucket exactly as they always did; an all-azure
+# fleet's storage accounts through devcontainer_config.state_store -- the
 # account whose name the template matches, marking the ones a configured
-# instance owns; delete purges every version and delete marker first, then
-# deletes the bucket -- one instance's with INSTANCE=<name>, every fleet
-# bucket in REMOTE_AWS_REGION with ALL=1, which additionally requires
-# CONFIRM=delete because a typo'd ALL should never be all it takes to erase
-# every instance's state history. Both take REMOTE_AWS_REGION with no
-# default (the region guard below); deleting is deliberate, and the bucket
-# stands outside the instance lifecycle, so no instance-* target ever calls
-# these.
+# azure instance owns; delete purges every container then deletes the
+# account and its emptied state group -- one instance's with
+# INSTANCE=<name>, every fleet account with ALL=1, which additionally
+# requires CONFIRM=delete because a typo'd ALL should never be all it takes
+# to erase every instance's state history. Only the EC2 branches take
+# REMOTE_AWS_REGION (the region guard runs there; azure takes the location
+# the scaffold pins); deleting is deliberate, and the stores stand outside
+# the instance lifecycle, so no instance-* target ever calls these.
 bucket-list:
-	@$(REMOTE_AWS_REGION_GUARD) \
-	$(call FLEET_EC2_KIND_GUARD,$(BUCKET_KIND_REMEDY)); \
-	PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket list
+	@$(call FLEET_STATE_KIND_GUARD,$(BUCKET_KIND_REMEDY)); \
+	if [ "$$fleet_kind" = "azure" ]; then \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_store list; \
+	else \
+		$(REMOTE_AWS_REGION_GUARD) \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket list; \
+	fi
 
 bucket-delete:
 	@$(call INSTANCE_OR_ALL_GUARD,bucket-delete)
 	@$(call ENGINE_FLEET_REFUSAL)
 	@if [ "$(ALL)" = "1" ] && [ "$(CONFIRM)" != "delete" ]; then \
-		printf '\033[0;31m[ERROR]\033[0m ALL=1 deletes every state bucket this fleet names in REMOTE_AWS_REGION; confirm it: make bucket-delete ALL=1 CONFIRM=delete\n' >&2; \
+		printf '\033[0;31m[ERROR]\033[0m ALL=1 deletes every state store this fleet names (EC2 buckets and azure storage accounts); confirm it: make bucket-delete ALL=1 CONFIRM=delete\n' >&2; \
 		exit 1; \
 	fi; \
-	$(REMOTE_AWS_REGION_GUARD) \
 	if [ "$(ALL)" = "1" ]; then \
-		$(call FLEET_EC2_KIND_GUARD,$(BUCKET_KIND_REMEDY)); \
-		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket delete-all; \
+		$(call FLEET_STATE_KIND_GUARD,$(BUCKET_KIND_REMEDY)); \
+		if [ "$$fleet_kind" = "azure" ]; then \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_store delete-all; \
+		else \
+			$(REMOTE_AWS_REGION_GUARD) \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket delete-all; \
+		fi; \
 	else \
 		. $(RD_DIR)/lib.sh; \
 		INSTANCE="$(INSTANCE)" rd_resolve_instance; \
-		rd_require_engine_kind ec2 "$(BUCKET_KIND_REMEDY)"; \
-		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket delete "$(INSTANCE)"; \
+		if [ "$$(rd_engine_kind)" = "azure" ]; then \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_store delete "$(INSTANCE)"; \
+		else \
+			rd_require_engine_kind ec2 "$(BUCKET_KIND_REMEDY)"; \
+			$(REMOTE_AWS_REGION_GUARD) \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket delete "$(INSTANCE)"; \
+		fi; \
 	fi
 
 disconnect:
@@ -719,15 +807,18 @@ list-containers:
 	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli container-list --local-context "$(LOCAL_CONTEXT)"
 
 # Writes remote-instances/<name>/terragrunt.hcl and its guidance. Never
-# deploys; the cli prints the guidance messages verbatim. AMI= and REGION=
-# pass through when given; REGION is the scaffold-time AMI/AZ lookup ONLY --
-# it never selects where anything deploys. The deployment region is
-# REMOTE_AWS_REGION, required without a default by every Terragrunt-running
-# target (REMOTE_AWS_REGION_GUARD above), because root.hcl names the shared
-# state bucket from it.
+# deploys; the cli prints the guidance messages verbatim. AMI=, REGION=,
+# CLOUD=, LOCATION= and VM_SIZE= pass through when given; REGION is the
+# scaffold-time AMI/AZ lookup ONLY -- it never selects where anything
+# deploys. The deployment region is REMOTE_AWS_REGION, required without a
+# default by every Terragrunt-running target (REMOTE_AWS_REGION_GUARD
+# above), because root.hcl names the shared state bucket from it.
+# CLOUD=azure switches the scaffold to the azure kind, which requires
+# LOCATION= (the azure location) and takes VM_SIZE=; REGION=/AMI= are
+# refused on azure.
 instance-init:
 	@$(call INSTANCE_USAGE_GUARD,instance-init)
-	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-init "$(INSTANCE)" $(if $(REGION),--region $(REGION),) $(if $(AMI),--ami $(AMI),)
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-init "$(INSTANCE)" $(if $(CLOUD),--cloud $(CLOUD),) $(if $(LOCATION),--location $(LOCATION),) $(if $(VM_SIZE),--vm-size $(VM_SIZE),) $(if $(REGION),--region $(REGION),) $(if $(AMI),--ami $(AMI),)
 
 # Read-only: one instance's live state, or every instance's with ALL=1. The
 # cli exits non-zero when any probe failed, so a loop abort names the
@@ -742,11 +833,13 @@ instance-status:
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-status "$$name" || exit 1; \
 	done <<< "$$names"
 
-# Dry run: init (bootstrapping the instance's state bucket on the very first
-# run, see TERRAGRUNT_INIT_HELPER), then plan. Never applies anything.
-# EC2-only by kind: Terragrunt reaches an EC2 instance's deployment and
-# nothing else, so each instance is resolved and kind-checked before any
-# Terragrunt runs, and an ssh engine is refused naming the engine-* surface.
+# Dry run: init (bootstrapping the EC2 instance's state bucket, or ensuring
+# the azure instance's state store, on the very first run, see
+# TERRAGRUNT_INIT_HELPER), then plan. Never applies anything. ec2 and azure
+# by kind: Terragrunt reaches either kind's deployment, and the init work
+# the kind needs runs inside tg_init, so each instance is resolved and
+# ssh-refused before any Terragrunt runs; an ssh engine is refused naming
+# the engine-* surface.
 instance-plan:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-plan)
 	@$(call ENGINE_FLEET_REFUSAL)
@@ -759,28 +852,37 @@ instance-plan:
 		printf '\033[0;36m[PLAN]\033[0m %s\n' "$$name"; \
 		unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
 		INSTANCE="$$name" rd_resolve_instance; \
-		rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"; \
+		kind="$$(rd_engine_kind)"; \
+		case "$$kind" in ec2|azure) ;; *) rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)" ;; esac; \
 		tg_init "$$name"; \
 		terragrunt plan || exit 1; \
 	done <<< "$$names"
 
-# Power: stop or start, waiting for the target state (and, on start, for the
-# SSM agent) before reporting done. Abort-on-fail so a half-powered fleet
-# never looks converged. EC2-only by kind: an ssh engine has no power state,
-# and the refusal fires per instance before any aws call.
+# Power: stop or start, waiting for the target state (and, on start, for
+# the engine agent) before reporting done. Abort-on-fail so a half-powered
+# fleet never looks converged. ec2 and azure by kind: each instance is
+# resolved and ssh-refused before its platform is called, the EC2 branch
+# keeps its --region flag and the region guard that requires it, and the
+# azure branch carries neither (az is ambiently logged in and the VM is
+# addressed by the record the deploy wrote).
 instance-stop:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-stop)
 	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	. $(RD_DIR)/lib.sh; \
-	$(REMOTE_AWS_REGION_GUARD) \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; nothing to stop.\n'; exit 0; }; \
 	while IFS= read -r name; do \
 		unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
 		INSTANCE="$$name" rd_resolve_instance; \
-		rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"; \
-		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-stop "$$name" --region "$$REMOTE_AWS_REGION" || exit 1; \
+		kind="$$(rd_engine_kind)"; \
+		case "$$kind" in ec2|azure) ;; *) rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)" ;; esac; \
+		if [ "$$kind" = "azure" ]; then \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-stop "$$name" || exit 1; \
+		else \
+			$(REMOTE_AWS_REGION_GUARD) \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-stop "$$name" --region "$$REMOTE_AWS_REGION" || exit 1; \
+		fi; \
 	done <<< "$$names"
 
 instance-start:
@@ -788,23 +890,31 @@ instance-start:
 	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	. $(RD_DIR)/lib.sh; \
-	$(REMOTE_AWS_REGION_GUARD) \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; nothing to start.\n'; exit 0; }; \
 	while IFS= read -r name; do \
 		unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
 		INSTANCE="$$name" rd_resolve_instance; \
-		rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"; \
-		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-start "$$name" --region "$$REMOTE_AWS_REGION" || exit 1; \
+		kind="$$(rd_engine_kind)"; \
+		case "$$kind" in ec2|azure) ;; *) rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)" ;; esac; \
+		if [ "$$kind" = "azure" ]; then \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-start "$$name" || exit 1; \
+		else \
+			$(REMOTE_AWS_REGION_GUARD) \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-start "$$name" --region "$$REMOTE_AWS_REGION" || exit 1; \
+		fi; \
 		make --no-print-directory cert-install INSTANCE="$$name" || exit 1; \
 	done <<< "$$names"
 
 # Records the EC2 id Terragrunt output in the instance's per-instance id
 # store (devcontainer_config.instance_ops.link_id) -- the place the power,
 # status and remote targets read it from. Deploy does this automatically;
-# this target exists for an instance re-provisioned outside make. The id's
-# shape is validated by the cli, which refuses anything but i- plus
-# lowercase hex.
+# this target exists for an EC2 instance re-provisioned outside make. The
+# id's shape is validated by the cli, which refuses anything but i- plus
+# lowercase hex. EC2-only by kind: an azure engine has no EC2 id to link --
+# the deploy writes its address record from the terragrunt outputs, and an
+# azure engine re-provisioned outside make re-links by re-running that
+# deploy; an ssh engine is refused naming the engine-* surface.
 instance-link:
 	@$(call INSTANCE_USAGE_GUARD,instance-link)
 	@if [ -z "$(INSTANCE_ID)" ]; then \
@@ -814,7 +924,13 @@ instance-link:
 	@set -euo pipefail; \
 	. $(RD_DIR)/lib.sh; \
 	INSTANCE="$(INSTANCE)" rd_resolve_instance; \
-	rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"
+	case "$$(rd_engine_kind)" in \
+		ec2) ;; \
+		azure) rd_fail "instance '${INSTANCE}' is an azure engine; there is no EC2 id to link" \
+			"the deploy writes the azure engine's address record from the terragrunt outputs; an engine re-provisioned outside make re-links by re-running that deploy:" \
+			"  make instance-deploy INSTANCE=${INSTANCE}" ;; \
+		*) rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)" ;; \
+	esac
 	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-link "$(INSTANCE)" --instance-id "$(INSTANCE_ID)"
 
 # The SSH engine's own lifecycle. engine-init scaffolds the manifest
@@ -869,14 +985,25 @@ engine-remove:
 # CONFIRM=replace) whose saved plan file IS what apply consumes -- the guard
 # reads the plan's own output, then `apply -auto-approve tfplan.deploy`
 # applies exactly what was guarded, never a re-plan; the file is removed by
-# the per-instance EXIT trap on every exit path -- then link the output id,
-# converge the missing trust chain (cert material and published TLS params
-# are created only when the status probes report them absent -- when params
-# are already present the publish/install steps are skipped entirely, so a
-# live daemon is never restarted; each probe must answer exactly true or
-# false -- empty, null or malformed fails the deploy naming the instance and
-# the raw status output), then push-secrets. Prints the follow-on chain,
-# which blocks on `make remote` and so is printed rather than run.
+# the per-instance EXIT trap on every exit path -- and a plan that fails
+# prints its captured output plus the stale-lock remedy, because a deploy
+# killed mid-plan leaves the state backend's lock in place and the next
+# plan dies acquiring it (the lock id to force-unlock is in that output) --
+# then the kind's own
+# addressing record: the azure branch reads `terragrunt output -json` and
+# writes the engine-address record from the module outputs (every required
+# key must answer or the deploy fails naming the missing ones), the EC2
+# branch links the output id -- then converge the missing trust chain (cert
+# material and published TLS material are created only when the status
+# probes report them absent -- when params are already present the
+# publish/install steps are skipped entirely, so a live daemon is never
+# restarted; each probe must answer exactly true or false -- empty, null or
+# malformed fails the deploy naming the instance and the raw status output;
+# and the installed marker, once present, must name the VM it was installed
+# on, so an azure instance replaced under CONFIRM=replace reinstalls its
+# daemon material onto the new VM),
+# then push-secrets. Prints the follow-on chain, which blocks on `make
+# remote` and so is printed rather than run.
 instance-deploy:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-deploy)
 	@$(call ENGINE_FLEET_REFUSAL)
@@ -911,12 +1038,19 @@ instance-deploy:
 		printf '\033[0;36m[DEPLOY]\033[0m %s\n' "$$name"; \
 		unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
 		INSTANCE="$$name" rd_resolve_instance; \
-		rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"; \
+		kind="$$(rd_engine_kind)"; \
+		case "$$kind" in ec2|azure) ;; *) rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)" ;; esac; \
 		tg_init "$$name"; \
 		plan_file="$${PWD}/tfplan.deploy"; \
 		trap 'rm -f "$$plan_file"' EXIT; \
 		terragrunt validate || { printf '\033[0;31m[ERROR]\033[0m %s: terragrunt validate failed (output above)\n' "$$name" >&2; exit 1; }; \
-		plan_log=$$(terragrunt plan -out=tfplan.deploy 2>&1); \
+		plan_log=$$(terragrunt plan -out=tfplan.deploy 2>&1) || { \
+			printf '%s\n' "$$plan_log" >&2; \
+			printf '\033[0;31m[ERROR]\033[0m %s: terragrunt plan failed. If the output above names a state lock (Error acquiring the state lock), an earlier deploy was killed mid-plan and its lock survived; clear it and retry:\n' "$$name" >&2; \
+			printf '        cd remote-instances/%s && terragrunt force-unlock <lock-id>   # <lock-id> is the lock id the output above names\n' "$$name" >&2; \
+			printf '        then re-run: make instance-deploy INSTANCE=%s\n' "$$name" >&2; \
+			exit 1; \
+		}; \
 		printf '%s\n' "$$plan_log" | grep -qE 'No changes\.|To perform exactly these actions' || { \
 			printf '%s\n' "$$plan_log" >&2; \
 			printf '\033[0;31m[ERROR]\033[0m %s: the plan produced no outcome summary -- Terragrunt can exit zero on a failed plan, so the guard requires an explicit success marker (No changes, or an apply hint).\n' "$$name" >&2; \
@@ -933,13 +1067,24 @@ instance-deploy:
 			fi; \
 		fi; \
 		terragrunt apply -auto-approve tfplan.deploy || { printf '\033[0;31m[ERROR]\033[0m %s: terragrunt apply failed (output above)\n' "$$name" >&2; exit 1; }; \
-		id=$$(terragrunt output -raw instance_id); \
-		[ -n "$$id" ] || { \
-			printf '\033[0;31m[ERROR]\033[0m terragrunt output -raw instance_id returned nothing for %s\n' "$$name" >&2; \
-			printf '        Did the apply above succeed? Inspect it: cd remote-instances/%s && terragrunt output\n' "$$name" >&2; \
-			exit 1; \
-		}; \
-		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-link "$$name" --instance-id "$$id" || exit 1; \
+		if [ "$$kind" = "azure" ]; then \
+			outputs_json=$$(terragrunt output -json) || { \
+				printf '%s\n' "$$outputs_json" >&2; \
+				printf '\033[0;31m[ERROR]\033[0m %s: terragrunt output -json failed. If the output above names a state lock, a killed deploy left it behind; clear it and retry:\n' "$$name" >&2; \
+				printf '        cd remote-instances/%s && terragrunt force-unlock <lock-id>   # <lock-id> is the lock id the output above names\n' "$$name" >&2; \
+				printf '        then re-run: make instance-deploy INSTANCE=%s\n' "$$name" >&2; \
+				exit 1; \
+			}; \
+			printf '%s' "$$outputs_json" | PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "import json,sys; from pathlib import Path; from devcontainer_config import instances, repo; required=['vm_name','vm_resource_id','resource_group','relay_namespace','hybrid_connection','vault_name','vault_uri','location']; payload=json.load(sys.stdin); missing=[k for k in required if k not in payload]; sys.exit('missing required terragrunt outputs: '+', '.join(missing)) if missing else None; record={k: payload[k].get('value') for k in required}; unusable=[k for k,v in record.items() if not isinstance(v,str) or not v]; sys.exit('terragrunt outputs carry no usable string value for: '+', '.join(unusable)) if unusable else None; instances.write_engine_address(repo.find_root(Path.cwd()), '$$name', record); print('recorded the engine address for $$name from the terragrunt outputs')" || { printf '\033[0;31m[ERROR]\033[0m %s: the engine address record could not be written from the terragrunt outputs\n' "$$name" >&2; exit 1; }; \
+		else \
+			id=$$(terragrunt output -raw instance_id); \
+			[ -n "$$id" ] || { \
+				printf '\033[0;31m[ERROR]\033[0m terragrunt output -raw instance_id returned nothing for %s\n' "$$name" >&2; \
+				printf '        Did the apply above succeed? Inspect it: cd remote-instances/%s && terragrunt output\n' "$$name" >&2; \
+				exit 1; \
+			}; \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-link "$$name" --instance-id "$$id" || exit 1; \
+		fi; \
 		cd "$(CURDIR)"; \
 		status_json=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-status "$$name" --json) || { \
 			printf '\033[0;31m[ERROR]\033[0m %s: instance-status --json failed; the trust chain cannot be inspected\n' "$$name" >&2; \
@@ -953,7 +1098,14 @@ instance-deploy:
 			}; \
 			make --no-print-directory cert-client INSTANCE="$$name" || exit 1; \
 		fi; \
-		if [ "$$params_present" != "true" ] || [ ! -f "$$HOME/.docker/certs/$$name/installed" ]; then \
+		marker="$$HOME/.docker/certs/$$name/installed"; \
+		install_needed=0; \
+		if [ "$$params_present" != "true" ] || [ ! -f "$$marker" ]; then install_needed=1; fi; \
+		if [ "$$install_needed" = "0" ] && [ "$$kind" = "azure" ]; then \
+			recorded_vm=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$$name').get('vm_resource_id', ''))") || { printf '\033[0;31m[ERROR]\033[0m %s: the engine address record could not be read for the installed-marker check\n' "$$name" >&2; exit 1; }; \
+			[ "$$(cat "$$marker")" = "$$recorded_vm" ] || install_needed=1; \
+		fi; \
+		if [ "$$install_needed" = "1" ]; then \
 			[ "$$params_present" = "true" ] || make --no-print-directory cert-publish INSTANCE="$$name" || exit 1; \
 			make --no-print-directory cert-install INSTANCE="$$name" || exit 1; \
 		fi; \
@@ -968,17 +1120,21 @@ instance-deploy:
 # Destroy one instance, or every configured one with ALL=1 -- and ALL=1
 # additionally requires CONFIRM=destroy, because a typo'd ALL should never
 # be all it takes to end the fleet. Per instance: a best-effort note of what
-# dies (the EC2 instance and its volumes always; the containers on it only
-# when its docker context answers within DOCKER_CHECK_TIMEOUT_SECONDS, since
-# a dead daemon is no evidence either way), then terragrunt destroy, then
-# the cli's instance-cleanup for the params, context, certs and id that
-# Terragrunt does not know about.
+# dies (the EC2 instance and its volumes, or the azure VM and its disks;
+# the containers on it only when its docker context answers within
+# DOCKER_CHECK_TIMEOUT_SECONDS, since a dead daemon is no evidence either
+# way), then terragrunt destroy, then the cli's instance-cleanup for the
+# out-of-band state Terragrunt does not know about (EC2 params, azure's
+# local record, both kinds' context, certs and id). ec2 and azure by kind:
+# the EC2 branch keeps the region guard and the init-before-destroy tg_init,
+# the azure branch carries neither (az is ambiently logged in, and the
+# azure backend is Terragrunt's own azurerm state, which needs no bootstrap
+# before a destroy).
 instance-destroy:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-destroy)
 	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	. $(RD_DIR)/lib.sh; \
-	$(REMOTE_AWS_REGION_GUARD) \
 	if [ "$(ALL)" = "1" ]; then \
 		if [ "$(CONFIRM)" != "destroy" ]; then \
 			printf '\033[0;31m[ERROR]\033[0m ALL=1 destroys every configured instance; confirm it: make instance-destroy ALL=1 CONFIRM=destroy\n' >&2; \
@@ -994,8 +1150,13 @@ instance-destroy:
 	( \
 		unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
 		INSTANCE="$$name" rd_resolve_instance; \
-		rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"; \
-		printf '\033[0;36m[DESTROY]\033[0m %s: the EC2 instance and its volumes are deleted\n' "$$name"; \
+		kind="$$(rd_engine_kind)"; \
+		case "$$kind" in ec2|azure) ;; *) rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)" ;; esac; \
+		if [ "$$kind" = "azure" ]; then \
+			printf '\033[0;36m[DESTROY]\033[0m %s: the azure VM and its disks are deleted\n' "$$name"; \
+		else \
+			printf '\033[0;36m[DESTROY]\033[0m %s: the EC2 instance and its volumes are deleted\n' "$$name"; \
+		fi; \
 		printf '  stopping any open forward first\n'; \
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards stop "$$name" || exit 1; \
 		ctx=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.docker_context(repo.find_root(Path.cwd()), '$$name'))"); \
@@ -1013,10 +1174,18 @@ instance-destroy:
 		else \
 			printf '  its containers could not be checked (docker unreachable via %s); they die with the instance regardless\n' "$$ctx"; \
 		fi; \
-		tg_init "$$name"; \
-		terragrunt destroy -auto-approve; \
-		cd "$(CURDIR)"; \
-		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-cleanup "$$name" --region "$$REMOTE_AWS_REGION"; \
+		if [ "$$kind" = "azure" ]; then \
+			cd "$(CURDIR)/remote-instances/$$name" || exit 1; \
+			terragrunt destroy -auto-approve; \
+			cd "$(CURDIR)"; \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-cleanup "$$name"; \
+		else \
+			$(REMOTE_AWS_REGION_GUARD) \
+			tg_init "$$name"; \
+			terragrunt destroy -auto-approve; \
+			cd "$(CURDIR)"; \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-cleanup "$$name" --region "$$REMOTE_AWS_REGION"; \
+		fi; \
 	) || exit 1; \
 	done <<< "$$names"
 
@@ -1063,11 +1232,19 @@ push-secrets:
 # spec Section 4.1.2 (E6-F1-S1-T2): client and CA expiry per instance, the
 # inspection half of the `certs` module. Exit 0 when every certificate is
 # outside the warning window (including a RENEW row for one still valid but
-# inside it), exit 1 when any has expired. EC2-only by kind, fleet-wide: no
-# TLS material exists for an ssh engine, so a fleet mixing kinds is refused
-# naming the first ssh engine rather than rendering silence for it.
+# inside it), exit 1 when any has expired. Fleet-wide over the remote
+# engines: both the EC2 and the azure kind carry TLS material locally, so a
+# fleet mixing the two is reported; only an ssh engine is refused, naming
+# its kind's remedy rather than rendering silence for it.
 cert-status:
-	@$(call FLEET_EC2_KIND_GUARD,$(CERT_KIND_REMEDY)); \
+	@. $(RD_DIR)/lib.sh; \
+	names=$$($(DISCOVER_INSTANCE_NAMES)) || exit 1; \
+	while IFS= read -r name; do \
+		[ -n "$$name" ] || continue; \
+		unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
+		INSTANCE="$$name" rd_resolve_instance; \
+		case "$$(rd_engine_kind)" in ec2|azure) ;; *) rd_require_engine_kind ec2 "$(CERT_KIND_REMEDY)" ;; esac; \
+	done <<< "$$names"; \
 	PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.certs status
 
 # spec Section 4.5: the issuing half. Separate targets, not one idempotent
@@ -1083,29 +1260,50 @@ cert-client:
 cert-publish:
 	@INSTANCE="$(INSTANCE)" $(CERTS_SH) publish
 
-# Readiness poll before cert-install: a freshly applied instance's SSM
-# agent answers before user-data has finished installing the rootless
-# daemon, and the install SSM command then fails on a dockerd that does not
-# exist yet. This waits (readiness detection, never a fixed sleep) until
-# both EC2 status checks report Ok for the instance the id store names,
-# polling at the same cadence instance_ops uses for power transitions.
+# Readiness poll before cert-install: a freshly applied (or started)
+# instance's engine agent answers before its install path can succeed, and
+# an install issued too early fails on a daemon that does not exist yet.
+# This waits (readiness detection, never a fixed sleep) per kind: the azure
+# branch polls through the cli's azure-wait-agent (the shared
+# transport_azure readiness poll, bounded by AZURE_AGENT_READY_TIMEOUT),
+# and the EC2 branch waits until both EC2 status checks report Ok for the
+# instance the id store names, polling at the same cadence instance_ops
+# uses for power transitions. Then certs.sh install runs the kind's own
+# install arm, and the installed marker is written for the converge step
+# to check, per kind: on EC2 the bare marker the converge has always
+# checked, whose presence alone means installed; on azure the marker
+# records the current VM's resource id, read from the engine address
+# record, so converge can tell an install performed on a VM that no longer
+# exists -- a CONFIRM=replace replaces the VM while the vault secrets and
+# this marker survive -- from one performed on the VM now running, and
+# reinstalls the daemon material when they disagree.
 cert-install:
 	@set -euo pipefail; \
 	. $(RD_DIR)/lib.sh; \
 	INSTANCE="$(INSTANCE)" rd_resolve_instance; \
-	rd_require_engine_kind ec2 "$(CERT_KIND_REMEDY)"; \
-	id=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-status "$(INSTANCE)" --json | python3 -c "import json,sys; print(json.loads(sys.stdin.read())['recorded_id'] or '')"); \
-	[ -n "$$id" ] || { printf '\033[0;31m[ERROR]\033[0m no EC2 instance id is recorded for instance '%s'. Link it first: make instance-link INSTANCE=<name>\n' "$(INSTANCE)" >&2; exit 2; }; \
-	ok=0; \
-	for i in $$(seq 1 60); do \
-		state=$$(aws ec2 describe-instance-status --instance-ids "$$id" --include-all-instances --query 'InstanceStatuses[0].[SystemStatus.Status,InstanceStatus.Status]' --output text 2>/dev/null || true); \
-		[ "$$state" = "ok	ok" ] && { ok=1; break; }; \
-		sleep 5; \
-	done; \
-	[ "$$ok" = "1" ] || { printf '\033[0;31m[ERROR]\033[0m %s: EC2 status checks did not reach ok within the poll window (last: %s)\n' "$(INSTANCE)" "$$state" >&2; exit 1; }; \
+	kind="$$(rd_engine_kind)"; \
+	if [ "$$kind" = "azure" ]; then \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli azure-wait-agent "$(INSTANCE)" || exit 1; \
+	elif [ "$$kind" = "ec2" ]; then \
+		id=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-status "$(INSTANCE)" --json | python3 -c "import json,sys; print(json.loads(sys.stdin.read())['recorded_id'] or '')"); \
+		[ -n "$$id" ] || { printf '\033[0;31m[ERROR]\033[0m no EC2 instance id is recorded for instance '%s'. Link it first: make instance-link INSTANCE=<name>\n' "$(INSTANCE)" >&2; exit 2; }; \
+		ok=0; \
+		for i in $$(seq 1 60); do \
+			state=$$(aws ec2 describe-instance-status --instance-ids "$$id" --include-all-instances --query 'InstanceStatuses[0].[SystemStatus.Status,InstanceStatus.Status]' --output text 2>/dev/null || true); \
+			[ "$$state" = "ok	ok" ] && { ok=1; break; }; \
+			sleep 5; \
+		done; \
+		[ "$$ok" = "1" ] || { printf '\033[0;31m[ERROR]\033[0m %s: EC2 status checks did not reach ok within the poll window (last: %s)\n' "$(INSTANCE)" "$$state" >&2; exit 1; }; \
+	else \
+		rd_require_engine_kind ec2 "$(CERT_KIND_REMEDY)"; \
+	fi; \
 	INSTANCE="$(INSTANCE)" $(CERTS_SH) install; \
 	mkdir -p "$$HOME/.docker/certs/$(INSTANCE)"; \
-	touch "$$HOME/.docker/certs/$(INSTANCE)/installed"
+	if [ "$$kind" = "azure" ]; then \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$(INSTANCE)').get('vm_resource_id', ''))" > "$$HOME/.docker/certs/$(INSTANCE)/installed"; \
+	else \
+		touch "$$HOME/.docker/certs/$(INSTANCE)/installed"; \
+	fi
 
 proxy-start:
 	@$(PROXY_ENV) $(PROXY_SH) start

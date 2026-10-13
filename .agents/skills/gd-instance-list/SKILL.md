@@ -1,6 +1,6 @@
 ---
 name: gd-instance-list
-description: Validates the Section 4.2.1 contract end to end, thirteen checks (six local, seven remote), and reports a per-check verdict table; the validation contract every other devcontainer skill reuses.
+description: Validates the Section 4.2.1 contract end to end, thirteen checks (six local, seven remote) per EC2 engine with the azure twins answering the same walk, and reports a per-check verdict table; the validation contract every other devcontainer skill reuses.
 ---
 
 # gd-instance-list
@@ -15,6 +15,19 @@ skill can currently obtain in tested Python. This skill's only job is walking
 the thirteen checks in dependency order, stopping at the first failure, and
 reporting a verdict; it asks nothing of its own beyond the one question
 Section 4.1.1 already defines.
+
+The thirteen are written against the EC2 kind, and the azure kind answers
+the same walk with its own probes rather than a second table: the instance
+check reads the VM's power state and its VM agent instead of EC2 running
+state and the SSM agent, the forward check reads the relay listener and the
+hybrid-connection forward instead of the SSM one, the certificate check
+reads the same local material (both kinds carry TLS material locally; an
+ssh engine carries none), and the AWS-only checks — the SSO session and
+everything SSM-shaped — have no azure counterpart at all, since nothing on
+the azure path touches AWS. `make list-instances` renders the same
+kind-awareness per row, and this skill's verdict carries whatever the
+resolved kind's probes answered, dashing the probes its kind does not have
+rather than reporting them as failures.
 
 Two of the thirteen checks, disk headroom and `HOST_PROXY` agreeing with a
 reachable proxy, are host facts no module in this repository probes yet.

@@ -1210,6 +1210,169 @@ def test_instance_init_delegates_to_scaffold_and_prints_its_guidance(
     assert runner.calls[0][0] == "aws"
 
 
+# An azure location fixture value, generated so no real region name is stored.
+_AZURE_LOCATION = f"testlocation-{uuid.uuid4().hex[:6]}"
+
+
+def test_instance_init_azure_cli_writes_the_azure_template_with_no_aws_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--cloud azure --location writes the azure template and issues no command:
+    the azure scaffold pins no AMI and allocates CIDRs from files alone."""
+    root = _git_root_with_origin(tmp_path)
+    repo_module = importlib.import_module("devcontainer_config.repo")
+    (root / ".gitignore").write_text(
+        (repo_module.find_root(Path(__file__).resolve().parent) / ".gitignore").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    runner = _InstanceFakeRunner()  # strict: any invocation fails the test
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(
+        monkeypatch,
+        root,
+        ["instance-init", name, "--cloud", "azure", "--location", _AZURE_LOCATION],
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert runner.calls == [], "the azure scaffold must issue no command"
+    scaffolded = root / "remote-instances" / name / "terragrunt.hcl"
+    text = scaffolded.read_text(encoding="utf-8")
+    assert "_envcommon/remote-azure.hcl" in text
+    assert f'location = "{_AZURE_LOCATION}"' in text
+    assert f'vm_size  = "{instance_ops.DEFAULT_AZURE_VM_SIZE}"' in text
+    assert f"Deploy with: make instance-deploy INSTANCE={name}" in out
+
+
+def test_instance_init_azure_cli_requires_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--cloud azure without --location is refused naming the flag, writing nothing."""
+    root = _git_root_with_origin(tmp_path)
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    runner = _InstanceFakeRunner()
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(monkeypatch, root, ["instance-init", name, "--cloud", "azure"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--location" in captured.err
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_instance_init_azure_cli_refuses_region_and_ami(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The EC2-only flags are refused under azure -- the region refusal names
+    its azure equivalent (--location), the AMI refusal states there is no
+    such input; neither flag reaches an aws call."""
+    root = _git_root_with_origin(tmp_path)
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    runner = _InstanceFakeRunner()
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    cases = (
+        (["--region", "us-east-1"], "--location"),
+        (["--ami", "ami-" + uuid.uuid4().hex], "AMI"),
+    )
+    for extra, expected in cases:
+        exit_code = run_cli(
+            monkeypatch,
+            root,
+            [
+                "instance-init",
+                name,
+                "--cloud",
+                "azure",
+                "--location",
+                _AZURE_LOCATION,
+                *extra,
+            ],
+        )
+        captured = capsys.readouterr()
+        assert exit_code == 1, f"{extra} must be refused under azure"
+        assert expected in captured.err, f"{extra}: {captured.err}"
+
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_instance_init_azure_cli_passes_an_explicit_vm_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _git_root_with_origin(tmp_path)
+    repo_module = importlib.import_module("devcontainer_config.repo")
+    (root / ".gitignore").write_text(
+        (repo_module.find_root(Path(__file__).resolve().parent) / ".gitignore").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    runner = _InstanceFakeRunner()
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(
+        monkeypatch,
+        root,
+        [
+            "instance-init",
+            name,
+            "--cloud",
+            "azure",
+            "--location",
+            _AZURE_LOCATION,
+            "--vm-size",
+            "Standard_D4pls_v5",
+        ],
+    )
+
+    assert exit_code == 0
+    text = (root / "remote-instances" / name / "terragrunt.hcl").read_text(encoding="utf-8")
+    assert 'vm_size  = "Standard_D4pls_v5"' in text
+
+
+def test_instance_init_cli_cloud_choices_are_ec2_and_azure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Anything else is a usage error at exit 2, before any handler runs."""
+    root = _git_root_with_origin(tmp_path)
+    name = _instance_name()
+
+    exit_code = run_cli(monkeypatch, root, ["instance-init", name, "--cloud", "gcp"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "invalid choice" in captured.err
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_instance_init_help_names_the_cloud_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = import_cli()
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["instance-init", "--help"])
+
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    for flag in ("--cloud", "--location", "--vm-size", "--region", "--ami"):
+        assert flag in out, f"{flag} is missing from instance-init's help"
+
+
 def test_instance_stop_delegates_with_the_recorded_id_and_region(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1338,3 +1501,148 @@ def test_instance_cleanup_failure_exits_nonzero_with_the_cli_error_path(
     assert "ERROR" in err
     assert name in err
     assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
+# azure-wait-agent (the cert-install readiness poll's cli surface) and the
+# azure row's STATE column.
+# ---------------------------------------------------------------------------
+
+
+def _seed_azure_instance(
+    root: Path, name: str, *, resource_group: str, vm_name: str, vault_name: str
+) -> None:
+    """The azure scaffold and the relay address record, from generated values."""
+    instances = importlib.import_module("devcontainer_config.instances")
+    directory = root / "remote-instances" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "terragrunt.hcl").write_text(
+        'include "envcommon" {\n'
+        '  path = "${dirname(find_in_parent_folders("root-azure.hcl"))}'
+        '/_envcommon/remote-azure.hcl"\n'
+        "}\n"
+        "\n"
+        "inputs = {\n"
+        f'  instance_name = "{name}"\n'
+        '  location = "westeurope"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    instances.write_engine_address(
+        root,
+        name,
+        {
+            "vm_name": vm_name,
+            "vm_resource_id": (
+                f"/subscriptions/x/resourceGroups/{resource_group}"
+                f"/providers/Microsoft.Compute/virtualMachines/{vm_name}"
+            ),
+            "resource_group": resource_group,
+            "relay_namespace": f"gd-{uuid.uuid4().hex[:8]}.servicebus.windows.net",
+            "hybrid_connection": f"gd-{uuid.uuid4().hex[:8]}",
+            "vault_name": vault_name,
+            "vault_uri": f"https://{vault_name}.vault.azure.net",
+            "location": "westeurope",
+        },
+    )
+
+
+def test_azure_wait_agent_polls_through_the_shared_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The subcommand reads the record's VM pair and runs the shared bounded
+    poll on the production runner seam, printing the confirmed outcome."""
+    transport = importlib.import_module("devcontainer_config.transport")
+    hostprobe = importlib.import_module("devcontainer_config.hostprobe")
+    root = _git_root_with_origin(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = f"gd-rg-{uuid.uuid4().hex[:8]}", f"gd-vm-{uuid.uuid4().hex[:8]}"
+    _seed_azure_instance(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name="gd-vault"
+    )
+    seen_commands: list[tuple[str, ...]] = []
+
+    def runner(command: Sequence[str], timeout_seconds: float | None) -> object:
+        del timeout_seconds
+        seen_commands.append(tuple(command))
+        query = command[command.index("--query") + 1]
+        value = "Ready\n" if "vmAgent" in query else "PowerState/running\n"
+        return hostprobe.CommandResult(exit_code=0, stdout=value)
+
+    monkeypatch.setattr(transport, "subprocess_command_runner", runner)
+
+    exit_code = run_cli(monkeypatch, root, ["azure-wait-agent", name])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Ready" in out
+    assert any(
+        "--resource-group" in command
+        and command[command.index("--resource-group") + 1] == resource_group
+        and command[command.index("--name") + 1] == vm_name
+        for command in seen_commands
+    )
+
+
+def test_azure_wait_agent_without_a_record_names_the_deploy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _git_root_with_origin(tmp_path)
+    name = _instance_name("azinst")
+    (root / "remote-instances" / name).mkdir(parents=True)
+
+    exit_code = run_cli(monkeypatch, root, ["azure-wait-agent", name])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "engine-address.json" in err
+    assert f"make instance-deploy INSTANCE={name}" in err
+
+
+def test_instance_status_renders_the_azure_power_in_the_state_column(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    _instance_docker_config: Path,
+) -> None:
+    """The table's header and columns are the ones every kind shares; an
+    azure row renders the VM power state in STATE and the record's VM name
+    in ID, exactly where the EC2 row renders its own."""
+    instance_ops = _import_instance_ops()
+    root = _git_root_with_origin(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = f"gd-rg-{uuid.uuid4().hex[:8]}", f"gd-vm-{uuid.uuid4().hex[:8]}"
+    _seed_azure_instance(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name="gd-vault"
+    )
+    certs = importlib.import_module("devcontainer_config.certs")
+    runner = _InstanceFakeRunner()
+    runner.queue(_instance_ok(json.dumps({"power": "VM running", "provisioning": "Succeeded"})))
+    for _ in certs.AZURE_PUBLISHABLE.values():
+        runner.queue(_instance_ok("https://gd-vault.vault.azure.net/secrets/x\n"))
+    runner.queue(_instance_err('context "nope": context not found'))
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(monkeypatch, root, ["instance-status", name])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    header = out.splitlines()[0]
+    assert header.split() == [
+        "INSTANCE",
+        "STATE",
+        "ID",
+        "PARAMS",
+        "CERTS",
+        "FORWARD",
+        "CONTEXT",
+    ]
+    row = out.splitlines()[1].split()
+    assert row[0] == name
+    assert row[1] == "VM", "the STATE column renders the VM power state"
+    assert row[2] == "running"
+    assert row[3] == vm_name

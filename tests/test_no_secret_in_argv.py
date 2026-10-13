@@ -11,10 +11,10 @@ client.
 
 This module pins the same invariant for the shell entry points, which reach the
 store directly rather than through the client, and additionally pins that they
-do not reach for `file:///dev/stdin`, a form the aws CLI v2 cannot read at all. It is a source scan rather than
-an execution test on purpose: the property is "no such call exists", which a
-test that runs one call cannot establish, and which must hold without an AWS
-account or a network to check it.
+do not reach for `file:///dev/stdin`, a form the aws CLI v2 cannot read at
+all. It is a source scan rather than an execution test on purpose: the
+property is "no such call exists", which a test that runs one call cannot
+establish, and which must hold without an AWS account or a network to check it.
 
 The scan reads the scripts as text, so it cannot see a value assembled at run
 time through a variable holding `--value`. That construction would be a
@@ -40,17 +40,36 @@ def _shell_scripts() -> list[Path]:
 
 _INVOCATION = re.compile(r"\bssm\s+put-parameter\b")
 
+# The azure twin: push-secrets.sh's azure branch writes the same two payload
+# files to Key Vault, and the same argv invariant applies -- the value rides
+# a `--file` on a private temporary file, never an argument.
+_KEYVAULT_INVOCATION = re.compile(r"\bkeyvault\s+secret\s+set\b")
 
-def _put_parameter_invocations(text: str) -> list[str]:
-    """Each `aws ssm put-parameter` call in `text`, flattened across continuations.
 
-    Anchored on the `ssm put-parameter` subcommand pair rather than the bare
-    string, which also occurs in a helper's name and in the document's own
-    filename; matching those would report a call where there is none and, worse,
-    would let a real call hide among them.
+def _invocations(text: str, pattern: re.Pattern[str]) -> list[str]:
+    """Each matching call in `text`, flattened across continuations.
+
+    Anchored on the subcommand pair rather than the bare string, which also
+    occurs in a helper's name and in the document's own filename; matching
+    those would report a call where there is none and, worse, would let a
+    real call hide among them.
     """
     joined = re.sub(r"\\\n\s*", " ", text)
-    return [line.strip() for line in joined.splitlines() if _INVOCATION.search(line)]
+    return [line.strip() for line in joined.splitlines() if pattern.search(line)]
+
+
+def _put_parameter_invocations(text: str) -> list[str]:
+    """Each `aws ssm put-parameter` call in `text`, flattened across continuations."""
+    return _invocations(text, _INVOCATION)
+
+
+def _keyvault_set_invocations(text: str) -> list[str]:
+    """Each `az keyvault secret set` call in `text`, flattened across continuations."""
+    return _invocations(text, _KEYVAULT_INVOCATION)
+
+
+def _all_scripts() -> list[Path]:
+    return sorted(_RD_DIR.glob("*.sh"))
 
 
 def test_shell_scripts_exist_so_this_module_cannot_pass_vacuously() -> None:
@@ -74,7 +93,8 @@ def test_the_scan_finds_the_calls_it_claims_to_check() -> None:
 @pytest.mark.parametrize("script", _shell_scripts(), ids=lambda path: path.name)
 def test_no_shell_script_passes_a_parameter_value_in_argv(script: Path) -> None:
     offenders = [
-        call for call in _put_parameter_invocations(script.read_text(encoding="utf-8"))
+        call
+        for call in _put_parameter_invocations(script.read_text(encoding="utf-8"))
         if "--value" in call
     ]
     assert not offenders, (
@@ -111,3 +131,37 @@ def test_no_shell_script_asks_the_aws_cli_to_read_the_document_from_stdin() -> N
                 f"{script.name} passes the document on stdin, which the aws CLI v2 cannot "
                 f"read; write it to a private file and pass file://<path>: {call}"
             )
+
+
+def test_the_scan_finds_the_keyvault_calls_it_claims_to_check() -> None:
+    """A repository that stopped writing Key Vault secrets would make the
+    assertions below vacuous."""
+    found = [
+        (path.name, call)
+        for path in _all_scripts()
+        for call in _keyvault_set_invocations(path.read_text(encoding="utf-8"))
+    ]
+    assert found, "no keyvault secret set call found in any shell script; the scan checks nothing"
+
+
+@pytest.mark.parametrize("script", _all_scripts(), ids=lambda path: path.name)
+def test_no_shell_script_passes_a_keyvault_value_in_argv(script: Path) -> None:
+    """The Key Vault twin of the put-parameter invariant: value in a `--file`, never argv."""
+    offenders = [
+        call
+        for call in _keyvault_set_invocations(script.read_text(encoding="utf-8"))
+        if "--value" in call
+    ]
+    assert not offenders, (
+        f"{script.name} passes a secret value as an argument, exposing it in the process "
+        f"table and in any error this repository reports: {offenders}\n"
+        "Write it to a private file and pass --file <path> instead, the way "
+        "devcontainer_config.certs.KeyVaultClient.write_secret does."
+    )
+
+
+def test_the_keyvault_calls_use_the_file_form() -> None:
+    """Absence of `--value` is not enough: the calls must use the form that replaced it."""
+    for script in _all_scripts():
+        for call in _keyvault_set_invocations(script.read_text(encoding="utf-8")):
+            assert "--file" in call, f"{script.name} sets a Key Vault secret without --file: {call}"

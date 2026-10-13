@@ -4,10 +4,22 @@ set -euo pipefail
 
 : "${DEVCONTAINER_USER:=vscode}"
 : "${DEVCONTAINER_SSM_PREFIX:=/devcontainer/$(basename "$(pwd)")}"
+: "${DEVCONTAINER_ENGINE_KIND:=}"
+: "${DEVCONTAINER_VAULT_NAME:=}"
 : "${DEVCONTAINER_IMDS_ENDPOINT:=http://169.254.169.254}"
 : "${DEVCONTAINER_IMDS_TIMEOUT_SECONDS:=2}"
 : "${DEVCONTAINER_IMDS_TOKEN_TTL_SECONDS:=60}"
 : "${DEVCONTAINER_SECRET_UMASK:=077}"
+
+# The azure bootstrap's platform constants, each overridable the same way
+# the aws IMDS ones above are. The identity endpoint is the fixed link-local
+# address every azure VM answers on; the resource is the audience a Key
+# Vault access token is minted for; the API versions pin the request shapes
+# the curl calls below compose.
+: "${DEVCONTAINER_AZURE_IMDS_ENDPOINT:=http://169.254.169.254}"
+: "${DEVCONTAINER_AZURE_IMDS_API_VERSION:=2018-02-01}"
+: "${DEVCONTAINER_KEYVAULT_RESOURCE:=https://vault.azure.net}"
+: "${DEVCONTAINER_KEYVAULT_API_VERSION:=7.4}"
 
 WORK_DIR="$(pwd)"
 SHELL_ENV="${WORK_DIR}/shell.env"
@@ -47,9 +59,66 @@ fetch_parameter() {
   [ -s "${destination}" ] || fail_bootstrap "fetched ${name} is empty"
 }
 
+# The azure twin of imds_token/imds_get: a managed-identity access token for
+# the Key Vault resource, fetched from the identity endpoint the VM answers
+# on. The endpoint answers a GET (not aws IMDSv2's PUT), the token rides the
+# JSON body, and python3 -- already the container's own tool -- extracts it.
+azure_imds_token() {
+  curl -sf --connect-timeout "${DEVCONTAINER_IMDS_TIMEOUT_SECONDS}" \
+    -H "Metadata:true" \
+    "${DEVCONTAINER_AZURE_IMDS_ENDPOINT}/metadata/identity/oauth2/token?api-version=${DEVCONTAINER_AZURE_IMDS_API_VERSION}&resource=${DEVCONTAINER_KEYVAULT_RESOURCE}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
+}
+
+fetch_key_vault_secret() {
+  local token="$1" secret="$2" destination="$3"
+  # The bearer header reaches curl through stdin (`-H @-`, curl >= 7.55;
+  # the container image ships a modern curl), never as an argv word: a
+  # `-H "Authorization: Bearer ${token}"` sits in the process table for
+  # the whole fetch, readable by anything that can list processes.
+  printf 'Authorization: Bearer %s\n' "${token}" \
+    | curl -sf --connect-timeout "${DEVCONTAINER_IMDS_TIMEOUT_SECONDS}" \
+      -H @- \
+      "https://${DEVCONTAINER_VAULT_NAME}.vault.azure.net/secrets/${secret}?api-version=${DEVCONTAINER_KEYVAULT_API_VERSION}" \
+      | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "${destination}" \
+    || fail_bootstrap "could not fetch ${secret} from Key Vault '${DEVCONTAINER_VAULT_NAME}' (was 'make push-secrets' run for this project?)"
+  [ -s "${destination}" ] || fail_bootstrap "fetched ${secret} is empty"
+}
+
+bootstrap_secrets_from_key_vault() {
+  log_info "shell.env not found, bootstrapping from Key Vault (${DEVCONTAINER_VAULT_NAME})"
+
+  [ -n "${DEVCONTAINER_VAULT_NAME}" ] \
+    || fail_bootstrap "DEVCONTAINER_VAULT_NAME is not set; the build's containerEnv must carry the instance's vault"
+  command -v curl > /dev/null 2>&1 || fail_bootstrap "curl is not installed"
+  command -v python3 > /dev/null 2>&1 || fail_bootstrap "python3 is not installed"
+
+  local token
+  token="$(azure_imds_token)" \
+    || fail_bootstrap "the instance identity endpoint did not yield a vault token, not on a managed-identity host"
+  [ -n "${token}" ] || fail_bootstrap "the instance identity endpoint returned an empty vault token"
+
+  local previous_umask
+  previous_umask="$(umask)"
+  umask "${DEVCONTAINER_SECRET_UMASK}"
+  fetch_key_vault_secret "${token}" "shell-env" "${SHELL_ENV}"
+  [ -f "${PROFILE_MAP}" ] || fetch_key_vault_secret "${token}" "profile-map" "${PROFILE_MAP}"
+  umask "${previous_umask}"
+
+  log_success "Bootstrapped shell.env and aws-profile-map.json from Key Vault"
+}
+
 bootstrap_secrets() {
   if [ -f "${SHELL_ENV}" ]; then
     log_info "Using existing shell.env"
+    return 0
+  fi
+  # The azure engine's secrets live in the instance's own Key Vault, named
+  # by the build's containerEnv; its VM answers the managed-identity
+  # endpoint instead of aws IMDSv2, so the bootstrap mode is selected here,
+  # before the aws arm -- whose IMDS variables stay untouched -- can run.
+  if [ "${DEVCONTAINER_ENGINE_KIND}" = "azure" ]; then
+    bootstrap_secrets_from_key_vault
     return 0
   fi
   log_info "shell.env not found, bootstrapping from Parameter Store (${DEVCONTAINER_SSM_PREFIX})"

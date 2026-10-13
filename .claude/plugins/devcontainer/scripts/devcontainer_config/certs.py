@@ -9,23 +9,28 @@ binary, driven by `.agents/skills/gd-cert-lifecycle/SKILL.md`. Every
 `openssl` invocation below passes an argument list, never a shell string
 (spec Section 3.4's dependency rule, AC-FUNC-006), and this module imports
 nothing beyond the standard library and this project's own
-`devcontainer_config.instances` -- no third-party package is added.
+`devcontainer_config.instances` and `devcontainer_config.repo` --
+no third-party package is added.
 `instances` supplies `DEFAULT_CERTS_ROOT` (`instances.certs_root`, spec
 Section 9's own addressing-table derivation of this identical value,
 E8-F1-S1-T1 round 2), `instances.PARAMETER_ROOT`, and the instance-name
 rule `_validate_instance` delegates to, rather than this module declaring
-second, independently drifting copies of any of them.
+second, independently drifting copies of any of them; `repo` supplies the
+repository root `repo.find_root` resolves, the one value the kind-selected
+publication path below needs `instances.read_kind` against.
 
 `instance` reaches this module unvalidated from `--instance` on the CLI and,
 per `.agents/skills/gd-cert-lifecycle/SKILL.md`'s own instance
 resolution, from `INSTANCE`/`DEFAULT_REMOTE_INSTANCE`; every path this module
-composes from it -- `CertPaths.instance_dir` and the Parameter Store path
-`publication_set` builds -- validates it first, through `_validate_instance`,
+composes from it -- `CertPaths.instance_dir`, the Parameter Store path
+`publication_set` builds and the Key Vault secret name
+`azure_publication_set` builds -- validates it first, through
+`_validate_instance`,
 which delegates to `devcontainer_config.instances.validate_name`: the single
 owner spec Section 4.5 assigns the naming rule, so a name containing a path
 separator, the empty string, or a name longer than
 `instances.MAX_INSTANCE_NAME_LENGTH` is rejected before it ever reaches a
-filesystem path or a Parameter Store path (code_review, this unit, round 1:
+filesystem path or a store path (code_review, this unit, round 1:
 BLOCKING 1; round 2: WARN, a second, length-unbounded validator of the
 identical concept). `PARAMETER_ROOT` below is likewise
 `instances.PARAMETER_ROOT` itself, not a second literal declaration
@@ -172,14 +177,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
-from devcontainer_config import instances
+from devcontainer_config import instances, repo
 
-# The two external commands this module ever shells out to. Every openssl
+# The three external commands this module ever shells out to. Every openssl
 # argv built here starts with `OPENSSL_EXECUTABLE`; every Parameter Store
-# argv the client below builds starts with `AWS_EXECUTABLE`; nothing else
+# argv the client below builds starts with `AWS_EXECUTABLE`; every Key Vault
+# argv the azure client builds starts with `AZ_EXECUTABLE`; nothing else
 # in this module names an executable (AC-FUNC-006).
 OPENSSL_EXECUTABLE = "openssl"
 AWS_EXECUTABLE = "aws"
+AZ_EXECUTABLE = "az"
 
 # spec Section 5.5's material root. A parameter of `CertPaths`, not a literal
 # baked into any function body, so the test suite can point an entire run at
@@ -289,6 +296,27 @@ _PUBLISHABLE: dict[str, str] = {
     SERVER_CERT_FILENAME: SECURE_STRING_TYPE,
     CA_CERT_FILENAME: STRING_TYPE,
 }
+
+# The azure engine kind's publication set: the same three filenames, mapped
+# to Key Vault secret names -- which the vault permits only as
+# alphanumerics and dashes, hence the dash-joined forms. The CA private key
+# is absent from this mapping for the same reason it is absent from
+# `_PUBLISHABLE`, and `azure_publication_set` refuses it by name through the
+# same `_is_ca_private_key_request` rule.
+AZURE_SERVER_KEY_SECRET = "tls-server-key"
+AZURE_SERVER_CERT_SECRET = "tls-server-cert"
+AZURE_CA_SECRET = "tls-ca"
+
+AZURE_PUBLISHABLE: dict[str, str] = {
+    SERVER_KEY_FILENAME: AZURE_SERVER_KEY_SECRET,
+    SERVER_CERT_FILENAME: AZURE_SERVER_CERT_SECRET,
+    CA_CERT_FILENAME: AZURE_CA_SECRET,
+}
+
+# The marker `certs publication-set` prints after each Key Vault secret name
+# when the instance's engine kind is azure, the same role the Parameter
+# Store type column plays for the ec2 set.
+AZURE_KEYVAULT_MARK = "azure-key-vault"
 
 # Every spelling of "the CA private key" `publication_set` must recognize and
 # refuse by name rather than falling through to the generic "not
@@ -765,6 +793,309 @@ class ParameterStoreClient:
         return version
 
 
+# ---------------------------------------------------------------------------
+# The Key Vault publication client. This section is the azure engine kind's
+# twin of the Parameter Store client above, and it mirrors that client's
+# discipline exactly: the value travels in a 0600 `--file` inside a 0700
+# directory removed before returning, never an argument; every write is read
+# back and byte-compared before the caller may report it published; the
+# same injectable Runner seam substitutes a fake in tests; and the failure
+# classes name the remedy. The `az` CLI is ambiently logged in, so the
+# client takes a vault name and no region and no profile.
+# ---------------------------------------------------------------------------
+
+# The two `az keyvault` subcommands this client ever issues. Declared once so
+# each is named identically in the argv it builds and in the operation name
+# an error message reports for it.
+KEYVAULT_SET_OP = "keyvault secret set"
+KEYVAULT_SHOW_OP = "keyvault secret show"
+
+# The write's `--file` document, created at mode 0600 inside the temporary
+# 0700 directory the write removes before returning -- the same discipline
+# `PUT_DOCUMENT_FILENAME` documents for the aws path.
+PUT_SECRET_FILENAME = "put-secret.txt"
+
+# Substrings the az CLI's stderr carries for the error conditions this
+# client distinguishes from an unclassified failure. Matched literally,
+# not parsed as JSON, because the CLI's own error rendering is plain text.
+SECRET_NOT_FOUND_MARKER = "SecretNotFound"
+FORBIDDEN_MARKER = "AuthorizationFailed"
+AZURE_LOGIN_MARKER = "az login"
+
+
+class KeyVaultError(RuntimeError):
+    """Base class for every failure the Key Vault client raises.
+
+    Every raise site names the offending secret name and states the
+    remedy, so an operator reading the message knows what to do next
+    without consulting this module.
+    """
+
+
+class KeyVaultUnavailableError(KeyVaultError):
+    """The `az` binary is missing, or no Entra credential resolved for it."""
+
+
+class KeyVaultUnauthorizedError(KeyVaultError):
+    """The caller's identity is not authorized for the vault."""
+
+
+class KeyVaultSecretNotFoundError(KeyVaultError):
+    """No secret exists under the name a read asked for."""
+
+
+class KeyVaultUnclassifiedError(KeyVaultError):
+    """The vault rejected the operation for a reason this client does not classify."""
+
+
+def _keyvault_unavailable_no_binary_message(secret_name: str) -> str:
+    return (
+        f"ERROR: cannot reach Key Vault for {secret_name}\n"
+        "The az CLI is not on PATH.\n"
+        "Install the Azure CLI ('brew install azure-cli' on macOS), then retry."
+    )
+
+
+def _keyvault_unavailable_no_login_message(secret_name: str) -> str:
+    return (
+        f"ERROR: cannot reach Key Vault for {secret_name}\n"
+        "No Entra credential resolved for the az CLI.\n"
+        "Run 'az login' to refresh the credentials, then retry."
+    )
+
+
+def _keyvault_unauthorized_message(secret_name: str, vault_name: str) -> str:
+    return (
+        f"ERROR: access denied for {secret_name} in vault '{vault_name}'\n"
+        "The caller's identity is not authorized for this vault.\n"
+        "Ask an operator to grant the missing Key Vault secret permission on this "
+        "vault, then retry."
+    )
+
+
+def _keyvault_not_found_message(secret_name: str, vault_name: str) -> str:
+    return (
+        f"ERROR: no secret named {secret_name} in vault '{vault_name}'\n"
+        "The vault reported SecretNotFound.\n"
+        f"Publish it first: run the publication that writes '{secret_name}' "
+        "and retry."
+    )
+
+
+def _keyvault_unclassified_failure_message(
+    secret_name: str, operation: str, returncode: int
+) -> str:
+    return (
+        f"ERROR: cannot complete '{operation}' for {secret_name}\n"
+        f"The az CLI exited with status {returncode}; this is not a missing "
+        "credential, an access-denied response, or a not-found response, so "
+        "this client does not guess a cause.\n"
+        "The az CLI's diagnostic is not repeated here because it may contain "
+        "response detail this client does not echo; re-run the command by hand "
+        "(add '--debug' for detail) to see it directly, then retry."
+    )
+
+
+def _raise_keyvault_for_failure(
+    secret_name: str, vault_name: str, operation: str, returncode: int, stderr: str
+) -> NoReturn:
+    if SECRET_NOT_FOUND_MARKER in stderr:
+        raise KeyVaultSecretNotFoundError(_keyvault_not_found_message(secret_name, vault_name))
+    if FORBIDDEN_MARKER in stderr:
+        raise KeyVaultUnauthorizedError(_keyvault_unauthorized_message(secret_name, vault_name))
+    if AZURE_LOGIN_MARKER in stderr:
+        raise KeyVaultUnavailableError(_keyvault_unavailable_no_login_message(secret_name))
+    raise KeyVaultUnclassifiedError(
+        _keyvault_unclassified_failure_message(secret_name, operation, returncode)
+    )
+
+
+def _tsv_value(stdout: str) -> str:
+    """`az --query value --output tsv`'s stdout as the stored value, byte for byte.
+
+    tsv keeps its output line-oriented: a tab, newline or backslash inside a
+    value is rendered as the escape text ``\\t``/``\\n``/``\\\\`` rather than
+    raw, and the CLI appends one trailing newline to the line it prints. This
+    reverses exactly that rendering -- a single left-to-right pass, so an
+    escaped backslash is never mistaken for the start of a second escape --
+    which is what lets `publish_to_key_vault`'s read-back comparison be a
+    byte comparison against the write. For a value carrying none of the three
+    characters (PEM material carries none) the pass is the identity after the
+    trailing-newline trim.
+    """
+    text = stdout[:-1] if stdout.endswith("\n") else stdout
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character == "\\" and index + 1 < len(text):
+            escaped = text[index + 1]
+            if escaped == "n":
+                out.append("\n")
+                index += 2
+                continue
+            if escaped == "t":
+                out.append("\t")
+                index += 2
+                continue
+            if escaped == "\\":
+                out.append("\\")
+                index += 2
+                continue
+        out.append(character)
+        index += 1
+    return "".join(out)
+
+
+class KeyVaultClient:
+    """Writes and reads individual secrets in the Key Vault `vault_name` names.
+
+    The azure twin of `ParameterStoreClient`, bound to one vault instead of
+    addressing paths. `runner` and `vault_name` are the only inputs: no
+    credential, endpoint, region or profile is read from anywhere else in
+    this class, because the `az` CLI resolves its Entra session the way any
+    other invocation on this host does, so nothing here hardcodes one and a
+    test constructs the client with no network, no azure and no docker.
+    """
+
+    def __init__(self, runner: Runner, *, vault_name: str) -> None:
+        self._runner = runner
+        self._vault_name = vault_name
+
+    def _set_argv(self, secret_name: str, file_path: Path) -> list[str]:
+        """The write argv: the value rides `--file`, never an argument."""
+        return [
+            AZ_EXECUTABLE,
+            "keyvault",
+            "secret",
+            "set",
+            "--vault-name",
+            self._vault_name,
+            "--name",
+            secret_name,
+            "--file",
+            str(file_path),
+        ]
+
+    def _show_argv(self, secret_name: str) -> list[str]:
+        """The read argv: `--query value` renders the stored value alone."""
+        return [
+            AZ_EXECUTABLE,
+            "keyvault",
+            "secret",
+            "show",
+            "--vault-name",
+            self._vault_name,
+            "--name",
+            secret_name,
+            "--query",
+            "value",
+            "--output",
+            "tsv",
+        ]
+
+    def _invoke(
+        self, argv: list[str], secret_name: str, *, operation: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Run `argv` through the injected runner and translate any failure.
+
+        The one place every operation's error handling passes through, the
+        same single-seam shape `_invoke` gives the Parameter Store client:
+        the translation from an `az` exit code or a missing binary to a
+        `KeyVaultError` subclass exists once, not once per operation.
+        """
+        try:
+            result = self._runner(argv, None)
+        except FileNotFoundError as exc:
+            raise KeyVaultUnavailableError(
+                _keyvault_unavailable_no_binary_message(secret_name)
+            ) from exc
+        if result.returncode != 0:
+            _raise_keyvault_for_failure(
+                secret_name, self._vault_name, operation, result.returncode, result.stderr
+            )
+        return result
+
+    def read_secret(self, secret_name: str) -> str:
+        """The value stored under `secret_name`, byte for byte.
+
+        The read counterpart of `write_secret`, and symmetric with it:
+        `publish_to_key_vault` uses it to confirm each published secret
+        independently, rather than trusting the write call's own exit
+        code.
+
+        Raises:
+            KeyVaultUnavailableError: the vault could not be reached.
+            KeyVaultUnauthorizedError: the caller lacks access to this vault.
+            KeyVaultSecretNotFoundError: no secret exists under this name.
+            KeyVaultError: the response could not be interpreted as one
+                stored value.
+            KeyVaultUnclassifiedError: the vault rejected the operation
+                for a reason this client does not classify.
+        """
+        result = self._invoke(self._show_argv(secret_name), secret_name, operation=KEYVAULT_SHOW_OP)
+        if result.stdout.strip() == "":
+            raise KeyVaultError(
+                f"ERROR: the read of {secret_name} returned nothing\n"
+                f"Vault '{self._vault_name}' answered successfully but printed no "
+                "value, which is not a state a published secret can be in.\n"
+                "Re-run the publication, and check whether another process is "
+                "writing the same vault."
+            )
+        return _tsv_value(result.stdout)
+
+    def write_secret(self, secret_name: str, value: str) -> None:
+        """Store `value` under `secret_name`, overwriting any existing version.
+
+        The one place in this repository a Key Vault secret is written. The
+        argv invariant is the Parameter Store client's own, restated for
+        azure: `value` travels inside a `--file` document written to a
+        private file this method creates and removes, and never appears in
+        argv, so no sensitive material -- a TLS private key included -- can
+        reach the process table. Key Vault versions every `set`, so the
+        overwrite a re-issuance needs is the store's own normal behavior.
+
+        Raises:
+            KeyVaultUnavailableError: the vault could not be reached.
+            KeyVaultUnauthorizedError: the caller lacks access to this vault.
+            KeyVaultUnclassifiedError: the vault rejected the operation
+                for a reason this client does not classify.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            document_path = Path(directory) / PUT_SECRET_FILENAME
+            descriptor = os.open(document_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(value)
+            argv = self._set_argv(secret_name, document_path)
+            self._invoke(argv, secret_name, operation=KEYVAULT_SET_OP)
+
+
+def _publication_contents(paths: CertPaths) -> dict[str, str]:
+    """Issue the server material and assemble everything a publish path writes.
+
+    The one head both publication paths share: the CA existence check and
+    its `create-ca` remedy, then `issue_server`'s output joined by the CA
+    certificate read, keyed by filename. `publish` (Parameter Store) and
+    `publish_to_key_vault` (Key Vault) both consume it, so the two stores
+    can never be handed different bytes for the same instance.
+
+    Raises:
+        CertsError: the CA is missing, so there is nothing to sign with.
+    """
+    if not paths.ca_key.is_file() or not paths.ca_cert.is_file():
+        raise CertsError(
+            f"ERROR: no certificate authority for {paths.instance!r}\n"
+            f"Expected {paths.ca_key} and {paths.ca_cert}.\n"
+            f"Create it first: create-ca --instance {paths.instance}"
+        )
+    server = issue_server(paths)
+    return {
+        SERVER_KEY_FILENAME: server.key_pem,
+        SERVER_CERT_FILENAME: server.cert_pem,
+        CA_CERT_FILENAME: paths.ca_cert.read_text(encoding="utf-8"),
+    }
+
+
 def publish(paths: CertPaths, client: ParameterStoreClient) -> tuple[str, ...]:
     """Publish `paths.instance`'s TLS material to Parameter Store, returning the paths written.
 
@@ -804,19 +1135,7 @@ def publish(paths: CertPaths, client: ParameterStoreClient) -> tuple[str, ...]:
             an operator needs, and re-wrapping them here would only bury
             it.
     """
-    if not paths.ca_key.is_file() or not paths.ca_cert.is_file():
-        raise CertsError(
-            f"ERROR: no certificate authority for {paths.instance!r}\n"
-            f"Expected {paths.ca_key} and {paths.ca_cert}.\n"
-            f"Create it first: create-ca --instance {paths.instance}"
-        )
-
-    server = issue_server(paths)
-    contents = {
-        SERVER_KEY_FILENAME: server.key_pem,
-        SERVER_CERT_FILENAME: server.cert_pem,
-        CA_CERT_FILENAME: paths.ca_cert.read_text(encoding="utf-8"),
-    }
+    contents = _publication_contents(paths)
 
     written: list[str] = []
     for entry in publication_set(paths.instance):
@@ -826,15 +1145,63 @@ def publish(paths: CertPaths, client: ParameterStoreClient) -> tuple[str, ...]:
         stored = client.read_parameter(entry.parameter_path)
         if stored != value:
             raise CertsError(
-                f"ERROR: {entry.parameter_path} does not read back as it was written\n"
-                f"Wrote {len(value)} bytes, read back {len(stored)}.\n"
-                "The daemon reads this parameter at container create; starting it against "
-                "material that is not what was issued would fail the TLS handshake with an "
-                "error naming neither this publish nor the certificate.\n"
-                f"Re-run the publish for {paths.instance!r}, and check whether another "
-                "process is writing the same prefix."
+                _read_back_mismatch_message(entry.parameter_path, paths, len(value), len(stored))
             )
         written.append(entry.parameter_path)
+    return tuple(written)
+
+
+def _read_back_mismatch_message(
+    destination: str, paths: CertPaths, written_bytes: int, read_bytes: int
+) -> str:
+    """The one read-back refusal both publication paths raise."""
+    return (
+        f"ERROR: {destination} does not read back as it was written\n"
+        f"Wrote {written_bytes} bytes, read back {read_bytes}.\n"
+        "The daemon reads this material at container create; starting it against "
+        "material that is not what was issued would fail the TLS handshake with an "
+        "error naming neither this publish nor the certificate.\n"
+        f"Re-run the publish for {paths.instance!r}, and check whether another "
+        "process is writing the same store."
+    )
+
+
+def publish_to_key_vault(paths: CertPaths, client: KeyVaultClient) -> tuple[str, ...]:
+    """Publish `paths.instance`'s TLS material to its Key Vault, returning the secrets written.
+
+    The azure twin of `publish`, and it inherits that function's guarantees
+    wholesale by consuming the same `_publication_contents` head and the
+    same read-back discipline: `issue_server`'s output reaches the vault
+    through `KeyVaultClient.write_secret`, which passes every value on a
+    0600 `--file` inside a removed 0700 directory rather than in argv, so
+    the key never touches the process table; only the three destinations
+    `azure_publication_set` allows are written, the CA *private* key among
+    the refused names; and every secret is read back through
+    `KeyVaultClient.read_secret` and byte-compared against what was written
+    before this function reports it published.
+
+    Raises:
+        CertsError: the CA is missing, so there is nothing to sign with.
+        KeyVaultError: the vault rejected or could not serve a write.
+            Deliberately not translated -- the `KeyVaultError` subclasses
+            already carry the remedy an operator needs, and re-wrapping
+            them here would only bury it.
+    """
+    contents = _publication_contents(paths)
+
+    written: list[str] = []
+    for secret_name in azure_publication_set(paths.instance):
+        filename = next(
+            candidate for candidate, secret in AZURE_PUBLISHABLE.items() if secret == secret_name
+        )
+        value = contents[filename]
+        client.write_secret(secret_name, value)
+        stored = client.read_secret(secret_name)
+        if stored != value:
+            raise CertsError(
+                _read_back_mismatch_message(secret_name, paths, len(value), len(stored))
+            )
+        written.append(secret_name)
     return tuple(written)
 
 
@@ -1421,13 +1788,36 @@ def _ca_key_publication_denied_message(name: str) -> str:
     )
 
 
-def _unpublishable_name_message(name: str) -> str:
-    allowed = ", ".join(_PUBLISHABLE)
+def _unpublishable_name_message(name: str, publishable: dict[str, str]) -> str:
+    allowed = ", ".join(publishable)
     return (
         f"ERROR: {name!r} is not part of the publication set\n"
         f"Only {allowed} may be published for an instance (spec Section 5.3).\n"
         "Call publication_set() with no arguments for the default set."
     )
+
+
+def _validated_publication_names(
+    instance: str, filenames: Sequence[str] | None, publishable: dict[str, str]
+) -> tuple[str, ...]:
+    """The publication names asked for, after both refusal rules ran.
+
+    The one body both `publication_set` and `azure_publication_set` share,
+    so the CA-private-key refusal and the not-in-the-set refusal can never
+    drift between the Parameter Store set and the Key Vault set: the rules
+    live once, and only the mapping a validated name resolves through
+    differs.
+    """
+    _validate_instance(instance)
+    names = tuple(publishable) if filenames is None else tuple(filenames)
+    validated = []
+    for name in names:
+        if _is_ca_private_key_request(name):
+            raise CertsError(_ca_key_publication_denied_message(name))
+        if name not in publishable:
+            raise CertsError(_unpublishable_name_message(name, publishable))
+        validated.append(name)
+    return tuple(validated)
 
 
 def publication_set(
@@ -1449,14 +1839,8 @@ def publication_set(
             is `ca-key.pem`), or any other name outside the three entries
             this function returns by default.
     """
-    _validate_instance(instance)
-    names = tuple(_PUBLISHABLE) if filenames is None else tuple(filenames)
     entries = []
-    for name in names:
-        if _is_ca_private_key_request(name):
-            raise CertsError(_ca_key_publication_denied_message(name))
-        if name not in _PUBLISHABLE:
-            raise CertsError(_unpublishable_name_message(name))
+    for name in _validated_publication_names(instance, filenames, _PUBLISHABLE):
         entries.append(
             PublicationEntry(
                 parameter_path=f"{PARAMETER_ROOT}/{instance}/{TLS_SEGMENT}/{name}",
@@ -1464,6 +1848,28 @@ def publication_set(
             )
         )
     return tuple(entries)
+
+
+def azure_publication_set(instance: str, filenames: Sequence[str] | None = None) -> tuple[str, ...]:
+    """The Key Vault secret names `instance`'s material may publish (the azure kind).
+
+    The azure twin of `publication_set`: the same three filenames, refused
+    through the same rules -- the CA private key under any spelling, and
+    anything outside the set by name -- mapped to the Key Vault secret names
+    `AZURE_PUBLISHABLE` declares, whose dash-joined forms are the shapes the
+    vault's own naming rule permits (alphanumerics and dashes only). Passing
+    `filenames` restricts (or, for any name outside the set, rejects) the
+    returned names -- it never adds one.
+
+    Raises:
+        CertsError: `instance` is empty or contains a path separator
+            (`_validate_instance`, checked before anything is returned), or
+            `filenames` names the CA private key under any spelling, or any
+            other name outside the three names this function returns by
+            default.
+    """
+    validated = _validated_publication_names(instance, filenames, AZURE_PUBLISHABLE)
+    return tuple(AZURE_PUBLISHABLE[name] for name in validated)
 
 
 def not_after(cert_path: Path) -> datetime.datetime:
@@ -1774,7 +2180,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     publish_parser = subparsers.add_parser(
         "publish",
-        help="Publish this instance's TLS material to Parameter Store.",
+        help=(
+            "Publish this instance's TLS material to its engine kind's store "
+            "(Parameter Store for ec2, the instance's Key Vault for azure)."
+        ),
     )
     add_instance_arguments(publish_parser)
     publish_parser.add_argument(
@@ -1786,7 +2195,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     publication_set_parser = subparsers.add_parser(
         "publication-set",
-        help="Print the Parameter Store entries this instance's material may publish.",
+        help=(
+            "Print the store entries this instance's material may publish, "
+            "selected by its engine kind."
+        ),
     )
     publication_set_parser.add_argument(
         "--instance", required=True, help="The remote instance name."
@@ -1833,8 +2245,31 @@ def _run_issue_client(args: argparse.Namespace) -> int:
 
 
 def _run_publish(args: argparse.Namespace) -> int:
-    """Issue server material and publish it, printing each destination written."""
+    """Issue server material and publish it to the instance kind's store.
+
+    The store is selected by the instance's engine kind
+    (`instances.read_kind`): the ec2 kind publishes to Parameter Store as it
+    always has, and the azure kind publishes to the Key Vault named in its
+    engine address record (`instances.engine_vault_name`, whose refusal
+    names the deploy that writes the record). An ssh engine is refused by
+    `certs.sh` before this handler runs and reaches no store from here.
+    """
     paths = CertPaths(instance=args.instance, root=args.root)
+    try:
+        root = repo.find_root(Path.cwd())
+        kind = instances.read_kind(root, args.instance)
+    except (repo.RepoError, instances.InstancesError) as exc:
+        raise CertsError(str(exc)) from exc
+    if kind == instances.ENGINE_KIND_AZURE:
+        try:
+            vault_name = instances.engine_vault_name(root, args.instance)
+        except instances.InstancesError as exc:
+            raise CertsError(str(exc)) from exc
+        for secret_name in publish_to_key_vault(
+            paths, KeyVaultClient(subprocess_runner, vault_name=vault_name)
+        ):
+            print(f"published {secret_name}")
+        return 0
     client = ParameterStoreClient(subprocess_runner, region=args.region)
     for path in publish(paths, client):
         print(f"published {path}")
@@ -1842,6 +2277,21 @@ def _run_publish(args: argparse.Namespace) -> int:
 
 
 def _run_publication_set(args: argparse.Namespace) -> int:
+    """Print the publication set the instance's kind publishes to.
+
+    The ec2 set is the Parameter Store entries spec Section 5.3 names; the
+    azure set is the Key Vault secret names, azure-marked so the operator
+    can tell at a glance which store the name addresses.
+    """
+    try:
+        root = repo.find_root(Path.cwd())
+        kind = instances.read_kind(root, args.instance)
+    except (repo.RepoError, instances.InstancesError) as exc:
+        raise CertsError(str(exc)) from exc
+    if kind == instances.ENGINE_KIND_AZURE:
+        for secret_name in azure_publication_set(args.instance):
+            print(f"{secret_name} {AZURE_KEYVAULT_MARK}")
+        return 0
     for entry in publication_set(args.instance):
         print(f"{entry.parameter_path} {entry.parameter_type}")
     return 0

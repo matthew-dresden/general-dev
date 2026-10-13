@@ -641,6 +641,262 @@ def test_scaffold_fails_fast_when_gitignore_is_missing(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# scaffold, azure cloud
+# ---------------------------------------------------------------------------
+
+
+# The azure location fixture every azure scaffold test passes: a generated,
+# location-shaped value, so no real region name is stored in this file.
+def _azure_location() -> str:
+    return f"testlocation-{uuid.uuid4().hex[:6]}"
+
+
+def test_scaffold_azure_writes_the_azure_contract(tmp_path: Path) -> None:
+    """The azure template carries the README's three parts with the azure
+    inputs, issues no command, and validates nothing it only includes."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name("acme")
+    location = _azure_location()
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root, name, cloud=instances.ENGINE_KIND_AZURE, location=location, runner=runner
+    )
+
+    assert result.path == root / "remote-instances" / name / "terragrunt.hcl"
+    assert result.ami is None, "the azure kind pins no image at scaffold time"
+    assert runner.calls == [], "the azure scaffold issues no command at all"
+    text = result.path.read_text(encoding="utf-8")
+    # The README's conventions: the directory name is the identity, every
+    # input is the operator's to edit, and the deploy command follows.
+    assert f"# remote-instances/{name}/terragrunt.hcl" in text
+    assert "The directory name IS this instance's identity" in text
+    assert f"#   make instance-deploy INSTANCE={name}" in text
+    assert 'include "root" {' in text
+    assert 'path = find_in_parent_folders("root-azure.hcl")' in text
+    assert (
+        'path = "${dirname(find_in_parent_folders("root-azure.hcl"))}'
+        '/_envcommon/remote-azure.hcl"' in text
+    )
+    assert f'instance_name = "{name}"' in text
+    assert f'name_prefix   = "{name}"' in text
+    assert f'location = "{location}"' in text
+    assert f'vm_size  = "{ops.DEFAULT_AZURE_VM_SIZE}"' in text
+    assert f"root_volume_size_gb = {ops.DEFAULT_VOLUME_SIZE_GB}" in text
+    assert f"data_volume_size_gb = {ops.DEFAULT_VOLUME_SIZE_GB}" in text
+    assert 'vnet_cidr   = "10.100.0.0/16"' in text
+    assert 'subnet_cidr = "10.100.1.0/24"' in text
+    assert f'Environment = "{name}"' in text
+    # Forward-looking: the scaffold writes the declaration without checking
+    # the layer or provider it names.
+    assert not (root / "remote-instances" / "_envcommon" / "remote-azure.hcl").exists()
+    assert not (root / "provider" / "azure").exists()
+    assert any(f"created {result.path}" in message for message in result.messages)
+    assert any(f"make instance-deploy INSTANCE={name}" in message for message in result.messages)
+
+
+def test_scaffold_azure_vm_size_default_is_the_constant(tmp_path: Path) -> None:
+    """The unpassed --vm-size default lands in the template from the one
+    constant, which this test pins to the specified value."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root,
+        _instance_name(),
+        cloud=instances.ENGINE_KIND_AZURE,
+        location=_azure_location(),
+        runner=runner,
+    )
+
+    assert ops.DEFAULT_AZURE_VM_SIZE == "Standard_D2pls_v5"
+    assert f'vm_size  = "{ops.DEFAULT_AZURE_VM_SIZE}"' in result.path.read_text(encoding="utf-8")
+
+
+def test_scaffold_azure_vm_size_override_lands_in_the_template(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root,
+        _instance_name(),
+        cloud=instances.ENGINE_KIND_AZURE,
+        location=_azure_location(),
+        vm_size="Standard_D4pls_v5",
+        runner=runner,
+    )
+
+    assert 'vm_size  = "Standard_D4pls_v5"' in result.path.read_text(encoding="utf-8")
+
+
+def _git_root_gitignore_text() -> str:
+    """The committed `.gitignore` text `_git_root` seeds a scratch checkout with.
+
+    The azure refusal tests assert the gitignore is untouched; reading the
+    same source `_git_root` copies from keeps the expected value one
+    derivation from the fixture, not a second hand-typed copy.
+    """
+    repo = _import_repo()
+    real_repo_root = repo.find_root(Path(__file__).resolve().parent)
+    return subprocess.run(
+        ["git", "-C", str(real_repo_root), "show", "HEAD:.gitignore"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def test_scaffold_azure_requires_a_location(tmp_path: Path) -> None:
+    """No default location exists: the refusal names the input and writes nothing."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.ScaffoldError) as exc_info:
+        ops.scaffold(root, name, cloud=instances.ENGINE_KIND_AZURE, runner=runner)
+
+    message = str(exc_info.value)
+    assert "--location" in message and "LOCATION=<location>" in message
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+    assert (root / ".gitignore").read_text(encoding="utf-8") == _git_root_gitignore_text()
+
+
+def test_scaffold_azure_refuses_a_region_naming_the_location_equivalent(
+    tmp_path: Path,
+) -> None:
+    """The EC2 region input is refused on azure: the message names the azure
+    equivalent (--location / LOCATION=) and nothing is written."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.ScaffoldError) as exc_info:
+        ops.scaffold(
+            root,
+            name,
+            cloud=instances.ENGINE_KIND_AZURE,
+            region=REGION,
+            location=_azure_location(),
+            runner=runner,
+        )
+
+    message = str(exc_info.value)
+    assert "region" in message.lower()
+    assert "--location" in message
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_scaffold_azure_refuses_an_ami(tmp_path: Path) -> None:
+    """There is no AMI input on azure: the refusal says so and writes nothing."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.ScaffoldError) as exc_info:
+        ops.scaffold(
+            root,
+            name,
+            cloud=instances.ENGINE_KIND_AZURE,
+            ami=_ami_id(),
+            location=_azure_location(),
+            runner=runner,
+        )
+
+    message = str(exc_info.value)
+    assert "AMI" in message
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_scaffold_azure_refuses_an_unknown_cloud(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.ScaffoldError) as exc_info:
+        ops.scaffold(root, name, cloud="gcp", runner=runner)
+
+    message = str(exc_info.value)
+    assert "gcp" in message
+    assert "ec2" in message and "azure" in message
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_scaffold_azure_skips_claimed_cidrs_like_the_ec2_scaffold(tmp_path: Path) -> None:
+    """The same CIDR-allocation helper answers both clouds: a sibling claiming
+    10.100 pushes the azure deployment to the next free block."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    _sibling_with_cidr(root, "claimed", "10.100.0.0/16")
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root,
+        _instance_name(),
+        cloud=instances.ENGINE_KIND_AZURE,
+        location=_azure_location(),
+        runner=runner,
+    )
+
+    assert result.vpc_cidr == "10.101.0.0/16"
+    assert 'vnet_cidr   = "10.101.0.0/16"' in result.path.read_text(encoding="utf-8")
+    assert 'subnet_cidr = "10.101.1.0/24"' in result.path.read_text(encoding="utf-8")
+
+
+def test_scaffold_azure_appends_the_same_gitignore_entry(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+
+    ops.scaffold(
+        root,
+        name,
+        cloud=instances.ENGINE_KIND_AZURE,
+        location=_azure_location(),
+        runner=_FakeRunner(),
+    )
+
+    lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    entry = f"remote-instances/{name}/"
+    assert lines.count(entry) == 1
+    assert lines.index(entry) == lines.index(ops.GITIGNORE_SCAFFOLD_ANCHOR) + 1
+
+
+def test_scaffold_azure_ec2_region_default_applies_only_when_unset(tmp_path: Path) -> None:
+    """A region-less EC2 scaffold applies DEFAULT_REGION itself; the CLI no
+    longer fills one in ahead of the azure refusal."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    ami = _ami_id()
+    runner = _FakeRunner()
+    runner.queue(_ok(ami))
+
+    result = ops.scaffold(root, _instance_name(), ami=ami, runner=runner)
+
+    assert ops.DEFAULT_REGION == "us-east-1"
+    text = result.path.read_text(encoding="utf-8")
+    assert f'availability_zone  = "{ops.DEFAULT_REGION}a"' in text
+
+
+# ---------------------------------------------------------------------------
 # Per-instance id store
 # ---------------------------------------------------------------------------
 
@@ -1623,3 +1879,420 @@ def test_engine_remove_rejects_an_invalid_name_before_anything_runs(
 
     assert runner.calls == []
     assert stopper.calls == []
+
+
+# ---------------------------------------------------------------------------
+# state / list_state: the azure engine kind
+# ---------------------------------------------------------------------------
+
+
+def _write_azure_scaffold(root: Path, name: str, location: str = "westeurope") -> Path:
+    """The per-instance terragrunt.hcl the azure scaffold writes, in miniature.
+
+    The include text is what `read_kind` keys the azure kind on.
+    """
+    instances = _import_instances()
+    directory = root / "remote-instances" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    hcl = directory / "terragrunt.hcl"
+    hcl.write_text(
+        'include "envcommon" {\n'
+        '  path = "${dirname(find_in_parent_folders("root-azure.hcl"))}'
+        '/_envcommon/remote-azure.hcl"\n'
+        "}\n"
+        "\n"
+        "inputs = {\n"
+        f'  instance_name = "{name}"\n'
+        f'  location = "{location}"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    del instances
+    return hcl
+
+
+def _write_engine_address(
+    root: Path, name: str, *, resource_group: str, vm_name: str, vault_name: str
+) -> None:
+    """The relay address record the deploy writes, from generated values."""
+    instances = _import_instances()
+    instances.write_engine_address(
+        root,
+        name,
+        {
+            "vm_name": vm_name,
+            "vm_resource_id": (
+                f"/subscriptions/{uuid.uuid4().hex}/resourceGroups/{resource_group}"
+                f"/providers/Microsoft.Compute/virtualMachines/{vm_name}"
+            ),
+            "resource_group": resource_group,
+            "relay_namespace": f"gd-{uuid.uuid4().hex[:8]}.servicebus.windows.net",
+            "hybrid_connection": f"gd-{uuid.uuid4().hex[:8]}",
+            "vault_name": vault_name,
+            "vault_uri": f"https://{vault_name}.vault.azure.net",
+            "location": "westeurope",
+        },
+    )
+
+
+def _azure_vm_names() -> tuple[str, str]:
+    """A (resource_group, vm_name) pair, generated per call."""
+    suffix = uuid.uuid4().hex[:8]
+    return f"gd-rg-{suffix}", f"gd-vm-{suffix}"
+
+
+def _vm_show_result(power: str) -> subprocess.CompletedProcess[str]:
+    """The `az vm show -d --query {power:...}` answer for `power`."""
+    return _ok(json.dumps({"power": power, "provisioning": "Succeeded"}))
+
+
+def _vm_show_argv(resource_group: str, vm_name: str) -> tuple[str, ...]:
+    return (
+        "az",
+        "vm",
+        "show",
+        "-g",
+        resource_group,
+        "-n",
+        vm_name,
+        "-d",
+        "--query",
+        "{power:powerState, provisioning:provisioningState}",
+        "--output",
+        "json",
+    )
+
+
+def _secret_show_argv(vault_name: str, secret_name: str) -> tuple[str, ...]:
+    return (
+        "az",
+        "keyvault",
+        "secret",
+        "show",
+        "--vault-name",
+        vault_name,
+        "--name",
+        secret_name,
+        "--query",
+        "id",
+        "--output",
+        "tsv",
+    )
+
+
+def test_state_for_an_azure_engine_probes_the_vm_and_the_vault(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    certs = _import_certs()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = _azure_vm_names()
+    vault_name = f"gd-vault-{uuid.uuid4().hex[:8]}"
+    _write_azure_scaffold(root, name)
+    _write_engine_address(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name=vault_name
+    )
+    runner = _FakeRunner()
+    runner.queue(_vm_show_result("VM running"))
+    for _ in certs.AZURE_PUBLISHABLE.values():
+        runner.queue(_ok(f"https://{vault_name}.vault.azure.net/secrets/x\n"))
+    runner.queue(_err("no such context: anything"))
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.azure_state == "VM running"
+    assert snapshot.ec2_state is None
+    assert snapshot.recorded_id == vm_name, "the record's VM name is the azure row's display id"
+    assert snapshot.params_present is True
+    assert snapshot.certs_present is False
+    assert snapshot.context_exists is False
+    assert snapshot.lookup_error is None
+    assert runner.calls[0] == _vm_show_argv(resource_group, vm_name)
+    assert runner.calls[1:4] == [
+        _secret_show_argv(vault_name, secret_name)
+        for secret_name in certs.AZURE_PUBLISHABLE.values()
+    ]
+    assert all(call[0] != "aws" for call in runner.calls), (
+        "an azure engine runs no aws probe at all"
+    )
+
+
+def test_state_azure_a_missing_secret_answers_params_false(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    certs = _import_certs()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = _azure_vm_names()
+    vault_name = f"gd-vault-{uuid.uuid4().hex[:8]}"
+    _write_azure_scaffold(root, name)
+    _write_engine_address(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name=vault_name
+    )
+    runner = _FakeRunner()
+    runner.queue(_vm_show_result("VM running"))
+    secrets = iter(certs.AZURE_PUBLISHABLE.values())
+    runner.queue(_ok(f"https://{vault_name}.vault.azure.net/secrets/x\n"))  # first present
+    next(secrets)
+    runner.queue(_err("(SecretNotFound) not found", returncode=1))  # second missing
+    runner.queue(_err("no such context: anything"))  # the context inspect
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.params_present is False
+    assert snapshot.lookup_error is None
+
+
+def test_state_azure_a_vault_probe_failure_is_a_lookup_error(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = _azure_vm_names()
+    vault_name = f"gd-vault-{uuid.uuid4().hex[:8]}"
+    _write_azure_scaffold(root, name)
+    _write_engine_address(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name=vault_name
+    )
+    runner = _FakeRunner()
+    runner.queue(_vm_show_result("VM running"))
+    runner.queue(_err("(AuthorizationFailed) denied"))
+    runner.queue(_err("no such context: anything"))  # the context inspect
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.params_present is None
+    assert snapshot.lookup_error is not None
+    assert "AuthorizationFailed" in snapshot.lookup_error
+
+
+def test_state_azure_a_missing_record_degrades_with_the_deploy_remedy(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    _write_azure_scaffold(root, name)
+    runner = _FakeRunner()
+    runner.queue(_err("no such context: anything"))
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.azure_state is None
+    assert snapshot.params_present is None
+    assert snapshot.recorded_id is None
+    assert snapshot.lookup_error is not None
+    assert "engine-address.json" in snapshot.lookup_error
+    assert f"make instance-deploy INSTANCE={name}" in snapshot.lookup_error
+    assert all(call[0] != "az" for call in runner.calls), (
+        "a row with no record runs no az probe at all"
+    )
+
+
+def test_state_azure_a_record_missing_its_targets_degrades(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    _write_azure_scaffold(root, name)
+    _write_engine_address(root, name, resource_group="gd-rg", vm_name="", vault_name="gd-vault")
+    runner = _FakeRunner()
+    runner.queue(_err("no such context: anything"))
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.azure_state is None
+    assert snapshot.lookup_error is not None
+    assert "vm_name" in snapshot.lookup_error
+
+
+# ---------------------------------------------------------------------------
+# Power operations, azure arm
+# ---------------------------------------------------------------------------
+
+
+def _power_view_argv(resource_group: str, vm_name: str) -> tuple[str, ...]:
+    """The instance-view power read the azure poll issues, through the shared builder.
+
+    The builder names the sub-arguments; the module's `_run_az` prefixes the
+    binary, so the recorded argv carries it.
+    """
+    transport_azure = importlib.import_module("devcontainer_config.transport_azure")
+    return ("az", *transport_azure.build_vm_power_argv(resource_group, vm_name))
+
+
+def test_stop_azure_deallocates_and_polls_to_deallocated(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = _azure_vm_names()
+    _write_azure_scaffold(root, name)
+    _write_engine_address(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name="gd-vault"
+    )
+    sleeps: list[float] = []
+    runner = _FakeRunner()
+    runner.queue(_ok("{}"))  # the deallocate call
+    runner.queue(_ok("PowerState/stopping\n"))  # the poll: not yet
+    runner.queue(_ok("PowerState/deallocated\n"))  # the poll: done
+
+    message = ops.stop(root, name, region=REGION, runner=runner, sleep=sleeps.append)
+
+    assert vm_name in message
+    assert "deallocated" in message
+    assert runner.calls[0] == ("az", "vm", "deallocate", "-g", resource_group, "-n", vm_name)
+    assert runner.calls[1] == _power_view_argv(resource_group, vm_name)
+    assert sleeps == [ops.POWER_POLL_SECONDS], "one not-yet answer paced one poll interval"
+
+
+def test_stop_azure_is_idempotent_when_already_deallocated(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = _azure_vm_names()
+    _write_azure_scaffold(root, name)
+    _write_engine_address(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name="gd-vault"
+    )
+    sleeps: list[float] = []
+    runner = _FakeRunner()
+    runner.queue(_ok("{}"))
+    runner.queue(_ok("PowerState/deallocated\n"))
+
+    message = ops.stop(root, name, region=REGION, runner=runner, sleep=sleeps.append)
+
+    assert "deallocated" in message
+    assert sleeps == [], "the first read answers the target, so no waiting happens"
+
+
+def test_stop_azure_timeout_names_the_last_observed_state(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = _azure_vm_names()
+    _write_azure_scaffold(root, name)
+    _write_engine_address(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name="gd-vault"
+    )
+    runner = _FakeRunner()
+    runner.queue(_ok("{}"))
+    for _ in range(ops.POWER_POLL_LIMIT):
+        runner.queue(_ok("PowerState/stopping\n"))
+
+    with pytest.raises(ops.PowerError) as exc_info:
+        ops.stop(root, name, region=REGION, runner=runner, sleep=lambda _s: None)
+
+    message = str(exc_info.value)
+    assert "PowerState/stopping" in message
+    assert str(ops.POWER_POLL_LIMIT) in message
+    assert vm_name in message
+
+
+def test_azure_power_without_a_record_names_the_deploy(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    _write_azure_scaffold(root, name)
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.PowerError) as exc_info:
+        ops.stop(root, name, region=REGION, runner=runner, sleep=lambda _s: None)
+
+    message = str(exc_info.value)
+    assert "engine-address.json" in message
+    assert f"make instance-deploy INSTANCE={name}" in message
+    assert runner.calls == []
+
+
+def test_start_azure_waits_for_running_then_the_agent(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = _azure_vm_names()
+    _write_azure_scaffold(root, name)
+    _write_engine_address(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name="gd-vault"
+    )
+    sleeps: list[float] = []
+    runner = _FakeRunner()
+    runner.queue(_ok("{}"))  # the start call
+    runner.queue(_ok("PowerState/running\n"))  # the power read
+    runner.queue(_ok("Starting\n"))  # the agent read: not yet
+    runner.queue(_ok("PowerState/running\n"))  # the second loop's power read
+    runner.queue(_ok("Ready\n"))  # the agent read: ready
+
+    message = ops.start(root, name, region=REGION, runner=runner, sleep=sleeps.append)
+
+    assert vm_name in message
+    assert "running" in message and "Ready" in message
+    assert runner.calls[0] == ("az", "vm", "start", "-g", resource_group, "-n", vm_name)
+    assert sleeps == [5.0], "the not-yet agent answer paced one poll interval"
+
+
+def test_start_azure_surfaces_a_failed_readiness_read_as_a_power_error(
+    tmp_path: Path,
+) -> None:
+    """The readiness wait is transport_azure's (the one home of the poll),
+    and its failures cross into this module only as `PowerError`."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = _azure_vm_names()
+    _write_azure_scaffold(root, name)
+    _write_engine_address(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name="gd-vault"
+    )
+    runner = _FakeRunner()
+    runner.queue(_ok("{}"))  # the start call
+    runner.queue(_err("az: login required"))  # the first readiness read fails
+
+    with pytest.raises(ops.PowerError) as exc_info:
+        ops.start(root, name, region=REGION, runner=runner, sleep=lambda _s: None)
+
+    assert "login required" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# cleanup: the azure arm
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_azure_skips_the_ssm_surface_and_removes_context_and_certs(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    _write_azure_scaffold(root, name)
+    _write_engine_address(
+        root, name, resource_group="gd-rg", vm_name="gd-vm", vault_name="gd-vault"
+    )
+    runner = _FakeRunner()
+    runner.queue(_err('context "nope": context not found'))  # the context inspect: absent
+
+    messages = ops.cleanup(root, name, region=REGION, runner=runner)
+
+    assert any("absent; nothing to remove" in message for message in messages)
+    assert all(call[0] != "aws" for call in runner.calls), (
+        "an azure engine has no SSM surface for cleanup to touch"
+    )
+
+
+def test_cleanup_azure_still_aggregates_failures(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    _write_azure_scaffold(root, name)
+    runner = _FakeRunner()
+    runner.queue(_err("docker daemon exploded"))  # the context inspect fails for real
+
+    with pytest.raises(ops.CleanupError) as exc_info:
+        ops.cleanup(root, name, region=REGION, runner=runner)
+
+    message = str(exc_info.value)
+    assert "docker daemon exploded" in message
+    assert all(call[0] != "aws" for call in runner.calls)

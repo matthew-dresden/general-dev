@@ -146,9 +146,9 @@ import argparse
 import contextlib
 import datetime
 import json
-import shlex
 import os
 import selectors
+import shlex
 import socket
 import subprocess
 import sys
@@ -1021,6 +1021,49 @@ def _material_install_timeout_seconds() -> float:
     )
 
 
+def tls_dir_prepare_lines(daemon_user: str) -> tuple[str, ...]:
+    """The shared head of both engine kinds' install scripts: the TLS directory.
+
+    `set -eu` first, the daemon user quoted once, the directory created at
+    mode 0700 and owned by that user, and `umask 077` set before anything
+    is fetched -- the private key is never briefly world-readable between
+    creation and its explicit `chmod`. Shared with
+    `devcontainer_config.transport_azure`'s azure twin so the two install
+    scripts cannot drift: one prepares the directory, not two.
+    """
+    return (
+        "set -eu",
+        f"user={shlex.quote(daemon_user)}",
+        'dir="/home/$user/tls"',
+        'install -d -m 0700 -o "$user" -g "$user" "$dir"',
+        "umask 077",
+    )
+
+
+def rootless_daemon_restart_lines() -> tuple[str, ...]:
+    """The shared tail of both engine kinds' install scripts: start the daemon.
+
+    Every written file is handed to the daemon user, then the rootless
+    docker service is restarted and confirmed active. The daemon was
+    enabled but never started: its first start reads the material that only
+    now exists. `restart` is idempotent, so a re-delivery after a
+    certificate reissue is a restart, not a failure. Shared with the azure
+    twin for the same drift reason the head documents.
+    """
+    return (
+        'chown -R "$user:$user" "$dir"',
+        'uid="$(id -u "$user")"',
+        'runuser -u "$user" -- env HOME="/home/$user" '
+        'XDG_RUNTIME_DIR="/run/user/$uid" '
+        'DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" '
+        "systemctl --user restart docker.service",
+        'runuser -u "$user" -- env HOME="/home/$user" '
+        'XDG_RUNTIME_DIR="/run/user/$uid" '
+        'DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" '
+        "systemctl --user is-active docker.service",
+    )
+
+
 def build_install_commands(instance: str, *, daemon_user: str, region: str) -> tuple[str, ...]:
     """The shell the instance runs to install its published material and start its daemon.
 
@@ -1040,13 +1083,7 @@ def build_install_commands(instance: str, *, daemon_user: str, region: str) -> t
     `umask 077` before the fetch, then an explicit mode per file: the key is
     never briefly world-readable between creation and `chmod`.
     """
-    lines = [
-        "set -eu",
-        f"user={shlex.quote(daemon_user)}",
-        'dir="/home/$user/tls"',
-        'install -d -m 0700 -o "$user" -g "$user" "$dir"',
-        "umask 077",
-    ]
+    lines = list(tls_dir_prepare_lines(daemon_user))
     for entry in certs.publication_set(instance):
         filename = entry.parameter_path.rsplit("/", 1)[1]
         mode = "0600" if filename == certs.SERVER_KEY_FILENAME else "0644"
@@ -1056,24 +1093,7 @@ def build_install_commands(instance: str, *, daemon_user: str, region: str) -> t
             f'--query Parameter.Value --output text > "$dir/{filename}"'
         )
         lines.append(f'chmod {mode} "$dir/{filename}"')
-    lines.extend(
-        [
-            'chown -R "$user:$user" "$dir"',
-            'uid="$(id -u "$user")"',
-            # The daemon was enabled but never started: its first start reads
-            # the material that only now exists. `start` is idempotent, so a
-            # re-delivery after a certificate reissue is a restart, not a
-            # failure.
-            'runuser -u "$user" -- env HOME="/home/$user" '
-            'XDG_RUNTIME_DIR="/run/user/$uid" '
-            'DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" '
-            "systemctl --user restart docker.service",
-            'runuser -u "$user" -- env HOME="/home/$user" '
-            'XDG_RUNTIME_DIR="/run/user/$uid" '
-            'DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" '
-            "systemctl --user is-active docker.service",
-        ]
-    )
+    lines.extend(rootless_daemon_restart_lines())
     return tuple(lines)
 
 

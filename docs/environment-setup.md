@@ -62,6 +62,7 @@ command, but earlier is cheaper.
 | uv | `brew install uv` | `uv --version` |
 | zsh | ships with macOS | `zsh --version` |
 | aws CLI v2 | `brew install awscli` | `aws --version` prints `aws-cli/2…` |
+| azure CLI | `brew install azure-cli` | `az version` prints a version and a set of module versions |
 | gh | `brew install gh`, then `gh auth login` | `gh auth status` reports a login |
 | devcontainer CLI | `npm install -g @devcontainers/cli` | `devcontainer --version` |
 | jq | `brew install jq` | `jq --version` |
@@ -75,6 +76,12 @@ Two of those need one more step beyond installation:
 - gh needs its login because the `git` credential source resolves through
   git's credential helper on this machine, and `gh auth login` is what
   feeds that helper for github.com.
+
+The azure CLI row is needed only when azure engines are in play; a machine
+that never targets one never runs it. `az login` must succeed before an
+azure engine is provisioned or connected to, because the relay token the
+forward presents and the state store's subscription lookup both resolve
+through that login.
 
 Verify: every row's command above answers without an error.
 
@@ -319,7 +326,8 @@ the per-instance deployment file's contract is
 [remote-instances/README.md](../remote-instances/README.md). The credential
 push needs no remote variant at all: it rides whichever docker context the
 run addresses, so the very same `make push-creds` and `make build` steps
-deliver the same fragments to the EC2 engine's container.
+deliver the same fragments to a remote engine's container, whichever kind
+it is.
 
 ### The lifecycle at a glance
 
@@ -335,8 +343,8 @@ every stage:
 | Open the forward | `make remote INSTANCE=<project>` | Opens the SSM forward as a background daemon, points docker at the engine; returns once docker answers through it |
 | Build and open | `make build INSTANCE=<project>`, then `make reopen INSTANCE=<project>` | Clone into a volume on the engine, build, run postCreate, attach VS Code |
 | Day to day | `make status`, `stop`, `start`, `exec` with `INSTANCE=<project>`; `make list-containers` for the every-engine view | Container lifecycle; the checkout survives all of it |
-| Pause to save cost | `make instance-stop INSTANCE=<project>`, later `make instance-start INSTANCE=<project>` | Stops and starts the EC2 instance; containers, volumes and checkouts survive |
-| Retire | `make instance-destroy INSTANCE=<project>` | Terragrunt destroy plus cleanup of parameters, certificates, context and id |
+| Pause to save cost | `make instance-stop INSTANCE=<project>`, later `make instance-start INSTANCE=<project>` | Stops and starts the instance's VM (the EC2 one here); containers, volumes and checkouts survive |
+| Retire | `make instance-destroy INSTANCE=<project>` | Terragrunt destroy plus cleanup of parameters (EC2), certificates, context and id |
 
 `make list-instances` reports every configured instance's live state at any
 point: EC2 state, recorded id, Parameter Store and certificate material,
@@ -344,7 +352,9 @@ forwarded port, docker context. The probes are kind-aware: an ssh engine
 (one declared by a `remote-instances/<name>/engine.json` manifest, see the
 ssh transport in devcontainer.md) runs no EC2 probe at all and answers one
 reachability probe instead, rendered in the same STATE column as `ok` or
-`unreachable`, with the EC2-only columns dashed.
+`unreachable`; an azure engine answers with its VM power state and its Key
+Vault TLS material, the record's VM name standing in for the EC2 id, with
+the probes its kind does not have dashed.
 `make instance-status INSTANCE=<name>`
 narrows it to one instance; the targets that accept it also take `ALL=1`
 for every configured instance at once.
@@ -390,6 +400,57 @@ container over stdin, so a config change needs no rebuild. Both channels
 and their guarantees are in [devcontainer.md](devcontainer.md)'s "Secrets
 model" section. `gd-engine-ssh` drives this whole path for an agent.
 
+### The Azure engine path
+
+An EC2 instance is one provisioned kind of remote engine. The other
+provisioned kind is an Azure virtual machine: like the EC2 kind, this
+repository provisions it through Terragrunt, but against a different cloud
+and a different transport. The deployment creates the resource group, the
+virtual network and subnet, the platform unit (a zero-inbound network
+security group, a user-assigned managed identity, the instance's Key Vault,
+and the relay namespace and hybrid connection), and the VM itself with its
+root and data disks. The instance carries no public IP and no SSH surface
+anywhere: the docker API travels over the relay hybrid connection, whose
+listener end is a unit on the VM dialing *outward* to the relay service,
+and whose sender half is the laptop's forward, authorized by Entra and
+carrying the same mTLS docker API. State storage is one Azure storage
+account per instance behind the azurerm backend, ensured on the first
+Terragrunt run, the azure counterpart of the per-instance S3 bucket.
+
+The lifecycle is the same targets the EC2 kind uses, selected by
+`CLOUD=azure` at scaffold time:
+
+| Stage | Command |
+|---|---|
+| Scaffold the deployment | `make instance-init INSTANCE=<name> CLOUD=azure LOCATION=<location>` (`VM_SIZE=` optional; `REGION=` and `AMI=` are EC2-only inputs and refused on azure) |
+| Edit the deployment | edit the file `instance-init` wrote: VM size, volume sizes, CIDR blocks, tags — and add your Entra object id to `relay_sender_object_ids` and `keyvault_officer_object_ids` |
+| Provision and converge | `make instance-deploy INSTANCE=<name>`: Terragrunt apply; provisions the platform unit and VM, carries your two object-id grants in as role assignments on the namespace and the vault, records the relay address record, pushes secrets |
+| Open the forward | `make remote INSTANCE=<name>` (or `make connect-start INSTANCE=<name>`, which leaves the machine-wide context alone); the engine's own kind selects the relay transport, so an azure engine needs no variable |
+| Build and open | `make build INSTANCE=<name>`, then `make reopen INSTANCE=<name>` |
+| Pause to save cost | `make instance-stop INSTANCE=<name>`, later `make instance-start INSTANCE=<name>` (deallocate and restart the VM; containers, volumes and checkouts survive) |
+| Retire | `make instance-destroy INSTANCE=<name>`: Terragrunt destroy plus cleanup of the local record, context and certificates; the state store survives, like the EC2 bucket |
+
+The object-id edit is the one input an azure scaffold cannot fill in for
+you, because it names you: `relay_sender_object_ids` grants your Entra
+identity the Relay Sender role on the namespace — the right to open the
+sender half of the hybrid connection the forward rides — and
+`keyvault_officer_object_ids` grants Key Vault Secrets Officer on the vault,
+the right to publish the instance's TLS material and secrets into it. An
+empty list provisions fine and simply leaves the connect and the push with
+no grant to stand on. Find your id with `az ad signed-in-user show --query id`.
+
+The connect flow differs from the SSM one in two ways worth knowing. The
+VM-side listener stops itself when idle (Azure bills listener-hours while a
+hybrid connection has a connected listener), so opening the forward first
+starts it again with one `az vm run-command invoke` — on a freshly started
+VM that cold start can take tens of seconds, and the connect flow waits
+behind it deliberately rather than letting the first docker call die. And
+the sender's credential is an Entra token rather than an AWS SSO session: it
+lives roughly an hour, so a 401 partway through a workday is remedied the
+same way the SSO expiry is — `az login`, then `make connect-refresh
+INSTANCE=<name>` re-opens the forward from its recorded command.
+`gd-env-setup-azure` drives this whole path for an agent.
+
 ### What scaffold and deploy do
 
 `make instance-init INSTANCE=<name>` writes the one file a new instance
@@ -399,17 +460,23 @@ the commonly edited inputs. It never runs Terragrunt. The scaffold stays
 local to this checkout: `instance-init` also appends
 `remote-instances/<name>/` to the repository `.gitignore`, so the directory
 never appears in `git status`; to track a deployment deliberately, delete
-that appended line and commit the directory. Its `REGION=` option
-selects only where the default AMI and availability zone are looked up; the
-deployment region is `REMOTE_AWS_REGION`, which every Terragrunt-running
-target requires with no default.
+that appended line and commit the directory. On the EC2 kind, its `REGION=`
+option selects only where the default AMI and availability zone are looked
+up; the deployment region is `REMOTE_AWS_REGION`, which every
+Terragrunt-running target requires with no default. On the azure kind,
+`REGION=` is refused and the deployment's placement is the `LOCATION=` the
+scaffold carries as an input; no `REMOTE_AWS_REGION` is demanded of azure
+commands.
 
 `make instance-deploy INSTANCE=<name>` converges the instance: terragrunt
-init (bootstrapping the instance's state bucket on the very first
-run), validate, a plan guarded against accidental replacement, apply of
+init (bootstrapping the EC2 instance's state bucket on the very first run,
+or ensuring the azure instance's state storage account), validate, a plan
+guarded against accidental replacement, apply of
 exactly the guarded plan, then follow-ups that run only when a status probe
-reports the corresponding piece missing: recording the applied EC2 id,
-issuing and publishing the certificate material, and pushing secrets. When
+reports the corresponding piece missing: recording the applied address (the
+EC2 id, or the azure engine-address record written from the terragrunt
+outputs), issuing and publishing the certificate material, and pushing
+secrets. When
 the material is already present, the steps are skipped entirely, so a
 deploy never restarts a live daemon; renewals are manual, via
 `make cert-status`. The replacement guard is the safety net worth knowing:
@@ -420,15 +487,20 @@ Troubleshooting).
 ### Why mutual TLS, and what the certificates are for
 
 Two independent factors stack up between this machine and the docker
-daemon, each answering a different question. IAM authorizes the SSM
+daemon, each answering a different question. On the EC2 kind, IAM
+authorizes the SSM
 session: the `ssm:StartSession` grant decides who may open the port forward
 at all, and removing it is the only revocation mechanism the platform has.
-The certificates then authenticate the docker API itself, in both
+On the azure kind, Entra authorizes the sender half the same way: the Azure
+Relay Sender role decides who may couple to the hybrid connection at all,
+and removing it — or deleting the hybrid connection — is that kind's
+revocation mechanism. The certificates then authenticate the docker API
+itself, in both
 directions, on top of that forward: the daemon presents a server
 certificate the client verifies, and the client presents a certificate the
 daemon verifies against the CA it holds. Neither factor substitutes for the
-other. A valid SSO session alone commands nothing, and a copied client
-certificate is inert without a tunnel IAM authorizes.
+other. A valid SSO or Entra identity alone commands nothing, and a copied
+client certificate is inert without a forward the cloud authorizes.
 
 Certificate material lives per instance under `~/.docker/certs/<name>/`
 (or `$DOCKER_CONFIG/certs/<name>/`), and the same directory holds the
@@ -436,44 +508,52 @@ instance's recorded EC2 id: an `instance-id` file written by
 `make instance-link` and, automatically, by `make instance-deploy`, read by
 every remote target's resolver, so no id variable is ever set by hand,
 and an id dies with its instance. `make cert-status` reports client and CA
-expiry per instance (EC2 engines only; no TLS material exists for an ssh
-engine, so a fleet mixing kinds is refused naming the first ssh engine); a
+expiry per instance (the remote engines only: EC2 and azure both carry TLS
+material locally, and an ssh engine has none, so only an ssh engine is
+refused); a
 renewal is a deliberate, manual step and touches
 nothing on the running instance, because the daemon accepts any client
 certificate that chains to its CA.
 
 ### Stop, start and destroy
 
-`make instance-stop INSTANCE=<name>` stops the EC2 instance and waits until
-it reports stopped; `make instance-start INSTANCE=<name>` starts it again
-and waits for its SSM agent to report ready. Everything on the instance
+`make instance-stop INSTANCE=<name>` stops the instance's VM and waits
+until its platform reports it down (EC2 `stopped`, azure
+`PowerState/deallocated`); `make instance-start INSTANCE=<name>` starts it
+again and waits for its engine agent to report ready (the EC2 SSM agent's
+`Online`, or the azure VM agent's `Ready`). Everything on the instance
 survives the cycle: containers, images, volumes, the cloned checkouts.
 The port forward does not; open it again after a start with
 `make remote INSTANCE=<name>`; if connecting then still fails, reinstall
 the daemon's TLS material with `make cert-install INSTANCE=<name>`.
 
 `make instance-destroy INSTANCE=<name>` runs terragrunt destroy for that
-instance, then cleans up everything Terragrunt does not know about: its
-Parameter Store parameters, its docker context, its certificate directory
-(the recorded id file included). `ALL=1` destroys every configured
+instance, then cleans up everything Terragrunt does not know about: for an
+EC2 instance its Parameter Store parameters, for both kinds its docker
+context and its certificate directory (the recorded id file included; on
+azure the same directory carries the engine-address record). `ALL=1`
+destroys every configured
 instance, and only that form requires `CONFIRM=destroy`, because a typo'd
 ALL should never be all it takes to end the fleet.
 
-Each instance owns its remote-state bucket, and it stands outside that
-instance's lifecycle: one bucket per instance
-(`tg-state-<instance-name>-<region>-<account-id>-<suffix>`, derived in
-`remote-instances/root.hcl` from the instance's name, the region, the
-account and a committed suffix), holding the instance's state key
-(`<name>/terraform.tfstate`). No destroy target deletes it. Two targets
-manage the buckets instead: `make bucket-list` (requires
-`REMOTE_AWS_REGION`) shows every bucket the fleet's template matches and
+Each instance owns its remote-state store, and it stands outside that
+instance's lifecycle: one store per instance, named from
+`remote-instances/root.hcl`'s own template and a committed suffix (the EC2
+kind's S3 bucket is
+`tg-state-<instance-name>-<region>-<account-id>-<suffix>`; the azure kind's
+storage account composes its lowercase-alphanumeric form from the same
+per-instance naming idea, holding a `tfstate` blob container in a
+dedicated `rg-<instance>-state` resource group). No destroy target deletes
+it. Two targets manage the stores instead, per kind: `make bucket-list`
+shows every store the fleet's template matches and
 marks the ones a configured instance owns, and `make bucket-delete
-INSTANCE=<name>` purges every version and deletes one; `ALL=1` deletes
-every bucket in `REMOTE_AWS_REGION` and additionally requires
+INSTANCE=<name>` purges and deletes one; `ALL=1` deletes
+every store in the fleet and additionally requires
 `CONFIRM=delete`, because it takes every instance's state history with
-it. Both are EC2-only by kind: an ssh engine has no state bucket, so a
-fleet mixing kinds is refused naming the first ssh engine, and a mixed
-fleet is scanned deliberately.
+it. The surfaces are per kind (an all-EC2 fleet answers to the aws CLI and
+needs `REMOTE_AWS_REGION`; an all-azure fleet answers to the az CLI), and
+a fleet mixing the two kinds is refused naming them, so the per-kind forms
+run on a fleet configured for one kind at a time.
 
 ### Working with several engines at once
 
@@ -628,3 +708,60 @@ If the failure instead names a missing recorded id, record it with
 `make instance-deploy INSTANCE=<name>`, which records the id
 automatically. `make list-instances` shows the forward port each
 instance's context records.
+
+**An azure connect fails with 401.** Symptom: `make connect-start
+INSTANCE=<name>` against an azure engine prints an authorization refusal
+naming the relay and a 401. Cause: the Entra token the sender presents has
+expired; it lives roughly an hour. Fix: `az login`, then
+`make connect-refresh INSTANCE=<name>`, which re-opens the forward from its
+recorded command with a fresh token.
+
+**The azure relay answers 404, no listener.** Symptom: a connect or a
+docker call against an azure engine fails naming the hybrid connection and
+404. Cause: the VM-side listener is not running — it stops itself after an
+idle stretch, because azure bills listener-hours while a connected listener
+exists. Fix: `make connect-start INSTANCE=<name>` starts the listener first
+(through one `az vm run-command invoke`), so run that rather than retrying
+whatever call surfaced the 404; `make connect-refresh` alone re-runs a
+recorded command and does not start the unit.
+
+**The azure listener refuses to start.** Symptom: the run-command that
+`make connect-start` issues returns and the unit still reports inactive.
+Cause: something on the VM side — a stale unit, a package, an identity
+role — is keeping it down. Fix: read why the unit is not active with the
+same channel the start used:
+`az vm run-command invoke -g <resource-group> --vm-name <vm-name>
+--command-id RunShellScript --scripts "journalctl -u gd-relay -n 50
+--no-pager"`, then take the action its output names. The resource group and
+VM name are in the instance's address record.
+
+**The azure VM is deallocated.** Symptom: every azure probe dashes, or a
+connect names the VM stopped. Cause: the instance was deallocated —
+deliberately with `make instance-stop`, or by an idle policy on the
+subscription. Fix: `make instance-start INSTANCE=<name>` starts the VM and
+waits until its agent reports ready, then `make remote INSTANCE=<name>`
+re-opens the forward.
+
+**The deploy dies in `SubscriptionNotFound` on a storage create.** Symptom:
+`instance-deploy` fails while bootstrapping the state store, and the raw
+output is `(SubscriptionNotFound) Subscription <id> was not found.` Cause:
+a fresh subscription has the resource providers unregistered, and azure's
+error for it surfaces here first. Fix: register them — the command block is
+in [azure-requirements.md](azure-requirements.md), section 2's once-per-
+subscription note — then re-run the deploy.
+
+**The apply dies in a VM quota or SKU error.** Symptom: `terragrunt apply`
+fails with `exceeding approved <family> Cores quota` (the subscription has a
+zero-core limit for that VM family) or `SkuNotAvailable` (the family has
+quota but the region has no capacity). Cause: azure rations VM families per
+region, and a fresh subscription starts at zero for most of them. Fix: pick
+a size whose family shows nonzero quota and no restriction — the check
+commands are in [azure-requirements.md](azure-requirements.md), section 2 —
+then set `vm_size` (and `os_image_urn` for an x64 size) in the scaffolded
+`terragrunt.hcl` and re-run `make instance-deploy INSTANCE=<name>`.
+
+**A deploy fails with `Error acquiring the state lock`.** Cause: a previous
+deploy was killed mid-plan and its Terragrunt state lock survived. Fix: the
+failed plan's printed output names the lock id — run
+`cd remote-instances/<name> && terragrunt force-unlock <lock-id>` with it,
+then re-run the deploy.

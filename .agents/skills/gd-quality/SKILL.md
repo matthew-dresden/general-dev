@@ -37,7 +37,7 @@ never assume silence is a yes.
 |---|---|---|
 | Baseline | `make validate` | Its `validate:` line names `lint` and `test`, and `lint:` names the sub-targets `## Findings` interprets; both sets are read from the Makefile, never copied here. |
 | Interpret | `## Findings`, per failing sub-target | A sub-target with no row is reported by its own name and raw output. |
-| Reproduce a hook failure | `make hooks-run` (exactly what pre-commit runs) or `make hooks-run-push` (exactly what pre-push runs: lint, then a secrets scan of every commit in the pushed range) | Reproduction only; the fix follows `## Findings`, and `## Never` governs every response. |
+| Reproduce a hook failure | `make hooks-run` (exactly what pre-commit runs) or `make hooks-run-push` (exactly what pre-push runs: lint, the pushed-range secrets scan, then `make test` and `make coverage`) | Reproduction only; the fix follows `## Findings`, and `## Never` governs every response. |
 | Close | A fresh `make validate` | `## Completion`'s only source of truth. |
 
 ## Procedure

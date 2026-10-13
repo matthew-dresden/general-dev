@@ -259,6 +259,15 @@ JSON_FILES = $(shell find . -name '*.json' $(LINT_EXCLUDES))
 # Override to spell-check a set this repo does not own, e.g. docs in a clone
 # under repos/:  make lint-spell SPELL_FILES="repos/<name>/*.md"
 SPELL_FILES ?= $(MD_FILES)
+# The markdown set the prose gate reads: the same find MD_FILES runs, minus
+# the sets the other linters and consumers own -- the skills roster's
+# canonical copies (installed into agent surfaces, written against their own
+# register), CLAUDE.md (agent tooling instructions) and tests/ (fixtures).
+# The prose surfaces: user-facing markdown only. Skills and CLAUDE.md keep
+# their own voice, tests/ carries fixtures, and .terragrunt-cache holds
+# generated copies of the repo's docs that terragrunt refreshes on its own
+# schedule -- restyling a cache copy would be undone by the next init.
+PROSE_FILES ?= $(shell find . -name '*.md' $(LINT_EXCLUDES) -not -path './.agents/skills/*' -not -name 'CLAUDE.md' -not -path './tests/*' -not -path '*/.terragrunt-cache/*')
 PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer/aws-profile-map.json
 # The hostcreds manifest is private like the PRIVATE_FILES entries (make init
 # creates it from its committed example; lint-private refuses to let it be
@@ -272,9 +281,9 @@ PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
 
 .DEFAULT_GOAL := help
 .PHONY: help connect-start disconnect status exec shell start stop restart rename check build push-creds creds-init verify-container clean rebuild push-secrets list-containers \
-        lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-workspace lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
+        lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-workspace lint-secrets lint-spell lint-prose spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
-        keybindings validate test cert-status list-instances instance-init instance-plan instance-deploy instance-status instance-stop instance-start instance-destroy instance-link \
+        keybindings validate coverage test cert-status list-instances instance-init instance-plan instance-deploy instance-status instance-stop instance-start instance-destroy instance-link \
         engine-init engine-verify engine-remove \
         connect-status connect-stop connect-refresh connect-list bucket-list bucket-delete \
         skills-install skills-remove skills-list
@@ -378,15 +387,16 @@ help:
 	row "make proxy-restart"    "local"  "Stop then start, picking up changed settings."; \
 	row "make proxy-stop"       "local"  "Stop it. Settings come from $(CONFIG); set HOST_PROXY=true in shell.env to make the container use it."; \
 	printf '\n\033[1mQUALITY\033[0m\n'; \
-	row "make lint"             "host"   "Private files untracked, no nested repos, no host venv in the workspace, JSON parses, shellcheck, markdown, US English, staged secrets. Non-zero on any finding."; \
+	row "make lint"             "host"   "Private files untracked, no nested repos, no host venv in the workspace, JSON parses, shellcheck, markdown, US English, prose rules, staged secrets. Non-zero on any finding."; \
 	row "make lint-secrets"     "host"   "Scan staged content for secrets, or RANGE=<a>..<b> for a commit range. Exit 1 on any finding; there is no ignore list."; \
 	row "make format"           "host"   "Auto-fix what the markdown tooling can fix, then report what is left."; \
 	row "make lint-spell"       "host"   "US English spelling over this repo's markdown. SPELL_FILES overrides the set."; \
 	row "make spell-fix"        "host"   "Auto-fix spelling, British-to-American included, in the same set. Rewrites the files."; \
 	row "make hooks-install"    "host"   "Install pre-commit and pre-push hooks via devcontainer_config.githooks. Refuses to clobber a hook it did not write."; \
 	row "make hooks-run"        "host"   "Exactly what pre-commit runs. Use it to reproduce a pre-commit failure."; \
-	row "make hooks-run-push"   "host"   "Exactly what pre-push runs: lint, then a secrets scan of every commit in the pushed range."; \
+	row "make hooks-run-push"   "host"   "Exactly what pre-push runs: lint, the pushed-range secrets scan, then the test and coverage steps CI runs."; \
 	row "make test"             "host"   "Run the hermetic pytest suite in tests/. No docker, no AWS, no network."; \
+	row "make coverage"         "host"   "The coverage gate CI runs: the same suite with the 90% floor over devcontainer_config enforced."; \
 	row "make validate"         "host"   "The green-baseline contract automation depends on. Runs lint then test."; \
 	note "SKILLS" "wire this repo's .agents/skills roster into an agent on this Mac; no devcontainer involved"; \
 	row "make skills-install"   "host"   "Wire an agent to the skills home: global symlink (default), project verify/wire, or runtime one-shot (printed, never run). AGENT=opencode|claude|both SCOPE=global|project|runtime"; \
@@ -1317,7 +1327,7 @@ proxy-restart:
 proxy-status:
 	@$(PROXY_ENV) $(PROXY_SH) status
 
-lint: lint-private lint-nested lint-workspace lint-json lint-sh lint-dispatch lint-md lint-spell lint-secrets
+lint: lint-private lint-nested lint-workspace lint-json lint-sh lint-dispatch lint-md lint-spell lint-prose lint-secrets
 	@printf '\033[0;32m[DONE]\033[0m all checks passed\n'
 
 # The single entry point external automation calls to decide whether this
@@ -1344,6 +1354,24 @@ test:
 		exit 1; \
 	done
 	@$(PYTEST) tests
+
+# The CI test job's coverage step, local: the same command CI runs, guarded
+# by the same prerequisite tools `test` guards. The step's own
+# --cov-fail-under overrides pyproject.toml [tool.coverage.report] fail_under
+# should the two ever diverge; a red coverage step always reproduces here.
+coverage:
+	@printf '\033[0;36m[TEST]\033[0m coverage gate over devcontainer_config\n'
+	@for tool in $(TEST_PREREQUISITE_TOOLS); do \
+		command -v "$$tool" > /dev/null 2>&1 && continue; \
+		case "$$tool" in \
+			uv) hint="$(TEST_INSTALL_HINT_uv)" ;; \
+			zsh) hint="$(TEST_INSTALL_HINT_zsh)" ;; \
+		esac; \
+		printf '\033[0;31m[ERROR]\033[0m %s is not installed.\n' "$$tool" >&2; \
+		printf '        Install it: %s\n' "$$hint" >&2; \
+		exit 1; \
+	done
+	@$(PYTEST) --cov=.claude/plugins/devcontainer/scripts/devcontainer_config --cov-fail-under=90
 
 lint-nested:
 	@printf '\033[0;36m[LINT]\033[0m no nested repos tracked\n'
@@ -1382,6 +1410,14 @@ lint-spell:
 		exit 1; \
 	fi
 	@$(SPELL_LINT) $(SPELL_FILES)
+
+# The prose gate (.devcontainer/lint-prose.py): no em or en dash in prose,
+# no run of two or more consecutive prose lines outside fences, tables,
+# headings, list items and quotes. Findings name file, line and the
+# offending text; there is no ignore list (fail-fast, per CLAUDE.md).
+lint-prose:
+	@printf '\033[0;36m[LINT]\033[0m prose, dashes and paragraphs (%s files)\n' "$(words $(PROSE_FILES))"
+	@python3 .devcontainer/lint-prose.py $(PROSE_FILES)
 
 lint-dispatch:
 	@printf '\033[0;36m[LINT]\033[0m dispatched commands resolve\n'
@@ -1430,14 +1466,19 @@ spell-fix:
 
 hooks-run: lint
 
-# Runs on pre-push (E2-F2-S1-T1): the same lint pre-commit runs, then a
-# secrets scan of every commit in the pushed range, derived from git's own
-# pre-push stdin and read by devcontainer_config.githooks. lint runs first
-# so a pre-push failure never reaches the (slower) history scan needlessly;
-# git's stdin flows through both recipe lines unredirected, into whichever
-# one actually reads it.
+# Runs on pre-push (E2-F2-S1-T1), now the full CI set in order: the same
+# lint pre-commit runs, then a secrets scan of every commit in the pushed
+# range, derived from git's own pre-push stdin and read by
+# devcontainer_config.githooks, then the same test and coverage steps the
+# CI test job runs. lint runs first so a pre-push failure never reaches the
+# (slower) history scan needlessly. stdin: git's ref list flows through the
+# range scan's recipe line unredirected, into hooks-pre-push, the one
+# reader; the two make invocations after it take < /dev/null so neither
+# pytest run can consume git's stdin.
 hooks-run-push: lint
 	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli hooks-pre-push
+	@$(MAKE) --no-print-directory test < /dev/null
+	@$(MAKE) --no-print-directory coverage < /dev/null
 
 # Hook content lives in devcontainer_config.githooks, not here (E2-F2-S1-T1):
 # this delegates instead of writing hook bodies inline, so that content has

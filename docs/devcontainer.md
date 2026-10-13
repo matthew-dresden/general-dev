@@ -1,305 +1,140 @@
 # Devcontainer internals
 
-How this workspace's container is defined, provisioned, and supplied with
-secrets, in both local and remote mode. Remote-engine operations (tunnel,
-EC2 reference, troubleshooting) live in
-[`.devcontainer/remote-docker/README.md`](../.devcontainer/remote-docker/README.md).
+How this workspace's container is defined, provisioned, and supplied with secrets, in both local and remote mode.
+
+- Remote-engine operations (tunnel, EC2 reference, troubleshooting) live in [`.devcontainer/remote-docker/README.md`](../.devcontainer/remote-docker/README.md).
 
 ## Definition
 
 `.devcontainer/devcontainer.json`:
 
-- Built from `.devcontainer/Dockerfile`, user `vscode`, workspace at
-  `/workspaces/${localWorkspaceFolderBasename}`. The Dockerfile declares a
-  `# syntax=docker/dockerfile:1` directive (required for the heredoc `RUN`
-  form used below) and is `FROM mcr.microsoft.com/devcontainers/base:noble`
-  plus two layers. The first creates `~/.vscode-server` and the directories
-  the server volumes mount over, owned by `vscode`. Docker creates a missing
-  mount point, and a named volume that is empty, root-owned; VS Code installs
-  its server as `vscode` before any lifecycle hook has run, so nothing inside
-  the container can hand those directories over in time. In local mode that
-  failure was fatal: the extension runs `devcontainer up --skip-post-create`,
-  then installs the server itself and stops at `ln: failed to create symbolic
-  link '/home/vscode/.vscode-server/bin/<build>': Permission denied`.
-  Ownership set in the image is what a fresh volume is initialized with, so
-  the mount points are writable from the moment the container starts. Remote
-  mode never hit it, because `make build` runs the whole of `devcontainer up`,
-  postCreate included, before it seeds the server. The second layer installs
-  the AWS session-manager-plugin (see the dedicated bullet below).
-- Features: aws-cli, azure-cli, Python 3.14, Node 25, kubectl + helm
-  (minikube disabled
-  via `"minikube": "none"`), common-utils, docker-in-docker, uv,
-  `ghcr.io/devcontainers/features/terraform:1` (Terraform, Terragrunt and
-  tflint, each pinned `latest`); `jq` joins the existing apt-packages list.
-- The AWS `session-manager-plugin` is installed by the Dockerfile's second
-  `RUN` layer rather than by a devcontainer Feature: no registry Feature for
-  it exists. The spec originally named
-  `ghcr.io/devcontainers-extra/features/aws-ssm-session-manager-plugin:1` as
-  the mechanism, but that Feature has never existed in any registry, and the
-  only two personal repositories that come close are either unresolvable on
-  `ghcr` or unmaintained since 2024-06-27, so `CLAUDE.md`'s dependency-trust
-  rule rules them out. The step fetches the package over TLS from AWS's own
-  S3-hosted download path and
-  verifies its detached signature with `gpg --batch --verify` before
-  `dpkg --install` ever runs, failing the build on any verification error.
-  The trust anchor is AWS's publisher signing key, embedded in the Dockerfile
-  and pinned by fingerprint `7959637124CE093AD501D47A2C4D4AFF6F6757EE`
-  (`devcontainer_config.plugin_install` carries the same pinned values so a
-  test can assert the Dockerfile has not drifted from them). No package
-  checksum is pinned: the download always targets AWS's moving `latest` path,
-  so a checksum pinned against today's build would break every future rebuild
-  the moment AWS publishes a new plugin version at that same URL; the
-  signing key's fingerprint is stable across releases, so verifying the
-  signature against it is what gives the install provenance without freezing
-  the plugin version. The plugin runs at build time, not `postCreateCommand`,
-  so it ships inside the immutable image; `devcontainer_config/transport.py`
-  shells out to it by relying on it being on `PATH` for the non-root
-  `vscode` user (work unit `E5-F3-S1-T2`, operator ruling signed at commit
-  `9a38c703adda210e27c2c34607cb1a09a4d63378`). The azure CLI, the azure
-  engine's own cloud CLI, needs no such custom step: a registry feature for
-  it exists, `ghcr.io/devcontainers/features/azure-cli:1`, and the features
-  list above carries it.
-- The IaC engine is Terraform, licensed BUSL-1.1; the installed
-  Terraform and Terragrunt versions satisfy the floors `>= 1.10` and
-  `>= 1.1.3` respectively.
-- Features contribute VS Code extensions of their own, merged with the
-  `customizations.vscode.extensions` list: the container image's
-  `devcontainer.metadata` label records which feature added which. The aws-cli
-  feature contributes `AmazonWebServices.aws-toolkit-vscode`, which nothing here
-  uses: nobody signs into it, so its explorer sat on a Sign in button, and it
-  shows a telemetry notice on first activation regardless of the `aws.telemetry`
-  setting, on every rebuild anew because the acknowledgment lives in `data/`,
-  which is deliberately not persisted. The `-`-prefixed entry in the extensions
-  list is the spec's opt-out and keeps the feature (the CLI is used) while
-  dropping its extension. `aws.telemetry: false` stays in the settings so a
-  manual install of the toolkit still collects nothing.
-- `devcontainer-lock.json` is not tracked. The CLI writes it when it resolves a
-  feature it has no entry for, so a tracked copy left `.devcontainer` dirty after
-  the first build with a new feature, and the build guard then refused the next
-  build: it clones from origin, where a locally written lock would not be. The
-  file is an output, not an input; builds resolve features from the tags in
-  `devcontainer.json` without it. Feature versions are pinned there instead.
-- uv is a feature because `make lint` runs every linter through `uvx`, so without
-  it the target fails at the tool rather than on findings, and nothing else
-  installed it: not a feature, not `project-setup.sh`. The feature installs the
-  release tarball from `astral-sh/uv` directly, and both `uv` and `uvx` land in
-  `/usr/local/bin` for the container user.
-- `"shutdownAction": "none"`, the container is NOT stopped when the VS Code
-  window closes or the connection drops. Applies in both modes; on the remote
-  engine this is what makes sessions survive laptop shutdowns.
-- `runArgs` names the container `<repo>-${devcontainerId}` and stamps it with
-  `devcontainer.project=<repo>`. The label is what the Makefile targets match
-  on, so containers created by `make build` and by VS Code's Clone Repository
-  in Container Volume are discovered identically. `${devcontainerId}` is unique
-  per instance, so several clones of one repo coexist; the generated name is
-  long, and `make rename` replaces it with something readable. Local `make
-  build` also passes `devcontainer.local_folder` and `devcontainer.config_file`
-  as id-labels: any `--id-label` replaces the CLI's defaults, and those two are
-  how VS Code recognizes a folder's container, so without them `make reopen`
-  had VS Code build a second, identically-configured container rather than
-  attach to the one just built.
-- Terminals default to a `tmux` profile that attaches to a shared session
-  (`terminal.integrated.profiles.linux`). VS Code terminates terminal processes
-  when the window closes, so this is what keeps a Claude session or long build
-  alive across a disconnect, terminal persistence alone only restores the tab
-  and its scrollback. The `tm-session-*` and `tm-window-*` commands that drive
-  it are defined in `.devcontainer/tmux-commands.sh` and sourced by postCreate;
-  `tm-help` lists them, and `tm-` plus Tab discovers them. `tmux: pick session`
-  is a second profile that runs `tm-session-pick`, which lists the sessions
-  that exist and opens the one you name: a VS Code profile is fixed
-  configuration written when the container is built and cannot enumerate
-  sessions created later. A plain non-persistent shell is the `zsh` profile.
-- Keybindings are the one part of the terminal experience `devcontainer.json`
-  cannot carry. `customizations.vscode` takes `settings` and `extensions`, both
-  of which the server applies inside the container, but a keybinding is
-  resolved by the window on the developer's machine, and VS Code exposes no
-  setting that changes what the terminal sends for a chord. Shift+Enter
-  therefore reaches the shell as a bare `\r`, indistinguishable from Enter, and
-  Claude Code submits instead of inserting a newline. `/terminal-setup` fixes
-  exactly this by writing a `workbench.action.terminal.sendSequence` binding
-  that sends `ESC CR`, but run from a container terminal it writes
-  `~/.config/Code/User/keybindings.json` *in the container*, which nothing
-  reads, and reports success. `.devcontainer/vscode-keybindings.json` holds the
-  binding and `make keybindings` merges it into the editor's real
-  `keybindings.json` on the host, refusing to run if it detects
-  `REMOTE_CONTAINERS`, `DEVCONTAINER` or `CODESPACES`. It appends only, keeps
-  the pre-existing file as `keybindings.json.pre-devcontainer.bak`, and fails
-  rather than overwrite a `shift+enter` binding that already exists with other
-  arguments. `VSCODE_USER_DIR` overrides the location for Insiders, Cursor or a
-  portable install; `VSCODE_APP_DIRNAME` overrides just the application folder.
-  tmux is not involved in the failure: it forwards `ESC CR` to the pane intact
-  at every `escape-time`, because the two bytes arrive in one write and the
-  timer that would split them never starts.
-- `terminal.integrated.persistentSessionReviveProcess` is `never`. VS Code
-  restores a persisted terminal by relaunching its executable without the args it
-  was started with, so a tab launched as `tmux new-session -A -s main zsh` came
-  back as bare `tmux`, which does not attach to anything: it created a fresh
-  auto-numbered session. They accumulated one or more per reattach, and the tmux
-  server outlives the connection, so they never went away. The evidence was in
-  `~/.vscode-server/data/logs/*/ptyhost.log`, where every restore logged
-  `args undefined` next to the profile launches that logged full args, and each
-  one matched a numbered session to the second. `never` switches off recreating a
-  dead process; reconnecting to a live one is unaffected. Nothing is lost, since
-  scrollback lives in tmux via `history-limit`, not in VS Code's replay buffer.
-  Because it is a setting, it reaches a container only when VS Code seeds
-  `data/Machine/settings.json`, which is on a rebuild.
-- `.devcontainer/tmux.conf`, installed to `~/.tmux.conf` by postCreate, turns
-  the mouse on so the wheel scrolls and clicks select, raises tmux's own
-  scrollback from its 2000-line default, lists every session on the status bar,
-  and sets `default-shell` so windows open zsh rather than the account's login
-  shell. postCreate rewrites that line with the zsh it resolved, because the
-  committed file cannot know where zsh was installed.
-- `postAttachCommand` runs `resmon-disks.py`, which points the Resource Monitor
-  extension at the device behind the workspace. resmon filters by device rather
-  than mount point and the device differs per host, so both the mount and its
-  device are resolved at run time. Which mount holds the workspace differs per
-  engine: remote mounts the checkout volume at `/workspaces`, local bind-mounts
-  only the repository below it, leaving `/workspaces` itself on the container's
-  overlay. Unset, `RESMON_DISK_MOUNTS` therefore resolves to the shallowest mount
-  at or under `/workspaces`: `/workspaces` on one engine, `/workspaces/<repo>`
-  on the other. `RESMON_WORKSPACES` moves where that is searched. Reportable
-  means the source names one filesystem, not that it names a device file: the
-  extension keeps the filesystems whose source string appears in
-  `resmon.disk.drives`, a local bind mount reports a driver name (`mac` for
-  virtiofs on macOS) that matches exactly one of them, while `/tmp` is a tmpfs
-  reporting `none` or `tmpfs` for several unrelated filesystems at once and would
-  show up unlabelled or matching all of them. A source is checked by whether
-  every mount sharing it is the same filesystem (`st_dev`), which accepts a
-  device Docker bind-mounts repeatedly, as it does for `/etc/hosts`, and fails on
-  an ambiguous one rather than writing that entry. It runs on attach rather than
-  in postCreate because VS Code writes its settings file after postCreate, and it
-  never creates that file: doing so stops VS Code seeding it and leaves the
-  container with no profiles or editor settings at all.
-- The hook names that script as `$HOME/.local/bin/resmon-disks.py`, not by a
-  workspace-relative path, and `configure_resmon_disks` in postCreate links it
-  there. Only postCreate is run by the devcontainer CLI, which knows
-  `workspaceFolder` and runs it there; `postAttachCommand` is run by VS Code, and
-  on the remote engine the workspace is a volume with no local path, so the
-  window attaches to the container by name. An attached container carries no
-  `workspaceFolder` in its metadata for the extension to run hooks in, so the
-  hook runs in the home directory: a relative path resolved to
-  `~/.devcontainer/resmon-disks.py`, and every attach ended in
-  `postAttachCommand … failed with exit code 2` and no disk figures. postCreate
-  verifies the link by running it as the container user, so a broken one fails
-  the build instead of every attach.
-- `mounts` puts a volume, `vscode-server-<repo>`, over
-  `/home/vscode/.vscode-server/bin`. VS Code installs its headless server there by
-  piping ~200 MiB from the laptop into the container, which crosses the SSM
-  tunnel on the remote engine: 252s at 836 kB/s in a measured build. The volume
-  outlives the container, so a rebuild finds `bin/<vscode-build>` already
-  present, and the extension's check (`test -d`) skips the transfer entirely.
-  Per project rather than engine-wide, because two containers sharing one server
-  directory would collide on `data/Machine/.devport-<build>` and the connection
-  token. `configure_vscode_server_dir` in postCreate aborts the build if that
-  path is not a mount point, so a config that stopped mounting it cannot go
-  unnoticed, and then proves the container user can write it. It chowns
-  nothing: the Dockerfile owns that, and a chown running after VS Code
-  has already tried to install the server is too late to be the fix. A volume
-  that an earlier build left root-owned with content in it keeps that ownership,
-  since Docker only initializes an empty one, and the write check is what says
-  so. The
-  target is a literal path there because no devcontainer variable resolves to
-  the remote user's home and `${containerEnv:HOME}` is empty in this image;
-  postCreate composes the same path from `/etc/passwd` instead, which is what
-  makes the mismatch detectable. `make clean` keeps it, identified by its mount
-  point rather than its name, so a teardown does not throw away a cache that
-  costs a fetch to rebuild.
-- `postAttachCommand` also runs `vscode-settings-sync.py`, ahead of the resmon
-  hook and sequentially so the two never write the settings file at once. VS Code
-  writes `data/Machine/settings.json` from `customizations.vscode.settings` only
-  when that file is absent, so before this an edit to `devcontainer.json` reached
-  a container only by creating one. The hook merges the settings that file
-  declares into the existing copy on every attach: keys VS Code or a feature put
-  there are left alone, and a key removed from `devcontainer.json` is not
-  removed from the container, which still needs a rebuild. It never creates the
-  file, for the same reason the resmon hook does not. It locates the config by
-  the one `\*/.devcontainer/devcontainer.json` under `/workspaces`, since an
-  attached container gives a hook no workspace path, and fails when that is not
-  exactly one file; `DEVCONTAINER_CONFIG` names it directly.
+- Built from `.devcontainer/Dockerfile`, user `vscode`, workspace at `/workspaces/${localWorkspaceFolderBasename}`.
+  - The Dockerfile declares a `# syntax=docker/dockerfile:1` directive (required for the heredoc `RUN` form used below) and is `FROM mcr.microsoft.com/devcontainers/base:noble` plus two layers.
+  - The first layer creates `~/.vscode-server` and the directories the server volumes mount over, owned by `vscode`.
+  - Why ownership matters: Docker creates a missing mount point as a named volume that is empty and root-owned, and VS Code installs its server as `vscode` before any lifecycle hook has run, so nothing inside the container can hand those directories over in time.
+  - In local mode that failure was fatal: the extension runs `devcontainer up --skip-post-create`, then installs the server itself and stops at `ln: failed to create symbolic link '/home/vscode/.vscode-server/bin/<build>': Permission denied`.
+  - Ownership set in the image is what a fresh volume is initialized with, so the mount points are writable from the moment the container starts.
+  - Remote mode never hit it, because `make build` runs the whole of `devcontainer up`, postCreate included, before it seeds the server.
+  - The second layer installs the AWS session-manager-plugin (see the dedicated bullet below).
+- Features: aws-cli, azure-cli, Python 3.14, Node 25, kubectl + helm (minikube disabled via `"minikube": "none"`), common-utils, docker-in-docker, uv, `ghcr.io/devcontainers/features/terraform:1` (Terraform, Terragrunt and tflint, each pinned `latest`); `jq` joins the existing apt-packages list.
+- The AWS `session-manager-plugin` is installed by the Dockerfile's second `RUN` layer rather than by a devcontainer Feature: no registry Feature for it exists.
+  - The spec originally named `ghcr.io/devcontainers-extra/features/aws-ssm-session-manager-plugin:1` as the mechanism, but that Feature has never existed in any registry, and the only two personal repositories that come close are either unresolvable on `ghcr` or unmaintained since 2024-06-27, so `CLAUDE.md`'s dependency-trust rule rules them out.
+  - The step fetches the package over TLS from AWS's own S3-hosted download path and verifies its detached signature with `gpg --batch --verify` before `dpkg --install` ever runs, failing the build on any verification error.
+  - The trust anchor is AWS's publisher signing key, embedded in the Dockerfile and pinned by fingerprint `7959637124CE093AD501D47A2C4D4AFF6F6757EE` (`devcontainer_config.plugin_install` carries the same pinned values so a test can assert the Dockerfile has not drifted from them).
+  - No package checksum is pinned: the download always targets AWS's moving `latest` path, so a checksum pinned against today's build would break every future rebuild the moment AWS publishes a new plugin version at that same URL.
+  - The signing key's fingerprint is stable across releases, so verifying the signature against it is what gives the install provenance without freezing the plugin version.
+  - The plugin runs at build time, not `postCreateCommand`, so it ships inside the immutable image.
+  - `devcontainer_config/transport.py` shells out to it by relying on it being on `PATH` for the non-root `vscode` user (work unit `E5-F3-S1-T2`, operator ruling signed at commit `9a38c703adda210e27c2c34607cb1a09a4d63378`).
+  - The azure CLI, the azure engine's own cloud CLI, needs no such custom step: a registry feature for it exists, `ghcr.io/devcontainers/features/azure-cli:1`, and the features list above carries it.
+- The IaC engine is Terraform, licensed BUSL-1.1; the installed Terraform and Terragrunt versions satisfy the floors `>= 1.10` and `>= 1.1.3` respectively.
+- Features contribute VS Code extensions of their own, merged with the `customizations.vscode.extensions` list: the container image's `devcontainer.metadata` label records which feature added which.
+  - The aws-cli feature contributes `AmazonWebServices.aws-toolkit-vscode`, which nothing here uses: nobody signs into it, so its explorer sat on a Sign in button, and it shows a telemetry notice on first activation regardless of the `aws.telemetry` setting, on every rebuild anew because the acknowledgment lives in `data/`, which is deliberately not persisted.
+  - The `-`-prefixed entry in the extensions list is the spec's opt-out and keeps the feature (the CLI is used) while dropping its extension.
+  - `aws.telemetry: false` stays in the settings so a manual install of the toolkit still collects nothing.
+- `devcontainer-lock.json` is not tracked.
+  - The CLI writes it when it resolves a feature it has no entry for, so a tracked copy left `.devcontainer` dirty after the first build with a new feature, and the build guard then refused the next build: it clones from origin, where a locally written lock would not be.
+  - The file is an output, not an input; builds resolve features from the tags in `devcontainer.json` without it.
+  - Feature versions are pinned there instead.
+- uv is a feature because `make lint` runs every linter through `uvx`, so without it the target fails at the tool rather than on findings, and nothing else installed it: not a feature, not `project-setup.sh`.
+  - The feature installs the release tarball from `astral-sh/uv` directly, and both `uv` and `uvx` land in `/usr/local/bin` for the container user.
+- `"shutdownAction": "none"`: the container is NOT stopped when the VS Code window closes or the connection drops.
+  - Applies in both modes; on the remote engine this is what makes sessions survive laptop shutdowns.
+- `runArgs` names the container `<repo>-${devcontainerId}` and stamps it with `devcontainer.project=<repo>`.
+  - The label is what the Makefile targets match on, so containers created by `make build` and by VS Code's Clone Repository in Container Volume are discovered identically.
+  - `${devcontainerId}` is unique per instance, so several clones of one repo coexist; the generated name is long, and `make rename` replaces it with something readable.
+  - Local `make build` also passes `devcontainer.local_folder` and `devcontainer.config_file` as id-labels: any `--id-label` replaces the CLI's defaults, and those two are how VS Code recognizes a folder's container, so without them `make reopen` had VS Code build a second, identically-configured container rather than attach to the one just built.
+- Terminals default to a `tmux` profile that attaches to a shared session (`terminal.integrated.profiles.linux`).
+  - VS Code terminates terminal processes when the window closes, so this is what keeps a Claude session or long build alive across a disconnect; terminal persistence alone only restores the tab and its scrollback.
+  - The `tm-session-*` and `tm-window-*` commands that drive it are defined in `.devcontainer/tmux-commands.sh` and sourced by postCreate; `tm-help` lists them, and `tm-` plus Tab discovers them.
+  - `tmux: pick session` is a second profile that runs `tm-session-pick`, which lists the sessions that exist and opens the one you name: a VS Code profile is fixed configuration written when the container is built and cannot enumerate sessions created later.
+  - A plain non-persistent shell is the `zsh` profile.
+- Keybindings are the one part of the terminal experience `devcontainer.json` cannot carry.
+  - `customizations.vscode` takes `settings` and `extensions`, both of which the server applies inside the container, but a keybinding is resolved by the window on the developer's machine, and VS Code exposes no setting that changes what the terminal sends for a chord.
+  - Shift+Enter therefore reaches the shell as a bare `\r`, indistinguishable from Enter, and Claude Code submits instead of inserting a newline.
+  - `/terminal-setup` fixes exactly this by writing a `workbench.action.terminal.sendSequence` binding that sends `ESC CR`, but run from a container terminal it writes `~/.config/Code/User/keybindings.json` *in the container*, which nothing reads, and reports success.
+  - `.devcontainer/vscode-keybindings.json` holds the binding and `make keybindings` merges it into the editor's real `keybindings.json` on the host, refusing to run if it detects `REMOTE_CONTAINERS`, `DEVCONTAINER` or `CODESPACES`.
+  - It appends only, keeps the pre-existing file as `keybindings.json.pre-devcontainer.bak`, and fails rather than overwrite a `shift+enter` binding that already exists with other arguments.
+  - `VSCODE_USER_DIR` overrides the location for Insiders, Cursor or a portable install; `VSCODE_APP_DIRNAME` overrides just the application folder.
+  - tmux is not involved in the failure: it forwards `ESC CR` to the pane intact at every `escape-time`, because the two bytes arrive in one write and the timer that would split them never starts.
+- `terminal.integrated.persistentSessionReviveProcess` is `never`.
+  - VS Code restores a persisted terminal by relaunching its executable without the args it was started with, so a tab launched as `tmux new-session -A -s main zsh` came back as bare `tmux`, which does not attach to anything: it created a fresh auto-numbered session.
+  - They accumulated one or more per reattach, and the tmux server outlives the connection, so they never went away.
+  - The evidence was in `~/.vscode-server/data/logs/*/ptyhost.log`, where every restore logged `args undefined` next to the profile launches that logged full args, and each one matched a numbered session to the second.
+  - `never` switches off recreating a dead process; reconnecting to a live one is unaffected.
+  - Nothing is lost, since scrollback lives in tmux via `history-limit`, not in VS Code's replay buffer.
+  - Because it is a setting, it reaches a container only when VS Code seeds `data/Machine/settings.json`, which is on a rebuild.
+- `.devcontainer/tmux.conf`, installed to `~/.tmux.conf` by postCreate, turns the mouse on so the wheel scrolls and clicks select, raises tmux's own scrollback from its 2000-line default, lists every session on the status bar, and sets `default-shell` so windows open zsh rather than the account's login shell.
+  - postCreate rewrites that line with the zsh it resolved, because the committed file cannot know where zsh was installed.
+- `postAttachCommand` runs `resmon-disks.py`, which points the Resource Monitor extension at the device behind the workspace.
+  - resmon filters by device rather than mount point and the device differs per host, so both the mount and its device are resolved at run time.
+  - Which mount holds the workspace differs per engine: remote mounts the checkout volume at `/workspaces`; local bind-mounts only the repository below it, leaving `/workspaces` itself on the container's overlay.
+  - Unset, `RESMON_DISK_MOUNTS` therefore resolves to the shallowest mount at or under `/workspaces`: `/workspaces` on one engine, `/workspaces/<repo>` on the other.
+  - `RESMON_WORKSPACES` moves where that is searched.
+  - "Reportable" means the source names one filesystem, not that it names a device file: the extension keeps the filesystems whose source string appears in `resmon.disk.drives`.
+  - A local bind mount reports a driver name (`mac` for virtiofs on macOS) that matches exactly one of them, while `/tmp` is a tmpfs reporting `none` or `tmpfs` for several unrelated filesystems at once and would show up unlabelled or matching all of them.
+  - A source is checked by whether every mount sharing it is the same filesystem (`st_dev`), which accepts a device Docker bind-mounts repeatedly, as it does for `/etc/hosts`, and fails on an ambiguous one rather than writing that entry.
+  - It runs on attach rather than in postCreate because VS Code writes its settings file after postCreate, and it never creates that file: doing so stops VS Code seeding it and leaves the container with no profiles or editor settings at all.
+- The hook names that script as `$HOME/.local/bin/resmon-disks.py`, not by a workspace-relative path, and `configure_resmon_disks` in postCreate links it there.
+  - Only postCreate is run by the devcontainer CLI, which knows `workspaceFolder` and runs it there; `postAttachCommand` is run by VS Code, and on the remote engine the workspace is a volume with no local path, so the window attaches to the container by name.
+  - An attached container carries no `workspaceFolder` in its metadata for the extension to run hooks in, so the hook runs in the home directory: a relative path resolved to `~/.devcontainer/resmon-disks.py`, and every attach ended in `postAttachCommand … failed with exit code 2` and no disk figures.
+  - postCreate verifies the link by running it as the container user, so a broken one fails the build instead of every attach.
+- `mounts` puts a volume, `vscode-server-<repo>`, over `/home/vscode/.vscode-server/bin`.
+  - VS Code installs its headless server there by piping ~200 MiB from the laptop into the container, which crosses the SSM tunnel on the remote engine: 252s at 836 kB/s in a measured build.
+  - The volume outlives the container, so a rebuild finds `bin/<vscode-build>` already present, and the extension's check (`test -d`) skips the transfer entirely.
+  - It is per project rather than engine-wide, because two containers sharing one server directory would collide on `data/Machine/.devport-<build>` and the connection token.
+  - `configure_vscode_server_dir` in postCreate aborts the build if that path is not a mount point, so a config that stopped mounting it cannot go unnoticed, and then proves the container user can write it.
+  - It chowns nothing: the Dockerfile owns that, and a chown running after VS Code has already tried to install the server is too late to be the fix.
+  - A volume that an earlier build left root-owned with content in it keeps that ownership, since Docker only initializes an empty one, and the write check is what says so.
+  - The target is a literal path there because no devcontainer variable resolves to the remote user's home and `${containerEnv:HOME}` is empty in this image; postCreate composes the same path from `/etc/passwd` instead, which is what makes the mismatch detectable.
+  - `make clean` keeps it, identified by its mount point rather than its name, so a teardown does not throw away a cache that costs a fetch to rebuild.
+- `postAttachCommand` also runs `vscode-settings-sync.py`, ahead of the resmon hook and sequentially so the two never write the settings file at once.
+  - VS Code writes `data/Machine/settings.json` from `customizations.vscode.settings` only when that file is absent, so before this an edit to `devcontainer.json` reached a container only by creating one.
+  - The hook merges the settings that file declares into the existing copy on every attach: keys VS Code or a feature put there are left alone, and a key removed from `devcontainer.json` is not removed from the container, which still needs a rebuild.
+  - It never creates the file, for the same reason the resmon hook does not.
+  - It locates the config by the one `\*/.devcontainer/devcontainer.json` under `/workspaces`, since an attached container gives a hook no workspace path, and fails when that is not exactly one file; `DEVCONTAINER_CONFIG` names it directly.
 - `extensionsCache` is on a second volume, `vscode-extensions-cache-<repo>`.
-  Without it VS Code copies the extension packages it has cached on the laptop
-  into each new container over the docker connection, 23.4s in and 11.2s tarring
-  them back in a measured build, both across the tunnel on the remote engine.
-  Kept between containers, the packages are already there.
-- `data/` and `extensions/` are deliberately not on a volume. VS Code seeds
-  `data/Machine/settings.json` from `customizations.vscode.settings` only when
-  that file does not exist, so persisting `data/` would freeze the in-container
-  settings; `extensions/` is what VS Code installs from the cache, 6s for 19 of
-  them in a measured build, so persisting it would only risk a set that no longer
-  matches the server build. `DEVCONTAINER_VSCODE_SERVER_VOLUMES` names the
-  directories postCreate expects to find mounted.
-- `make reopen` seeds that volume before it opens the window, and `make
-  vscode-server` does it on demand. The build to fetch is only knowable on the
-  laptop, since VS Code updates itself between container builds, so postCreate
-  cannot have seeded what the next attach will look for: `code --version` line 2
-  is the build, the platform comes from `uname` in the container, and the tarball
-  is fetched from `VSCODE_UPDATE_URL` inside the container, off the tunnel. A
-  measured cold seed took 31s for download and extraction of 635 MB, against
-  252s for VS Code's own transfer. It verifies the `commit` in the delivered
-  `product.json` before moving it into place, extracts beside the target so an
-  interrupted fetch leaves no half-server where the extension probes, and does
-  nothing when the build is already present. An entry that is present but not a
-  usable server is removed first, unless a process is running from it: a VS Code
-  window attached to a local container it created itself mounts the host's
-  server cache at `/vscode` and writes a symlink to it into the volume, which
-  dangles in every container built without that mount, invisible to `test -e`,
-  which follows links, yet enough to make the final `mv` refuse and fail the
-  seed on every attach. `SKIP_VSCODE_SERVER_SEED=1` opens
-  the window without it. It then prunes builds nothing needs: VS Code never
-  deletes the server it stops using, and each is around 635 MB, so one arrives
-  per VS Code update and none leave. A build a process in the container is
-  running is kept, since that is the server the current window is talking to, and
-  every removal is reported.
-- Git repo detection: `git.autoRepositoryDetection: "subFolders"` +
-  `git.repositoryScanMaxDepth: -1` + `git.openRepositoryInParentFolders:
-  "never"`, every nested repo under the workspace root is detected at any
-  depth, and nothing outside the workspace is ever adopted. Gitignored clones
-  are found too: the extension's traversal filters on folder name, excluding
-  `.git` and `git.repositoryScanIgnoredFolders`, and never reads `.gitignore`.
-  Nothing sets `git.scanRepositories`, because there is nothing to list.
-  Clone into `repos/`, or anywhere else under the workspace.
-  Workspace settings override the devcontainer defaults, so both files carry
-  the same values.
-- That scan only runs at window open. Between scans the extension watches for
-  new `.git` directories, but discards any path already inside an open
-  repository, and both the workspace root and every clone under it are open
-  repositories. `configure_repo_detection` in postCreate defeats that by
-  writing `.gitmodules` files: `repos/` in the workspace root, plus one entry
-  per nested repository in whichever repository encloses it. A path declared as
-  a submodule path is the one case the extension's lookup skips, so the clone
-  is left unclaimed and opened on its own. No gitlink is written, so every
-  `git submodule` command stays a no-op, and the files are generated rather
-  than committed so a rebuild recreates them. `DEVCONTAINER_REPOS_DIR` and
-  `DEVCONTAINER_REPO_SCAN_IGNORE` control the directory and the folders the
-  walk prunes. That walk is a snapshot of what exists when the container is
-  built: `repos/` is declared as a whole directory, so anything cloned there
-  later is still picked up immediately, while a repository cloned later
-  *inside another clone* waits for the next window open.
+  - Without it VS Code copies the extension packages it has cached on the laptop into each new container over the docker connection, 23.4s in and 11.2s tarring them back in a measured build, both across the tunnel on the remote engine.
+  - Kept between containers, the packages are already there.
+- `data/` and `extensions/` are deliberately not on a volume.
+  - VS Code seeds `data/Machine/settings.json` from `customizations.vscode.settings` only when that file does not exist, so persisting `data/` would freeze the in-container settings.
+  - `extensions/` is what VS Code installs from the cache, 6s for 19 of them in a measured build, so persisting it would only risk a set that no longer matches the server build.
+  - `DEVCONTAINER_VSCODE_SERVER_VOLUMES` names the directories postCreate expects to find mounted.
+- `make reopen` seeds that volume before it opens the window, and `make vscode-server` does it on demand.
+  - The build to fetch is only knowable on the laptop, since VS Code updates itself between container builds, so postCreate cannot have seeded what the next attach will look for: `code --version` line 2 is the build, the platform comes from `uname` in the container, and the tarball is fetched from `VSCODE_UPDATE_URL` inside the container, off the tunnel.
+  - A measured cold seed took 31s for download and extraction of 635 MB, against 252s for VS Code's own transfer.
+  - It verifies the `commit` in the delivered `product.json` before moving it into place, extracts beside the target so an interrupted fetch leaves no half-server where the extension probes, and does nothing when the build is already present.
+  - An entry that is present but not a usable server is removed first, unless a process is running from it: a VS Code window attached to a local container it created itself mounts the host's server cache at `/vscode` and writes a symlink to it into the volume, which dangles in every container built without that mount, invisible to `test -e`, which follows links, yet enough to make the final `mv` refuse and fail the seed on every attach.
+  - `SKIP_VSCODE_SERVER_SEED=1` opens the window without it.
+  - It then prunes builds nothing needs: VS Code never deletes the server it stops using, and each is around 635 MB, so one arrives per VS Code update and none leave.
+  - A build a process in the container is running is kept, since that is the server the current window is talking to, and every removal is reported.
+- Git repo detection: `git.autoRepositoryDetection: "subFolders"` + `git.repositoryScanMaxDepth: -1` + `git.openRepositoryInParentFolders: "never"`.
+  - Every nested repo under the workspace root is detected at any depth, and nothing outside the workspace is ever adopted.
+  - Gitignored clones are found too: the extension's traversal filters on folder name, excluding `.git` and `git.repositoryScanIgnoredFolders`, and never reads `.gitignore`.
+  - Nothing sets `git.scanRepositories`, because there is nothing to list.
+  - Clone into `repos/`, or anywhere else under the workspace.
+  - Workspace settings override the devcontainer defaults, so both files carry the same values.
+- That scan only runs at window open.
+  - Between scans the extension watches for new `.git` directories, but discards any path already inside an open repository, and both the workspace root and every clone under it are open repositories.
+  - `configure_repo_detection` in postCreate defeats that by writing `.gitmodules` files: `repos/` in the workspace root, plus one entry per nested repository in whichever repository encloses it.
+  - A path declared as a submodule path is the one case the extension's lookup skips, so the clone is left unclaimed and opened on its own.
+  - No gitlink is written, so every `git submodule` command stays a no-op, and the files are generated rather than committed so a rebuild recreates them.
+  - `DEVCONTAINER_REPOS_DIR` and `DEVCONTAINER_REPO_SCAN_IGNORE` control the directory and the folders the walk prunes.
+  - That walk is a snapshot of what exists when the container is built: `repos/` is declared as a whole directory, so anything cloned there later is still picked up immediately, while a repository cloned later *inside another clone* waits for the next window open.
 
 ## Provisioning flow (postCreate)
 
 `postCreateCommand` → `postcreate-wrapper.sh` → `.devcontainer.postcreate.sh`:
 
-1. **Wrapper: secrets.** If `shell.env` is missing, bootstrap from SSM
-   Parameter Store (see below); otherwise source the local file. Configures
-   apt proxy when `HTTP_PROXY` is set. Fails fast on any missing input.
-2. **Postcreate: configuration.** Installs nothing, everything installable is
-   a feature. Each step is a function in `.devcontainer.postcreate.sh`, states
-   the dependency it needs, and is skipped with a banner when that dependency
-   is absent rather than aborting the build, except for every step the table
-   below marks `required`: the VS Code server volumes handed to the container
-   user, because a path that is not a mount point refills from empty on every
-   rebuild and a volume an earlier build left root-owned cannot be written by
-   the container user; the resmon-disks postAttach link, because
-   `postAttachCommand` runs it unconditionally and a container that cannot
-   provide it fails on every attach; the vscode-settings-sync postAttach
-   link, for the same postAttach reason; the git hooks step, because a
-   container whose hooks did not install would run `git commit` with no
-   secret scan; and the hostcreds startup block render, because a
-   container whose shells silently lack their credentials is worse
-   than a container that failed to create. Each of those aborts the build
-   through `exit_with_error` instead of shipping a container missing the
-   guarantee:
+1. **Wrapper: secrets.** If `shell.env` is missing, bootstrap from SSM Parameter Store (see below); otherwise source the local file. It configures the apt proxy when `HTTP_PROXY` is set, and fails fast on any missing input.
+2. **Postcreate: configuration.** Installs nothing; everything installable is a feature.
+
+   Each step is a function in `.devcontainer.postcreate.sh`, states the dependency it needs, and is skipped with a banner when that dependency is absent rather than aborting the build.
+
+   The steps the table below marks `required`: the VS Code server volumes handed to the container user, because a path that is not a mount point refills from empty on every rebuild and a volume an earlier build left root-owned cannot be written by the container user;
+   - the resmon-disks postAttach link, because `postAttachCommand` runs it unconditionally and a container that cannot provide it fails on every attach;
+   - the vscode-settings-sync postAttach link, for the same postAttach reason;
+   - the git hooks step, because a container whose hooks did not install would run `git commit` with no secret scan;
+   - the hostcreds startup block render, because a container whose shells silently lack their credentials is worse than a container that failed to create. Each of those aborts the build through `exit_with_error` instead of shipping a container missing the guarantee:
 
    | Step | Depends on |
    |---|---|
@@ -320,496 +155,257 @@ EC2 reference, troubleshooting) live in
    | pre-commit and pre-push hooks, via `make hooks-install` | the workspace `.git` directory, required |
    | `.gitmodules` per repository, for live repo detection | `git` |
 
-   It then hands `$HOME` back to the container user and runs
-   `project-setup.sh` as that user.
+   It then hands `$HOME` back to the container user and runs `project-setup.sh` as that user.
 
    The npm handover is what lets a globally installed CLI update itself.
-   A feature installs one as root at image build time, so the package directory
-   and the scope directory above it (`lib/node_modules/@anthropic-ai` for Claude
-   Code) are left owned by root and not group-writable, while
-   `lib/node_modules` itself is group-writable from the node feature. npm
-   updates a package by replacing its directory, which needs write permission on
-   the directory holding it, so the update fails with `no write permission to
-   npm prefix` even though the prefix looks writable. Two things follow from
-   that:
-   - The prefixes handed over are not only the one `npm prefix -g` reports.
-     nvm keeps a prefix per node version, and a CLI can sit under a version that
-     is not the active one, so each CLI named in
-     `DEVCONTAINER_NPM_MANAGED_CLIS` (default `claude`) is resolved from its own
-     executable and its prefix added.
-   - The check is a real `mkdir` and `rmdir` as the container user in every
-     directory npm writes into: `lib/node_modules`, each scope directory inside
-     it, and `bin`, where the executable symlink is replaced. `test -w` on
-     `lib/node_modules` passes while the scope directories inside it are still
-     root-owned, which reported a successful build and left the update broken
-     until someone ran `claude update` by hand.
 
-    `.devcontainer/claude-settings.json` is the desired state for Claude Code's
-    own `~/.claude/settings.json`, merged in rather than written over so
-    anything the CLI has already stored there survives. `$HOME` is not a volume,
-    so a rebuild starts from an empty `~/.claude` and the merge is what makes
-    the choice repeatable. It currently sets `tui` to `default`, the classic
-    main-screen renderer. The value matters less than the key being present:
-    Claude Code offers the flicker-free fullscreen renderer on startup only
-    while `tui` is unset, so declaring it both picks the renderer and retires
-    the prompt and the tip that advertises it. `/tui fullscreen` still switches
-    the running container, and postCreate puts it back on the next rebuild.
+   - A feature installs one as root at image build time, so the package directory and the scope directory above it (`lib/node_modules/@anthropic-ai` for Claude Code) are left owned by root and not group-writable, while `lib/node_modules` itself is group-writable from the node feature.
+   - npm updates a package by replacing its directory, which needs write permission on the directory holding it, so the update fails with `no write permission to npm prefix` even though the prefix looks writable.
+   - Two things follow from that:
+     - The prefixes handed over are not only the one `npm prefix -g` reports. nvm keeps a prefix per node version, and a CLI can sit under a version that is not the active one, so each CLI named in `DEVCONTAINER_NPM_MANAGED_CLIS` (default `claude`) is resolved from its own executable and its prefix added.
+     - The check is a real `mkdir` and `rmdir` as the container user in every directory npm writes into: `lib/node_modules`, each scope directory inside it, and `bin`, where the executable symlink is replaced. `test -w` on `lib/node_modules` passes while the scope directories inside it are still root-owned, which reported a successful build and left the update broken until someone ran `claude update` by hand.
 
-    The same file also points Claude Code at the z.ai GLM Coding Plan, the same
-    provider opencode uses. `ANTHROPIC_BASE_URL` selects the
-    Anthropic-compatible endpoint, and the `ANTHROPIC_DEFAULT_*_MODEL` entries
-    map Claude Code's model tiers onto GLM models: the Opus tier resolves to
-    `glm-5.3` (flagship) and the Sonnet and Haiku tiers to `glm-5.3-flash`.
-    The `[1m]` suffix opts each model into the 1M-token context window, which
-    `CLAUDE_CODE_AUTO_COMPACT_WINDOW` sizes to match. Choosing a model inside
-    Claude Code therefore chooses a GLM model: `/model opus` (or
-    `claude --model opus`) runs the flagship, `/model sonnet` runs Flash, and
-    `/status` shows which one is active. The key itself is never stored in the
-    file: `apiKeyHelper` runs `printenv ZAI_API_KEY`, so each request pulls the
-    credential from the environment variable the hostcreds startup block
-    exports, and an unset variable fails the request instead of falling back.
+   `.devcontainer/claude-settings.json` is the desired state for Claude Code's own `~/.claude/settings.json`.
+
+   - It is merged in rather than written over, so anything the CLI has already stored there survives.
+   - `$HOME` is not a volume, so a rebuild starts from an empty `~/.claude` and the merge is what makes the choice repeatable.
+   - It currently sets `tui` to `default`, the classic main-screen renderer.
+   - The value matters less than the key being present: Claude Code offers the flicker-free fullscreen renderer on startup only while `tui` is unset, so declaring it both picks the renderer and retires the prompt and the tip that advertises it.
+   - `/tui fullscreen` still switches the running container, and postCreate puts it back on the next rebuild.
+
+   The same file also points Claude Code at the z.ai GLM Coding Plan, the same provider opencode uses.
+
+   - `ANTHROPIC_BASE_URL` selects the Anthropic-compatible endpoint.
+   - The `ANTHROPIC_DEFAULT_*_MODEL` entries map Claude Code's model tiers onto GLM models: the Opus tier resolves to `glm-5.3` (flagship) and the Sonnet and Haiku tiers to `glm-5.3-flash`.
+   - The `[1m]` suffix opts each model into the 1M-token context window, which `CLAUDE_CODE_AUTO_COMPACT_WINDOW` sizes to match.
+   - Choosing a model inside Claude Code therefore chooses a GLM model: `/model opus` (or `claude --model opus`) runs the flagship, `/model sonnet` runs Flash, and `/status` shows which one is active.
+   - The key itself is never stored in the file: `apiKeyHelper` runs `printenv ZAI_API_KEY`, so each request pulls the credential from the environment variable the hostcreds startup block exports, and an unset variable fails the request instead of falling back.
 
 ## Git credentials
 
 The container holds no credential of its own until one is pushed to it.
-postCreate only sets `credential.helper store` and the SSH→HTTPS URL rewrite;
-pushing is `make push-creds`'s job, and `make build` runs it as its last
-step. The push resolves every entry the hostcreds manifest names; the git
-half is gated by the manifest itself and runs only when an entry carries
-`"source": "git"`. It copies in the credential that already works on the
-developer's machine for origin's host, obtained through
-`git credential fill` so it works with any configured helper (osxkeychain,
-libsecret, gh, store), written to `~/.git-credentials` at mode 600 inside
-the container. The step resets `credential.helper` with
-`git config --replace-all`, because the Dev Containers extension copies the
-host's `~/.gitconfig` into the container when a window attaches (a rebuild
-usually has one already attached to the previous container), and that
-copy leaves several helper values in place, against which a plain
-`git config` set fails with "cannot overwrite multiple values" after the
-container is otherwise complete. One helper, `store`, is the intended state,
-and the push proves the credential answers by running `git ls-remote origin`
-inside the container before reporting success. `make verify-container`
-re-checks that state on demand, on either engine.
 
-This replaced `GIT_AUTH_METHOD` / `GIT_TOKEN` / ssh-key handling driven by
-`shell.env`, which had two problems: the token had to be rotated by hand, and
-`configure_git_token` wrote `~/.netrc` while configuring the `store` helper,
-which reads only `~/.git-credentials`, so it authenticated nothing even when
-the token was current. Neither failure was visible while VS Code was attached,
-because the extension forwards the host's credentials; it surfaced only when an
-agent tried to push from a detached session.
+- postCreate only sets `credential.helper store` and the SSH→HTTPS URL rewrite.
+- Pushing is `make push-creds`'s job, and `make build` runs it as its last step.
+- The push resolves every entry the hostcreds manifest names; the git half is gated by the manifest itself and runs only when an entry carries `"source": "git"`.
+- It copies in the credential that already works on the developer's machine for origin's host, obtained through `git credential fill` so it works with any configured helper (osxkeychain, libsecret, gh, store), written to `~/.git-credentials` at mode 600 inside the container.
+- The step resets `credential.helper` with `git config --replace-all`, because the Dev Containers extension copies the host's `~/.gitconfig` into the container when a window attaches (a rebuild usually has one already attached to the previous container), and that copy leaves several helper values in place, against which a plain `git config` set fails with "cannot overwrite multiple values" after the container is otherwise complete.
+- One helper, `store`, is the intended state, and the push proves the credential answers by running `git ls-remote origin` inside the container before reporting success.
+- `make verify-container` re-checks that state on demand, on either engine.
+
+This mechanism replaced `GIT_AUTH_METHOD` / `GIT_TOKEN` / ssh-key handling driven by `shell.env`, which had two problems.
+
+- The token had to be rotated by hand.
+- `configure_git_token` wrote `~/.netrc` while configuring the `store` helper, which reads only `~/.git-credentials`, so it authenticated nothing even when the token was current.
+- Neither failure was visible while VS Code was attached, because the extension forwards the host's credentials; it surfaced only when an agent tried to push from a detached session.
 
 ## Git hooks
 
-`make hooks-install` installs a pre-commit and a pre-push hook, both written
-by `devcontainer_config.githooks`, so hook content has exactly one source
-instead of being duplicated between the two `.git/hooks/*` files.
+`make hooks-install` installs a pre-commit and a pre-push hook, both written by `devcontainer_config.githooks`, so hook content has exactly one source instead of being duplicated between the two `.git/hooks/*` files.
 
-- **pre-commit** execs `make hooks-run`, which is `make lint`: private files
-  untracked, no nested repos, JSON parses, shellcheck, markdown, US English
-  spelling, and a secrets scan of whatever is currently staged.
-- **pre-push** execs `make hooks-run-push`, which runs `lint` first and then
-  scans every commit in the pushed range, not just the tip. Git hands the
-  hook one `<local ref> <local sha> <remote ref> <remote sha>` line per ref
-  being pushed on stdin; `devcontainer_config.githooks.ranges_from_push_refs`
-  turns that into one `<a>..<b>` range per ref (an all-zero remote id, a
-  branch the remote has never seen, becomes every commit reachable from the
-  local tip that is not already reachable from a remote-tracking ref this
-  checkout knows about, so a branch forked from `main` scans only its own new
-  commits, not `main`'s history too; an all-zero local id, a delete,
-  contributes nothing to scan), and each range is scanned with the same
-  detectors staged mode uses. The whole range is scanned, not just the tip,
-  because a credential introduced early and removed later still reaches the
-  remote in history the moment the commit that added it is pushed; scanning
-  only the tip would miss it.
+- **pre-commit** execs `make hooks-run`, which is `make lint`: private files untracked, no nested repos, JSON parses, shellcheck, markdown, US English spelling, and a secrets scan of whatever is currently staged.
+- **pre-push** execs `make hooks-run-push`, which runs `lint` first and then scans every commit in the pushed range, not just the tip.
+  - Git hands the hook one `<local ref> <local sha> <remote ref> <remote sha>` line per ref being pushed on stdin.
+  - `devcontainer_config.githooks.ranges_from_push_refs` turns that into one `<a>..<b>` range per ref: an all-zero remote id (a branch the remote has never seen) becomes every commit reachable from the local tip that is not already reachable from a remote-tracking ref this checkout knows about, so a branch forked from `main` scans only its own new commits, not `main`'s history too; an all-zero local id (a delete) contributes nothing to scan.
+  - Each range is scanned with the same detectors staged mode uses.
+  - The whole range is scanned, not just the tip, because a credential introduced early and removed later still reaches the remote in history the moment the commit that added it is pushed; scanning only the tip would miss it.
 
-Installing is idempotent: a second `make hooks-install` leaves the hooks
-byte-identical, and it refuses to overwrite a hook it did not write, in case
-a developer already has their own pre-commit or pre-push hook. To check for
-drift, whether an installed hook still matches what `make hooks-install`
-would write, without rewriting it, run:
+Installing is idempotent: a second `make hooks-install` leaves the hooks byte-identical, and it refuses to overwrite a hook it did not write, in case a developer already has their own pre-commit or pre-push hook.
+
+To check for drift, whether an installed hook still matches what `make hooks-install` would write, without rewriting it, run:
 
 ```sh
 PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.cli hooks-check
 ```
 
-`make hooks-uninstall` removes both hooks; running that command (or any of
-the other patterns the Bypass denial section below lists) through Claude
-Code's `Bash` tool is itself a denied bypass.
+- `make hooks-uninstall` removes both hooks.
+- Running that command (or any of the other patterns the Bypass denial section below lists) through Claude Code's `Bash` tool is itself a denied bypass.
 
-On the remote engine the workspace is cloned into a volume, so the container
-has its own `.git` directory, one `make hooks-install` on the host never
-touches. Without a second install, a commit made from a container terminal,
-where most work in this repository happens, would run no secret scan at
-all, the unguarded path becoming the common one instead of the exception.
-postCreate closes that gap: after the workspace and its `.git` directory are
-in place, it runs the identical `make hooks-install` the host uses, so the
-container renders the same hook content from the same
-`devcontainer_config.githooks` module rather than a second copy. A failed
-install aborts postCreate rather than continuing with no hooks in place: a
-container that reached the prompt with no guard would run `git commit` with
-no secret scan, at the moment a developer is least likely to be reading the
-setup log.
+On the remote engine the workspace is cloned into a volume, so the container has its own `.git` directory, one `make hooks-install` on the host never touches.
+
+- Without a second install, a commit made from a container terminal, where most work in this repository happens, would run no secret scan at all, the unguarded path becoming the common one instead of the exception.
+- postCreate closes that gap: after the workspace and its `.git` directory are in place, it runs the identical `make hooks-install` the host uses, so the container renders the same hook content from the same `devcontainer_config.githooks` module rather than a second copy.
+- A failed install aborts postCreate rather than continuing with no hooks in place: a container that reached the prompt with no guard would run `git commit` with no secret scan, at the moment a developer is least likely to be reading the setup log.
 
 ## Bypass denial
 
-The threat this control answers is not a secret reaching the repository,
-but an agent or a human disabling the controls above under time pressure.
-The hook contract ("Bypass
-denial") fixes the denied surface. A `PreToolUse`
-hook on the `Bash` matcher, `.claude/hooks/deny_bypass.py`, registered in
-`.claude/settings.json`, denies every structurally recognized attempt made
-through Claude Code's `Bash` tool to run one of the following, naming the
-rule and the fix instead of only refusing. This hook intercepts only
-commands issued through that tool; a command a human (or an agent working
-outside Claude Code) types directly into a host or container terminal is
-not intercepted here at all, and stays covered, if at all, only by the git
-hooks the previous section describes:
+The threat this control answers is not a secret reaching the repository, but an agent or a human disabling the controls above under time pressure.
 
-- `git commit --no-verify`, its `-n` alias (bare or bundled with another
-  short option, for example `-vn`), and `git commit --no-gpg-sign`.
+- The hook contract ("Bypass denial") fixes the denied surface.
+- A `PreToolUse` hook on the `Bash` matcher, `.claude/hooks/deny_bypass.py`, registered in `.claude/settings.json`, denies every structurally recognized attempt made through Claude Code's `Bash` tool to run one of the following, naming the rule and the fix instead of only refusing.
+- This hook intercepts only commands issued through that tool.
+- A command a human (or an agent working outside Claude Code) types directly into a host or container terminal is not intercepted here at all, and stays covered, if at all, only by the git hooks the previous section describes.
+
+The denied patterns:
+
+- `git commit --no-verify`, its `-n` alias (bare or bundled with another short option, for example `-vn`), and `git commit --no-gpg-sign`.
 - `git push --no-verify`.
-- Any `HUSKY=`, `SKIP=` or `PRE_COMMIT_ALLOW_NO_CONFIG=` assignment,
-  whatever the value, whether written inline before the program or behind
-  `env`, wherever in a chained command they appear.
+- Any `HUSKY=`, `SKIP=` or `PRE_COMMIT_ALLOW_NO_CONFIG=` assignment, whatever the value, whether written inline before the program or behind `env`, wherever in a chained command they appear.
 - `git add -f` / `--force` of a path `.gitignore` excludes.
 - `rm` or `chmod` targeting anything under `.git/hooks`.
-- `make hooks-uninstall`, including the `make -C <dir> hooks-uninstall`
-  spelling.
+- `make hooks-uninstall`, including the `make -C <dir> hooks-uninstall` spelling.
 
-Evaluation is structural: a command line chained with `&&`, `||`, `;`, a
-pipe, a bare `&` background operator, simply a newline (the ordinary shape
-of a multi-line Bash-tool command), or a statement wrapped in a subshell
-`( )` or a brace group `{ }`, is denied when any segment matches, not only
-the first, and a denial is decided from the tokenized program, arguments
-and leading assignments, never a substring search over the raw text. The
-program name is compared by its basename, so `/usr/bin/git commit
---no-verify` and `/bin/rm .git/hooks/pre-commit` are denied the same as
-the unprefixed spellings. A bare-word launcher ahead of the program
-(`sudo`, `env`, `command`, `nohup`, `time`, `doas`, `nice`, `ionice`,
-`setsid`, any number of them chained) and a shell reserved word that would
-otherwise be misread as the program after a `;` inside a compound
-statement (`then`, `else`, `elif`, `do`, `done`, `fi`, `while`, `until`,
-`case`, `esac`, `in`, `function`, `if`, `!`) are both walked past the same
-way, so `sudo git commit --no-verify` and `if true; then git commit
---no-verify; fi` deny exactly as the unprefixed, unwrapped spelling does.
+Evaluation is structural: a command line chained with `&&`, `||`, `;`, a pipe, a bare `&` background operator, simply a newline (the ordinary shape of a multi-line Bash-tool command), or a statement wrapped in a subshell `( )` or a brace group `{ }`, is denied when any segment matches, not only the first.
 
-Known limitations, so this section does not claim broader coverage than
-the hook delivers: a denied command nested inside a quoted string this
-hook cannot re-parse (`bash -c "<command>"`, `sh -c "<command>"` and
-`eval "<command>"`), is not recovered from that string; a `git -c
-core.hooksPath=<path>` global config assignment is walked past without
-its value being inspected; a launcher combined with its own flags (`sudo
--u root`, `env -i`, `nice -n 10`) is not walked past, only the bare word
-is; and a wrapper that requires a positional argument before the command
-it runs (`timeout <n>`, `stdbuf <opts>`, `xargs`) is not treated as a
-launcher at all. Each of these is documented here, in the module
-docstring, as a hardening candidate for a follow-up unit, not asserted as
-covered.
+- A denial is decided from the tokenized program, arguments and leading assignments, never a substring search over the raw text.
+- The program name is compared by its basename, so `/usr/bin/git commit --no-verify` and `/bin/rm .git/hooks/pre-commit` are denied the same as the unprefixed spellings.
+- A bare-word launcher ahead of the program (`sudo`, `env`, `command`, `nohup`, `time`, `doas`, `nice`, `ionice`, `setsid`, any number of them chained) and a shell reserved word that would otherwise be misread as the program after a `;` inside a compound statement (`then`, `else`, `elif`, `do`, `done`, `fi`, `while`, `until`, `case`, `esac`, `in`, `function`, `if`, `!`) are both walked past the same way, so `sudo git commit --no-verify` and `if true; then git commit --no-verify; fi` deny exactly as the unprefixed, unwrapped spelling does.
 
-`git push --dry-run` is permitted: under `push`, `-n` means dry run, a
-rehearsal that changes nothing, not the `commit` alias for `--no-verify`.
-The same two characters are read in the context of the subcommand they
-follow rather than matched blindly, so `git commit -n` is denied while
-`git push -n` is not.
+Known limitations, so this section does not claim broader coverage than the hook delivers:
 
-The default is deny for anything the hook cannot understand: an
-untokenizable command line, an event on stdin that is not valid JSON or
-carries no command, or a `git add -f` whose ignore check cannot run, all
-deny rather than allow.
+- A denied command nested inside a quoted string this hook cannot re-parse (`bash -c "<command>"`, `sh -c "<command>"` and `eval "<command>"`) is not recovered from that string.
+- A `git -c core.hooksPath=<path>` global config assignment is walked past without its value being inspected.
+- A launcher combined with its own flags (`sudo -u root`, `env -i`, `nice -n 10`) is not walked past, only the bare word is.
+- A wrapper that requires a positional argument before the command it runs (`timeout <n>`, `stdbuf <opts>`, `xargs`) is not treated as a launcher at all.
+- Each of these is documented here, in the module docstring, as a hardening candidate for a follow-up unit, not asserted as covered.
 
-A denial that looks wrong is not worked around with a different spelling
-of the same bypass. Fix the underlying problem the flag was reaching for
-(a genuinely broken hook, a signing key that needs configuring), or
-escalate to a human operator, who can evaluate whether the denied action
-is legitimate; only a human, not this hook and not the agent it stopped,
-approves running a command it lists above.
+- `git push --dry-run` is permitted: under `push`, `-n` means dry run, a rehearsal that changes nothing, not the `commit` alias for `--no-verify`.
+- The same two characters are read in the context of the subcommand they follow rather than matched blindly, so `git commit -n` is denied while `git push -n` is not.
+
+The default is deny for anything the hook cannot understand: an untokenizable command line, an event on stdin that is not valid JSON or carries no command, or a `git add -f` whose ignore check cannot run, all deny rather than allow.
+
+A denial that looks wrong is not worked around with a different spelling of the same bypass.
+
+- Fix the underlying problem the flag was reaching for (a genuinely broken hook, a signing key that needs configuring), or escalate to a human operator, who can evaluate whether the denied action is legitimate.
+- Only a human, not this hook and not the agent it stopped, approves running a command it lists above.
 
 ## Creating the container (remote)
 
-`make build` does what VS Code's Clone Repository in Container Volume does, but
-blocking and scriptable:
+`make build` does what VS Code's Clone Repository in Container Volume does, but blocking and scriptable:
 
-1. Clone the repo from **origin** into a named volume (`<repo>-<branch>`) on
-   the engine, using the cached base image, then chown it to the container uid.
-2. Generate an override config: the resolved `devcontainer.json` with
-   `workspaceMount` pointed at that volume. The committed file is untouched, so
-   local builds still bind-mount normally. It is written to a temp file, and the
-   CLI resolves a config's relative paths against the config it was handed, so
-   `build.dockerfile` and `build.context` are rewritten absolute against
-   `.devcontainer` on the way through. Without that the build would look for the
-   Dockerfile next to the temp file.
-3. `devcontainer up --override-config …`, which blocks through the image build
-   and postCreate and propagates its exit code.
+1. Clone the repo from **origin** into a named volume (`<repo>-<branch>`) on the engine, using the cached base image, then chown it to the container uid.
+2. Generate an override config: the resolved `devcontainer.json` with `workspaceMount` pointed at that volume.
+3. `devcontainer up --override-config …`, which blocks through the image build and postCreate and propagates its exit code.
 
-The config is read from the laptop while the checkout comes from origin, so the
-build refuses to run when `.devcontainer` has uncommitted changes, otherwise
-the container would not contain the config that built it. `FORCE=1` overrides.
+Facts about step 2:
 
-The build's last act is the hostcreds push the Secrets model section below
-describes, and because it is last, a credential that fails to resolve aborts
-the build with the container otherwise complete: fix the credential
-(`make creds-init` names what is missing), re-run `make push-creds` alone, and
-no rebuild is needed. `make verify-container` re-checks the pushed state
-inside the container at any time, on either engine.
+- The committed file is untouched, so local builds still bind-mount normally.
+- The override is written to a temp file, and the CLI resolves a config's relative paths against the config it was handed, so `build.dockerfile` and `build.context` are rewritten absolute against `.devcontainer` on the way through.
+- Without that the build would look for the Dockerfile next to the temp file.
 
-The image carries no asdf: Python and Node come from devcontainer features,
-and nothing else references asdf. A project that wants it must add that
-support deliberately.
+The config is read from the laptop while the checkout comes from origin, so the build refuses to run when `.devcontainer` has uncommitted changes, otherwise the container would not contain the config that built it. `FORCE=1` overrides.
+
+The build's last act is the hostcreds push the Secrets model section below describes, and because it is last, a credential that fails to resolve aborts the build with the container otherwise complete.
+
+- Fix the credential (`make creds-init` names what is missing), re-run `make push-creds` alone, and no rebuild is needed.
+- `make verify-container` re-checks the pushed state inside the container at any time, on either engine.
+
+The image carries no asdf: Python and Node come from devcontainer features, and nothing else references asdf. A project that wants it must add that support deliberately.
 
 ## Certificate lifecycle
 
-A remote engine is reached over mTLS: the docker daemon authenticates the
-laptop's client certificate, and the laptop authenticates the daemon's server
-certificate, both signed by a certificate authority created once per
-instance. Three lifetimes govern that material (`CERT_CA_DAYS`,
-`CERT_SERVER_DAYS`, `CERT_CLIENT_DAYS`; defaults and validation are
-documented in `docs/environment-files.md`'s "Certificate lifetimes"
-section, the single place they are defined). Certificate material is
-persisted under `certs.DEFAULT_CERTS_ROOT` / `instances.certs_root()`:
-`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/` when
-`DOCKER_CONFIG` is unset (`docs/environment-files.md`'s "Instances"
-section, `DOCKER_CONFIG` row, the single place that default is defined);
-`<certs-root>` stands for that root in the table below:
+A remote engine is reached over mTLS: the docker daemon authenticates the laptop's client certificate, and the laptop authenticates the daemon's server certificate, both signed by a certificate authority created once per instance.
+
+Three lifetimes govern that material (`CERT_CA_DAYS`, `CERT_SERVER_DAYS`, `CERT_CLIENT_DAYS`; defaults and validation are documented in `docs/environment-files.md`'s "Certificate lifetimes" section, the single place they are defined).
+
+Certificate material is persisted under `certs.DEFAULT_CERTS_ROOT` / `instances.certs_root()`: `$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/` when `DOCKER_CONFIG` is unset (`docs/environment-files.md`'s "Instances" section, `DOCKER_CONFIG` row, the single place that default is defined). `<certs-root>` stands for that root in the table below:
 
 | Material | Default lifetime | Persisted at |
 |---|---|---|
 | CA (`ca-key.pem`, `ca.pem`) | 3650 days | `<certs-root>/<instance>/ca/` |
-| Server (key, certificate) | 365 days | Nowhere: generated and published in one step, never written under `<certs-root>/<instance>/` — to Parameter Store for an EC2 instance, to the instance's Key Vault (as the `tls-server-key`, `tls-server-cert` and `tls-ca` secrets) for an azure engine |
+| Server (key, certificate) | 365 days | Nowhere: generated and published in one step, never written under `<certs-root>/<instance>/`; published to Parameter Store for an EC2 instance, and to the instance's Key Vault (as the `tls-server-key`, `tls-server-cert` and `tls-ca` secrets) for an azure engine |
 | Client (`key.pem`, `cert.pem`) | 90 days | `<certs-root>/<instance>/` |
 
-The client certificate's ninety-day lifetime is the one an operator actually
-lives with day to day, and it is sustainable only because rotating it is
-cheap: `make cert-status` reports a `RENEW` row, naming the exact
-`gd-cert-lifecycle INSTANCE=<name>` invocation that clears it, once a
-client certificate is inside its warning window (`CERT_WARN_DAYS`, default
-14 days); running that invocation's "Rotate client certificate" operation
-(`.agents/skills/gd-cert-lifecycle/SKILL.md`) issues a fresh
-client key and certificate from the same CA and installs them atomically.
+- The client certificate's ninety-day lifetime is the one an operator actually lives with day to day, and it is sustainable only because rotating it is cheap.
+- `make cert-status` reports a `RENEW` row, naming the exact `gd-cert-lifecycle INSTANCE=<name>` invocation that clears it, once a client certificate is inside its warning window (`CERT_WARN_DAYS`, default 14 days).
+- Running that invocation's "Rotate client certificate" operation (`.agents/skills/gd-cert-lifecycle/SKILL.md`) issues a fresh client key and certificate from the same CA and installs them atomically.
 
-**Rotating a client certificate touches nothing on the instance.** The daemon
-holds only `ca.pem` and accepts any client certificate that chains to it, so
-a replacement signed by the same CA is accepted the moment it is presented:
-no Parameter Store entry is written, the daemon is never restarted, no
-`terragrunt apply` runs, and the docker context needs no update since it
-already points at `cert.pem`/`key.pem` by path. The CA itself is never
-reissued by a rotation, because reissuing it would invalidate every certificate it
-already signed, including the server certificate the daemon is already
-serving, which would take the instance off the air until a new server key is
-published and the daemon restarted. This is also why a client rotation is
-not a substitute for revoking access: Docker supports neither CRL nor OCSP,
-so the superseded client certificate stays cryptographically valid until its
-own `notAfter` passes; removing the principal's `ssm:StartSession` grant is
-what actually renders a certificate inert, because a certificate
-authenticates but IAM authorizes, and a certificate is useless without the
-tunnel it authenticates inside. An azure engine's revocation is the same
-sentence in that cloud's vocabulary: removing the principal's Azure Relay
-Sender role on the namespace — or deleting the hybrid connection itself —
-is what renders a certificate inert, because the sender half of the couple
-is what a laptop certificate authenticates inside, and Entra authorizes
-that half.
+**Rotating a client certificate touches nothing on the instance.**
+
+- The daemon holds only `ca.pem` and accepts any client certificate that chains to it, so a replacement signed by the same CA is accepted the moment it is presented.
+- No Parameter Store entry is written, the daemon is never restarted, no `terragrunt apply` runs, and the docker context needs no update since it already points at `cert.pem`/`key.pem` by path.
+- The CA itself is never reissued by a rotation, because reissuing it would invalidate every certificate it already signed, including the server certificate the daemon is already serving, which would take the instance off the air until a new server key is published and the daemon restarted.
+- This is also why a client rotation is not a substitute for revoking access: Docker supports neither CRL nor OCSP, so the superseded client certificate stays cryptographically valid until its own `notAfter` passes.
+- Removing the principal's `ssm:StartSession` grant is what actually renders a certificate inert, because a certificate authenticates but IAM authorizes, and a certificate is useless without the tunnel it authenticates inside.
+- An azure engine's revocation is the same sentence in that cloud's vocabulary: removing the principal's Azure Relay Sender role on the namespace, or deleting the hybrid connection itself, is what renders a certificate inert, because the sender half of the couple is what a laptop certificate authenticates inside, and Entra authorizes that half.
 
 ## Transport
 
-The security group behind a remote instance (an azure engine: its network
-security group, one rule list kept empty for the same reason) carries zero
-ingress rules
-: no packet from the network reaches the docker daemon,
-only the loopback listener `127.0.0.1:DOCKER_TLS_PORT` on the instance
-itself. Reaching that listener from the laptop is two independent factors
-stacked on top of each other, each answering a different question (spec
-Section 3.6.2), and neither substitutes for the other:
+The security group behind a remote instance (an azure engine: its network security group, one rule list kept empty for the same reason) carries zero ingress rules: no packet from the network reaches the docker daemon, only the loopback listener `127.0.0.1:DOCKER_TLS_PORT` on the instance itself.
 
-- **The SSM port forward**
-  (`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`,
-  E6-F2-S1-T1) maps the loopback listener to a local port on the laptop with
-  `aws ssm start-session --document-name AWS-StartPortForwardingSession`,
-  with no SSH element anywhere in the argument vector. `ssm:StartSession` scoped
-  to that document decides *who may open the tunnel at all*, and, since
-  Docker supports neither CRL nor OCSP, revoking it is the only revocation
-  mechanism this platform has.
-- **mTLS over that tunnel** (`transport.ensure_context`/`transport.handshake`,
-  E6-F2-S1-T2) decides *who may command the daemon once the tunnel is
-  open*. An SSM grant alone is coarse: without the client certificate,
-  anyone whose policy permits `ssm:StartSession` would drive the engine.
+Reaching that listener from the laptop is two independent factors stacked on top of each other, each answering a different question (spec Section 3.6.2), and neither substitutes for the other:
 
-Once the forward answers, `transport.ensure_context` creates or updates the
-docker context `<repo-slug>-<instance>` (`general-dev-<instance>` in this
-repository) to address `tcp://127.0.0.1:<the allocated
-port>` and carry the `ca`, `cert` and `key` files the layout fixes
-under `<certs-root>/<instance>/`. An
-existing context is updated in place rather than deleted and recreated; an
-existing context whose endpoint is `ssh://` is refused by name and left
-completely untouched. Nothing creates such a context; one that survives on a
-machine is the only record of what that machine was pointed at, and silently
-rewriting it would destroy that record.
-VS Code Dev Containers needs no transport of its own: it follows the active
-docker context, so pointing the context at the forward points the editor at it
-too.
+- **The SSM port forward** (`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`, E6-F2-S1-T1) maps the loopback listener to a local port on the laptop with `aws ssm start-session --document-name AWS-StartPortForwardingSession`, with no SSH element anywhere in the argument vector.
+  - `ssm:StartSession` scoped to that document decides *who may open the tunnel at all*, and, since Docker supports neither CRL nor OCSP, revoking it is the only revocation mechanism this platform has.
+- **mTLS over that tunnel** (`transport.ensure_context`/`transport.handshake`, E6-F2-S1-T2) decides *who may command the daemon once the tunnel is open*.
+  - An SSM grant alone is coarse: without the client certificate, anyone whose policy permits `ssm:StartSession` would drive the engine.
 
-`transport.handshake` then completes a `docker version` handshake against
-that context, retried until it answers and bounded by
-`DOCKER_HANDSHAKE_TIMEOUT` (`docs/environment-files.md`), reporting the
-daemon's API version, which must be at least 1.44 for mTLS on a TCP
-listener with a rootless daemon, and whether it reports
-running rootless.
+Once the forward answers, `transport.ensure_context` creates or updates the docker context `<repo-slug>-<instance>` (`general-dev-<instance>` in this repository) to address `tcp://127.0.0.1:<the allocated port>` and carry the `ca`, `cert` and `key` files the layout fixes under `<certs-root>/<instance>/`.
 
-**Three transports, one kind dispatch.** `make connect-start`
-resolves the instance, reads the engine's kind off the address block
-resolution exports (`docs/environment-files.md`) and opens the matching
-transport: an `ssh` engine (an `engine.json` manifest) runs the ssh form,
-an `azure` engine the azure relay form, an `ec2` instance the ssm form.
-`DEVCONTAINER_TRANSPORT` is a guard on
-that dispatch, never the selector: unset, the kind alone decides, which
-is why an operator naming an ssh engine sets no variable; set, the value
-must agree with the kind (`ssm` behind an ec2 instance, `ssh` behind an
-ssh engine, `relay` behind an azure engine, each contradiction refused
-symmetrically) or the run exits non-zero naming the conflict, and any
-other value exits non-zero naming the variable, the offending value and the
-accepted values. An EC2 instance, or no instance named at all, runs
+- An existing context is updated in place rather than deleted and recreated.
+- An existing context whose endpoint is `ssh://` is refused by name and left completely untouched.
+- Nothing creates such a context; one that survives on a machine is the only record of what that machine was pointed at, and silently rewriting it would destroy that record.
+- VS Code Dev Containers needs no transport of its own: it follows the active docker context, so pointing the context at the forward points the editor at it too.
+
+`transport.handshake` then completes a `docker version` handshake against that context, retried until it answers and bounded by `DOCKER_HANDSHAKE_TIMEOUT` (`docs/environment-files.md`), reporting the daemon's API version, which must be at least 1.44 for mTLS on a TCP listener with a rootless daemon, and whether it reports running rootless.
+
+**Three transports, one kind dispatch.** `make connect-start` resolves the instance, reads the engine's kind off the address block resolution exports (`docs/environment-files.md`) and opens the matching transport: an `ssh` engine (an `engine.json` manifest) runs the ssh form, an `azure` engine the azure relay form, an `ec2` instance the ssm form.
+
+- `DEVCONTAINER_TRANSPORT` is a guard on that dispatch, never the selector.
+- Unset, the kind alone decides, which is why an operator naming an ssh engine sets no variable.
+- Set, the value must agree with the kind (`ssm` behind an ec2 instance, `ssh` behind an ssh engine, `relay` behind an azure engine, each contradiction refused symmetrically) or the run exits non-zero naming the conflict, and any other value exits non-zero naming the variable, the offending value and the accepted values.
+
+An EC2 instance, or no instance named at all, runs
 
 ```sh
 PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.forwards \
   open --instance-id <id> --context <context> --profile <profile> --region <region>
 ```
 
-which is the same connection the operator targets make with, real values
-substituted from `config.env` and the instance's per-instance id store,
-the `instance-id` file under
-`<certs-root>/<instance>/`, written by `make instance-link` and recorded
-automatically by `make instance-deploy` at apply time, and that the
-`Makefile`'s own `connect` target issues behind its ssm route;
-`transport.resolve_transport` reads the identical
-`DEVCONTAINER_TRANSPORT` inside the transport's own connect handler too,
-refusing before touching AWS or docker at all unless it is `ssm`. This
-path establishes the SSM forward exactly as `start` does, then ties in the
-two calls `start` alone never makes, `transport.ensure_context` and
-`transport.handshake`, and activates the resulting context with
-`docker context use` before confirming the handshake. The daemon is
-managed by `devcontainer_config.forwards`, not run in the foreground: the
-connect recipe spawns the command above as a detached process (unbuffered
-stdout streaming into a per-instance log), polls for its `Connected:`
-announcement, printed only after the handshake answered, records the
-daemon's pid, command, log and forwarded port beside the instance's
-certificate material, and returns once all of that is confirmed; a child
-that dies first or never announces surfaces with its log tail, and nothing
-is retried behind a failure. The forward stays open after the command
-returns, so a subsequent `make build` reaches the `tcp://` context
-directly; the lifecycle targets manage it afterwards:
-`make connect-status` (per instance or `ALL=1`), `make connect-stop`
-(SIGINT first, then the port-closed verification), `make connect-refresh`
-(re-runs the recorded command, for an expired SSO session or a dropped
-tunnel) and `make connect-list`. `--certs-root`
-defaults to `certs.DEFAULT_CERTS_ROOT`, the same `<certs-root>` root
-`make cert-status` and the certificate material above use, and only
-needs overriding for a test fixture or an alternate checkout layout.
-The ssm transport installs no SSH configuration block, spawns no `ssh`
-process, and names no `AWS-StartSSHSession` document; it requires no key on
-the instance, and the instance is provisioned without one. The `--context`
-value (and the `REMOTE_DOCKER_CONTEXT` the Makefile derives it from,
-`config.env`, operator-overridable) must carry the `<repo-slug>-` prefix
-`instances.docker_context_prefix` derives from `repo.repo_slug`
-(`general-dev-` in this repository, not a literal to copy into a fork):
-`transport.instance_from_context_name` raises `InvalidContextNameError` on
-any context name that does not start with it, since that prefix is the
-single place the bare instance name is recovered for certificate lookup.
+which is the same connection the operator targets make with, real values substituted from `config.env` and the instance's per-instance id store.
 
-**The ssh transport, for an SSH engine.** The value `ssh` runs the same
-`forwards open` lifecycle with the ssh flag form
-(`--name/--host/--port/--user/--docker-addr/--context`), reaching a
-generic SSH engine (one declared by a
-`remote-instances/<name>/engine.json` manifest; `python3 -m
-devcontainer_config.cli engine-init` scaffolds one) through
-`devcontainer_config.transport_ssh`: a managed `ssh -N -L` local forward
-(`BatchMode` and `ExitOnForwardFailure` set, the operator's own identity
-and agent, no key flag and no remote command) to the engine's docker
-address, a plain `tcp://127.0.0.1:<port>` context with no certificate
-material, readiness being the local port accepting a connection bounded by
-`SSH_FORWARD_TIMEOUT`, and the same `Connected:` announcement and teardown
-discipline as the ssm transport. The destination differs by platform: a
-Linux endpoint typically serves an absolute Unix socket path, while a
-Windows endpoint requires a tcp destination (Windows OpenSSH cannot
-forward to named pipes or Unix sockets), normally Docker Desktop's
-`tcp://localhost:2375` ("Expose daemon on tcp://localhost:2375 without
-TLS"). A forward failure whose destination is a socket path states that
-guidance explicitly, and `engine-init --docker-addr`'s help states it at
-scaffold time. No AWS value is required: an SSH engine opens no session,
-so the region, profile and instance-id guards apply to the ssm branch
-alone.
+- The id store is the `instance-id` file under `<certs-root>/<instance>/`, written by `make instance-link` and recorded automatically by `make instance-deploy` at apply time, and the `Makefile`'s own `connect` target issues the command behind its ssm route.
+- `transport.resolve_transport` reads the identical `DEVCONTAINER_TRANSPORT` inside the transport's own connect handler too, refusing before touching AWS or docker at all unless it is `ssm`.
+- This path establishes the SSM forward exactly as `start` does, then ties in the two calls `start` alone never makes, `transport.ensure_context` and `transport.handshake`, and activates the resulting context with `docker context use` before confirming the handshake.
+- The daemon is managed by `devcontainer_config.forwards`, not run in the foreground: the connect recipe spawns the command above as a detached process (unbuffered stdout streaming into a per-instance log), polls for its `Connected:` announcement, printed only after the handshake answered, records the daemon's pid, command, log and forwarded port beside the instance's certificate material, and returns once all of that is confirmed.
+- A child that dies first or never announces surfaces with its log tail, and nothing is retried behind a failure.
+- The forward stays open after the command returns, so a subsequent `make build` reaches the `tcp://` context directly; the lifecycle targets manage it afterwards: `make connect-status` (per instance or `ALL=1`), `make connect-stop` (SIGINT first, then the port-closed verification), `make connect-refresh` (re-runs the recorded command, for an expired SSO session or a dropped tunnel) and `make connect-list`.
+- `--certs-root` defaults to `certs.DEFAULT_CERTS_ROOT`, the same `<certs-root>` root `make cert-status` and the certificate material above use, and only needs overriding for a test fixture or an alternate checkout layout.
+- The ssm transport installs no SSH configuration block, spawns no `ssh` process, and names no `AWS-StartSSHSession` document; it requires no key on the instance, and the instance is provisioned without one.
+- The `--context` value (and the `REMOTE_DOCKER_CONTEXT` the Makefile derives it from, `config.env`, operator-overridable) must carry the `<repo-slug>-` prefix `instances.docker_context_prefix` derives from `repo.repo_slug` (`general-dev-` in this repository, not a literal to copy into a fork).
+- `transport.instance_from_context_name` raises `InvalidContextNameError` on any context name that does not start with it, since that prefix is the single place the bare instance name is recovered for certificate lookup.
 
-**The azure transport, for an azure engine.** An azure engine runs the
-same `forwards open` lifecycle through `devcontainer_config.transport_azure`,
-with an Azure Relay hybrid connection in place of the tunnel: the VM holds
-the relay's listener end — a unit on the VM that dials *outward* to the
-relay service — and the laptop's daemon is the sender half, opening one
-sender connection per docker API call, each authorized by an Entra token
-carried in the request header and never the query string. The token comes
-from `az account get-access-token` against the relay's audience, lives
-roughly an hour, and is cached with a refresh margin; a 401 invalidates
-the cache and retries once with a fresh token before failing naming
-`az login` as the remedy. Two things differ from the other transports in
-operator-visible ways. The VM-side listener stops itself when idle — azure
-bills listener-hours while a hybrid connection has a connected listener —
-so before binding the local port the connect flow starts it again with one
-synchronous `az vm run-command invoke`, bounded by
-`AZURE_LISTENER_START_TIMEOUT`; a cold start on a freshly started VM can
-take tens of seconds, and the flow waits behind it deliberately rather
-than letting the first docker call die on a 404 no-listener answer. And
-the one-shot `verify` never starts the listener: a 404 there is diagnosed
-with the `make connect-start` remedy, which is the command that starts it.
-Everything past the relay pipe is the shared machinery: the context is
-created or updated by the same `transport.ensure_context`, carries the
-same client certificate, dials `tcp://127.0.0.1:<port>` with the same SAN
-requirement, and completes the same `docker version` handshake. No AWS
-value is required here either: an azure engine's addressing record, not an
-instance id or a region, is what this branch reads.
+**The ssh transport, for an SSH engine.** The value `ssh` runs the same `forwards open` lifecycle with the ssh flag form (`--name/--host/--port/--user/--docker-addr/--context`), reaching a generic SSH engine (one declared by a `remote-instances/<name>/engine.json` manifest; `python3 -m devcontainer_config.cli engine-init` scaffolds one) through `devcontainer_config.transport_ssh`.
 
-**A killed deploy leaves the state lock behind.** `make instance-deploy`
-runs Terragrunt, whose state backend takes one lock per instance while a
-plan or apply runs, and a deploy killed mid-plan — an interrupted
-terminal, a closed laptop — can leave that lock in place. The next
-deploy's plan then fails acquiring it, naming `Error acquiring the state
-lock` and the lock id; Terragrunt can also exit zero on a plan that
-actually failed, so the deploy does not trust the exit status: a plan
-that produces no success marker, or fails outright, has its captured
-output printed to stderr along with the remedy. The remedy is the lock id
-that output names: from the instance's own directory run
-`cd remote-instances/<name> && terragrunt force-unlock <lock-id>`, then
-re-run the deploy. `terragrunt output -json` after an azure apply is
-captured the same way and gets the same treatment. A lock is never forced
-as a matter of course: force-unlocking while another operation genuinely
-holds it is what invites concurrent state writes, so the id always comes
-from the failed run's own printed output.
+- The forward is a managed `ssh -N -L` local forward (`BatchMode` and `ExitOnForwardFailure` set, the operator's own identity and agent, no key flag and no remote command) to the engine's docker address.
+- The context is a plain `tcp://127.0.0.1:<port>` context with no certificate material; readiness is the local port accepting a connection, bounded by `SSH_FORWARD_TIMEOUT`; and the `Connected:` announcement and teardown discipline are the same as the ssm transport's.
+- The destination differs by platform: a Linux endpoint typically serves an absolute Unix socket path, while a Windows endpoint requires a tcp destination (Windows OpenSSH cannot forward to named pipes or Unix sockets), normally Docker Desktop's `tcp://localhost:2375` ("Expose daemon on tcp://localhost:2375 without TLS").
+- A forward failure whose destination is a socket path states that guidance explicitly, and `engine-init --docker-addr`'s help states it at scaffold time.
+- No AWS value is required: an SSH engine opens no session, so the region, profile and instance-id guards apply to the ssm branch alone.
 
-**The SAN requirement, and its symptom.** TLS validates the name the
-*client* dials the daemon with, and the client dials `127.0.0.1` through
-the loopback forward, so the server certificate must carry `IP:127.0.0.1`
-and `DNS:localhost`, never the instance's own hostname or private
-address. A server certificate issued for either of those produces a
-handshake failure that names neither the forward nor the SANs: a real
-example, captured against a deliberately mis-issued certificate, reads
-`tls: failed to verify certificate: x509: certificate is valid for
-10.0.0.5, not 127.0.0.1`: prose that reads like a tunnel, security-group
-or daemon problem before it reads like a certificate one.
-`transport.diagnose_handshake_failure` exists to close that gap: it
-recognizes that shape (and the related `x509: cannot validate certificate
-for 127.0.0.1 because it doesn't contain any IP SANs`) and states the SAN
-requirement, both required values, and the `gd-cert-lifecycle
-INSTANCE=<name>` invocation that reissues the server certificate, instead
-of surfacing the bare TLS error. A connection failure, whether the forward
-not established or the daemon not listening, is translated into a distinct
-diagnosis naming the forward instead, so the two causes are never
-conflated.
+**The azure transport, for an azure engine.** An azure engine runs the same `forwards open` lifecycle through `devcontainer_config.transport_azure`, with an Azure Relay hybrid connection in place of the tunnel.
+
+- The VM holds the relay's listener end (a unit on the VM that dials *outward* to the relay service), and the laptop's daemon is the sender half, opening one sender connection per docker API call, each authorized by an Entra token carried in the request header and never the query string.
+- The token comes from `az account get-access-token` against the relay's audience, lives roughly an hour, and is cached with a refresh margin; a 401 invalidates the cache and retries once with a fresh token before failing naming `az login` as the remedy.
+- The VM-side listener stops itself when idle (azure bills listener-hours while a hybrid connection has a connected listener), so before binding the local port the connect flow starts it again with one synchronous `az vm run-command invoke`, bounded by `AZURE_LISTENER_START_TIMEOUT`.
+- A cold start on a freshly started VM can take tens of seconds, and the flow waits behind it deliberately rather than letting the first docker call die on a 404 no-listener answer.
+- The one-shot `verify` never starts the listener: a 404 there is diagnosed with the `make connect-start` remedy, which is the command that starts it.
+- Everything past the relay pipe is the shared machinery: the context is created or updated by the same `transport.ensure_context`, carries the same client certificate, dials `tcp://127.0.0.1:<port>` with the same SAN requirement, and completes the same `docker version` handshake.
+- No AWS value is required here either: an azure engine's addressing record, not an instance id or a region, is what this branch reads.
+
+**A killed deploy leaves the state lock behind.**
+
+- `make instance-deploy` runs Terragrunt, whose state backend takes one lock per instance while a plan or apply runs, and a deploy killed mid-plan (an interrupted terminal, a closed laptop) can leave that lock in place.
+- The next deploy's plan then fails acquiring it, naming `Error acquiring the state lock` and the lock id.
+- Terragrunt can also exit zero on a plan that actually failed, so the deploy does not trust the exit status: a plan that produces no success marker, or fails outright, has its captured output printed to stderr along with the remedy.
+- The remedy is the lock id that output names: from the instance's own directory run `cd remote-instances/<name> && terragrunt force-unlock <lock-id>`, then re-run the deploy.
+- `terragrunt output -json` after an azure apply is captured the same way and gets the same treatment.
+- A lock is never forced as a matter of course: force-unlocking while another operation genuinely holds it is what invites concurrent state writes, so the id always comes from the failed run's own printed output.
+
+**The SAN requirement, and its symptom.**
+
+- TLS validates the name the *client* dials the daemon with, and the client dials `127.0.0.1` through the loopback forward, so the server certificate must carry `IP:127.0.0.1` and `DNS:localhost`, never the instance's own hostname or private address.
+- A server certificate issued for either of those produces a handshake failure that names neither the forward nor the SANs.
+- A real example, captured against a deliberately mis-issued certificate, reads `tls: failed to verify certificate: x509: certificate is valid for 10.0.0.5, not 127.0.0.1`: prose that reads like a tunnel, security-group or daemon problem before it reads like a certificate one.
+- `transport.diagnose_handshake_failure` exists to close that gap: it recognizes that shape (and the related `x509: cannot validate certificate for 127.0.0.1 because it doesn't contain any IP SANs`) and states the SAN requirement, both required values, and the `gd-cert-lifecycle INSTANCE=<name>` invocation that reissues the server certificate, instead of surfacing the bare TLS error.
+- A connection failure, whether the forward not established or the daemon not listening, is translated into a distinct diagnosis naming the forward instead, so the two causes are never conflated.
 
 ## Secrets model
 
-Two halves, deliberately separate. Configuration, meaning `shell.env` and
-the AWS profile map, is per-developer setup with no credential in it,
-published to Parameter Store so a fresh remote clone-in-volume can
-bootstrap itself. Credentials never touch Parameter Store at all: each one
-is resolved on the developer's machine, from a source only that machine
-holds, and pushed over the active docker context straight into the
-container.
+Two halves, deliberately separate.
+
+- Configuration, meaning `shell.env` and the AWS profile map, is per-developer setup with no credential in it, published to Parameter Store so a fresh remote clone-in-volume can bootstrap itself.
+- Credentials never touch Parameter Store at all: each one is resolved on the developer's machine, from a source only that machine holds, and pushed over the active docker context straight into the container.
 
 ```mermaid
 flowchart LR
@@ -843,42 +439,20 @@ shell.env (local, gitignored)  ──────────────►  SS
 aws-profile-map.json                           /devcontainer/<project>/…       container volume
 ```
 
-- Local mode: files exist on disk (created by `make init`); the SSM path
-  is never attempted.
-- Remote mode: a fresh clone-in-volume has no gitignored files. The wrapper
-  detects EC2 instance credentials via IMDSv2 (instance launched with
-  hop-limit 2 so containers can reach them) and fetches
-  `${DEVCONTAINER_SSM_PREFIX:-/devcontainer/<workspace-basename>}/shell.env`
-  (SecureString) and `…/aws-profile-map.json` (String), written with 0600 /
-  default perms. Any failure is fatal with a message naming the remedy.
-- SSH-engine mode: an instance declared by
-  `remote-instances/<name>/engine.json` has no Parameter Store behind it, so
-  the container path never touches AWS. The build seeds the same transformed
-  payload straight into the workspace volume (`container.sh`, right after
-  the clone), so the wrapper finds `shell.env` on disk and skips the
-  Parameter Store bootstrap entirely; the payload is fresh on every rebuild.
-  `make push-secrets` against such an instance refreshes the two files in
-  the running container over stdin, so a config change needs no rebuild.
-  Both channels render through one shared transform
-  (`.devcontainer/remote-docker/config-payload.sh`), so the EC2 publish and
-  the SSH seed are byte-identical flavors.
-- Azure-engine mode: the instance's two configuration files live in its own
-  Key Vault as secrets, and the container fetches them with the VM's
-  user-assigned managed identity — no stored credential anywhere. The build
-  injects `DEVCONTAINER_ENGINE_KIND=azure` and the instance's vault name
-  (read from its relay address record) into the container's environment,
-  and the postcreate wrapper, seeing the azure kind, exchanges an identity
-  token from the instance metadata endpoint for the two secrets
-  (`shell-env`, `profile-map`) over the vault's REST endpoint. The VM
-  identity carries Key Vault Secrets User on that vault — read only, never
-  an Officer role — so the container's bootstrap can never rewrite what the
-  laptop publishes; a build on an azure engine with no vault named is
-  refused before anything runs.
-- The pushed `shell.env` is the local one transformed for remote: proxy
-  disabled and removed (no laptop tinyproxy on EC2), `BASH_ENV` pointed at the
-  remote workspace path, stale PATH prepends dropped.
-- The instance role can only **read** `/devcontainer/*` parameters; writes
-  happen from the laptop with SSO credentials.
+- Local mode: files exist on disk (created by `make init`); the SSM path is never attempted.
+- Remote mode: a fresh clone-in-volume has no gitignored files.
+  - The wrapper detects EC2 instance credentials via IMDSv2 (instance launched with hop-limit 2 so containers can reach them) and fetches `${DEVCONTAINER_SSM_PREFIX:-/devcontainer/<workspace-basename>}/shell.env` (SecureString) and `…/aws-profile-map.json` (String), written with 0600 / default perms.
+  - Any failure is fatal with a message naming the remedy.
+- SSH-engine mode: an instance declared by `remote-instances/<name>/engine.json` has no Parameter Store behind it, so the container path never touches AWS.
+  - The build seeds the same transformed payload straight into the workspace volume (`container.sh`, right after the clone), so the wrapper finds `shell.env` on disk and skips the Parameter Store bootstrap entirely; the payload is fresh on every rebuild.
+  - `make push-secrets` against such an instance refreshes the two files in the running container over stdin, so a config change needs no rebuild.
+  - Both channels render through one shared transform (`.devcontainer/remote-docker/config-payload.sh`), so the EC2 publish and the SSH seed are byte-identical flavors.
+- Azure-engine mode: the instance's two configuration files live in its own Key Vault as secrets, and the container fetches them with the VM's user-assigned managed identity, with no stored credential anywhere.
+  - The build injects `DEVCONTAINER_ENGINE_KIND=azure` and the instance's vault name (read from its relay address record) into the container's environment.
+  - The postcreate wrapper, seeing the azure kind, exchanges an identity token from the instance metadata endpoint for the two secrets (`shell-env`, `profile-map`) over the vault's REST endpoint.
+  - The VM identity carries Key Vault Secrets User on that vault (read only, never an Officer role), so the container's bootstrap can never rewrite what the laptop publishes; a build on an azure engine with no vault named is refused before anything runs.
+- The pushed `shell.env` is the local one transformed for remote: proxy disabled and removed (no laptop tinyproxy on EC2), `BASH_ENV` pointed at the remote workspace path, stale PATH prepends dropped.
+- The instance role can only **read** `/devcontainer/*` parameters; writes happen from the laptop with SSO credentials.
 
 The credential half (hostcreds):
 
@@ -889,122 +463,56 @@ hostcreds.map.json (host)         make push-creds (host)                containe
 keychain / git credential fill /    one <NAME>.env fragment per        ~/.hostcreds/ (mode 700),
 aws configure export-credentials    credential at mode 0600, piped     fragments at mode 600; a
 resolved only on the host           over docker exec stdin,            git entry also seeds
-                                   never on an argument                ~/.git-credentials; the
-                                                                       startup block sources
-                                                                       every fragment
+                                    never on an argument                ~/.git-credentials; the
+                                                                        startup block sources
+                                                                        every fragment
 ```
 
-- `.devcontainer/hostcreds.map.json` names each credential and its source;
-  the values themselves live only in the macOS keychain, git's own
-  credential helper and the developer's AWS SSO session. The container
-  resolves nothing: `make push-creds`, which `make build` and `make up`
-  run, resolves every entry on the host and writes one `<NAME>.env`
-  fragment per credential into the container's `~/.hostcreds/`. Any entry
-  that cannot be resolved aborts the push, so a container never ships a
-  subset of the manifest.
-- The push rides the active docker context, so it is identical on either
-  engine: local and remote differ only in which context is active, and the
-  fragments, the mode checks and the git seeding are byte-for-byte the
-  same either way. The remote engine needs no extra credential path of
-  its own.
-- postCreate appends the hostcreds startup block to `~/.bashrc` and
-  `~/.zshenv` (rendered by `devcontainer_config.cli shell-block`,
-  marker-guarded, required; the provisioning-flow table above marks it
-  so). Every shell afterwards sources each fragment in sorted order,
-  exporting the credential under its manifest name; an `aws-export` entry
-  exports the three standard AWS variables plus the raw document under the
-  entry's own name (see environment-files.md), and past its expiry
-  prints one notice line on stderr naming `make push-creds` and exports
-  nothing.
-- A rebuild wipes the credentials by design: `~/.hostcreds` lives in the
-  container's own filesystem, not a volume, so a rebuilt container starts
-  with none; the build that created it has already pushed a fresh
-  set as its last step. `make verify-container` re-checks the whole state
-  inside the container (store and fragment modes, the startup block in
-  both rc files, silent shell startup, and `git ls-remote` /
-  `aws sts get-caller-identity` for whichever sources the manifest names),
-  on either engine.
+- `.devcontainer/hostcreds.map.json` names each credential and its source; the values themselves live only in the macOS keychain, git's own credential helper and the developer's AWS SSO session.
+  - The container resolves nothing: `make push-creds`, which `make build` and `make up` run, resolves every entry on the host and writes one `<NAME>.env` fragment per credential into the container's `~/.hostcreds/`.
+  - Any entry that cannot be resolved aborts the push, so a container never ships a subset of the manifest.
+- The push rides the active docker context, so it is identical on either engine: local and remote differ only in which context is active, and the fragments, the mode checks and the git seeding are byte-for-byte the same either way.
+  - The remote engine needs no extra credential path of its own.
+- postCreate appends the hostcreds startup block to `~/.bashrc` and `~/.zshenv` (rendered by `devcontainer_config.cli shell-block`, marker-guarded, required; the provisioning-flow table above marks it so).
+  - Every shell afterwards sources each fragment in sorted order, exporting the credential under its manifest name.
+  - An `aws-export` entry exports the three standard AWS variables plus the raw document under the entry's own name (see environment-files.md), and past its expiry prints one notice line on stderr naming `make push-creds` and exports nothing.
+- A rebuild wipes the credentials by design: `~/.hostcreds` lives in the container's own filesystem, not a volume, so a rebuilt container starts with none; the build that created it has already pushed a fresh set as its last step.
+  - `make verify-container` re-checks the whole state inside the container (store and fragment modes, the startup block in both rc files, silent shell startup, and `git ls-remote` / `aws sts get-caller-identity` for whichever sources the manifest names), on either engine.
 
-The full manifest reference (sources, labels, defaults, reserved names,
-the scanner integration) is `docs/environment-files.md`'s "Host
-credentials (hostcreds)" section; the ordered setup sequence, with a
-verification step after each stage, is `docs/environment-setup.md`.
+The full manifest reference (sources, labels, defaults, reserved names, the scanner integration) is `docs/environment-files.md`'s "Host credentials (hostcreds)" section; the ordered setup sequence, with a verification step after each stage, is `docs/environment-setup.md`.
 
 ## devcontainer file contract
 
-- `.devcontainer/` is self-managed: nothing regenerates the directory, and
-  changes here stay (provenance and license attribution: `NOTICE`).
-- `shell.env` + `devcontainer-environment-variables.json` come from `make
-  init` (or the `gd-env-setup-local` interview, whose `render` step writes
-  the same files from your answers). After changing either, re-run
-  `make push-secrets` so the remote copies match.
-- The four secret-file entries in `.gitignore` are committed here; any new
-  private file joins them the same way.
+- `.devcontainer/` is self-managed: nothing regenerates the directory, and changes here stay (provenance and license attribution: `NOTICE`).
+- `shell.env` + `devcontainer-environment-variables.json` come from `make init` (or the `gd-env-setup-local` interview, whose `render` step writes the same files from your answers).
+  - After changing either, re-run `make push-secrets` so the remote copies match.
+- The four secret-file entries in `.gitignore` are committed here; any new private file joins them the same way.
 
 ## Plugin and skills
 
-The Claude Code plugin is an inbound integration: "Marketplace at
-`.claude/plugins/devcontainer`", failing
-as "A malformed manifest fails skill lint". The plugin lives at
-`.claude/plugins/devcontainer/`, a directory holding `.claude-plugin/plugin.json`
-(the plugin manifest, `name: devcontainer`) and `.claude-plugin/marketplace.json`
-(a marketplace whose single `plugins` entry sources that same directory). Neither
-manifest enumerates skills: the skill set is discovered from the plugin's
-`skills/` directory, so the manifests never drift from what is actually present
-there.
+- The Claude Code plugin is an inbound integration: "Marketplace at `.claude/plugins/devcontainer`", failing as "A malformed manifest fails skill lint".
+- The plugin lives at `.claude/plugins/devcontainer/`, a directory holding `.claude-plugin/plugin.json` (the plugin manifest, `name: devcontainer`) and `.claude-plugin/marketplace.json` (a marketplace whose single `plugins` entry sources that same directory).
+- Neither manifest enumerates skills: the skill set is discovered from the plugin's `skills/` directory, so the manifests never drift from what is actually present there.
 
-`.claude/settings.json` registers the plugin directory as a `directory`-sourced
-marketplace under `extraKnownMarketplaces.devcontainer` and enables the plugin
-from it via `enabledPlugins["devcontainer@devcontainer"]`. This is additive to
-the `PreToolUse` bypass-denial hook registration the previous section describes;
-both keys coexist in the same file.
+- `.claude/settings.json` registers the plugin directory as a `directory`-sourced marketplace under `extraKnownMarketplaces.devcontainer` and enables the plugin from it via `enabledPlugins["devcontainer@devcontainer"]`.
+- This is additive to the `PreToolUse` bypass-denial hook registration the previous section describes; both keys coexist in the same file.
 
-With the marketplace registered and the plugin enabled, Claude Code resolves
-each skill directory under `.claude/plugins/devcontainer/skills/` as the
-slash command `/devcontainer:gd-<name>`. That directory is not a real
-directory: it is a relative symlink to `../../../.agents/skills`, the
-canonical, agent-agnostic skills home, where every skill lives at
-`.agents/skills/<name>/SKILL.md` under a `gd-`-prefixed name and
-cross-references between skills use the bare `gd-<name>` form. Other agents
-read `.agents/skills/` directly; nothing copies skill bodies anywhere, so no
-surface can drift from the canonical roster.
+With the marketplace registered and the plugin enabled, Claude Code resolves each skill directory under `.claude/plugins/devcontainer/skills/` as the slash command `/devcontainer:gd-<name>`.
 
-The canonical roster table lives in `docs/skills.md`: one row per skill
-directory under `.agents/skills/`, with the per-skill summaries.
-`tests/test_skill_lint.py`'s `check_plugin` asserts that table's row set and
-the directory set are equal, so the table cannot drift from what is actually
-installed, and enforces the rest of the structural contract in the same
-run:
+- That directory is not a real directory: it is a relative symlink to `../../../.agents/skills`, the canonical, agent-agnostic skills home, where every skill lives at `.agents/skills/<name>/SKILL.md` under a `gd-`-prefixed name and cross-references between skills use the bare `gd-<name>` form.
+- Other agents read `.agents/skills/` directly; nothing copies skill bodies anywhere, so no surface can drift from the canonical roster.
 
-- `plugin.json`'s `name` equals the plugin directory name, and
-  `marketplace.json` has exactly one `plugins` entry whose `source` resolves
-  to that same directory.
-- `.claude/settings.json` registers the plugin directory as a `directory`
-  marketplace and enables it in `enabledPlugins`.
-- Every `SKILL.md` opens with a `---`-delimited frontmatter block holding a
-  non-empty `description` no longer than 500 characters (opencode caps
-  descriptions at 1024; the lint enforces both limits), and a `name`
-  matching its directory and the `^gd-[a-z0-9]+(-[a-z0-9]+)*$` pattern.
-- Every skill that declares `Interview backend: <backend>` restricts
-  `<backend>` to one of `answers.BACKENDS`, and gives a `## Questions` table
-  with header `| Field | Prompt |` whose `Field` column, as a set, equals
-  `answers.required_fields({"backend": <backend>, "aws_config_enabled": True,
-  "host_proxy": True})`; the comparison always runs with the AWS and
-  host-proxy branches enabled, regardless of what the skill's own backend or
-  interview flow would actually ask, so `aws_profiles` and `host_proxy_url`
-  are always expected fields in every skill's table. A required field the
-  table omits and a declared field that is not a real `answers` field each
-  produce their own finding; a declared field that is a real `answers` field
-  but is not required for `<backend>` produces a third finding, distinct
-  from the invented-field case.
-- Every skill's `## Checks` table, when its header line matches exactly
-  `| Check | Prevents | Failure message | Remedy |`, must have a unique
-  `Check` name, a unique `Failure message`, and a non-empty `Remedy` in
-  every row. A `SKILL.md` with no `## Checks` table, or one whose header is
-  misspelled or reordered, is treated as having no such table and produces
-  no finding; the `Prevents` column's content is never validated.
-- Every bare `gd-<name>` reference, in any `SKILL.md`, in `docs/skills.md`,
-  or in this document, names a skill present in the roster.
+The canonical roster table lives in `docs/skills.md`: one row per skill directory under `.agents/skills/`, with the per-skill summaries.
+
+- `tests/test_skill_lint.py`'s `check_plugin` asserts that table's row set and the directory set are equal, so the table cannot drift from what is actually installed, and enforces the rest of the structural contract in the same run:
+  - `plugin.json`'s `name` equals the plugin directory name, and `marketplace.json` has exactly one `plugins` entry whose `source` resolves to that same directory.
+  - `.claude/settings.json` registers the plugin directory as a `directory` marketplace and enables it in `enabledPlugins`.
+  - Every `SKILL.md` opens with a `---`-delimited frontmatter block holding a non-empty `description` no longer than 500 characters (opencode caps descriptions at 1024; the lint enforces both limits), and a `name` matching its directory and the `^gd-[a-z0-9]+(-[a-z0-9]+)*$` pattern.
+  - Every skill that declares `Interview backend: <backend>` restricts `<backend>` to one of `answers.BACKENDS`, and gives a `## Questions` table with header `| Field | Prompt |` whose `Field` column, as a set, equals `answers.required_fields({"backend": <backend>, "aws_config_enabled": True, "host_proxy": True})`; the comparison always runs with the AWS and host-proxy branches enabled, regardless of what the skill's own backend or interview flow would actually ask, so `aws_profiles` and `host_proxy_url` are always expected fields in every skill's table.
+  - A required field the table omits and a declared field that is not a real `answers` field each produce their own finding; a declared field that is a real `answers` field but is not required for `<backend>` produces a third finding, distinct from the invented-field case.
+  - Every skill's `## Checks` table, when its header line matches exactly `| Check | Prevents | Failure message | Remedy |`, must have a unique `Check` name, a unique `Failure message`, and a non-empty `Remedy` in every row.
+  - A `SKILL.md` with no `## Checks` table, or one whose header is misspelled or reordered, is treated as having no such table and produces no finding; the `Prevents` column's content is never validated.
+  - Every bare `gd-<name>` reference, in any `SKILL.md`, in `docs/skills.md`, or in this document, names a skill present in the roster.
 
 The roster, grouped into the seven families `gd-help` maps in prose:
 

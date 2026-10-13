@@ -1,72 +1,44 @@
 # provider/azure
 
-Terraform module that provisions one remote devcontainer engine on azure: a
-resource group, virtual network and subnet (optional), the platform unit --
-zero-inbound network security group, user-assigned identity, Key Vault,
-relay namespace and hybrid connection -- (optional), and the Linux virtual
-machine itself with its root disk and an optional second data disk. Every
-option this module supports is an input; nothing is selected by editing a
-`.tf` file. The deployments that consume this module live under
-`remote-instances/`; the module itself never contains a deployment (spec
-Section 13, decision D6).
+Terraform module that provisions one remote devcontainer engine on azure: a resource group, virtual network and subnet (optional), the platform unit (zero-inbound network security group, user-assigned identity, Key Vault, relay namespace and hybrid connection, optional), and the Linux virtual machine itself with its root disk and an optional second data disk.
 
-This is the azure twin of `provider/aws`, and it mirrors that module's
-composition, its toggle discipline and its comment structure deliberately.
-This document is the reference for the developer or agent writing the
-Terragrunt `inputs` block that drives a deployment of this module. The
-state backend the deployments use is configured by
-`remote-instances/root-azure.hcl` (the azure root), whose side-car handoff
-with `devcontainer_config.state_store` that file's own header documents.
+- Every option this module supports is an input; nothing is selected by editing a `.tf` file.
+- The deployments that consume this module live under `remote-instances/`; the module itself never contains a deployment (spec Section 13, decision D6).
+
+This is the azure twin of `provider/aws`, and it mirrors that module's composition, its toggle discipline and its comment structure deliberately.
+
+- This document is the reference for the developer or agent writing the Terragrunt `inputs` block that drives a deployment of this module.
+- The state backend the deployments use is configured by `remote-instances/root-azure.hcl` (the azure root), whose side-car handoff with `devcontainer_config.state_store` that file's own header documents.
 
 ## Composition
 
-The root module (`remote-azure-vm.tf`) owns no resource of its own. It is
-exactly three `module` blocks:
+The root module (`remote-azure-vm.tf`) owns no resource of its own. It is exactly three `module` blocks:
 
-- `module.network` (`modules/network`), instantiated only when
-  `var.create_network` is `true`.
-- `module.security` (`modules/security`), instantiated only when
-  `var.create_platform` is `true`.
+- `module.network` (`modules/network`), instantiated only when `var.create_network` is `true`.
+- `module.security` (`modules/security`), instantiated only when `var.create_platform` is `true`.
 - `module.compute` (`modules/compute`), always instantiated.
 
-Every identifier that crosses a submodule boundary is resolved once, in the
-root module's `locals` block, from the submodule that created it when its
-toggle is `true` or from the matching replacement input when it is `false`.
-`module.compute` is written once and does not know which mode produced the
-values it receives.
+- Every identifier that crosses a submodule boundary is resolved once, in the root module's `locals` block, from the submodule that created it when its toggle is `true` or from the matching replacement input when it is `false`.
+- `module.compute` is written once and does not know which mode produced the values it receives.
 
-The compute submodule never takes a CIDR of any kind, and the network
-submodule never takes an image URN: addressing and instance provisioning
-are strictly separated, which is what makes the network substitutable
-behind `create_network = false`.
+The compute submodule never takes a CIDR of any kind, and the network submodule never takes an image URN: addressing and instance provisioning are strictly separated, which is what makes the network substitutable behind `create_network = false`.
 
 ## Toggles
 
-There are three `create_*` inputs, where the aws composition has four by
-one structural decision: the azure security submodule is ONE platform unit
-(the network security group and its subnet association, the user-assigned
-identity, the Key Vault, the relay namespace and hybrid connection, and
-their role assignments), so there is exactly one toggle for it. The unit's
-resources reference one another -- the association needs the group, the
-hybrid connection needs the namespace, the role assignments need the vault
-and the namespace -- so partial creation would be a different module, not
-this one with fewer resources, and there is no internal toggle to expose.
+There are three `create_*` inputs, where the aws composition has four by one structural decision: the azure security submodule is ONE platform unit (the network security group and its subnet association, the user-assigned identity, the Key Vault, the relay namespace and hybrid connection, and their role assignments), so there is exactly one toggle for it.
+
+- The unit's resources reference one another: the association needs the group, the hybrid connection needs the namespace, the role assignments need the vault and the namespace.
+- Partial creation would be a different module, not this one with fewer resources, and there is no internal toggle to expose.
 
 ### create_network
 
-Default `true`. Stops creating: the resource group, the virtual network
-and the subnet (`module.network`'s `count` becomes `0`).
+Default `true`. Stops creating: the resource group, the virtual network and the subnet (`module.network`'s `count` becomes `0`).
 
-When `false`, `var.resource_group_name` and `var.subnet_id` are both
-required, and `var.vnet_cidr` and `var.subnet_cidr` are ignored. When
-`true` (the default), `var.resource_group_name` and `var.subnet_id` must be
-left unset, and `var.vnet_cidr` and `var.subnet_cidr` are required instead.
+- When `false`, `var.resource_group_name` and `var.subnet_id` are both required, and `var.vnet_cidr` and `var.subnet_cidr` are ignored.
+- When `true` (the default), `var.resource_group_name` and `var.subnet_id` must be left unset, and `var.vnet_cidr` and `var.subnet_cidr` are required instead.
 
-`var.resource_group_name` is required whenever `create_network` is `false`,
-because every resource -- the platform unit's and the compute module's
-alike -- lands in some resource group. The `vnet_id` output is `null` on
-the reuse path: this deployment was given only a subnet, and the network it
-lives in was never named to it.
+- `var.resource_group_name` is required whenever `create_network` is `false`, because every resource (the platform unit's and the compute module's alike) lands in some resource group.
+- The `vnet_id` output is `null` on the reuse path: this deployment was given only a subnet, and the network it lives in was never named to it.
 
 Plan-time validation messages:
 
@@ -79,25 +51,15 @@ Plan-time validation messages:
 
 ### create_platform
 
-Default `true`. Stops creating: the platform unit -- the zero-inbound
-network security group and its subnet association, the user-assigned
-identity, the Key Vault, the relay namespace and hybrid connection, and
-their role assignments.
+Default `true`. Stops creating: the platform unit (the zero-inbound network security group and its subnet association, the user-assigned identity, the Key Vault, the relay namespace and hybrid connection, and their role assignments).
 
-When `false`, `var.identity_id`, `var.relay_namespace` and
-`var.hybrid_connection` are all required, and are passed straight to the
-compute submodule; `var.instance_name`,
-`var.relay_sender_object_ids` and `var.keyvault_officer_object_ids` are
-ignored. When `true` (the default), those three replacement inputs must be
-left unset, and `var.instance_name` is required instead.
+- When `false`, `var.identity_id`, `var.relay_namespace` and `var.hybrid_connection` are all required, and are passed straight to the compute submodule; `var.instance_name`, `var.relay_sender_object_ids` and `var.keyvault_officer_object_ids` are ignored.
+- When `true` (the default), those three replacement inputs must be left unset, and `var.instance_name` is required instead.
 
-Note for the deploy flow: `make instance-deploy` writes the engine address
-record from eight terraform outputs, including `vault_name` and `vault_uri`
-(`provider/azure/outputs.tf`). A `create_platform = false` deployment has
-no vault of this composition's, those two outputs are `null`, and the
-deploy flow refuses to write a half-empty record -- so a reused-platform
-deployment is wired by hand, not by the deploy flow. The documented reuse
-path below reuses the network only and keeps the platform toggle `true`.
+Note for the deploy flow: `make instance-deploy` writes the engine address record from eight terraform outputs, including `vault_name` and `vault_uri` (`provider/azure/outputs.tf`).
+
+- A `create_platform = false` deployment has no vault of this composition's, those two outputs are `null`, and the deploy flow refuses to write a half-empty record, so a reused-platform deployment is wired by hand, not by the deploy flow.
+- The documented reuse path below reuses the network only and keeps the platform toggle `true`.
 
 Plan-time validation messages:
 
@@ -111,24 +73,16 @@ Plan-time validation messages:
 
 ### create_data_volume
 
-Default `true`. Stops creating: the second data disk and its attachment in
-the compute submodule (`output "data_disk_id"` becomes `null`). The
-instance is left with its root disk only.
+Default `true`. Stops creating: the second data disk and its attachment in the compute submodule (`output "data_disk_id"` becomes `null`). The instance is left with its root disk only.
 
-No replacement identifier is required when this toggle is `false`: there is
-no identifier to substitute, only a disk the instance does without.
-Consequently this toggle carries no plan-time validation of its own;
-setting it to `false` never fails a plan for a missing input.
+- No replacement identifier is required when this toggle is `false`: there is no identifier to substitute, only a disk the instance does without.
+- Consequently this toggle carries no plan-time validation of its own; setting it to `false` never fails a plan for a missing input.
 
 ## Inputs
 
-Eight inputs default to `null` (unset) rather than declaring no default at
-all: `vnet_cidr`, `subnet_cidr`, `resource_group_name`, `subnet_id`,
-`instance_name`, `identity_id`, `relay_namespace` and
-`hybrid_connection`. Each of those becomes required only under the
-condition named in its row below. Four inputs declare no default and are
-always required regardless of any toggle: `location`, `vm_size`,
-`root_volume_size_gb`, `docker_data_root` and `name_prefix`.
+Eight inputs default to `null` (unset) rather than declaring no default at all: `vnet_cidr`, `subnet_cidr`, `resource_group_name`, `subnet_id`, `instance_name`, `identity_id`, `relay_namespace` and `hybrid_connection`. Each of those becomes required only under the condition named in its row below.
+
+Four inputs declare no default and are always required regardless of any toggle: `location`, `vm_size`, `root_volume_size_gb`, `docker_data_root` and `name_prefix`.
 
 | Input | Type | Required | Default | Effect |
 |---|---|---|---|---|
@@ -159,17 +113,11 @@ always required regardless of any toggle: `location`, `vm_size`,
 | `name_prefix` | `string` | always required | none | Prefix used to name every resource this composition creates. Validated: 1-18 lowercase alphanumeric or dash characters, beginning with a letter, not ending with a dash, so the derived `-vault` and `-relay` names stay inside azure's own naming laws. |
 | `tags` | `map(string)` | optional | `{}` | Common resource tags merged onto every resource this composition creates, across all three submodules. |
 
-Every input any of the three submodules (`modules/network`,
-`modules/security`, `modules/compute`) declares is redeclared here as a
-root input of the same name and passed straight through, or resolved into a
-`locals` value from a toggle and its matching replacement input. No
-submodule input exists that is not represented in this table.
+Every input any of the three submodules (`modules/network`, `modules/security`, `modules/compute`) declares is redeclared here as a root input of the same name and passed straight through, or resolved into a `locals` value from a toggle and its matching replacement input. No submodule input exists that is not represented in this table.
 
 ## Outputs
 
-The first eight are the deploy flow's contract: the azure branch of
-`make instance-deploy` reads exactly these, by these names, from
-`terragrunt output -json` and writes the engine address record from them.
+The first eight are the deploy flow's contract: the azure branch of `make instance-deploy` reads exactly these, by these names, from `terragrunt output -json` and writes the engine address record from them.
 
 | Output | Consumed by |
 |---|---|
@@ -185,17 +133,13 @@ The first eight are the deploy flow's contract: the azure branch of
 | `subnet_id` | A second deployment's `var.subnet_id`, set with `create_network = false`, to reuse this deployment's network. |
 | `identity_id` | A second deployment's `var.identity_id`, set with `create_platform = false`, to reuse this deployment's identity. |
 
-The security submodule's own outputs (`nsg_id` alongside the re-exported
-ones) and the network submodule's `resource_group_name` are internal to
-this composition except as re-exported above; the compute submodule's
-`data_disk_id` is likewise not re-exported.
+The security submodule's own outputs (`nsg_id` alongside the re-exported ones) and the network submodule's `resource_group_name` are internal to this composition except as re-exported above; the compute submodule's `data_disk_id` is likewise not re-exported.
 
 ## Worked examples
 
-Both examples use obviously-fake placeholder identifiers, never values from
-a real tenant.
+Both examples use obviously-fake placeholder identifiers, never values from a real tenant.
 
-### New network and platform (`create_network = true`, `create_platform = true`, the defaults -- what the scaffold writes)
+### New network and platform (`create_network = true`, `create_platform = true`, the defaults; what the scaffold writes)
 
 ```hcl
 # terragrunt.hcl
@@ -225,11 +169,9 @@ inputs = {
 
 ### Reused network (`create_network = false`), a second deployment
 
-The `resource_group_name` and `subnet_id` values below are the
-`resource_group` and `subnet_id` outputs of a prior deployment of this
-module. The platform toggle stays `true`: this deployment gets its own
-vault, namespace and identity, the same way the aws reuse example keeps its
-own security toggles true.
+The `resource_group_name` and `subnet_id` values below are the `resource_group` and `subnet_id` outputs of a prior deployment of this module.
+
+- The platform toggle stays `true`: this deployment gets its own vault, namespace and identity, the same way the aws reuse example keeps its own security toggles true.
 
 ```hcl
 # terragrunt.hcl

@@ -86,11 +86,12 @@ jobs:
         run: make test
 
       # A red step here means the suite passes but coverage of
-      # devcontainer_config fell under the 90% gate enforced by this step's
-      # own --cov-fail-under=90 flag (which overrides pyproject.toml
-      # [tool.coverage.report] fail_under if the two ever diverge): run the
-      # same command locally with --cov-report=term-missing to find the
+      # devcontainer_config fell under the 90% gate enforced by
+      # `make coverage` (the same target a local run uses, whose
+      # --cov-fail-under=90 flag overrides pyproject.toml
+      # [tool.coverage.report] fail_under if the two ever diverge): run
+      # `make coverage` locally with --cov-report=term-missing to find the
       # uncovered lines.
       - name: coverage gate
         shell: bash
-        run: uv run --group dev pytest --cov=.claude/plugins/devcontainer/scripts/devcontainer_config --cov-fail-under=90
+        run: make coverage

@@ -620,8 +620,20 @@ def test_hooks_install_recipe_has_no_hook_body_text_of_its_own() -> None:
     assert "hooks-install" in recipe
 
 
-def test_hooks_run_push_target_runs_lint_then_the_pre_push_command() -> None:
-    """AC-FUNC-004 / AC-TEST-005: hooks-run-push depends on lint and execs hooks-pre-push."""
+def test_hooks_run_push_target_runs_the_full_ci_set_in_order() -> None:
+    """AC-FUNC-004 / AC-TEST-005: hooks-run-push mirrors the CI set, in order.
+
+    The pre-push hook's body is unchanged -- devcontainer_config.githooks
+    renders `exec make hooks-run-push` -- so this target is the one place
+    the CI set is mirrored for a push: lint (the hook's prerequisite), then
+    devcontainer_config.cli hooks-pre-push's range scan, then `make test`,
+    then `make coverage`. Order is part of the contract: a lint or scan
+    failure must stop the push before the slower pytest runs, and coverage
+    must never run behind a test step that already failed. stdin is part of
+    it too: git's pre-push ref list reaches the range scan unredirected,
+    and the two make invocations after it take < /dev/null so no pytest run
+    can consume git's stdin.
+    """
     makefile_text = _makefile_text()
 
     match = re.search(r"^hooks-run-push:(.*)$", makefile_text, re.MULTILINE)
@@ -629,7 +641,20 @@ def test_hooks_run_push_target_runs_lint_then_the_pre_push_command() -> None:
     assert "lint" in match.group(1).split()
 
     recipe = _recipe_body(makefile_text, "hooks-run-push")
-    assert "hooks-pre-push" in recipe
+    scan_index = recipe.index("hooks-pre-push")
+    test_index = recipe.index("--no-print-directory test")
+    coverage_index = recipe.index("--no-print-directory coverage")
+    assert scan_index < test_index < coverage_index, (
+        f"hooks-run-push must run the range scan, then test, then coverage; recipe was: {recipe!r}"
+    )
+    assert "< /dev/null" not in recipe[:scan_index], (
+        "the range scan's recipe line must stay unredirected: git's pre-push "
+        "stdin flows to hooks-pre-push, the one reader"
+    )
+    assert recipe.count("< /dev/null") == 2, (
+        "both make invocations after the range scan must close stdin so "
+        "neither pytest run can consume git's ref list"
+    )
 
 
 def test_hooks_run_push_target_is_phony() -> None:

@@ -1,0 +1,202 @@
+# Live Azure end-to-end verification for the azure engine kind.
+#
+# Runs the real lifecycle against a disposable instance in eastus: provision,
+# converge, publish, tunnel, daemon handshake, power cycle, teardown, and a
+# zero-residue check. Costs real money for the duration of the run (a cheap
+# VM plus relay listener-hours); it exists because the hermetic suite can fake
+# az but cannot fake Azure.
+#
+# Authentication is OIDC federation, not a stored client secret: an app
+# registration in the tenant trusts this repository, and the three identifiers
+# below are repository variables (not secrets). Configure once:
+#   1. Create an app registration; note its application (client) id.
+#   2. Add a federated credential on it for this repo:
+#      organization: matthew-dresden, repository: general-dev,
+#      entity-type: branch, branch: main (or an environment credential;
+#      never a pull-request subject, so a future PR-triggered job could
+#      never mint this subscription-Owner token).
+#   3. Grant the app Owner (or Contributor + Role Administrator) on the
+#      subscription the engine deploys into.
+#   4. Set repository variables: AZURE_CLIENT_ID, AZURE_TENANT_ID,
+#      AZURE_SUBSCRIPTION_ID.
+# The deploying principal is also the relay sender and vault officer: the e2e
+# writes the app registration's own object id into the scaffolded module
+# inputs, so no human identity is involved. The principal also grants itself
+# the state account's blob data role during the deploy (state_store.ensure).
+name: azure-engine-e2e
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: azure-engine-e2e
+  cancel-in-progress: false
+
+env:
+  LOCAL_DOCKER_CONTEXT: default
+
+jobs:
+  azure-engine-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Azure (OIDC federation)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq
+          sudo npm install -g @devcontainers/cli
+
+      - name: Install terraform and terragrunt
+        run: |
+          set -euo pipefail
+          wget -qO- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y terraform
+          TG_URL=$(curl -fsSL https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest | python3 -c "import json,sys; print(json.load(sys.stdin)['assets'][0]['browser_download_url'])")
+          sudo curl -fsSL "$TG_URL" -o /usr/local/bin/terragrunt
+          sudo chmod +x /usr/local/bin/terragrunt
+          terraform version
+          terragrunt --version
+
+      - name: Register the resource providers a fresh subscription needs
+        run: |
+          set -euo pipefail
+          for namespace in Microsoft.Storage Microsoft.Compute Microsoft.Network Microsoft.KeyVault Microsoft.ManagedIdentity Microsoft.Relay; do
+            az provider register --namespace "$namespace" --output none
+          done
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            pending=$(az provider list \
+              --query "[?namespace=='Microsoft.Storage'||namespace=='Microsoft.Compute'||namespace=='Microsoft.Network'||namespace=='Microsoft.KeyVault'||namespace=='Microsoft.ManagedIdentity'||namespace=='Microsoft.Relay'].[registrationState]" \
+              -o tsv | grep -cv Registered || true)
+            [ "$pending" = "0" ] && break
+            sleep 15
+          done
+          az provider list \
+            --query "[?namespace=='Microsoft.Storage'||namespace=='Microsoft.Compute'||namespace=='Microsoft.Network'||namespace=='Microsoft.KeyVault'||namespace=='Microsoft.ManagedIdentity'||namespace=='Microsoft.Relay'].{ns:namespace, state:registrationState}" \
+            -o table
+
+      - name: Record the deploying principal's object id
+        run: |
+          set -euo pipefail
+          # The OIDC login is a service principal, not a user: its object id
+          # comes from the app registration the client id names.
+          oid=$(az ad sp show --id "${{ vars.AZURE_CLIENT_ID }}" --query id -o tsv)
+          echo "PRINCIPAL_OBJECT_ID=$oid" >> "$GITHUB_ENV"
+
+      - name: Scaffold the disposable azure instance
+        run: |
+          set -euo pipefail
+          # The size is quota-picked for fresh eastus subscriptions: the
+          # D2pls_v5 default carries a zero-core quota there (see
+          # azure-requirements.md section 2).
+          make instance-init INSTANCE=az-e2e CLOUD=azure LOCATION=eastus VM_SIZE=Standard_D2s_v4
+
+      - name: Add the deploying principal to the relay and vault grants
+        run: |
+          set -euo pipefail
+          file=remote-instances/az-e2e/terragrunt.hcl
+          python3 - "$file" "$PRINCIPAL_OBJECT_ID" <<'EOF'
+          import sys
+
+          path, oid = sys.argv[1], sys.argv[2]
+          lines = open(path).read().rstrip("\n").split("\n")
+          # The scaffolded file ends with the inputs block's closing brace;
+          # the grants join its last entries, one line above that brace --
+          # alongside the x64 image the quota-picked size needs (the module
+          # default image is the arm64 build).
+          if lines[-1].strip() != "}":
+              sys.exit(f"{path} does not end with the inputs block's closing brace")
+          grants = [
+              '  os_image_urn = "Canonical:ubuntu-24_04-lts:server:latest"',
+              f'  relay_sender_object_ids = ["{oid}"]',
+              f'  keyvault_officer_object_ids = ["{oid}"]',
+          ]
+          open(path, "w").write("\n".join(lines[:-1] + grants + ["}"]) + "\n")
+          EOF
+          tail -6 "$file"
+
+      - name: Converge (provision, certify, publish)
+        run: |
+          set -euo pipefail
+          make instance-deploy INSTANCE=az-e2e
+
+      - name: Verify certificates
+        run: |
+          set -euo pipefail
+          make cert-status
+
+      - name: Open the relay forward and prove the daemon answers
+        run: |
+          set -euo pipefail
+          make connect-start INSTANCE=az-e2e
+          ctx=$(docker context ls --format '{{.Name}}' | grep az-e2e)
+          docker --context "$ctx" version
+          docker --context "$ctx" info --format '{{.SecurityOptions}}' | grep -qi rootless
+
+      - name: Power-cycle the VM and re-prove the daemon
+        run: |
+          set -euo pipefail
+          make instance-stop INSTANCE=az-e2e
+          make instance-start INSTANCE=az-e2e
+          make cert-install INSTANCE=az-e2e
+          make connect-refresh INSTANCE=az-e2e
+          ctx=$(docker context ls --format '{{.Name}}' | grep az-e2e)
+          docker --context "$ctx" version
+
+      - name: Fleet status shows the azure engine
+        run: |
+          set -euo pipefail
+          # The committed remote-dev EC2 row degrades on a runner with no AWS
+          # identity (the integration workflow's own precedent), which turns
+          # the listing's exit code; the assertion is the azure row itself.
+          make list-instances || true
+          make -s list-instances | grep -E '^az-e2e .*VM running'
+
+      - name: Tear everything down
+        if: always()
+        run: |
+          set -euo pipefail
+          make connect-stop INSTANCE=az-e2e || true
+          make clean INSTANCE=az-e2e || true
+          make instance-destroy INSTANCE=az-e2e
+          make bucket-delete INSTANCE=az-e2e
+
+      - name: Prove zero residue
+        if: always()
+        run: |
+          set -euo pipefail
+          leftover_groups=$(az group list --query "[?starts_with(name, 'az-e2e') || starts_with(name, 'rg-aze2e')].name" -o tsv)
+          [ -z "$leftover_groups" ] || {
+            echo "ERROR: leftover resource groups:" >&2
+            echo "$leftover_groups" >&2
+            exit 1
+          }
+          leftover_accounts=$(az storage account list --query "[?starts_with(name, 'tgstate')].name" -o tsv)
+          [ -z "$leftover_accounts" ] || {
+            echo "ERROR: leftover state storage accounts:" >&2
+            echo "$leftover_accounts" >&2
+            exit 1
+          }
+          [ ! -e "$HOME/.docker/certs/az-e2e" ] || {
+            echo "ERROR: leftover local certificate directory" >&2
+            exit 1
+          }
+          docker context ls --format '{{.Name}}' | grep az-e2e && {
+            echo "ERROR: leftover docker context" >&2
+            exit 1
+          } || true

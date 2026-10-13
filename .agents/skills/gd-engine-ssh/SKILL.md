@@ -49,7 +49,7 @@ first, deliberately.
 |---|---|
 | `make engine-verify` fails | Report the ssh diagnosis verbatim: the endpoint, the local port, and whether the forward never opened (confirm plain ssh reachability and the docker destination) or the handshake never answered (the daemon behind docker_addr is down). Nothing is left running; the context may exist and is reused by the next connect. |
 | The engine's removal partially fails | Every removal is attempted even after an earlier one failed; report each named failure and re-run `make engine-remove INSTANCE=<name> CONFIRM=remove` after fixing them. Never hand-finish the removal piecemeal while the target exists. |
-| A fleet mixes kinds | The EC2-only fleet surfaces (bucket and cert reporting, the instance- ALL=1 targets) refuse naming the first ssh engine. Do not widen an ssh-engine request into a fleet run or the reverse; state the refusal and act on the one engine asked about. |
+| A fleet mixes kinds | The fleet state/cert surfaces (bucket and cert reporting, the instance- ALL=1 targets) refuse naming the first ssh engine. Do not widen an ssh-engine request into a fleet run or the reverse; state the refusal and act on the one engine asked about. |
 | The forward drops mid-session | `make connect-refresh INSTANCE=<name>` re-runs the recorded command; the ssh diagnosis lives in `rd_engine_diagnosis` and never names the AWS path an ssh engine does not have. |
 
 ## Related skills

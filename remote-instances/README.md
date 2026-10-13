@@ -6,14 +6,18 @@ deployment includes, plus one directory per instance. The `make help`
 INSTANCES group drives an instance's whole lifecycle against these
 directories: `make instance-init` scaffolds the one file a new instance
 needs, `make instance-plan` and `make instance-deploy` run the underlying
-Terragrunt against it, `make instance-stop`/`instance-start` power the EC2
-instance, and `make instance-destroy` tears it down and cleans up. The
-Terraform module this layer deploys, and the full input surface it
-accepts, is documented in
-[`provider/aws/README.md`](../provider/aws/README.md). The operations-facing
-checklist for a team that provisions the instance on the requester's behalf,
-generated from the same variable surface, is
-[`docs/ec2-requirements.md`](../docs/ec2-requirements.md). This document
+Terragrunt against it, `make instance-stop`/`instance-start` power the
+instance's VM (the EC2 kind or the azure kind), and `make instance-destroy`
+tears it down and cleans up. Each instance declares its kind at scaffold
+time — `CLOUD=azure` selects the azure kind — and the kind decides which
+shared layer and which Terraform module the deployment includes. For the
+EC2 kind that module, and the full input surface it accepts, is documented
+in [`provider/aws/README.md`](../provider/aws/README.md); for the azure
+kind, [`provider/azure/README.md`](../provider/azure/README.md). The
+operations-facing checklists for a team that provisions the instance on the
+requester's behalf, each generated from the same variable surface as its
+module, are [`docs/ec2-requirements.md`](../docs/ec2-requirements.md) and
+[`docs/azure-requirements.md`](../docs/azure-requirements.md). This document
 covers neither: it is the reference for the directory layout under
 `remote-instances/` itself, for the one file a new instance requires, and
 for the sizing and state-model decisions the defaults encode.
@@ -56,6 +60,22 @@ user edits to change the deployment:
   `true`, or the replacement identifiers of an existing resource when it is
   set to `false`).
 
+The azure kind scaffolds the same three parts from the azure layers:
+`include "root"` resolving [`root-azure.hcl`](./root-azure.hcl) (the azurerm
+backend, the storage account names its side-car carries, the generated
+`azurerm` provider block, the same version floors), `include "envcommon"`
+resolving [`_envcommon/remote-azure.hcl`](./_envcommon/remote-azure.hcl)
+(which points `terraform.source` at `provider/azure` and fixes the same
+daemon conventions for that cloud), and an `inputs` block carrying the
+identity inputs, the azure `location` and `vm_size`, the volume sizes, the
+CIDR blocks, the tags — and, the one edit the scaffold cannot make for you,
+the operator's own Entra object ids under `relay_sender_object_ids` and
+`keyvault_officer_object_ids`, the two grants that later let the laptop
+open the relay's sender half and publish into the instance's vault. An
+azure instance never includes `root.hcl` or `_envcommon/remote-ec2.hcl`,
+and an EC2 instance never includes the azure pair: the two roots configure
+different backends, and no instance includes both.
+
 The directory's own name is the instance name (Section 9), but only one
 artifact derives from it automatically: `root.hcl` sets
 `remote_state.config.key` from `path_relative_to_include()`, the including
@@ -89,6 +109,14 @@ the generated provider and the account lookup all resolve credentials from
 the same ambient AWS SDK chain, so the account a bucket name embeds and the
 account that creates and writes it can never diverge (`root.hcl`'s own
 header comment covers this in full).
+
+An azure instance carries no `REMOTE_AWS_REGION` requirement at all: its
+placement is the `location` input the scaffold wrote into its
+`terragrunt.hcl`, which `devcontainer_config.state_store` reads from that
+file when it composes the state store, and its credentials resolve from the
+ambient `az login` the same no-profile way — the subscription that composes
+the storage account's digest and the subscription that writes state are the
+same ambient lookup (`root-azure.hcl`'s own header comment covers this).
 
 ## An example per-instance file
 
@@ -154,6 +182,9 @@ layer enforces that agreement:
 | Certificates | `$DOCKER_CONFIG/certs/<name>/`, or `~/.docker/certs/<name>/` when `DOCKER_CONFIG` is unset | `E6` |
 | Recorded EC2 id | `<certs-root>/<name>/instance-id`, the same directory the certificates live in | `E6` (`make instance-link` writes it; `make instance-deploy` records the applied id automatically) |
 | Local forwarded port | Allocated per instance, recorded, never a fixed number | `E6` |
+| Relay address record (azure) | `<certs-root>/<name>/engine-address.json`, beside the certificates: relay namespace, hybrid connection, VM name and resource id, resource group, vault name and URI, location | `E6` (`make instance-deploy` writes it from the Terragrunt outputs; the relay transport and the vault surfaces read it) |
+| Key Vault (azure) | `<name-prefix>-vault` in the deployment's resource group, carrying the instance's published TLS material and configuration secrets | The platform unit (`provider/azure/modules/security`), from `var.name_prefix` |
+| State store (azure) | One storage account per instance in `rg-<name>-state`, name composed by `devcontainer_config.state_store` from the template and suffix `root-azure.hcl` declares | The state store's ensure, run before any Terragrunt command |
 
 The docker context row's Pattern is `<repo-slug>-<name>`,
 `devcontainer_config.repo.repo_slug` (derived from the git remote's URL)
@@ -170,8 +201,10 @@ one directory while this table points at another.
 
 "Owned by" above names what creates or manages each artifact at runtime
 (Terragrunt, the security submodule's inline IAM policy, `E6`'s transport
-and certificate modules). Deriving the value programmatically, turning
-an instance name into any one of these seven strings or paths, is a
+and certificate modules). The EC2 rows are an EC2 instance's set, the azure
+rows an azure engine's, and the directory, context, certificate and
+forwarded-port rows both kinds share. Deriving the value programmatically,
+turning an instance name into any one of these strings or paths, is a
 separate concern owned by exactly one Python module:
 `.claude/plugins/devcontainer/scripts/devcontainer_config/instances.py`.
 A script or skill that needs one of these values calls into that module
@@ -245,31 +278,44 @@ builds, which is why the floor sits where it does. The input is an
 ordinary `inputs` entry: edit it in the instance's own `terragrunt.hcl`
 and apply the edit with `make instance-deploy INSTANCE=<name>`.
 
-## Remote state: one bucket per instance
+## Remote state: one store per instance
 
-Every instance owns its own remote-state bucket.
-`root.hcl` derives its name
+Every instance owns its own remote-state store, one per instance per kind.
+For the EC2 kind, `root.hcl` derives the bucket's name
 (`tg-state-<instance-name>-<region>-<account-id>-<suffix>`) from the
 instance name (the including directory), the region in `REMOTE_AWS_REGION`,
 the AWS account and a committed suffix, so an instance computes its own
-bucket's name without any per-instance file naming it. The state *key*
-inside the bucket is `<name>/terraform.tfstate`, derived from the instance
-directory's own path, so two instances never share a bucket or a state key.
+bucket's name without any per-instance file naming it. For the azure kind,
+`root-azure.hcl` declares the name template and a committed suffix, and
+`devcontainer_config.state_store` composes the storage account's name from
+them — the instance component sanitized to azure's lowercase-alphanumeric
+law and disambiguated by a deterministic digest — in one dedicated
+`rg-<instance>-state` resource group, so it outlives the deployment's own
+resource group cleanly. The state *key* inside either store is
+`<name>/terraform.tfstate`, derived from the instance directory's own path,
+so two instances never share a store or a state key.
 
 Terragrunt bootstraps the bucket itself, with versioning, encryption and
 TLS enforcement included, the first time the instance runs a command
 with backend bootstrapping, which every Terragrunt-running make target
-does on your behalf (`make instance-plan`'s help line names this). The
-bucket stands outside the instance lifecycle:
+does on your behalf (`make instance-plan`'s help line names this); the
+azure store is ensured the same way — resource group, storage account and
+its `tfstate` container, each probed before it is created — because the
+azurerm backend has no bootstrap form of its own. The store stands outside
+the instance lifecycle:
 `make instance-destroy` removes the instance's Parameter Store parameters,
-docker context, certificates and recorded id; its state *key* survives the
-destroy (the record of what existed), and the bucket is never touched.
-Two targets manage the buckets instead: `make bucket-list` shows every
-bucket the fleet's template matches, marking the ones a configured
+docker context, certificates and recorded id (the azure kind: its address
+record, context and certificates; the deployment's resource group dies
+with `terragrunt destroy`, the state group does not); its state *key*
+survives the destroy (the record of what existed), and the store is never
+touched. Two targets manage the stores instead: `make bucket-list` shows every
+store the fleet's template matches, marking the ones a configured
 instance owns, and `make bucket-delete INSTANCE=<name>` purges every
-version and deletes one; `ALL=1` deletes every bucket in `REMOTE_AWS_REGION`
-and additionally requires `CONFIRM=delete`. That one is worth pausing over, since it
-takes every instance's whole state history with it.
+version and deletes one; `ALL=1` deletes every store and additionally
+requires `CONFIRM=delete`. That one is worth pausing over, since it
+takes every instance's whole state history with it. The surfaces are per
+kind — an all-EC2 fleet answers to the aws CLI, an all-azure fleet to the
+az CLI — and a fleet mixing the two kinds is refused naming them.
 
 ## The make targets, and the Terragrunt underneath them
 

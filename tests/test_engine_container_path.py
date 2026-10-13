@@ -131,11 +131,14 @@ def _resolver_block(tmp_path: Path, *, kind: str) -> str:
     """The resolved address block a stand-in resolver prints, per kind.
 
     The block's shape is `_print_address_block`'s, and the certificate
-    directory carries a real id store so the resolver's read of it runs.
+    directory carries a real id store so the resolver's read of it runs --
+    except for azure, which has no EC2 id behind it, so its block must
+    answer with an empty certificate directory.
     """
     certs_dir = tmp_path / "certs"
     certs_dir.mkdir(exist_ok=True)
-    (certs_dir / "instance-id").write_text(_synthetic_instance_id(17) + "\n", encoding="utf-8")
+    if kind != "azure":
+        (certs_dir / "instance-id").write_text(_synthetic_instance_id(17) + "\n", encoding="utf-8")
     if kind == "ssh":
         host = _engine_host()
         user = _engine_user()
@@ -150,6 +153,14 @@ def _resolver_block(tmp_path: Path, *, kind: str) -> str:
             f"ENGINE_USER={user}\n"
             f"ENGINE_DOCKER_ADDR=/var/run/docker-{uuid.uuid4().hex[:8]}.sock\n"
             f"ENGINE_ENDPOINT=ssh://{user}@{host}:{port}\n"
+        )
+    if kind == "azure":
+        return (
+            "INSTANCE=fake-inst\n"
+            "KIND=azure\n"
+            f"TERRAGRUNT_DIR={tmp_path / 'tg'}\n"
+            f"DOCKER_CONTEXT={_RESOLVER_CONTEXT}\n"
+            f"CERTS_DIR={certs_dir}\n"
         )
     return (
         "INSTANCE=fake-inst\n"
@@ -298,6 +309,44 @@ def test_ec2_remote_config_is_unchanged(tmp_path: Path) -> None:
     assert "id=i-" in satisfied.stdout, "the id-store read must still feed the requirement"
 
 
+def test_azure_resolution_satisfies_remote_config_without_any_aws_value(
+    tmp_path: Path,
+) -> None:
+    """KIND=azure needs only the docker context: no id store, no AWS variable,
+    and the resolver leaves REMOTE_INSTANCE_ID unset (the block's empty
+    certificate directory carries no id store to read)."""
+    bin_dir = _fake_resolver_bin(tmp_path, _resolver_block(tmp_path, kind="azure"))
+    snippet = (
+        "rd_resolve_instance_quiet\n"
+        "rd_require_remote_config\n"
+        "printf 'kind=%s ctx=%s id=[%s]\\n'"
+        ' "$KIND" "$REMOTE_DOCKER_CONTEXT" "${REMOTE_INSTANCE_ID-}"\n'
+    )
+    result = _run_snippet(snippet, path_prepend=bin_dir)
+    assert result.returncode == 0, (
+        f"azure resolution must satisfy remote config; stderr={result.stderr[:400]!r}"
+    )
+    assert "kind=azure" in result.stdout
+    assert f"ctx={_RESOLVER_CONTEXT}" in result.stdout
+    assert "id=[]" in result.stdout, "no EC2 id may be read for an azure engine"
+
+
+def test_azure_remote_config_still_demands_the_docker_context(tmp_path: Path) -> None:
+    """The one requirement azure keeps is REMOTE_DOCKER_CONTEXT."""
+    block = _resolver_block(tmp_path, kind="azure").replace(
+        f"DOCKER_CONTEXT={_RESOLVER_CONTEXT}\n", ""
+    )
+    bin_dir = _fake_resolver_bin(tmp_path, block)
+    result = _run_snippet(
+        "rd_resolve_instance_quiet\nunset REMOTE_DOCKER_CONTEXT\nrd_require_remote_config\n",
+        path_prepend=bin_dir,
+    )
+    assert result.returncode != 0, "a missing REMOTE_DOCKER_CONTEXT must still be refused"
+    assert "REMOTE_DOCKER_CONTEXT must be set" in result.stderr, (
+        f"the refusal must name the one variable azure demands; stderr={result.stderr[:400]!r}"
+    )
+
+
 def test_ssh_prereqs_skip_the_aws_tools(tmp_path: Path) -> None:
     """KIND=ssh: rd_check_prereqs passes with neither aws tool on PATH."""
     bin_dir = tmp_path / "bin"
@@ -318,6 +367,32 @@ def test_ec2_prereqs_still_demand_the_aws_tools(tmp_path: Path) -> None:
     assert "aws" in result.stderr, (
         f"the refusal must name the missing tool; stderr={result.stderr[:400]!r}"
     )
+
+
+def test_azure_prereqs_demand_az_alone(tmp_path: Path) -> None:
+    """KIND=azure: the missing az CLI is refused with the brew hint, and once
+    az is present the prereqs pass with neither aws tool on PATH -- an azure
+    engine opens no AWS session, so the aws pair is not demanded of it."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    missing = _run_snippet("KIND=azure\nrd_check_prereqs\n", path_only=str(bin_dir))
+    assert missing.returncode != 0, "azure prereqs must demand az"
+    assert "'az' is required" in missing.stderr, (
+        f"the refusal must name the missing tool; stderr={missing.stderr[:400]!r}"
+    )
+    assert "brew install azure-cli" in missing.stderr, (
+        f"the refusal must carry the install hint; stderr={missing.stderr[:400]!r}"
+    )
+    az = bin_dir / "az"
+    az.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    az.chmod(0o755)
+    satisfied = _run_snippet(
+        "KIND=azure\nrd_check_prereqs\nprintf 'ok\\n'\n", path_only=str(bin_dir)
+    )
+    assert satisfied.returncode == 0, (
+        f"azure prereqs must demand az alone; stderr={satisfied.stderr[:400]!r}"
+    )
+    assert "ok" in satisfied.stdout
 
 
 def test_engine_diagnosis_for_ssh_names_the_forward_and_never_the_aws_path(tmp_path: Path) -> None:
@@ -348,6 +423,45 @@ def test_engine_diagnosis_for_ssh_names_the_forward_and_never_the_aws_path(tmp_p
         f"ssh must never send the operator to aws sso login; got {out!r}"
     )
     assert "SSM port forward" not in out, f"ssh must never speak of the SSM session; got {out!r}"
+
+
+def test_engine_diagnosis_for_azure_names_the_relay_forward_and_never_the_aws_path(
+    tmp_path: Path,
+) -> None:
+    """Behavioral, with aws present and failing: azure never reads that as an
+    expired SSO session, names the relay forward to the resolved context's
+    endpoint, and offers the refresh remedy."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    docker = bin_dir / "docker"
+    docker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    docker.chmod(0o755)
+    aws = bin_dir / "aws"
+    aws.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    aws.chmod(0o755)
+    result = _run_snippet(
+        "KIND=azure\n"
+        "INSTANCE=fake-inst\n"
+        "REMOTE_DOCKER_CONTEXT=general-dev-fake-inst\n"
+        "rd_engine_diagnosis general-dev-fake-inst\n",
+        path_only=str(bin_dir),
+    )
+    assert result.returncode == 0, f"diagnosis must answer; stderr={result.stderr[:400]!r}"
+    out = result.stdout
+    assert "relay forward" in out, f"the azure branch must name the relay forward; got {out!r}"
+    assert "general-dev-fake-inst" in out, (
+        f"the relay diagnosis names the resolved context; got {out!r}"
+    )
+    assert "make connect-refresh INSTANCE=fake-inst" in out, (
+        f"the azure remedy must name the refresh; got {out!r}"
+    )
+    assert "aws sso login" not in out, (
+        f"azure must never send the operator to aws sso login; got {out!r}"
+    )
+    assert "expired" not in out, (
+        f"azure must never read a failing aws call as its own expired session; got {out!r}"
+    )
+    assert "SSM port forward" not in out, f"azure must never speak of the SSM session; got {out!r}"
 
 
 def test_engine_diagnosis_ec2_path_still_names_the_sso_remedy(tmp_path: Path) -> None:
@@ -389,12 +503,34 @@ def test_engine_diagnosis_ssh_branch_text_is_forward_only() -> None:
     branch_at = body.index('if [ "$(rd_engine_kind)" = "ssh" ]; then')
     branch = body[branch_at : body.index("return 0", branch_at)]
     assert "ENGINE_ENDPOINT" in branch, "the ssh diagnosis names the resolved endpoint"
-    assert "ssh_forward_remedy" in branch or "make connect-refresh" in branch, (
+    assert "refresh_remedy" in branch or "make connect-refresh" in branch, (
         "the ssh diagnosis names a forward-opening remedy"
     )
     assert "REMOTE_INSTANCE_ID" not in branch, "the ssh diagnosis never names the EC2 id"
     assert "aws sso" not in branch, "the ssh diagnosis never names the sso login"
     assert "SSM" not in branch, "the ssh diagnosis never speaks of the SSM session"
+
+
+def test_engine_diagnosis_azure_branch_text_is_relay_only() -> None:
+    """Static: the azure branch names the resolved context's relay endpoint and
+    nothing the kind has no counterpart for -- no EC2 id, no ssh endpoint, no
+    sso login, no SSM session."""
+    body = _sh_function_body("rd_engine_diagnosis", _lib_text())
+    branch_at = body.index('if [ "$(rd_engine_kind)" = "azure" ]; then')
+    branch = body[branch_at : body.index("return 0", branch_at)]
+    assert "REMOTE_DOCKER_CONTEXT" in branch, (
+        "the azure diagnosis names the resolved context the relay serves"
+    )
+    assert "relay forward" in branch, "the azure diagnosis names the relay forward"
+    assert "refresh_remedy" in branch or "make connect-refresh" in branch, (
+        "the azure diagnosis names a forward-opening remedy"
+    )
+    assert "REMOTE_INSTANCE_ID" not in branch, "the azure diagnosis never names the EC2 id"
+    assert "ENGINE_ENDPOINT" not in branch, (
+        "the azure diagnosis names the context, never the ssh engine's endpoint"
+    )
+    assert "aws sso" not in branch, "the azure diagnosis never names the sso login"
+    assert "SSM" not in branch, "the azure diagnosis never speaks of the SSM session"
 
 
 def test_engine_diagnosis_ec2_branch_is_unchanged() -> None:
@@ -524,8 +660,8 @@ def test_status_backend_line_is_kind_aware_and_never_reads_the_ec2_id_for_ssh() 
     bare id exactly as it always read.
     """
     body = _sh_function_body("rdc_status", _container_text())
-    ssh_at = body.index('if [ "$(rd_engine_kind)" = "ssh" ]')
-    ssh_branch = body[ssh_at : body.index("\n    else\n", ssh_at)]
+    case_at = body.index('case "$(rd_engine_kind)" in')
+    ssh_branch = body[body.index("      ssh)", case_at) : body.index("      azure)", case_at)]
     assert "ENGINE_ENDPOINT" in ssh_branch, (
         "the ssh Backend line must identify the engine by its resolved endpoint"
     )
@@ -533,8 +669,18 @@ def test_status_backend_line_is_kind_aware_and_never_reads_the_ec2_id_for_ssh() 
         "the resolver leaves REMOTE_INSTANCE_ID unset for an ssh engine; a bare "
         "reference under set -u would abort `make status ENGINE=<ssh engine>`"
     )
-    ec2_branch = body[body.index("\n    else\n", ssh_at) : body.index("\n  fi\n", ssh_at)]
-    assert "$REMOTE_INSTANCE_ID" in ec2_branch, "the EC2 Backend line keeps the instance id"
+    azure_branch = body[body.index("      azure)", case_at) : body.index("      *)", case_at)]
+    assert "REMOTE_INSTANCE_ID" not in azure_branch, (
+        "the resolver leaves REMOTE_INSTANCE_ID unset for an azure engine too; a bare "
+        "reference under set -u would abort `make status INSTANCE=<azure instance>`"
+    )
+    ec2_branch = body[body.index("      *)", case_at) : body.index("    esac", case_at)]
+    assert "REMOTE_INSTANCE_ID" in ec2_branch, "the EC2 Backend line keeps the instance id"
+    assert "${REMOTE_INSTANCE_ID:-" in ec2_branch, (
+        "the id is read defaulted: the resolver unsets REMOTE_INSTANCE_ID for an EC2 "
+        "instance that was never linked, and a bare reference under set -u would abort "
+        "`make status` for exactly that instance"
+    )
 
 
 def test_dispatch_prelude_clears_the_ssm_prefix_for_an_ssh_engine() -> None:

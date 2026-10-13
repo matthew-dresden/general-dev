@@ -847,6 +847,150 @@ def test_connect_start_routes_an_ssh_engine_without_the_transport_variable(
     assert "--instance-id" not in argv, "the ssh route must never carry the ssm form's id"
 
 
+def _fake_azure_engine_block(tmp_path: Path) -> str:
+    """The address block an azure engine's resolution prints, in the resolver's azure form.
+
+    The shape is `_print_address_block`'s azure branch: the KIND line the
+    azure kind declares, and the Terragrunt/docker-context/certificate rows
+    -- no ENGINE_ values and no instance id, the relay transport reading
+    the engine address record the deploy writes instead.
+    """
+    certs_dir = tmp_path / "certs"
+    certs_dir.mkdir()
+    return (
+        "INSTANCE=fake-azure-engine\n"
+        "KIND=azure\n"
+        f"TERRAGRUNT_DIR={tmp_path / 'tg'}\n"
+        f"DOCKER_CONTEXT={_RESOLVER_CONTEXT}\n"
+        f"CERTS_DIR={certs_dir}\n"
+    )
+
+
+def test_connect_start_routes_an_azure_engine_to_the_relay_form(tmp_path: Path) -> None:
+    """`make connect-start INSTANCE=<azure-engine>` opens the relay form, no variable.
+
+    The relay form carries only the name and the context: the transport
+    reads the relay address record itself, so no host values, no EC2 id and
+    no AWS session are ever part of the invocation.
+    """
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_azure_engine_block(tmp_path),
+        {"INSTANCE": "fake-azure-engine"},
+    )
+    assert result.returncode == 0, (
+        f"an azure engine needs no transport variable; stderr={result.stderr[:400]!r}"
+    )
+    invocations = marker.read_text(encoding="utf-8").strip().splitlines()
+    assert len(invocations) == 1, f"exactly one forwards run expected; got {invocations!r}"
+    argv = invocations[0]
+    assert "-m devcontainer_config.forwards open" in argv
+    assert "--name fake-azure-engine" in argv
+    assert f"--context {_RESOLVER_CONTEXT}" in argv
+    for forbidden in ("--host", "--instance-id", "--profile", "--region", "--docker-addr"):
+        assert forbidden not in argv, f"the relay form must never carry {forbidden}"
+
+
+def test_connect_start_refuses_the_ssm_guard_against_an_azure_engine(tmp_path: Path) -> None:
+    """Explicit ssm behind an azure engine refuses by name; no forward opens."""
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_azure_engine_block(tmp_path),
+        {"INSTANCE": "fake-azure-engine", "DEVCONTAINER_TRANSPORT": "ssm"},
+    )
+    assert result.returncode != 0, "an ssm guard behind an azure engine must fail the run"
+    assert "is an azure engine" in result.stderr
+    assert "DEVCONTAINER_TRANSPORT=ssm" in result.stderr
+    assert "unset DEVCONTAINER_TRANSPORT" in result.stderr
+    assert "set it to relay" in result.stderr
+    assert not marker.read_text(encoding="utf-8").strip(), "no forward may open behind the refusal"
+
+
+def test_connect_start_refuses_the_ssh_guard_against_an_azure_engine(tmp_path: Path) -> None:
+    """The mirror guard: explicit ssh behind an azure engine refuses by name."""
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_azure_engine_block(tmp_path),
+        {"INSTANCE": "fake-azure-engine", "DEVCONTAINER_TRANSPORT": "ssh"},
+    )
+    assert result.returncode != 0, "an ssh guard behind an azure engine must fail the run"
+    assert "is an azure engine" in result.stderr
+    assert "DEVCONTAINER_TRANSPORT=ssh" in result.stderr
+    assert "set it to relay" in result.stderr
+    assert not marker.read_text(encoding="utf-8").strip(), "no forward may open behind the refusal"
+
+
+def test_connect_start_refuses_the_relay_guard_against_an_ssh_engine(tmp_path: Path) -> None:
+    """The mirror guard: explicit relay behind an ssh engine refuses by name."""
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_ssh_engine_block(tmp_path),
+        {"INSTANCE": "fake-ssh-engine", "DEVCONTAINER_TRANSPORT": "relay"},
+    )
+    assert result.returncode != 0, "a relay guard behind an ssh engine must fail the run"
+    assert "is an ssh engine" in result.stderr
+    assert "DEVCONTAINER_TRANSPORT=relay" in result.stderr
+    assert "unset DEVCONTAINER_TRANSPORT" in result.stderr
+    assert "set it to ssh" in result.stderr
+    assert not marker.read_text(encoding="utf-8").strip(), "no forward may open behind the refusal"
+
+
+def test_connect_start_refuses_the_relay_guard_against_an_ec2_engine(tmp_path: Path) -> None:
+    """The mirror guard: explicit relay behind an EC2 engine refuses by name.
+
+    The stand-in block is the EC2 shape (no KIND line, so resolution's
+    default kind is ec2); the relay value belongs to azure engines, so the
+    run refuses before any guard or forward, naming the contradiction.
+    """
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_resolver_block(tmp_path),
+        {"INSTANCE": "fake-inst", "DEVCONTAINER_TRANSPORT": "relay"},
+    )
+    assert result.returncode != 0, "a relay guard behind an EC2 engine must fail the run"
+    assert "is an EC2 engine" in result.stderr
+    assert "DEVCONTAINER_TRANSPORT=relay" in result.stderr
+    assert "Unset DEVCONTAINER_TRANSPORT or set it to ssm" in result.stderr
+    assert not marker.read_text(encoding="utf-8").strip(), "no forward may open behind the refusal"
+
+
+def test_connect_start_refuses_the_relay_guard_without_an_engine_named(tmp_path: Path) -> None:
+    """The relay value, like ssh, needs the engine named; the refusal says so."""
+    result, _marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_azure_engine_block(tmp_path),
+        {"DEVCONTAINER_TRANSPORT": "relay"},
+    )
+    assert result.returncode != 0
+    assert "DEVCONTAINER_TRANSPORT=relay needs the engine named" in result.stderr
+    assert "make connect-start INSTANCE=<name>" in result.stderr
+
+
+def test_container_up_opens_the_azure_relay_forward_for_an_azure_engine() -> None:
+    """`rdc_up`'s third route: the azure kind opens the bare relay form.
+
+    Mirroring the ssh branch's shape, the azure branch passes the resolver's
+    own values and nothing else -- the transport reads the relay address
+    record itself -- while the ssh and ssm branches keep their exact
+    invocations.
+    """
+    up_body = _function_body("rdc_up", text=_container_text())
+    assert 'rd_engine_kind)" = "azure"' in up_body, (
+        "the up dispatch must route the azure kind to its own branch"
+    )
+    azure_at = up_body.index('rd_engine_kind)" = "azure"')
+    branch = up_body[azure_at : up_body.index('elif [ "$backend" = "remote" ]; then', azure_at)]
+    assert "-m devcontainer_config.forwards open" in branch
+    assert '--name "$INSTANCE"' in branch
+    assert '--context "$REMOTE_DOCKER_CONTEXT"' in branch
+    for forbidden in ("--instance-id", "--host", "--profile", "--region"):
+        assert forbidden not in branch, f"the azure up route must never carry {forbidden}"
+    assert "--host" not in branch
+    # The ssh and ssm branches keep their exact invocations.
+    assert '--name "$INSTANCE" --host "$ENGINE_HOST"' in up_body
+    assert '--instance-id "$REMOTE_INSTANCE_ID" --context "$REMOTE_DOCKER_CONTEXT"' in up_body
+
+
 def test_connect_start_refuses_the_ssm_guard_against_an_ssh_engine(tmp_path: Path) -> None:
     """The variable remains a guard: explicit ssm behind an ssh engine refuses by name.
 

@@ -43,13 +43,17 @@ share, so this module's own unit suite never shells out to a real `docker`
 binary (AC-TEST-004): no docker, no AWS, no network.
 
 The engine-kind notion is the newest row of this module's contract: an
-instance is either the EC2 kind (a Terragrunt-managed remote instance, the
-kind every derivation above was written for) or the SSH kind, a generic
-SSH endpoint with Docker, declared wholly by a
+instance is the EC2 kind (a Terragrunt-managed remote instance, the kind
+every derivation above was written for), the SSH kind, a generic SSH
+endpoint with Docker, declared wholly by a
 `remote-instances/<name>/engine.json` manifest, with no AWS, no Terragrunt,
-no Parameter Store and no certificates behind it. `read_kind` is the
-discriminator (`ENGINE_KIND_SSH` when the manifest exists, else
-`ENGINE_KIND_EC2`, so `discover`'s listing semantics are unchanged);
+no Parameter Store and no certificates behind it, or the azure kind, a
+Terragrunt deployment whose envcommon include targets
+`_envcommon/remote-azure.hcl` and whose engine is reached through an azure
+relay instead of an SSM port forward. `read_kind` is the discriminator
+(`ENGINE_KIND_SSH` when the manifest exists, else `ENGINE_KIND_AZURE` when
+the terragrunt include names the azure envcommon, else `ENGINE_KIND_EC2`,
+so `discover`'s listing semantics are unchanged);
 `validate_engine_values` is the manifest's single validation surface, used
 by both the read side (`engine_manifest`) and the write side
 (`instance_ops.scaffold_engine`) so neither can accept what the other
@@ -86,6 +90,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -121,6 +126,20 @@ STATE_KEY_FILENAME = "terraform.tfstate"
 ENGINE_MANIFEST_FILENAME = "engine.json"
 ENGINE_KIND_SSH = "ssh"
 ENGINE_KIND_EC2 = "ec2"
+
+# The fourth engine kind: an azure virtual machine deployed by the same
+# Terragrunt layer as the EC2 kind, whose envcommon include targets
+# `_envcommon/remote-azure.hcl` instead. Its transport is an azure relay
+# hybrid connection carrying the mTLS docker API rather than an SSM port
+# forward, so it has no EC2 id and no Parameter Store prefix; the record
+# naming the relay's local endpoint is `engine_address_path`'s file below.
+ENGINE_KIND_AZURE = "azure"
+
+# The envcommon include target `read_kind` keys the azure kind on, matched
+# as text in `terragrunt.hcl` -- the one file the azure scaffold writes --
+# because the include line is the whole declaration and no Terragrunt parse
+# exists in this stdlib-only package.
+_AZURE_ENVCOMMON_TARGET = "_envcommon/remote-azure.hcl"
 
 # The engine manifest's defaults and bounds. Declared once here, the module
 # that owns addressing, so `instance_ops.scaffold_engine`'s write side and
@@ -605,22 +624,31 @@ def validate_engine_values(payload: object) -> dict[str, object]:
 
 
 def read_kind(root: Path, name: str) -> str:
-    """`ENGINE_KIND_SSH` when `name`'s engine manifest exists, else `ENGINE_KIND_EC2`.
+    """The engine kind `name`'s directory declares: ssh, azure, else ec2.
 
-    The engine-kind notion the resolver layer addresses an instance
-    through: a `remote-instances/<name>/engine.json` manifest declares an
-    SSH engine; its absence means the EC2 kind, whether the directory
-    carries a terragrunt.hcl or (for backward compatibility of `discover`,
-    which lists every directory regardless of contents) neither file. A
-    manifest that exists but is not valid JSON fails fast here, at first
-    touch, rather than surfacing later as a parse error in a consumer that
-    already acted on the kind.
+    The discriminator the resolver layer addresses an instance through, in
+    precedence order: a `remote-instances/<name>/engine.json` manifest
+    declares an SSH engine and wins over everything else; a terragrunt.hcl
+    whose envcommon include targets `_envcommon/remote-azure.hcl` declares
+    the azure kind; anything else (a terragrunt.hcl without that include,
+    or, for backward compatibility of `discover`, which lists every
+    directory regardless of contents, a directory with neither file) is the
+    EC2 kind. A manifest that exists but is not valid JSON fails fast here,
+    at first touch, rather than surfacing later as a parse error in a
+    consumer that already acted on the kind; a terragrunt.hcl that exists
+    but cannot be read raises the read error itself, the same
+    real-read-error discipline `recorded_instance_id` follows.
     """
     validate_name(name)
-    if not engine_manifest_path(root, name).exists():
-        return ENGINE_KIND_EC2
-    _parsed_manifest(root, name)
-    return ENGINE_KIND_SSH
+    if engine_manifest_path(root, name).exists():
+        _parsed_manifest(root, name)
+        return ENGINE_KIND_SSH
+    terragrunt_hcl = terragrunt_dir(root, name) / "terragrunt.hcl"
+    if terragrunt_hcl.is_file() and _AZURE_ENVCOMMON_TARGET in terragrunt_hcl.read_text(
+        encoding="utf-8"
+    ):
+        return ENGINE_KIND_AZURE
+    return ENGINE_KIND_EC2
 
 
 def engine_manifest(root: Path, name: str) -> dict[str, object]:
@@ -646,6 +674,228 @@ def engine_endpoint(root: Path, name: str) -> str:
     """
     values = engine_manifest(root, name)
     return f"ssh://{values['user']}@{values['host']}:{values['port']}"
+
+
+# ---------------------------------------------------------------------------
+# The azure engine kind: the relay address record.
+# ---------------------------------------------------------------------------
+
+
+# The filename of the per-instance relay address record inside
+# `certs_dir(name)`, written at deploy time when the relay's hybrid
+# connection and its local forward endpoint become known. The file is this
+# module's to read and write (`write_engine_address` is the SINGLE WRITER,
+# `clear_engine_address` removes), the same one-store-one-writer discipline
+# the per-instance id store documents.
+ENGINE_ADDRESS_FILENAME = "engine-address.json"
+
+
+class EngineAddressError(InstancesError):
+    """Raised when an azure engine's relay address record is missing or malformed.
+
+    A missing record is the not-yet-deployed state, and the message names
+    the deploy that writes it; a record that exists but is not one JSON
+    object is a corrupt store, and the message names the file. Every refusal
+    this surface makes raises this one class, so a caller needs no
+    per-case handling.
+    """
+
+
+def engine_address_path(name: str) -> Path:
+    """`~/.docker/certs/<name>/engine-address.json`, honoring `DOCKER_CONFIG` when set.
+
+    The same certificate-material directory the per-instance id store lives
+    in (`certs_dir(name)`, spec Section 5.5's per-instance state dir), so
+    the azure kind's local state shares one root with the EC2 kind's and an
+    operator who relocates `DOCKER_CONFIG` relocates both together.
+    """
+    return certs_dir(name) / ENGINE_ADDRESS_FILENAME
+
+
+def engine_address(root: Path, name: str) -> dict[str, object]:
+    """The azure relay address record for `name`, parsed.
+
+    The read half of the record whose only writer is
+    `write_engine_address`. `root` is accepted for call-site uniformity
+    with the rest of the resolution surface and is deliberately unused,
+    exactly as `recorded_instance_id` documents for its own `root`: the
+    record addresses the operator's certificate-material directory, not the
+    repository.
+
+    Returns:
+        The parsed JSON object, verbatim: the record's keys are the relay
+        transport's addressing values, owned by the slice that opens the
+        forward, not re-validated here.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        EngineAddressError: the record is missing (the remedy names the
+            deploy that writes it) or is present but is not one JSON
+            object, whether from a syntax error or another JSON shape
+            (the message names the file and the reason).
+    """
+    path = engine_address_path(name)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise EngineAddressError(
+            f"ERROR: no engine address record at {path}\n"
+            f"Instance {name!r} has no {ENGINE_ADDRESS_FILENAME} yet, so there "
+            "is no relay address to read.\n"
+            f"Deploy it first: make instance-deploy INSTANCE={name}"
+        ) from exc
+    try:
+        payload: object = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise EngineAddressError(
+            f"ERROR: the engine address record at {path} is not valid JSON\n"
+            f"{exc}\n"
+            "Fix the JSON syntax named above, then retry."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise EngineAddressError(
+            f"ERROR: the engine address record at {path} must be one JSON object\n"
+            f"The payload parsed is {type(payload).__name__}, not an object.\n"
+            f"Redeploy to rewrite it: make instance-deploy INSTANCE={name}"
+        )
+    return payload
+
+
+def write_engine_address(root: Path, name: str, data: dict[str, object]) -> None:
+    """Record `data` as `name`'s azure relay address record; replaces any previous one.
+
+    The record's SINGLE WRITER (see ENGINE_ADDRESS_FILENAME). The payload
+    is written to a temp file in the record's own directory and moved into
+    place with one `os.replace`, so a reader can never observe a
+    half-written record -- the same guarantee a forward that opens
+    concurrently with a deploy depends on. A failed write removes its temp
+    file before propagating, leaving either the previous record or no
+    record, never a partial third state.
+
+    `root` is accepted for call-site uniformity with the rest of the
+    resolution surface and is deliberately unused, for the same reason
+    `engine_address` documents.
+    """
+    path = engine_address_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def clear_engine_address(root: Path, name: str) -> int:
+    """Remove `name`'s azure relay address record, if present.
+
+    `root` is accepted for call-site uniformity and deliberately unused,
+    like every other accessor on this store.
+
+    Returns:
+        1 when a record was removed, 0 when none was recorded -- the same
+        count convention `instance_ops.unlink_id` documents for the id
+        store.
+    """
+    path = engine_address_path(name)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return 0
+    return 1
+
+
+# The engine address record key naming the azure Key Vault the instance's
+# TLS material and configuration payload publish into. `certs.py`'s Key Vault
+# publication client, `cli.py`'s `secrets-vault` print and the container
+# build's staleness probe all resolve the store through `engine_vault_name`
+# below, so the key has one reader rather than one per consumer.
+VAULT_NAME_KEY = "vault_name"
+
+
+# The `location = "..."` input assignment the azure scaffold writes into the
+# per-instance terragrunt.hcl (`_render_azure_terragrunt_hcl` in
+# `instance_ops`), matched as a full-line assignment the same way `read_kind`
+# text-matches the envcommon include: the scaffold owns the line's exact
+# shape, and a commented-out or renamed input reads as missing rather than
+# half-parsed.
+_LOCATION_PATTERN = re.compile(r'^\s*location\s*=\s*"([^"]*)"', re.MULTILINE)
+
+
+def azure_instance_location(root: Path, name: str) -> str:
+    """The azure location input `name`'s scaffolded terragrunt.hcl carries.
+
+    The one reader of the `location` input: the state store composes the
+    storage account's name and placement from it, exactly the component
+    root.hcl's azure locals resolve at Terragrunt time. The assignment is
+    text-matched the same way `read_kind` text-matches the envcommon
+    include -- the scaffold owns the line's exact shape -- so a hand-edited
+    file that dropped the line reads as missing, never as a silently
+    guessed default.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        InstancesError: the terragrunt.hcl is missing (never scaffolded)
+            or carries no `location = "..."` assignment (the message names
+            the scaffold command that writes one).
+    """
+    validate_name(name)
+    terragrunt_hcl = terragrunt_dir(root, name) / "terragrunt.hcl"
+    try:
+        text = terragrunt_hcl.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise InstancesError(
+            f"ERROR: no terragrunt.hcl at {terragrunt_hcl}\n"
+            f"Instance {name!r} has no scaffold, so there is no azure location "
+            "to read.\n"
+            f"Scaffold it first: make instance-init INSTANCE={name} "
+            "CLOUD=azure LOCATION=<location>"
+        ) from exc
+    match = _LOCATION_PATTERN.search(text)
+    if match is None:
+        raise InstancesError(
+            f"ERROR: {terragrunt_hcl} carries no location input\n"
+            f"The azure location is read from the scaffolded "
+            "'location = \"...\"' assignment, and this file has none.\n"
+            f"Scaffold it first: make instance-init INSTANCE={name} "
+            "CLOUD=azure LOCATION=<location>"
+        )
+    return match.group(1)
+
+
+def engine_vault_name(root: Path, name: str) -> str:
+    """The Key Vault name `name`'s engine address record carries.
+
+    The single reader of the record's `VAULT_NAME_KEY`, so every consumer
+    that publishes to or compares against the instance's Key Vault derives
+    the same store from the same record. `root` is accepted for call-site
+    uniformity with the rest of the resolution surface and is deliberately
+    unused, exactly as `engine_address` documents for its own.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        EngineAddressError: the record is missing (the remedy names the
+            deploy that writes it), is not one JSON object, or is present
+            but carries no usable `VAULT_NAME_KEY` value (the message
+            names the redeploy that rewrites it).
+    """
+    validate_name(name)
+    vault = engine_address(root, name).get(VAULT_NAME_KEY)
+    if not isinstance(vault, str) or not vault:
+        raise EngineAddressError(
+            f"ERROR: the engine address record for instance {name!r} carries no usable "
+            f"{VAULT_NAME_KEY!r}\n"
+            f"The secrets surface reads '{VAULT_NAME_KEY}' from "
+            f"{engine_address_path(name)}.\n"
+            f"Redeploy to write it: make instance-deploy INSTANCE={name}"
+        )
+    return vault
 
 
 def _recorded_local_port(runner: CommandRunner, context_name: str) -> int | None:

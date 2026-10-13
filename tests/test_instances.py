@@ -34,6 +34,7 @@ import importlib
 import json
 import re
 import subprocess
+import uuid
 from pathlib import Path
 from types import ModuleType
 
@@ -506,6 +507,178 @@ def test_instance_id_filename_constant_matches_the_single_writer() -> None:
 
 
 # ---------------------------------------------------------------------------
+# engine_address (the azure relay address record)
+# ---------------------------------------------------------------------------
+
+
+def _address_record() -> dict[str, object]:
+    """A relay address record payload, every value generated per call.
+
+    The record's keys are owned by the slice that opens the relay forward;
+    the accessor contract under test is "the parsed dict comes back
+    verbatim", so the payload's shape is arbitrary here and generated, not
+    stored.
+    """
+    return {
+        "endpoint": f"tcp://127.0.0.1:{20000 + uuid.uuid4().int % 20000}",
+        "relay_id": uuid.uuid4().hex,
+    }
+
+
+def test_engine_address_reads_what_write_engine_address_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`engine_address` is the read half of the record `write_engine_address`
+    writes: the same dict, from the same file."""
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+    record = _address_record()
+
+    with pytest.raises(instances.EngineAddressError):
+        instances.engine_address(root, "sandbox")
+    instances.write_engine_address(root, "sandbox", record)
+
+    assert instances.engine_address(root, "sandbox") == record
+
+
+def test_engine_address_missing_names_the_deploy_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing record is the not-yet-deployed state, and the refusal names
+    the deploy that writes it."""
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+
+    with pytest.raises(instances.EngineAddressError) as exc_info:
+        instances.engine_address(root, "sandbox")
+
+    message = str(exc_info.value)
+    assert "make instance-deploy INSTANCE=sandbox" in message
+    assert instances.ENGINE_ADDRESS_FILENAME in message
+
+
+def test_engine_address_malformed_json_names_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record that is not valid JSON fails fast naming the file and the
+    parse error."""
+    instances = _import_instances()
+    docker_config = tmp_path / "docker-config"
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(docker_config))
+    root = generated_root(tmp_path)
+    path = instances.engine_address_path("sandbox")
+    path.parent.mkdir(parents=True)
+    path.write_text("not-json{", encoding="utf-8")
+
+    with pytest.raises(instances.EngineAddressError) as exc_info:
+        instances.engine_address(root, "sandbox")
+
+    message = str(exc_info.value)
+    assert str(path) in message
+    assert "Expecting value" in message
+
+
+def test_engine_address_rejects_a_non_object_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record that parses to a non-object is not an address record: the
+    refusal names the file and the shape."""
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+    path = instances.engine_address_path("sandbox")
+    path.parent.mkdir(parents=True)
+    path.write_text('["not", "an", "object"]', encoding="utf-8")
+
+    with pytest.raises(instances.EngineAddressError) as exc_info:
+        instances.engine_address(root, "sandbox")
+
+    message = str(exc_info.value)
+    assert str(path) in message
+    assert "JSON object" in message
+
+
+def test_engine_address_path_sits_in_the_certs_dir_the_id_store_uses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record shares the per-instance certificate-material directory, so a
+    relocated `DOCKER_CONFIG` moves it together with the id store."""
+    instances = _import_instances()
+    moved_docker_home = tmp_path / "moved-docker-home"
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(moved_docker_home))
+
+    assert instances.engine_address_path("sandbox") == (
+        instances.certs_dir("sandbox") / instances.ENGINE_ADDRESS_FILENAME
+    )
+    assert instances.ENGINE_ADDRESS_FILENAME == "engine-address.json"
+
+
+def test_write_engine_address_replaces_a_previous_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second write replaces, never accumulates: exactly one record file,
+    holding the newest payload."""
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+    first, second = _address_record(), _address_record()
+    instances.write_engine_address(root, "sandbox", first)
+    instances.write_engine_address(root, "sandbox", second)
+
+    assert instances.engine_address(root, "sandbox") == second
+    assert len(list(instances.engine_address_path("sandbox").parent.iterdir())) == 1
+
+
+def test_write_engine_address_leaves_no_temp_file_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The temp file the atomic write stages is gone once the replace landed."""
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+    instances.write_engine_address(root, "sandbox", _address_record())
+
+    assert [entry.name for entry in instances.engine_address_path("sandbox").parent.iterdir()] == [
+        instances.ENGINE_ADDRESS_FILENAME
+    ]
+
+
+def test_clear_engine_address_removes_once_then_reports_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remove-if-present: 1 when a record was removed (and it is gone), 0 when
+    none was recorded."""
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+
+    assert instances.clear_engine_address(root, "sandbox") == 0
+    instances.write_engine_address(root, "sandbox", _address_record())
+    assert instances.clear_engine_address(root, "sandbox") == 1
+    with pytest.raises(instances.EngineAddressError):
+        instances.engine_address(root, "sandbox")
+    assert instances.clear_engine_address(root, "sandbox") == 0
+
+
+def test_engine_address_accessors_reject_an_invalid_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+
+    for bad_name in ("../escape", "a/b", ""):
+        with pytest.raises(instances.InvalidInstanceNameError):
+            instances.engine_address(root, bad_name)
+        with pytest.raises(instances.InvalidInstanceNameError):
+            instances.write_engine_address(root, bad_name, {})
+        with pytest.raises(instances.InvalidInstanceNameError):
+            instances.clear_engine_address(root, bad_name)
+
+
+# ---------------------------------------------------------------------------
 # resolve (spec Section 4.1.1, AC-FUNC-005, AC-FUNC-006, AC-FUNC-007, AC-TEST-002)
 # ---------------------------------------------------------------------------
 
@@ -754,3 +927,135 @@ def test_module_help_lists_resolve_instance(
 
     assert exc_info.value.code == 0
     assert "resolve-instance" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# engine_vault_name (the azure Key Vault the address record names)
+# ---------------------------------------------------------------------------
+
+
+def test_engine_vault_name_reads_the_record_instances_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`engine_vault_name` is the read accessor on the record
+    `write_engine_address` writes: the same vault, from the same file."""
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+    vault_name = f"gd-vault-{uuid.uuid4().hex[:6]}"
+
+    with pytest.raises(instances.EngineAddressError):
+        instances.engine_vault_name(root, "sandbox")
+    instances.write_engine_address(root, "sandbox", {"vault_name": vault_name})
+
+    assert instances.engine_vault_name(root, "sandbox") == vault_name
+
+
+def test_engine_vault_name_missing_names_the_deploy_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record without a usable vault name fails fast naming the redeploy,
+    the same remedy a missing record names."""
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+    instances.write_engine_address(
+        root, "sandbox", {"relay_namespace": "gd.servicebus.windows.net"}
+    )
+
+    with pytest.raises(instances.EngineAddressError) as exc_info:
+        instances.engine_vault_name(root, "sandbox")
+
+    message = str(exc_info.value)
+    assert instances.VAULT_NAME_KEY in message
+    assert "make instance-deploy INSTANCE=sandbox" in message
+
+
+def test_engine_vault_name_rejects_a_non_string_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+    instances.write_engine_address(root, "sandbox", {"vault_name": ["not", "a", "name"]})
+
+    with pytest.raises(instances.EngineAddressError):
+        instances.engine_vault_name(root, "sandbox")
+
+
+# ---------------------------------------------------------------------------
+# azure_instance_location (the scaffold's location input)
+# ---------------------------------------------------------------------------
+
+
+def _seed_azure_scaffold(root: Path, name: str, location: str) -> Path:
+    """The per-instance terragrunt.hcl the azure scaffold writes, in miniature.
+
+    The include text is what `read_kind` keys the azure kind on, and the
+    `location = "..."` line is what the reader under test matches -- the
+    scaffold owns the line's exact shape, so the fixture writes that shape.
+    """
+    directory = root / "remote-instances" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    hcl = directory / "terragrunt.hcl"
+    hcl.write_text(
+        'include "envcommon" {\n'
+        '  path = "${dirname(find_in_parent_folders("root-azure.hcl"))}'
+        '/_envcommon/remote-azure.hcl"\n'
+        "}\n"
+        "\n"
+        "inputs = {\n"
+        f'  instance_name = "{name}"\n'
+        f'  location = "{location}"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    return hcl
+
+
+def test_azure_instance_location_reads_the_scaffolded_assignment(
+    tmp_path: Path,
+) -> None:
+    instances = _import_instances()
+    location = f"region-{uuid.uuid4().hex[:6]}"
+    _seed_azure_scaffold(tmp_path, "sandbox", location)
+
+    assert instances.azure_instance_location(tmp_path, "sandbox") == location
+
+
+def test_azure_instance_location_missing_scaffold_names_the_init_remedy(
+    tmp_path: Path,
+) -> None:
+    instances = _import_instances()
+
+    with pytest.raises(instances.InstancesError) as exc_info:
+        instances.azure_instance_location(tmp_path, "sandbox")
+
+    message = str(exc_info.value)
+    assert "no terragrunt.hcl" in message
+    assert "make instance-init INSTANCE=sandbox CLOUD=azure LOCATION=" in message
+
+
+def test_azure_instance_location_missing_assignment_names_the_init_remedy(
+    tmp_path: Path,
+) -> None:
+    instances = _import_instances()
+    hcl = _seed_azure_scaffold(tmp_path, "sandbox", "westeurope")
+    hcl.write_text(
+        hcl.read_text(encoding="utf-8").replace('  location = "westeurope"\n', ""),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(instances.InstancesError) as exc_info:
+        instances.azure_instance_location(tmp_path, "sandbox")
+
+    message = str(exc_info.value)
+    assert "carries no location input" in message
+    assert "make instance-init INSTANCE=sandbox CLOUD=azure LOCATION=" in message
+
+
+def test_azure_instance_location_rejects_an_invalid_name(tmp_path: Path) -> None:
+    instances = _import_instances()
+
+    with pytest.raises(instances.InvalidInstanceNameError):
+        instances.azure_instance_location(tmp_path, "../escape")

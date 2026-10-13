@@ -26,7 +26,8 @@ EC2 reference, troubleshooting) live in
   mode never hit it, because `make build` runs the whole of `devcontainer up`,
   postCreate included, before it seeds the server. The second layer installs
   the AWS session-manager-plugin (see the dedicated bullet below).
-- Features: aws-cli, Python 3.14, Node 25, kubectl + helm (minikube disabled
+- Features: aws-cli, azure-cli, Python 3.14, Node 25, kubectl + helm
+  (minikube disabled
   via `"minikube": "none"`), common-utils, docker-in-docker, uv,
   `ghcr.io/devcontainers/features/terraform:1` (Terraform, Terragrunt and
   tflint, each pinned `latest`); `jq` joins the existing apt-packages list.
@@ -54,7 +55,10 @@ EC2 reference, troubleshooting) live in
   so it ships inside the immutable image; `devcontainer_config/transport.py`
   shells out to it by relying on it being on `PATH` for the non-root
   `vscode` user (work unit `E5-F3-S1-T2`, operator ruling signed at commit
-  `9a38c703adda210e27c2c34607cb1a09a4d63378`).
+  `9a38c703adda210e27c2c34607cb1a09a4d63378`). The azure CLI, the azure
+  engine's own cloud CLI, needs no such custom step: a registry feature for
+  it exists, `ghcr.io/devcontainers/features/azure-cli:1`, and the features
+  list above carries it.
 - The IaC engine is Terraform, licensed BUSL-1.1; the installed
   Terraform and Terragrunt versions satisfy the floors `>= 1.10` and
   `>= 1.1.3` respectively.
@@ -571,7 +575,7 @@ section, `DOCKER_CONFIG` row, the single place that default is defined);
 | Material | Default lifetime | Persisted at |
 |---|---|---|
 | CA (`ca-key.pem`, `ca.pem`) | 3650 days | `<certs-root>/<instance>/ca/` |
-| Server (key, certificate) | 365 days | Nowhere: generated and published to Parameter Store in one step, never written under `<certs-root>/<instance>/` |
+| Server (key, certificate) | 365 days | Nowhere: generated and published in one step, never written under `<certs-root>/<instance>/` — to Parameter Store for an EC2 instance, to the instance's Key Vault (as the `tls-server-key`, `tls-server-cert` and `tls-ca` secrets) for an azure engine |
 | Client (`key.pem`, `cert.pem`) | 90 days | `<certs-root>/<instance>/` |
 
 The client certificate's ninety-day lifetime is the one an operator actually
@@ -598,11 +602,18 @@ so the superseded client certificate stays cryptographically valid until its
 own `notAfter` passes; removing the principal's `ssm:StartSession` grant is
 what actually renders a certificate inert, because a certificate
 authenticates but IAM authorizes, and a certificate is useless without the
-tunnel it authenticates inside.
+tunnel it authenticates inside. An azure engine's revocation is the same
+sentence in that cloud's vocabulary: removing the principal's Azure Relay
+Sender role on the namespace — or deleting the hybrid connection itself —
+is what renders a certificate inert, because the sender half of the couple
+is what a laptop certificate authenticates inside, and Entra authorizes
+that half.
 
 ## Transport
 
-The security group behind a remote instance carries zero ingress rules
+The security group behind a remote instance (an azure engine: its network
+security group, one rule list kept empty for the same reason) carries zero
+ingress rules
 : no packet from the network reaches the docker daemon,
 only the loopback listener `127.0.0.1:DOCKER_TLS_PORT` on the instance
 itself. Reaching that listener from the laptop is two independent factors
@@ -643,16 +654,18 @@ daemon's API version, which must be at least 1.44 for mTLS on a TCP
 listener with a rootless daemon, and whether it reports
 running rootless.
 
-**Two transports, one kind dispatch.** `make connect-start`
+**Three transports, one kind dispatch.** `make connect-start`
 resolves the instance, reads the engine's kind off the address block
 resolution exports (`docs/environment-files.md`) and opens the matching
 transport: an `ssh` engine (an `engine.json` manifest) runs the ssh form,
-an `ec2` instance the ssm form. `DEVCONTAINER_TRANSPORT` is a guard on
+an `azure` engine the azure relay form, an `ec2` instance the ssm form.
+`DEVCONTAINER_TRANSPORT` is a guard on
 that dispatch, never the selector: unset, the kind alone decides, which
 is why an operator naming an ssh engine sets no variable; set, the value
 must agree with the kind (`ssm` behind an ec2 instance, `ssh` behind an
-ssh engine) or the run exits non-zero naming the conflict, and any other
-value exits non-zero naming the variable, the offending value and the
+ssh engine, `relay` behind an azure engine, each contradiction refused
+symmetrically) or the run exits non-zero naming the conflict, and any
+other value exits non-zero naming the variable, the offending value and the
 accepted values. An EC2 instance, or no instance named at all, runs
 
 ```sh
@@ -723,6 +736,50 @@ guidance explicitly, and `engine-init --docker-addr`'s help states it at
 scaffold time. No AWS value is required: an SSH engine opens no session,
 so the region, profile and instance-id guards apply to the ssm branch
 alone.
+
+**The azure transport, for an azure engine.** An azure engine runs the
+same `forwards open` lifecycle through `devcontainer_config.transport_azure`,
+with an Azure Relay hybrid connection in place of the tunnel: the VM holds
+the relay's listener end — a unit on the VM that dials *outward* to the
+relay service — and the laptop's daemon is the sender half, opening one
+sender connection per docker API call, each authorized by an Entra token
+carried in the request header and never the query string. The token comes
+from `az account get-access-token` against the relay's audience, lives
+roughly an hour, and is cached with a refresh margin; a 401 invalidates
+the cache and retries once with a fresh token before failing naming
+`az login` as the remedy. Two things differ from the other transports in
+operator-visible ways. The VM-side listener stops itself when idle — azure
+bills listener-hours while a hybrid connection has a connected listener —
+so before binding the local port the connect flow starts it again with one
+synchronous `az vm run-command invoke`, bounded by
+`AZURE_LISTENER_START_TIMEOUT`; a cold start on a freshly started VM can
+take tens of seconds, and the flow waits behind it deliberately rather
+than letting the first docker call die on a 404 no-listener answer. And
+the one-shot `verify` never starts the listener: a 404 there is diagnosed
+with the `make connect-start` remedy, which is the command that starts it.
+Everything past the relay pipe is the shared machinery: the context is
+created or updated by the same `transport.ensure_context`, carries the
+same client certificate, dials `tcp://127.0.0.1:<port>` with the same SAN
+requirement, and completes the same `docker version` handshake. No AWS
+value is required here either: an azure engine's addressing record, not an
+instance id or a region, is what this branch reads.
+
+**A killed deploy leaves the state lock behind.** `make instance-deploy`
+runs Terragrunt, whose state backend takes one lock per instance while a
+plan or apply runs, and a deploy killed mid-plan — an interrupted
+terminal, a closed laptop — can leave that lock in place. The next
+deploy's plan then fails acquiring it, naming `Error acquiring the state
+lock` and the lock id; Terragrunt can also exit zero on a plan that
+actually failed, so the deploy does not trust the exit status: a plan
+that produces no success marker, or fails outright, has its captured
+output printed to stderr along with the remedy. The remedy is the lock id
+that output names: from the instance's own directory run
+`cd remote-instances/<name> && terragrunt force-unlock <lock-id>`, then
+re-run the deploy. `terragrunt output -json` after an azure apply is
+captured the same way and gets the same treatment. A lock is never forced
+as a matter of course: force-unlocking while another operation genuinely
+holds it is what invites concurrent state writes, so the id always comes
+from the failed run's own printed output.
 
 **The SAN requirement, and its symptom.** TLS validates the name the
 *client* dials the daemon with, and the client dials `127.0.0.1` through
@@ -805,6 +862,18 @@ aws-profile-map.json                           /devcontainer/<project>/…      
   Both channels render through one shared transform
   (`.devcontainer/remote-docker/config-payload.sh`), so the EC2 publish and
   the SSH seed are byte-identical flavors.
+- Azure-engine mode: the instance's two configuration files live in its own
+  Key Vault as secrets, and the container fetches them with the VM's
+  user-assigned managed identity — no stored credential anywhere. The build
+  injects `DEVCONTAINER_ENGINE_KIND=azure` and the instance's vault name
+  (read from its relay address record) into the container's environment,
+  and the postcreate wrapper, seeing the azure kind, exchanges an identity
+  token from the instance metadata endpoint for the two secrets
+  (`shell-env`, `profile-map`) over the vault's REST endpoint. The VM
+  identity carries Key Vault Secrets User on that vault — read only, never
+  an Officer role — so the container's bootstrap can never rewrite what the
+  laptop publishes; a build on an azure engine with no vault named is
+  refused before anything runs.
 - The pushed `shell.env` is the local one transformed for remote: proxy
   disabled and removed (no laptop tinyproxy on EC2), `BASH_ENV` pointed at the
   remote workspace path, stale PATH prepends dropped.
@@ -941,7 +1010,7 @@ The roster, grouped into the seven families `gd-help` maps in prose:
 
 | Family | Skills |
 |---|---|
-| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-doctor` |
+| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-setup-azure`, `gd-env-doctor` |
 | project- | `gd-project-onboard` |
 | instance- | `gd-instance-create`, `gd-instance-fleet`, `gd-instance-list`, `gd-instance-destroy` |
 | container- | `gd-container-local`, `gd-container-remote`, `gd-container-verify`, `gd-container-lifecycle` |

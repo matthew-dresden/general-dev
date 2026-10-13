@@ -49,7 +49,7 @@ INSTANCES                         one remote engine per project under remote-ins
   make connect-stop       host    Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1
   make connect-refresh    host    Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1
   make connect-list       host    Every instance's forward: pid, port, listening or not.
-  make bucket-list        host    Every state store this fleet's naming template matches (EC2 buckets, azure storage accounts): name, configured or orphaned. Per kind; a mixed fleet is refused.
+  make bucket-list        host    Every state store this fleet's naming template matches (EC2 buckets, azure accounts): name, configured or orphaned. Per kind; mixed fleet refused. EC2 needs REMOTE_AWS_REGION.
   make bucket-delete      host    Purge + delete state stores: INSTANCE=<name> (EC2 bucket or azure account), or ALL=1 CONFIRM=delete for every one. Per kind; mixed fleet refused. EC2 needs REMOTE_AWS_REGION.
   make remote             host    Point them at the remote engine (<REMOTE_DOCKER_CONTEXT>): ensures the engine's forward in the background, then switches docker. INSTANCE=<name> targets that instance.
 

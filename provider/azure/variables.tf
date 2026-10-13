@@ -35,10 +35,13 @@
 #
 # var.name_prefix additionally carries the azure resource-naming
 # validation: lowercase alphanumeric characters and dashes, beginning with
-# a letter, at most 18 characters -- the bound that keeps the derived
-# "-vault" suffix inside azure's 3-24 vault-name law and the "-relay"
-# suffix inside the namespace law. Every derived resource name in the
-# composition is legal exactly when this validation passes.
+# a letter, at most 18 characters, no consecutive dashes -- azure's vault
+# naming law bans consecutive hyphens, and a prefix admitting them would
+# pass the shape check and fail the vault's own creation at apply -- the
+# bound that keeps the derived "-vault" suffix inside azure's 3-24
+# vault-name law and the "-relay" suffix inside the namespace law. Every
+# derived resource name in the composition is legal exactly when this
+# validation passes.
 
 # --- Create toggles (Section 5.6) --------------------------------------
 
@@ -411,9 +414,12 @@ variable "name_prefix" {
     # characters at most: the "-vault" suffix then lands inside azure's
     # 3-24 vault-name law and the "-relay" suffix inside the 6-50
     # namespace law. Vault names may not end in a dash, and neither may
-    # this prefix for the same derived-name reason.
-    condition     = can(regex("^[a-z][a-z0-9-]{0,17}$", var.name_prefix)) && !can(regex("-$", var.name_prefix))
-    error_message = "var.name_prefix (${var.name_prefix}) must be 1 to 18 lowercase alphanumeric or dash characters, beginning with a letter and not ending with a dash: the derived vault and relay namespace names append '-vault' and '-relay' and must stay inside azure's own naming laws."
+    # this prefix for the same derived-name reason; nor may they carry
+    # consecutive dashes, azure's own vault-naming ban -- a prefix such as
+    # "gd--prod" passes the shape check but fails the vault's creation at
+    # apply, so the refusal is made here where it fails at plan instead.
+    condition     = can(regex("^[a-z][a-z0-9-]{0,17}$", var.name_prefix)) && !can(regex("-$", var.name_prefix)) && !can(regex("--", var.name_prefix))
+    error_message = "var.name_prefix (${var.name_prefix}) must be 1 to 18 lowercase alphanumeric or dash characters, beginning with a letter, ending with a dash nowhere and carrying no consecutive dashes: the derived vault and relay namespace names append '-vault' and '-relay' and must stay inside azure's own naming laws, which ban consecutive hyphens."
   }
 }
 

@@ -16,7 +16,11 @@ sender half of, and it obeys the same live-verified wire contract:
   control channel; this script dials that address AS-IS -- no auth header,
   no extra headers -- and once upgraded, that socket is a raw bidirectional
   byte pipe to the sender, bridged to the docker daemon on the loopback
-  target.
+  target. An empty binary frame is the in-band EOF sentinel both ends
+  speak: the bridge whose TCP side read EOF sends exactly one (never a
+  close frame), and the bridge that receives one shuts its own TCP write
+  half down -- EOF toward `docker exec -i` -- while the reverse direction
+  keeps running until a close frame or a second EOF ends the pipe.
 - The service drops the control channel when the token expires, so every
   reconnect fetches a fresh token from the instance identity endpoint first.
 
@@ -123,12 +127,32 @@ AUTH_HEADER_NAME = "ServiceBusAuthorization"
 ACTION_LISTEN = "listen"
 CLOSE_NORMAL = 1000
 
+# One frame-length ceiling, enforced before a declared payload is read: a
+# corrupt or hostile 64-bit length field must fail one connection, never
+# drive this reader into buffering an unbounded frame. Relay payloads are
+# docker API traffic, well under this bound.
+MAX_FRAME_BYTES = 16 * 1024 * 1024
+
 CHUNK_BYTES = 65536
 
 
 def log(message: str) -> None:
     """One state-change line to stdout; systemd captures it."""
     print(f"[gd-relay] {message}", flush=True)
+
+
+def redact(text: str, token: str | None) -> str:
+    """`text` with this connection's own token replaced.
+
+    The laptop-side transport scrubs its token from every handshake failure
+    it surfaces; this script journals to the same kind of permanent log
+    (the systemd journal), so a failure body or status line that echoed the
+    token -- an error page reflecting request headers, a future refactor
+    that captures the request head -- must not carry it there.
+    """
+    if not token:
+        return text
+    return text.replace(token, "***")
 
 
 class RelayWebSocket:
@@ -182,7 +206,10 @@ class RelayWebSocket:
             head, _, rest = bytes(buffer).partition(b"\r\n\r\n")
             status_line = head.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
             if " 101" not in status_line:
-                raise RelayHandshakeError(status_line=status_line, body=head.decode("latin-1"))
+                raise RelayHandshakeError(
+                    status_line=redact(status_line, token),
+                    body=redact(head.decode("latin-1"), token),
+                )
             expected = base64.b64encode(
                 hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii")).digest()
             ).decode("ascii")
@@ -218,6 +245,7 @@ class RelayWebSocket:
         return out
 
     def recv_frame(self) -> tuple[bool, int, bytes]:
+        """One frame, its declared length refused above `MAX_FRAME_BYTES`."""
         first, second = self._read_exact(2)
         fin = bool(first & 0x80)
         opcode = first & 0x0F
@@ -227,6 +255,11 @@ class RelayWebSocket:
             (length,) = struct.unpack("!H", self._read_exact(2))
         elif length == 127:
             (length,) = struct.unpack("!Q", self._read_exact(8))
+        if length > MAX_FRAME_BYTES:
+            raise ValueError(
+                f"the relay connection declared a {length}-byte frame, above the "
+                f"{MAX_FRAME_BYTES}-byte ceiling this reader buffers"
+            )
         mask = self._read_exact(4) if masked else b""
         payload = self._read_exact(length) if length else b""
         if masked:
@@ -337,25 +370,49 @@ def fetch_identity_token() -> str:
 def bridge_to_target(websocket: RelayWebSocket, target_host: str, target_port: int) -> None:
     """One coupled pipe: the rendezvous socket bridged to the daemon on `target`.
 
-    Same pipe discipline as the laptop side, in reverse: either side's close
-    tears both down through the common finally.
+    Same half-close pipe discipline as the laptop side, in reverse: the
+    sender's stdin reaching EOF arrives as ONE empty-payload binary frame
+    (never a close frame), and the target's own EOF is forwarded the same
+    way. An EOF alone never ends the pipe and never shuts the target
+    socket down -- its read side is the stdout direction docker still
+    writes to. The write half closes when the peer's sentinel arrives (EOF
+    toward docker), and a pipe whose BOTH directions have signaled EOF is
+    done, as is one hit by a close frame or a socket error; the common
+    finally tears those down.
     """
     tcp: socket.socket | None = None
     try:
         tcp = socket.create_connection((target_host, target_port), timeout=10.0)
         tcp.settimeout(None)
+        eof_forwarded = threading.Event()
+        target_write_shut = threading.Event()
+
+        def shut_target_write() -> None:
+            """Half-close the target socket's write side, exactly once."""
+            if target_write_shut.is_set():
+                return
+            target_write_shut.set()
+            try:
+                tcp.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
 
         def tcp_to_websocket() -> None:
             try:
                 while True:
                     data = tcp.recv(CHUNK_BYTES)
                     if not data:
-                        break
+                        # The target's own EOF: forward it in-band once --
+                        # never a close frame, which would kill the
+                        # sender's stdout direction -- and leave the rest
+                        # of the pipe alone.
+                        if not eof_forwarded.is_set():
+                            eof_forwarded.set()
+                            websocket.send_frame(OP_BINARY, b"")
+                        return
                     websocket.send_frame(OP_BINARY, data)
             except OSError:
                 pass
-            finally:
-                websocket.send_close()
 
         pump = threading.Thread(target=tcp_to_websocket, daemon=True)
         pump.start()
@@ -363,9 +420,17 @@ def bridge_to_target(websocket: RelayWebSocket, target_host: str, target_port: i
             message = websocket.recv_message()
             if message is None:
                 break
-            _, payload = message
+            opcode, payload = message
             if payload:
                 tcp.sendall(payload)
+            elif opcode == OP_BINARY:
+                # The sender's in-band EOF: docker's stdin is done. EOF
+                # toward the target, stdout keeps flowing -- and when this
+                # side already forwarded its own EOF, no direction can
+                # carry data anymore, so the pipe is done.
+                shut_target_write()
+                if eof_forwarded.is_set():
+                    break
     except OSError:
         pass
     finally:

@@ -759,3 +759,9 @@ a size whose family shows nonzero quota and no restriction — the check
 commands are in [azure-requirements.md](azure-requirements.md), section 2 —
 then set `vm_size` (and `os_image_urn` for an x64 size) in the scaffolded
 `terragrunt.hcl` and re-run `make instance-deploy INSTANCE=<name>`.
+
+**A deploy fails with `Error acquiring the state lock`.** Cause: a previous
+deploy was killed mid-plan and its Terragrunt state lock survived. Fix: the
+failed plan's printed output names the lock id — run
+`cd remote-instances/<name> && terragrunt force-unlock <lock-id>` with it,
+then re-run the deploy.

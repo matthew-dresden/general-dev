@@ -24,15 +24,21 @@ module is deliberately literal about it:
   neither carries the parameter at all.
 - Once the upgrade completes, the socket is a raw bidirectional byte pipe:
   binary WebSocket frames carry the payload, the service relays them
-  transparently, and each sender connection is one coupled pipe. Closing
-  one side propagates to the other (close 1000/1001), the service may send
-  pings (answered with pongs), and client frames are always masked
-  (RFC 6455).
+  transparently, and each sender connection is one coupled pipe. An empty
+  binary frame is the in-band EOF sentinel: the bridge whose TCP side read
+  EOF sends exactly one (never a close frame), and the bridge that receives
+  one shuts its own TCP write half down -- EOF toward `docker exec -i` --
+  while the reverse direction keeps running. A later close frame (1000/1001)
+  or TCP FIN still tears the whole pipe down. The service may send pings
+  (answered with pongs), and client frames are always masked (RFC 6455).
 - The Entra token comes from `az account get-access-token --resource
   https://relay.azure.net`, lives roughly an hour, and is cached with a
   five-minute refresh margin; a 401 on a new connection invalidates the
   cache and retries once with a fresh token before failing with the
-  `az login` remedy.
+  `az login` remedy. The fetch is bounded by `AZURE_TOKEN_FETCH_TIMEOUT`
+  (default 30 seconds) so a hung `az` fails this one token attempt instead
+  of wedging every accepted connection behind the cache's lock; a failed
+  fetch leaves the cache empty, so the next `get` retries.
 
 `connect` mirrors the other transports' connect flow with a relay pipe in
 place of their tunnel: it loads the instance's relay address record
@@ -77,8 +83,9 @@ context activation, then one relay sender opened by one real docker
 version call through the bound acceptor, the verdict line, and every
 socket torn down on every path out -- never a listener or daemon left
 behind. It does not start the listener: a 404 no-listener refusal there
-is diagnosed with the `make connect-start` remedy, which is the command
-that starts it.
+is diagnosed with the `make connect-refresh` remedy, which re-runs the
+daemon's recorded command including the listener start that brings the
+unit up.
 
 Nothing here waits on time. The daemon's liveness is the blocking
 `accept()` in its own thread; the bridging reads block on real sockets
@@ -104,6 +111,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -144,6 +152,14 @@ RELAY_TOKEN_REFRESH_MARGIN_SECONDS = 300.0
 RELAY_DIAL_TIMEOUT_ENV_VAR = "RELAY_DIAL_TIMEOUT"
 _RELAY_DIAL_TIMEOUT_DEFAULT_SECONDS = 30.0
 
+# One token fetch's deadline: the cache holds its lock across the `az` call,
+# so an unbounded fetch -- a hung `az` waiting on a browser prompt or a dead
+# network -- would wedge every accepted connection behind it while
+# `connect-status` kept reporting the forward listening. The deadline is
+# read through `read_positive_seconds` like every other bounded wait here.
+AZURE_TOKEN_FETCH_TIMEOUT_ENV_VAR = "AZURE_TOKEN_FETCH_TIMEOUT"
+_AZURE_TOKEN_FETCH_TIMEOUT_DEFAULT_SECONDS = 30.0
+
 _LOCALHOST = "127.0.0.1"
 
 # RFC 6455: the fixed GUID appended to the client key for the accept answer,
@@ -156,6 +172,12 @@ _OP_BINARY = 0x2
 _OP_CLOSE = 0x8
 _OP_PING = 0x9
 _OP_PONG = 0xA
+
+# One frame-length ceiling, enforced before a declared payload is read: a
+# corrupt or hostile 64-bit length field must fail one connection, never
+# drive this reader into buffering an unbounded frame. Relay payloads are
+# docker API traffic, well under this bound.
+_MAX_FRAME_BYTES = 16 * 1024 * 1024
 
 # The one header the relay's authentication rides on. The token is a bearer
 # credential, so it is never logged, never echoed into an error, and scrubbed
@@ -173,6 +195,20 @@ _CLOSE_NORMAL = 1000
 # resource_group) belongs to other slices and is deliberately ignored here.
 _RELAY_NAMESPACE_KEY = "relay_namespace"
 _HYBRID_CONNECTION_KEY = "hybrid_connection"
+
+# The strict shapes the three record values this module composes into URLs
+# and shell strings must match, checked before anything is composed with
+# them. The namespace is the deploy's FQDN form ("<name>.
+# servicebus.windows.net", what `make instance-deploy` writes) or its bare
+# label; the hybrid connection is the `gd-<instance>` name this repo
+# mints; the vault URI is the standard azure Key Vault REST host. Anything
+# outside these -- a scheme, a path, a query, a fragment, a shell
+# metacharacter -- would compose a dial aimed somewhere else or a shell
+# string the VM would interpret, so the record is refused outright rather
+# than escaped.
+_RELAY_NAMESPACE_PATTERN = re.compile(r"^[a-z0-9-]+(\.servicebus\.windows\.net)?$")
+_HYBRID_CONNECTION_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+_VAULT_URI_PATTERN = re.compile(r"^https://[A-Za-z0-9-]+\.vault\.azure\.net/?$")
 
 # The record keys the install-material surface below reads, and the one
 # optional key that names the vault's REST endpoint outright. A record
@@ -313,8 +349,8 @@ def _diagnose_handshake(*, status: int | None, body: str, instance: str) -> str:
         return (
             f"ERROR: the relay service refused the WebSocket upgrade with {status}\n"
             f"{detail}\n"
-            f"The relay listener is not running; run: make connect-start INSTANCE={instance} "
-            "which starts it."
+            f"The relay listener is not running; run: make connect-refresh INSTANCE={instance} "
+            "which re-runs the daemon's recorded command, listener start included."
         )
     return (
         "ERROR: the relay service refused the WebSocket upgrade "
@@ -353,12 +389,13 @@ def build_az_token_argv() -> list[str]:
 def parse_token_expiry(value: object) -> float:
     """`expiresOn` as a UTC epoch second, from either shape azure prints.
 
-    The CLI answers with an integer epoch for some credential flows and a
-    `YYYY-MM-DD HH:MM:SS.000000` string for others (the string is wall-clock
-    in the machine's local zone, which `datetime.timestamp()` on a naive
-    datetime applies). Anything else is a payload this module refuses rather
-    than guesses at, so a future shape change fails loudly here instead of
-    silently caching a token to the wrong deadline.
+    The CLI answers with an integer epoch (`expires_on`) for some credential
+    flows and a `YYYY-MM-DD HH:MM:SS.000000` string (`expiresOn`) for
+    others (the string is wall-clock in the machine's local zone, which
+    `datetime.timestamp()` on a naive datetime applies). Anything else is a
+    payload this module refuses rather than guesses at, so a future shape
+    change fails loudly here instead of silently caching a token to the
+    wrong deadline.
     """
     if isinstance(value, bool):
         raise RelayConfigError(
@@ -417,6 +454,10 @@ def parse_token_payload(stdout: str) -> tuple[str, float]:
             "ERROR: az account get-access-token returned no accessToken\n"
             "Run 'az login' to refresh the credentials, then retry."
         )
+    # The epoch field wins when the CLI prints both shapes: it is absolute,
+    # where the deprecated string is wall-clock in the local zone.
+    if "expires_on" in payload:
+        return token, parse_token_expiry(payload["expires_on"])
     if "expiresOn" not in payload:
         raise RelayConfigError(
             "ERROR: az account get-access-token returned no expiresOn\n"
@@ -426,18 +467,52 @@ def parse_token_payload(stdout: str) -> tuple[str, float]:
     return token, parse_token_expiry(payload["expiresOn"])
 
 
+def _token_fetch_timeout_seconds() -> float:
+    """`AZURE_TOKEN_FETCH_TIMEOUT`, read through the shared hostprobe reader.
+
+    Raises:
+        RelayTransportError: the variable is set to something that is not a
+            finite positive number of seconds.
+    """
+    try:
+        return read_positive_seconds(
+            AZURE_TOKEN_FETCH_TIMEOUT_ENV_VAR, _AZURE_TOKEN_FETCH_TIMEOUT_DEFAULT_SECONDS
+        )
+    except HostProbeError as exc:
+        raise RelayTransportError(
+            f"ERROR: {exc}\n"
+            "Set it to a positive number of seconds, or unset it to use the default of "
+            f"{_AZURE_TOKEN_FETCH_TIMEOUT_DEFAULT_SECONDS:g}."
+        ) from exc
+
+
 def fetch_relay_token(runner: CommandRunner) -> tuple[str, float]:
     """One live `az account get-access-token` through the runner seam.
 
+    The call is bounded by `AZURE_TOKEN_FETCH_TIMEOUT`: a hung `az` (a
+    browser prompt nobody is watching, a dead network) must fail this one
+    attempt rather than hold the token cache's lock forever.
+
     Raises:
+        RelayTransportError: the fetch outlived the deadline.
         RelayConfigError: `az` is not on PATH, the command failed (the
             operator's remedy is `az login`), or the answer could not be
             parsed.
     """
-    result = runner(tuple(build_az_token_argv()), None)
+    timeout_seconds = _token_fetch_timeout_seconds()
+    result = runner(tuple(build_az_token_argv()), timeout_seconds)
     if result.binary_missing:
         raise RelayConfigError(
             f"ERROR: {_AZ_BINARY} is not on PATH\nInstall the Azure CLI, then retry."
+        )
+    if result.timed_out:
+        raise RelayTransportError(
+            "ERROR: az account get-access-token did not answer within "
+            f"{timeout_seconds:g}s\n"
+            "The token cache's lock is held only for bounded fetches, so every waiting "
+            "connection retries with its own attempt.\n"
+            f"Raise {AZURE_TOKEN_FETCH_TIMEOUT_ENV_VAR} if this machine is simply slow, or "
+            "run 'az login' to refresh the credentials, then retry."
         )
     if result.exit_code != 0:
         raise RelayConfigError(
@@ -454,11 +529,15 @@ class TokenCache:
     One cache instance serves every connection thread the accept loop
     spawns: `get` returns the cached token while more than the refresh
     margin of life remains, and fetches a fresh one otherwise. The fetch
-    runs under the lock, so a burst of connections shares one `az` call
-    instead of racing into a token-per-connection storm. `invalidate` drops
-    the cache after a 401 so the retry mints a fresh token rather than
-    re-presenting the rejected one. The clock is injected so the tests walk
-    expiry without waiting on anything.
+    runs under the lock -- single-flight, so a burst of connections shares
+    one `az` call instead of racing into a token-per-connection storm --
+    and the fetch is bounded by `AZURE_TOKEN_FETCH_TIMEOUT`, so a hung `az`
+    delays the waiting connections by one bounded attempt instead of
+    wedging them behind the lock indefinitely. A failed fetch leaves the
+    cache empty (an in-flight stale token is dropped too), so the next
+    `get` retries rather than re-serving a rejected or expired token.
+    `invalidate` drops the cache after a 401 for the same reason. The clock
+    is injected so the tests walk expiry without waiting on anything.
     """
 
     def __init__(
@@ -481,7 +560,14 @@ class TokenCache:
             now = self._clock()
             if self._token is not None and now < self._expiry - self._refresh_margin_seconds:
                 return self._token
-            token, expiry = fetch_relay_token(self._runner)
+            try:
+                token, expiry = fetch_relay_token(self._runner)
+            except BaseException:
+                # A failed fetch must not leave a stale token cached: the
+                # next get() retries the fetch from an empty cache.
+                self._token = None
+                self._expiry = 0.0
+                raise
             self._token = token
             self._expiry = expiry
             return token
@@ -524,15 +610,29 @@ def relay_values(address: Mapping[str, object], *, instance: str) -> tuple[str, 
     other slices and are ignored. A record present but missing a relay key
     fails fast here, naming the same deploy remedy a missing record names:
     the operator's next step is identical, and a half-written record should
-    read as the not-yet-deployed state it effectively is.
+    read as the not-yet-deployed state it effectively is. Each key that IS
+    present must match its strict pattern (`_RELAY_NAMESPACE_PATTERN`,
+    `_HYBRID_CONNECTION_PATTERN`): both values are composed into the
+    `wss://` dial URL, so a query, fragment, path or metacharacter smuggled
+    into the record could aim the token-bearing dial somewhere else.
 
     Raises:
         RelayConfigError: either key is missing or is not a non-empty
-            string, or the namespace carries a scheme or path (it is a
-            host, and either would compose a malformed `wss://` URL).
+            string matching its pattern.
     """
     values: list[str] = []
-    for key in (_RELAY_NAMESPACE_KEY, _HYBRID_CONNECTION_KEY):
+    for key, pattern, expected in (
+        (
+            _RELAY_NAMESPACE_KEY,
+            _RELAY_NAMESPACE_PATTERN,
+            "a relay namespace host ('<namespace>.servicebus.windows.net' or its bare label)",
+        ),
+        (
+            _HYBRID_CONNECTION_KEY,
+            _HYBRID_CONNECTION_PATTERN,
+            "a bare hybrid-connection name of letters, digits and hyphens",
+        ),
+    ):
         value = address.get(key)
         if not isinstance(value, str) or not value:
             raise RelayConfigError(
@@ -542,16 +642,16 @@ def relay_values(address: Mapping[str, object], *, instance: str) -> tuple[str, 
                 f"'{_HYBRID_CONNECTION_KEY}' from {instances.engine_address_path(instance)}.\n"
                 f"Redeploy to write it: make instance-deploy INSTANCE={instance}"
             )
+        if not pattern.fullmatch(value):
+            raise RelayConfigError(
+                f"ERROR: the engine address record for instance {instance!r} carries a "
+                f"malformed {key!r}\n"
+                f"{value!r} is not {expected}; the value comes from "
+                f"{instances.engine_address_path(instance)}.\n"
+                f"Redeploy to rewrite it: make instance-deploy INSTANCE={instance}"
+            )
         values.append(value)
     namespace, hybrid_connection = values
-    if "://" in namespace or "/" in namespace:
-        raise RelayConfigError(
-            f"ERROR: the engine address record for instance {instance!r} carries a "
-            f"malformed {_RELAY_NAMESPACE_KEY!r}\n"
-            f"{namespace!r} is not a bare relay host; the record must name "
-            "'<namespace>.servicebus.windows.net'.\n"
-            f"Redeploy to rewrite it: make instance-deploy INSTANCE={instance}"
-        )
     return namespace, hybrid_connection
 
 
@@ -604,19 +704,31 @@ def vault_url(address: Mapping[str, object], *, instance: str) -> str:
     """The vault's REST base URL, from the record's `vault_uri` or its `vault_name`.
 
     Accepts either key: a record carrying `vault_uri` is answered from that
-    value verbatim (a trailing slash trimmed, so secret paths compose
-    cleanly); one carrying only `vault_name` has the standard
-    `https://<vault_name>.vault.azure.net` URL composed. A record carrying
-    neither is refused, as is a `vault_name` that is not a bare label --
-    the same bareness rule `relay_values` applies to the namespace, since a
-    scheme or path in either would compose a malformed URL here.
+    value once it matches `_VAULT_URI_PATTERN` (a trailing slash trimmed, so
+    secret paths compose cleanly); one carrying only `vault_name` has the
+    standard `https://<vault_name>.vault.azure.net` URL composed. A record
+    carrying neither is refused, as is a `vault_name` that is not a bare
+    label -- the same bareness rule `relay_values` applies to the namespace,
+    since a scheme or path in either would compose a malformed URL here.
+    The `vault_uri` check is strict, not cosmetic: the URL is composed into
+    shell the VM's root runs, so a query or path smuggled into the record
+    could redirect the token-bearing secret fetch.
 
     Raises:
-        RelayConfigError: neither key is usable, or `vault_name` carries a
-            scheme or path.
+        RelayConfigError: neither key is usable, `vault_uri` does not match
+            the strict pattern, or `vault_name` carries a scheme or path.
     """
     uri = address.get(_VAULT_URI_KEY)
     if isinstance(uri, str) and uri:
+        if not _VAULT_URI_PATTERN.fullmatch(uri):
+            raise RelayConfigError(
+                f"ERROR: the engine address record for instance {instance!r} carries a "
+                f"malformed {_VAULT_URI_KEY!r}\n"
+                f"{uri!r} is not a Key Vault REST host ('https://<vault-name>"
+                ".vault.azure.net'); the value comes from "
+                f"{instances.engine_address_path(instance)}.\n"
+                f"Redeploy to rewrite it: make instance-deploy INSTANCE={instance}"
+            )
         return uri.rstrip("/")
     vault_name = _address_str(address, instances.VAULT_NAME_KEY, instance=instance)
     if "://" in vault_name or "/" in vault_name:
@@ -644,11 +756,13 @@ def build_install_commands(instance: str, *, vault_url: str, daemon_user: str) -
     secret URLs and never carry a value, so the private key is absent from
     the run-command document and from the run-command history azure retains
     -- the token the script presents is its own managed identity's, fetched
-    from the instance metadata endpoint at run time. The Key Vault REST
-    answers are JSON, so each fetch extracts the body's `value` field with
-    python3 (present on the Ubuntu image the azure layer ships) and writes
-    it straight to its file; `umask 077` precedes the first fetch and each
-    file's mode is set explicitly after it.
+    from the instance metadata endpoint at run time, and it reaches curl
+    through stdin (`-H @-`) rather than argv, so it never sits in the VM's
+    process table. The Key Vault REST answers are JSON, so each fetch
+    extracts the body's `value` field with python3 (present on the Ubuntu
+    image the azure layer ships) and writes it straight to its file;
+    `umask 077` precedes the first fetch and each file's mode is set
+    explicitly after it.
     """
     lines = list(transport.tls_dir_prepare_lines(daemon_user))
     # No double quotes inside the command substitution: the strictest
@@ -665,9 +779,18 @@ def build_install_commands(instance: str, *, vault_url: str, daemon_user: str) -
     )
     for filename, secret_name in certs.AZURE_PUBLISHABLE.items():
         mode = "0600" if filename == certs.SERVER_KEY_FILENAME else "0644"
+        # The bearer header reaches curl through stdin (`-H @-`), never as
+        # an argv word: a `-H "Authorization: Bearer $token"` would sit in
+        # the process table for the whole fetch, readable by anything on
+        # the VM that can list processes. The URL is single-quoted safely
+        # because `vault_url` validated it to a shape that carries no
+        # quote; under `set -eu` a failed fetch yields python3 an empty or
+        # non-JSON body, so the script dies before its sentinel and the
+        # invoke reports the failure.
         lines.append(
-            f'curl -sf -H "Authorization: Bearer $token" '
-            f'"{vault_url}/secrets/{secret_name}?api-version={_KEYVAULT_API_VERSION}"'
+            "printf 'Authorization: Bearer %s\\n' \"$token\""
+            f" | curl -sf -H @- "
+            f"'{vault_url}/secrets/{secret_name}?api-version={_KEYVAULT_API_VERSION}'"
             " | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)"
             f'["value"])\' > "$dir/{filename}"'
         )
@@ -1326,7 +1449,14 @@ class RelayWebSocket:
         return out
 
     def recv_frame(self) -> tuple[bool, int, bytes]:
-        """One frame: `(fin, opcode, payload)`, server masks removed if present."""
+        """One frame: `(fin, opcode, payload)`, server masks removed if present.
+
+        A frame whose header declares more than `_MAX_FRAME_BYTES` is
+        refused before any payload byte is read, naming the declared size.
+
+        Raises:
+            RelayProtocolError: the declared length exceeds the ceiling.
+        """
         first, second = self._read_exact(2)
         fin = bool(first & 0x80)
         opcode = first & 0x0F
@@ -1336,6 +1466,11 @@ class RelayWebSocket:
             (length,) = struct.unpack("!H", self._read_exact(2))
         elif length == 127:
             (length,) = struct.unpack("!Q", self._read_exact(8))
+        if length > _MAX_FRAME_BYTES:
+            raise RelayProtocolError(
+                f"ERROR: the relay connection declared a {length}-byte frame, above the "
+                f"{_MAX_FRAME_BYTES}-byte ceiling this reader buffers"
+            )
         mask = self._read_exact(4) if masked else b""
         payload = self._read_exact(length) if length else b""
         if masked:
@@ -1458,14 +1593,66 @@ def _dial_sender(url: str, token: str, *, timeout_seconds: float) -> RelayWebSoc
 class _Bridge:
     """One coupled pipe: the accepted loopback socket and its relay sender.
 
-    `finish` closes both ends exactly once, whichever side ended the pipe;
-    the registry holds open bridges so a stop can close every one of them.
+    The half-close contract: either direction may end while the other keeps
+    running, which is what `docker exec -i` needs (stdin reaching EOF must
+    not kill the stdout still flowing back). The TCP side's EOF is forwarded
+    as ONE empty-payload binary frame -- never a close frame, and never a
+    shutdown of the loopback socket, whose read side IS the stdout direction
+    the CLI still reads. An empty binary frame received from the peer means
+    the remote stdout ended: the loopback write half shuts down (EOF toward
+    the CLI) and the reverse direction keeps running. `finish` closes both
+    ends exactly once, on a peer close frame, both directions having ended,
+    a socket error, or a daemon stop. The two Events guard the
+    one-sentinel-per-direction and one-shutdown-per-socket invariants
+    against the two threads sharing the bridge. The registry holds open
+    bridges so a stop can close every one of them.
     """
 
     def __init__(self, client_socket: socket.socket, websocket: RelayWebSocket) -> None:
         self._client_socket = client_socket
         self._websocket = websocket
         self._finished = threading.Event()
+        self._eof_forwarded = threading.Event()
+        self._tcp_write_shut = threading.Event()
+
+    def forward_tcp_eof(self) -> None:
+        """Send the in-band EOF sentinel toward the relay peer, exactly once.
+
+        One empty-payload binary frame, never a close frame: a close would
+        end the whole relay connection, killing the stdout direction that
+        may still be mid-flight.
+        """
+        if self._eof_forwarded.is_set():
+            return
+        self._eof_forwarded.set()
+        self._websocket.send_frame(_OP_BINARY, b"")
+
+    def shut_tcp_write(self) -> None:
+        """Half-close the loopback socket's write side, exactly once.
+
+        EOF toward the local docker CLI while its socket's read side -- the
+        stdout direction this bridge keeps pumping -- stays open.
+        """
+        if self._tcp_write_shut.is_set():
+            return
+        self._tcp_write_shut.set()
+        try:
+            self._client_socket.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+    def note_peer_eof(self) -> bool:
+        """Record the peer's in-band EOF; True once both directions have ended.
+
+        The peer's empty-payload sentinel means its TCP side read EOF -- the
+        remote stdout has ended. Combined with a forwarded EOF of our own
+        (the local stdin has ended), no more data can flow in either
+        direction, so the caller ends the pipe; before that moment the
+        reverse direction stays open, which is the `docker exec -i`
+        contract.
+        """
+        self.shut_tcp_write()
+        return self._eof_forwarded.is_set()
 
     def finish(self) -> None:
         """Close both ends once; the close frame is best-effort after a dead pipe."""
@@ -1506,16 +1693,25 @@ class _BridgeRegistry:
 def _pump_tcp_to_websocket(
     bridge: _Bridge, client_socket: socket.socket, websocket: RelayWebSocket
 ) -> None:
-    """The TCP-to-relay direction: every byte the docker CLI writes becomes one frame."""
+    """The TCP-to-relay direction: every byte the docker CLI writes becomes one frame.
+
+    The docker CLI's stdin reaching EOF is not this direction's death: it
+    forwards the EOF in-band once (the empty-payload sentinel) and this
+    thread ends WITHOUT `finish` and without touching the loopback socket
+    -- its read side is the stdout direction the CLI still reads, and its
+    write half closes when the peer's own sentinel arrives. Whatever ends
+    the pipe (a peer close frame, both directions ended, a socket error, a
+    daemon stop) is what tears it down. A socket error, by contrast, is a
+    dead pipe: `finish` closes both ends.
+    """
     try:
         while True:
             data = client_socket.recv(_PIPE_CHUNK_BYTES)
             if not data:
-                break
+                bridge.forward_tcp_eof()
+                return
             websocket.send_frame(_OP_BINARY, data)
     except OSError:
-        pass
-    finally:
         bridge.finish()
 
 
@@ -1532,7 +1728,10 @@ def bridge_connection(
     (the daemon log, under `make connect-start`) and both ends are closed,
     while the daemon's accept loop goes on serving. The relay-to-TCP
     direction runs in this thread; the TCP-to-relay direction runs in its
-    own, so either side's close tears both down through `finish`.
+    own, so either side's close tears both down through `finish`. An empty
+    binary message from the relay is the peer's in-band EOF: the loopback
+    write side is half-closed (EOF toward docker) and this loop keeps
+    reading, because the reverse direction is still live.
     """
     websocket: RelayWebSocket | None = None
     bridge: _Bridge | None = None
@@ -1547,9 +1746,13 @@ def bridge_connection(
             message = websocket.recv_message()
             if message is None:
                 break
-            _, payload = message
+            opcode, payload = message
             if payload:
                 client_socket.sendall(payload)
+            elif opcode == _OP_BINARY and bridge.note_peer_eof():
+                # Both directions have signaled EOF: the pipe's work is
+                # done, and the break reaches `finish` through the finally.
+                break
     except (transport.TransportError, OSError) as exc:
         print(f"relay: a connection through {namespace} failed: {exc}", file=sys.stderr, flush=True)
     finally:

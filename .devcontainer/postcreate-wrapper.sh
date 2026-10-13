@@ -72,10 +72,15 @@ azure_imds_token() {
 
 fetch_key_vault_secret() {
   local token="$1" secret="$2" destination="$3"
-  curl -sf --connect-timeout "${DEVCONTAINER_IMDS_TIMEOUT_SECONDS}" \
-    -H "Authorization: Bearer ${token}" \
-    "https://${DEVCONTAINER_VAULT_NAME}.vault.azure.net/secrets/${secret}?api-version=${DEVCONTAINER_KEYVAULT_API_VERSION}" \
-    | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "${destination}" \
+  # The bearer header reaches curl through stdin (`-H @-`, curl >= 7.55;
+  # the container image ships a modern curl), never as an argv word: a
+  # `-H "Authorization: Bearer ${token}"` sits in the process table for
+  # the whole fetch, readable by anything that can list processes.
+  printf 'Authorization: Bearer %s\n' "${token}" \
+    | curl -sf --connect-timeout "${DEVCONTAINER_IMDS_TIMEOUT_SECONDS}" \
+      -H @- \
+      "https://${DEVCONTAINER_VAULT_NAME}.vault.azure.net/secrets/${secret}?api-version=${DEVCONTAINER_KEYVAULT_API_VERSION}" \
+      | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["value"])' > "${destination}" \
     || fail_bootstrap "could not fetch ${secret} from Key Vault '${DEVCONTAINER_VAULT_NAME}' (was 'make push-secrets' run for this project?)"
   [ -s "${destination}" ] || fail_bootstrap "fetched ${secret} is empty"
 }

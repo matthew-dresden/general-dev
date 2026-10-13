@@ -350,7 +350,7 @@ help:
 	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \
 	row "make connect-refresh"  "host"   "Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1"; \
 	row "make connect-list"     "host"   "Every instance's forward: pid, port, listening or not."; \
-	row "make bucket-list"      "host"   "Every state store this fleet's naming template matches (EC2 buckets, azure storage accounts): name, configured or orphaned. Per kind; a mixed fleet is refused."; \
+	row "make bucket-list"      "host"   "Every state store this fleet's naming template matches (EC2 buckets, azure accounts): name, configured or orphaned. Per kind; mixed fleet refused. EC2 needs REMOTE_AWS_REGION."; \
 	row "make bucket-delete"    "host"   "Purge + delete state stores: INSTANCE=<name> (EC2 bucket or azure account), or ALL=1 CONFIRM=delete for every one. Per kind; mixed fleet refused. EC2 needs REMOTE_AWS_REGION."; \
 	row "make remote"           "host"   "Point them at the remote engine ($(REMOTE_CONTEXT)): ensures the engine's forward in the background, then switches docker. INSTANCE=<name> targets that instance."; \
 	note "BUILD" "every target blocks until the container is up and exits non-zero if anything fails"; \
@@ -985,7 +985,11 @@ engine-remove:
 # CONFIRM=replace) whose saved plan file IS what apply consumes -- the guard
 # reads the plan's own output, then `apply -auto-approve tfplan.deploy`
 # applies exactly what was guarded, never a re-plan; the file is removed by
-# the per-instance EXIT trap on every exit path -- then the kind's own
+# the per-instance EXIT trap on every exit path -- and a plan that fails
+# prints its captured output plus the stale-lock remedy, because a deploy
+# killed mid-plan leaves the state backend's lock in place and the next
+# plan dies acquiring it (the lock id to force-unlock is in that output) --
+# then the kind's own
 # addressing record: the azure branch reads `terragrunt output -json` and
 # writes the engine-address record from the module outputs (every required
 # key must answer or the deploy fails naming the missing ones), the EC2
@@ -994,7 +998,10 @@ engine-remove:
 # probes report them absent -- when params are already present the
 # publish/install steps are skipped entirely, so a live daemon is never
 # restarted; each probe must answer exactly true or false -- empty, null or
-# malformed fails the deploy naming the instance and the raw status output),
+# malformed fails the deploy naming the instance and the raw status output;
+# and the installed marker, once present, must name the VM it was installed
+# on, so an azure instance replaced under CONFIRM=replace reinstalls its
+# daemon material onto the new VM),
 # then push-secrets. Prints the follow-on chain, which blocks on `make
 # remote` and so is printed rather than run.
 instance-deploy:
@@ -1037,7 +1044,13 @@ instance-deploy:
 		plan_file="$${PWD}/tfplan.deploy"; \
 		trap 'rm -f "$$plan_file"' EXIT; \
 		terragrunt validate || { printf '\033[0;31m[ERROR]\033[0m %s: terragrunt validate failed (output above)\n' "$$name" >&2; exit 1; }; \
-		plan_log=$$(terragrunt plan -out=tfplan.deploy 2>&1); \
+		plan_log=$$(terragrunt plan -out=tfplan.deploy 2>&1) || { \
+			printf '%s\n' "$$plan_log" >&2; \
+			printf '\033[0;31m[ERROR]\033[0m %s: terragrunt plan failed. If the output above names a state lock (Error acquiring the state lock), an earlier deploy was killed mid-plan and its lock survived; clear it and retry:\n' "$$name" >&2; \
+			printf '        cd remote-instances/%s && terragrunt force-unlock <lock-id>   # <lock-id> is the lock id the output above names\n' "$$name" >&2; \
+			printf '        then re-run: make instance-deploy INSTANCE=%s\n' "$$name" >&2; \
+			exit 1; \
+		}; \
 		printf '%s\n' "$$plan_log" | grep -qE 'No changes\.|To perform exactly these actions' || { \
 			printf '%s\n' "$$plan_log" >&2; \
 			printf '\033[0;31m[ERROR]\033[0m %s: the plan produced no outcome summary -- Terragrunt can exit zero on a failed plan, so the guard requires an explicit success marker (No changes, or an apply hint).\n' "$$name" >&2; \
@@ -1055,7 +1068,13 @@ instance-deploy:
 		fi; \
 		terragrunt apply -auto-approve tfplan.deploy || { printf '\033[0;31m[ERROR]\033[0m %s: terragrunt apply failed (output above)\n' "$$name" >&2; exit 1; }; \
 		if [ "$$kind" = "azure" ]; then \
-			outputs_json=$$(terragrunt output -json) || { printf '\033[0;31m[ERROR]\033[0m %s: terragrunt output -json failed (output above)\n' "$$name" >&2; exit 1; }; \
+			outputs_json=$$(terragrunt output -json) || { \
+				printf '%s\n' "$$outputs_json" >&2; \
+				printf '\033[0;31m[ERROR]\033[0m %s: terragrunt output -json failed. If the output above names a state lock, a killed deploy left it behind; clear it and retry:\n' "$$name" >&2; \
+				printf '        cd remote-instances/%s && terragrunt force-unlock <lock-id>   # <lock-id> is the lock id the output above names\n' "$$name" >&2; \
+				printf '        then re-run: make instance-deploy INSTANCE=%s\n' "$$name" >&2; \
+				exit 1; \
+			}; \
 			printf '%s' "$$outputs_json" | PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "import json,sys; from pathlib import Path; from devcontainer_config import instances, repo; required=['vm_name','vm_resource_id','resource_group','relay_namespace','hybrid_connection','vault_name','vault_uri','location']; payload=json.load(sys.stdin); missing=[k for k in required if k not in payload]; sys.exit('missing required terragrunt outputs: '+', '.join(missing)) if missing else None; record={k: payload[k].get('value') for k in required}; unusable=[k for k,v in record.items() if not isinstance(v,str) or not v]; sys.exit('terragrunt outputs carry no usable string value for: '+', '.join(unusable)) if unusable else None; instances.write_engine_address(repo.find_root(Path.cwd()), '$$name', record); print('recorded the engine address for $$name from the terragrunt outputs')" || { printf '\033[0;31m[ERROR]\033[0m %s: the engine address record could not be written from the terragrunt outputs\n' "$$name" >&2; exit 1; }; \
 		else \
 			id=$$(terragrunt output -raw instance_id); \
@@ -1079,7 +1098,14 @@ instance-deploy:
 			}; \
 			make --no-print-directory cert-client INSTANCE="$$name" || exit 1; \
 		fi; \
-		if [ "$$params_present" != "true" ] || [ ! -f "$$HOME/.docker/certs/$$name/installed" ]; then \
+		marker="$$HOME/.docker/certs/$$name/installed"; \
+		install_needed=0; \
+		if [ "$$params_present" != "true" ] || [ ! -f "$$marker" ]; then install_needed=1; fi; \
+		if [ "$$install_needed" = "0" ] && [ "$$kind" = "azure" ]; then \
+			recorded_vm=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$$name').get('vm_resource_id', ''))") || { printf '\033[0;31m[ERROR]\033[0m %s: the engine address record could not be read for the installed-marker check\n' "$$name" >&2; exit 1; }; \
+			[ "$$(cat "$$marker")" = "$$recorded_vm" ] || install_needed=1; \
+		fi; \
+		if [ "$$install_needed" = "1" ]; then \
 			[ "$$params_present" = "true" ] || make --no-print-directory cert-publish INSTANCE="$$name" || exit 1; \
 			make --no-print-directory cert-install INSTANCE="$$name" || exit 1; \
 		fi; \
@@ -1243,8 +1269,14 @@ cert-publish:
 # and the EC2 branch waits until both EC2 status checks report Ok for the
 # instance the id store names, polling at the same cadence instance_ops
 # uses for power transitions. Then certs.sh install runs the kind's own
-# install arm and the same installed marker is touched for the converge
-# step to check.
+# install arm, and the installed marker is written for the converge step
+# to check, per kind: on EC2 the bare marker the converge has always
+# checked, whose presence alone means installed; on azure the marker
+# records the current VM's resource id, read from the engine address
+# record, so converge can tell an install performed on a VM that no longer
+# exists -- a CONFIRM=replace replaces the VM while the vault secrets and
+# this marker survive -- from one performed on the VM now running, and
+# reinstalls the daemon material when they disagree.
 cert-install:
 	@set -euo pipefail; \
 	. $(RD_DIR)/lib.sh; \
@@ -1267,7 +1299,11 @@ cert-install:
 	fi; \
 	INSTANCE="$(INSTANCE)" $(CERTS_SH) install; \
 	mkdir -p "$$HOME/.docker/certs/$(INSTANCE)"; \
-	touch "$$HOME/.docker/certs/$(INSTANCE)/installed"
+	if [ "$$kind" = "azure" ]; then \
+		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$(INSTANCE)').get('vm_resource_id', ''))" > "$$HOME/.docker/certs/$(INSTANCE)/installed"; \
+	else \
+		touch "$$HOME/.docker/certs/$(INSTANCE)/installed"; \
+	fi
 
 proxy-start:
 	@$(PROXY_ENV) $(PROXY_SH) start

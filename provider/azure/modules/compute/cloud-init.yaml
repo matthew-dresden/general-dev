@@ -91,8 +91,9 @@ write_files:
     content: ${relay_listener_b64}
 
   # The listener's systemd unit, embedded the same way. It is installed
-  # into /etc/systemd/system by runcmd below and enabled there, never
-  # started by provisioning.
+  # into /etc/systemd/system by runcmd below and daemon-reloaded there,
+  # never enabled and never started by provisioning; it is started
+  # exclusively on demand, by the connect flow.
   - path: /opt/gd-relay/gd-relay.service
     permissions: "0644"
     encoding: b64
@@ -185,27 +186,39 @@ runcmd:
   - install -d -m 0700 -o ${daemon_user} -g ${daemon_user} /home/${daemon_user}/tls
   - install -d -m 0755 -o ${daemon_user} -g ${daemon_user} ${data_root}
 %{ if create_data_volume }
-  # The data disk is located by scanning, not by trusting a device literal:
-  # azure presents attached data disks at /dev/sd* names whose letters are
-  # allocation-order dependent, and the LUN is not a device name. Exactly
-  # one empty (unformatted) disk is expected -- the one this deployment
-  # created -- so a count that is not one is a provisioning failure naming
-  # what was found, not a guess about which disk to erase.
+  # The data disk is located deterministically first: the compute module
+  # attaches it at LUN 0, and azure presents attached data disks under
+  # /dev/disk/azure/scsi1/lun* -- a path stable across VM sizes and boots,
+  # unlike /dev/sd* names whose letters are allocation-order dependent (and
+  # which waagent's temp-disk formatting can race on sizes that carry a
+  # temporary disk). The by-LUN path is tried first for exactly that
+  # reason. Only when it is absent -- a platform shape that presents the
+  # disk elsewhere -- does the template fall back to scanning, and the
+  # scan keeps its own discipline: exactly one empty (unformatted) disk is
+  # expected -- the one this deployment created -- so a count that is not
+  # one is a provisioning failure naming what was found, not a guess about
+  # which disk to erase.
   - |
     set -e
     if ! blkid -L DOCKERDATA > /dev/null 2>&1; then
-      CANDIDATES=""
-      for dev in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print $1}'); do
-        if [ -z "$(lsblk -n -o FSTYPE "/dev/$dev" | tr -d '[:space:]')" ]; then
-          CANDIDATES="$CANDIDATES /dev/$dev"
+      DEVICE=""
+      if [ -e /dev/disk/azure/scsi1/lun0 ]; then
+        DEVICE=/dev/disk/azure/scsi1/lun0
+      else
+        CANDIDATES=""
+        for dev in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print $1}'); do
+          if [ -z "$(lsblk -n -o FSTYPE "/dev/$dev" | tr -d '[:space:]')" ]; then
+            CANDIDATES="$CANDIDATES /dev/$dev"
+          fi
+        done
+        set -- $CANDIDATES
+        if [ "$#" -ne 1 ]; then
+          echo "FATAL: expected exactly 1 empty data disk, found $#:$CANDIDATES" | tee /dev/console
+          exit 1
         fi
-      done
-      set -- $CANDIDATES
-      if [ "$#" -ne 1 ]; then
-        echo "FATAL: expected exactly 1 empty data disk, found $#:$CANDIDATES" | tee /dev/console
-        exit 1
+        DEVICE="$1"
       fi
-      mkfs.ext4 -i 8192 -L DOCKERDATA "$1"
+      mkfs.ext4 -i 8192 -L DOCKERDATA "$DEVICE"
     fi
     grep -q "LABEL=DOCKERDATA" /etc/fstab || echo "LABEL=DOCKERDATA ${data_root} ext4 defaults,noatime,nofail 0 2" >> /etc/fstab
     mount -a
@@ -267,23 +280,25 @@ runcmd:
     set -e
     DAEMON_UID=$(id -u ${daemon_user})
     runuser -u ${daemon_user} -- env HOME=/home/${daemon_user} XDG_RUNTIME_DIR=/run/user/$DAEMON_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$DAEMON_UID/bus systemctl --user enable docker.service
-  # The relay listener is installed and enabled, not started: the unit is
-  # started on demand by the connect flow's run command, because azure
-  # bills listener-hours while a hybrid connection has a connected
-  # listener, and a listener enabled at boot with nothing to forward would
-  # accrue them from first boot. The self-stop in the listener script
-  # guards a running unit against idle hours; this enablement only pins
-  # the unit under its own name, so the connect flow's one-line start
-  # works without further configuration.
+  # The relay listener is installed and daemon-reloaded, and nothing more:
+  # no enable and no start. It is started exclusively on demand, by the
+  # connect flow's run command, because azure bills listener-hours while a
+  # hybrid connection has a connected listener. Enabling the unit here
+  # would do worse than nothing: its [Install] WantedBy=multi-user.target
+  # would start it at every reboot, accruing up to the listener script's
+  # whole idle window of billable hours per boot with nothing to forward,
+  # which is exactly the on-demand doctrine the self-stop in the listener
+  # script exists to keep. The connect flow's `systemctl start` needs no
+  # enablement behind it, so provisioning leaves the unit installed under
+  # its own name and out of every boot graph.
   - install -m 0644 /opt/gd-relay/gd-relay.service /etc/systemd/system/gd-relay.service
   - systemctl daemon-reload
-  - systemctl enable gd-relay.service
   # Written last, and only here: this is the sole place in the script
   # where every step above -- rootless docker installed, the rootful
   # daemon disabled and verified gone, sshd disabled, linger/AppArmor/
   # cgroup delegation applied, the data disk formatted and mounted,
-  # docker.service enabled, and the relay listener unit installed and
-  # enabled -- has already succeeded under `set -e`. A consumer polling
+  # docker.service enabled, and the relay listener unit installed --
+  # has already succeeded under `set -e`. A consumer polling
   # this path for readiness must never see it before the module's actual
   # work is done.
   - date -u +"%Y-%m-%dT%H:%M:%SZ" > /etc/general-dev-provisioned

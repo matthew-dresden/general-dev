@@ -213,16 +213,21 @@ rdc_status() {
   printf '\n\033[1mProject\033[0m        %s\n' "$PROJECT_NAME"
   if [ "$context" = "$REMOTE_DOCKER_CONTEXT" ]; then
     # The parenthetical engine identifier is kind-aware: an EC2 instance's
-    # id, an SSH engine's endpoint, an azure engine's relay address. The
-    # resolver deliberately leaves REMOTE_INSTANCE_ID unset when no EC2 id
-    # is behind the kind -- ssh and azure alike -- so the EC2 form's bare
-    # reference would end a set -u run before the report printed.
+    # id, an SSH engine's endpoint, an azure engine's relay address, a gcp
+    # engine's context alone (its record names the zone the tunnel dials).
+    # The resolver deliberately leaves REMOTE_INSTANCE_ID unset when no EC2
+    # id is behind the kind -- ssh, azure and gcp alike -- so the EC2
+    # form's bare reference would end a set -u run before the report
+    # printed.
     case "$(rd_engine_kind)" in
       ssh)
         printf '\033[1mBackend\033[0m        remote (ssh engine), context %s (%s)\n' "$context" "${ENGINE_ENDPOINT:-endpoint unknown}"
         ;;
       azure)
         printf '\033[1mBackend\033[0m        remote (azure engine), context %s\n' "$context"
+        ;;
+      gcp)
+        printf '\033[1mBackend\033[0m        remote (gcp engine), context %s\n' "$context"
         ;;
       *)
         printf '\033[1mBackend\033[0m        remote, context %s (%s)\n' "$context" "${REMOTE_INSTANCE_ID:-id unknown}"
@@ -511,6 +516,18 @@ rdc_ensure_secrets_current() {
   if [ "$(rd_engine_kind)" = "ssh" ]; then
     rd_log "SSH engine: config seeds into the workspace volume at build time (fresh on every rebuild), no Parameter Store check"
     return 0
+  fi
+  if [ "$(rd_engine_kind)" = "gcp" ]; then
+    # A gcp engine's published-config channel is its own cloud's, not
+    # Parameter Store: this probe's stores are per kind, and the gcp one
+    # lands with the gcp provider slice. Refusing names that, instead of
+    # letting the EC2 branch below run an aws call the kind has no use for.
+    rd_fail "The config-freshness check does not reach gcp engines yet" \
+      "This probe compares shell.env against the copy in the engine's own store --" \
+      "Parameter Store for EC2, Key Vault for azure -- and the gcp store lands with" \
+      "the gcp provider slice." \
+      "" \
+      "Skip the check deliberately:  ${RD_BOLD}make build SKIP_SECRETS_CHECK=1${RD_RESET}"
   fi
 
   local local_env published store_label vault
@@ -1183,6 +1200,35 @@ rdc_up() {
           "Otherwise reopen it from the forward's own recorded command:" \
           "  ${RD_BOLD}make connect-refresh INSTANCE=${INSTANCE}${RD_RESET}, then ${RD_BOLD}make up${RD_RESET}"
       rd_ok "azure relay forward open"
+    elif [ "$backend" = "remote" ] && [ "$(rd_engine_kind)" = "gcp" ]; then
+      # The gcp engine's route, mirroring the azure branch's shape: the
+      # daemonized forwards opener plus the --zone flag that distinguishes
+      # the iap form, read through the same cli accessor (gcp-zone) the
+      # connect-start dispatch uses -- the record the deploy wrote is the
+      # one source of the zone, never a second read of its JSON here. The
+      # transport reads the rest of the record itself. The refusal names
+      # the same authentication remedy the IAP transport's own child-death
+      # diagnosis names, then the recorded-command refresh both tunnels
+      # share.
+      rd_log "remote engine is not answering, opening the gcp IAP tunnel forward"
+      gcp_zone="$(PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" \
+        python3 -m devcontainer_config.cli gcp-zone "$INSTANCE")" \
+        || rd_fail "The gcp zone for instance '${INSTANCE}' could not be read" \
+          "The engine address record names it, and the deploy writes that record." \
+          "" \
+          "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+      PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" \
+        python3 -m devcontainer_config.forwards open \
+        --name "$INSTANCE" --zone "$gcp_zone" --context "$REMOTE_DOCKER_CONTEXT" > /dev/null \
+        || rd_fail "The gcp IAP tunnel forward could not be opened, so the remote engine stays unreachable" \
+          "The reason is in the output above." \
+          "" \
+          "If it is an authentication failure:" \
+          "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make connect-refresh INSTANCE=${INSTANCE}${RD_RESET}" \
+          "" \
+          "Otherwise reopen it from the forward's own recorded command:" \
+          "  ${RD_BOLD}make connect-refresh INSTANCE=${INSTANCE}${RD_RESET}, then ${RD_BOLD}make up${RD_RESET}"
+      rd_ok "gcp IAP tunnel forward open"
     elif [ "$backend" = "remote" ]; then
       # The daemonized opener, not a foreground `transport connect`: connect
       # idles until interrupted, so an up against a dead forward blocked

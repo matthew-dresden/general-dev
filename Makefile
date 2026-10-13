@@ -93,10 +93,13 @@ endef
 # remedies the refusals name, declared once so every target of a family
 # states the same guidance and none of them restates the predicate. They are
 # comma-free on purpose: they ride $(call ...) arguments, which split on
-# commas.
-EC2_KIND_REMEDY := an ssh engine has no EC2 lifecycle to plan or deploy and no power state to stop or start; reach it with make engine-verify INSTANCE=<name> or remove it with make engine-remove INSTANCE=<name> CONFIRM=remove and connect with make connect-start INSTANCE=<name>
-BUCKET_KIND_REMEDY := state stores are per kind: EC2 buckets answer to the aws CLI and azure storage accounts to the az CLI; an ssh engine has neither and no engine-* equivalent for this target
-CERT_KIND_REMEDY := no TLS material exists for ssh engines; nothing to report for one
+# commas. The gcp engine kind joins the resolver and the connect surface in
+# the same change, and its per-family surfaces (lifecycle, buckets,
+# certificates) land with its provider slice, so each remedy says where its
+# kind stands instead of claiming a family reaches every kind.
+EC2_KIND_REMEDY := only ec2 and azure engines carry this lifecycle yet; an ssh engine has none of it -- reach one with make engine-verify INSTANCE=<name> or remove it with make engine-remove INSTANCE=<name> CONFIRM=remove and connect with make connect-start INSTANCE=<name>; a gcp engine's lifecycle lands with its provider slice
+BUCKET_KIND_REMEDY := state stores are per kind: EC2 buckets answer to the aws CLI and azure storage accounts to the az CLI; a gcp engine's bucket surface lands with its provider slice and an ssh engine has neither and no engine-* equivalent for this target
+CERT_KIND_REMEDY := the certificate targets serve ec2 and azure engines yet; an ssh engine has no TLS material and nothing to report for one; a gcp engine's certificate surface lands with its provider slice
 
 # The fleet-wide state-surface guard, for the surfaces that address no
 # single instance (bucket-list, bucket-delete ALL=1): the state surfaces are
@@ -337,7 +340,7 @@ help:
 	note "INSTANCES" "one remote engine per project under remote-instances/; instance names are project names (e.g. acme)"; \
 	row "make list-instances"   "host"   "List every instance with live status: EC2 state, id, params, certs, forward, context; ssh engines answer reachability instead."; \
 	row "make list-containers"  "host"   "Every container this project owns, local engine plus every instance's, with per-engine reachability."; \
-	row "make instance-init"    "host"   "Writes <project>'s scaffold; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= AMI/AZ lookup; deploys in REMOTE_AWS_REGION]. Azure: CLOUD=azure LOCATION=<location> [VM_SIZE=]"; \
+	row "make instance-init"    "host"   "Scaffolds <project>; never deploys. INSTANCE=<n> [AMI=] [REGION= AMI/AZ lookup; deploys in REMOTE_AWS_REGION]. Azure: CLOUD=azure LOCATION=<loc> GCP: CLOUD=gcp PROJECT=<p> ZONE=<z>"; \
 	row "make instance-deploy"  "remote" "Converge: provision, record the engine address (EC2 links the id, azure the record), trust chain, push secrets. Refuses replacement without CONFIRM=replace. INSTANCE= | ALL=1"; \
 	row "make instance-status"  "host"   "One instance's live state, or every instance with ALL=1. INSTANCE=<instance-name> | ALL=1"; \
 	row "make instance-plan"    "remote" "Terragrunt plan per instance; bootstraps the state bucket (EC2) or ensures the azure state store on first run. INSTANCE=<instance-name> | ALL=1"; \
@@ -354,7 +357,7 @@ help:
 	row "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."; \
 	row "make cert-status"      "host"   "Client and CA expiry per instance. Remote engines only (EC2 and azure); ssh engines carry no TLS material."; \
 	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to the engine's store (Parameter Store, or Key Vault for azure). Remote builds do this when needed."; \
-	row "make connect-start"    "remote" "Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json, relay for azure engines); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
+	row "make connect-start"    "remote" "Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json, relay for azure, iap for gcp); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
 	row "make connect-status"   "host"   "Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1"; \
 	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \
 	row "make connect-refresh"  "host"   "Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1"; \
@@ -440,19 +443,21 @@ help:
 # profile or an instance id. DEVCONTAINER_TRANSPORT is a guard on that
 # dispatch, never the selector: unset, the kind alone decides, so an
 # operator naming an ssh engine never sets a variable; set, the value must
-# agree with the kind (ssm behind an ec2 engine, ssh behind an ssh engine)
-# or the run is refused naming the conflict, and any other value is refused
-# by name. The daemon is managed by devcontainer_config.forwards (spawn,
-# readiness poll, record); this recipe only resolves WHICH instance and
-# hands the resolved values over. The lifecycle companions: connect-start
-# (this target), connect-status, connect-stop, connect-refresh and
-# connect-list. lib.sh is sourced once, unconditionally, before the
-# dispatch: the kind checks below read the kind through rd_engine_kind, the
-# one predicate, and the ssh branch can only run for a resolved engine
-# anyway. The azure kind (KIND=azure) routes to the relay form, which
-# carries only the name and the context: the transport reads the relay
-# address record the deploy wrote, so the relay branch needs no env guards
-# at all -- engine-address.json is the config.
+# agree with the kind (ssm behind an ec2 engine, ssh behind an ssh engine,
+# iap behind a gcp engine) or the run is refused naming the conflict, and
+# any other value is refused by name. The daemon is managed by
+# devcontainer_config.forwards (spawn, readiness poll, record); this recipe
+# only resolves WHICH instance and hands the resolved values over. The
+# lifecycle companions: connect-start (this target), connect-status,
+# connect-stop, connect-refresh and connect-list. lib.sh is sourced once,
+# unconditionally, before the dispatch: the kind checks below read the kind
+# through rd_engine_kind, the one predicate, and the ssh branch can only run
+# for a resolved engine anyway. The azure kind (KIND=azure) routes to the
+# relay form and the gcp kind (KIND=gcp) to the iap form, which add only the
+# name and the context (iap adds --zone, read through the cli's gcp-zone
+# reader -- the one distinguishing flag the forwards opener needs): the
+# transports read their own address records the deploy wrote, so neither
+# branch needs env guards at all -- engine-address.json is the config.
 connect-start:
 	@set -euo pipefail; \
 	$(PROXY_ENV) \
@@ -471,9 +476,9 @@ connect-start:
 		ctx="$(REMOTE_CONTEXT)"; \
 	fi; \
 	case "$$transport" in \
-		ssh|ssm|relay|"") ;; \
+		ssh|ssm|relay|iap|"") ;; \
 		*) printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT="%s" is not recognized.\n' "$$transport" >&2; \
-		   printf '        Accepted values: ssm (the EC2 SSM forward), ssh (the SSH engine forward), and relay (the azure relay forward).\n' >&2; \
+		   printf '        Accepted values: ssm (the EC2 SSM forward), ssh (the SSH engine forward), relay (the azure relay forward), and iap (the gcp IAP tunnel forward).\n' >&2; \
 		   exit 1 ;; \
 	esac; \
 	route="ssm"; \
@@ -490,6 +495,11 @@ connect-start:
 				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to ssh.\n" >&2; \
 				exit 1; \
 			fi; \
+			if [ "$$transport" = "iap" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is an ssh engine; DEVCONTAINER_TRANSPORT=iap selects the gcp IAP tunnel transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to ssh.\n" >&2; \
+				exit 1; \
+			fi; \
 		elif [ "$$kind" = "azure" ]; then \
 			route="relay"; \
 			if [ "$$transport" = "ssm" ]; then \
@@ -502,12 +512,38 @@ connect-start:
 				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to relay.\n" >&2; \
 				exit 1; \
 			fi; \
+			if [ "$$transport" = "iap" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is an azure engine; DEVCONTAINER_TRANSPORT=iap selects the gcp IAP tunnel transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to relay.\n" >&2; \
+				exit 1; \
+			fi; \
+		elif [ "$$kind" = "gcp" ]; then \
+			route="iap"; \
+			if [ "$$transport" = "ssm" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is a gcp engine; DEVCONTAINER_TRANSPORT=ssm selects the ssm transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to iap.\n" >&2; \
+				exit 1; \
+			fi; \
+			if [ "$$transport" = "ssh" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is a gcp engine; DEVCONTAINER_TRANSPORT=ssh selects the ssh transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to iap.\n" >&2; \
+				exit 1; \
+			fi; \
+			if [ "$$transport" = "relay" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is a gcp engine; DEVCONTAINER_TRANSPORT=relay selects the azure relay transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to iap.\n" >&2; \
+				exit 1; \
+			fi; \
 		elif [ "$$transport" = "ssh" ]; then \
 			printf '\033[0;31m[ERROR]\033[0m instance %s is an EC2 engine; DEVCONTAINER_TRANSPORT=ssh selects the ssh transport, which only reaches ssh engines\n' "$$target" >&2; \
 			printf '        Unset DEVCONTAINER_TRANSPORT or set it to ssm.\n' >&2; \
 			exit 1; \
 		elif [ "$$transport" = "relay" ]; then \
 			printf '\033[0;31m[ERROR]\033[0m instance %s is an EC2 engine; DEVCONTAINER_TRANSPORT=relay selects the azure relay transport, which only reaches azure engines\n' "$$target" >&2; \
+			printf '        Unset DEVCONTAINER_TRANSPORT or set it to ssm.\n' >&2; \
+			exit 1; \
+		elif [ "$$transport" = "iap" ]; then \
+			printf '\033[0;31m[ERROR]\033[0m instance %s is an EC2 engine; DEVCONTAINER_TRANSPORT=iap selects the gcp IAP tunnel transport, which only reaches gcp engines\n' "$$target" >&2; \
 			printf '        Unset DEVCONTAINER_TRANSPORT or set it to ssm.\n' >&2; \
 			exit 1; \
 		fi; \
@@ -521,8 +557,17 @@ connect-start:
 		printf '        The relay form forwards one resolved azure engine; run:\n' >&2; \
 		printf '        make connect-start INSTANCE=<name>\n' >&2; \
 		exit 2; \
+	elif [ "$$transport" = "iap" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT=iap needs the engine named\n' >&2; \
+		printf '        The iap form forwards one resolved gcp engine; run:\n' >&2; \
+		printf '        make connect-start INSTANCE=<name>\n' >&2; \
+		exit 2; \
 	fi; \
 	case "$$route" in \
+		iap) \
+			gcp_zone="$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli gcp-zone "$$target")"; \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
+				--name "$$target" --zone "$$gcp_zone" --context "$$ctx" ;; \
 		relay) \
 			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
 				--name "$$target" --context "$$ctx" ;; \
@@ -623,6 +668,11 @@ bucket-list:
 	@$(call FLEET_STATE_KIND_GUARD,$(BUCKET_KIND_REMEDY)); \
 	if [ "$$fleet_kind" = "azure" ]; then \
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_store list; \
+	elif [ "$$fleet_kind" = "gcp" ]; then \
+		rd_fail "the gcp state-store surface is not wired yet" \
+			"a gcp fleet's buckets answer to gcloud storage; the surface lands with the" \
+			"gcp provider slice. Run it per kind once that slice lands, or address the" \
+			"buckets directly with gcloud storage in the meantime."; \
 	else \
 		$(REMOTE_AWS_REGION_GUARD) \
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket list; \
@@ -639,6 +689,11 @@ bucket-delete:
 		$(call FLEET_STATE_KIND_GUARD,$(BUCKET_KIND_REMEDY)); \
 		if [ "$$fleet_kind" = "azure" ]; then \
 			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_store delete-all; \
+		elif [ "$$fleet_kind" = "gcp" ]; then \
+			rd_fail "the gcp state-store surface is not wired yet" \
+				"a gcp fleet's buckets answer to gcloud storage; the surface lands with the" \
+				"gcp provider slice. Address the buckets directly with gcloud storage rm in" \
+				"the meantime."; \
 		else \
 			$(REMOTE_AWS_REGION_GUARD) \
 			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket delete-all; \
@@ -648,6 +703,11 @@ bucket-delete:
 		INSTANCE="$(INSTANCE)" rd_resolve_instance; \
 		if [ "$$(rd_engine_kind)" = "azure" ]; then \
 			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_store delete "$(INSTANCE)"; \
+		elif [ "$$(rd_engine_kind)" = "gcp" ]; then \
+			rd_fail "the gcp state-store surface is not wired yet" \
+				"instance '${INSTANCE}' is a gcp engine whose buckets answer to gcloud" \
+				"storage; the surface lands with the gcp provider slice. Address them" \
+				"directly with gcloud storage rm in the meantime."; \
 		else \
 			rd_require_engine_kind ec2 "$(BUCKET_KIND_REMEDY)"; \
 			$(REMOTE_AWS_REGION_GUARD) \
@@ -828,7 +888,7 @@ list-containers:
 # refused on azure.
 instance-init:
 	@$(call INSTANCE_USAGE_GUARD,instance-init)
-	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-init "$(INSTANCE)" $(if $(CLOUD),--cloud $(CLOUD),) $(if $(LOCATION),--location $(LOCATION),) $(if $(VM_SIZE),--vm-size $(VM_SIZE),) $(if $(REGION),--region $(REGION),) $(if $(AMI),--ami $(AMI),)
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-init "$(INSTANCE)" $(if $(CLOUD),--cloud $(CLOUD),) $(if $(LOCATION),--location $(LOCATION),) $(if $(PROJECT),--project $(PROJECT),) $(if $(ZONE),--zone $(ZONE),) $(if $(VM_SIZE),--vm-size $(VM_SIZE),) $(if $(REGION),--region $(REGION),) $(if $(AMI),--ami $(AMI),)
 
 # Read-only: one instance's live state, or every instance's with ALL=1. The
 # cli exits non-zero when any probe failed, so a loop abort names the

@@ -112,6 +112,55 @@ if [ "${KIND:-}" = "ssh" ]; then
   exit 0
 fi
 
+# The azure engine's config channel is its own Key Vault, named in the
+# engine address record the deploy wrote: the same transformed payload the
+# EC2 path publishes to Parameter Store is stored there as two secrets
+# (shell-env and profile-map), and the container's postCreate fetches them
+# through the VM's managed identity. Every value rides a --file pointing at
+# the 0700 trap-cleaned directory the payload was rendered into, never an
+# argument -- the same invariant devcontainer_config.certs' KeyVaultClient
+# enforces for every secret set it issues, applied at this script's level.
+rd_publish_config_payload_to_key_vault() {
+  local vault scripts_dir
+  scripts_dir="${REPO_ROOT}/.claude/plugins/devcontainer/scripts"
+  rd_require_cmd az "Install: brew install azure-cli"
+  vault="$(PYTHONPATH="$scripts_dir" python3 -m devcontainer_config.cli secrets-vault "$INSTANCE")" \
+    || rd_fail "The Key Vault for instance '${INSTANCE}' could not be read" \
+      "The engine address record names it, and the deploy writes that record; the reader's own message is above." \
+      "" \
+      "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+
+  # The value travels in a --file, never in argv: shell.env carries every
+  # credential this repository has, and an argument is visible in the
+  # process table to any other process on this machine for as long as the
+  # call runs. One directory, created at mode 0700 and removed by an EXIT
+  # trap, the same discipline the EC2 publish below applies to its
+  # --cli-input-json document.
+  RD_PUT_DIR="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/rd-put.XXXXXX")"
+  trap 'rm -rf "$RD_PUT_DIR"' EXIT
+  write_config_payload "$RD_PUT_DIR"
+
+  rd_log "Publishing shell-env to Key Vault '${vault}'..."
+  az keyvault secret set --vault-name "$vault" --name shell-env \
+    --file "${RD_PUT_DIR}/shell.env" > /dev/null \
+    || rd_fail "Publishing shell-env to Key Vault '${vault}' failed" \
+      "If az reported an authentication failure, sign in and retry:" \
+      "  ${RD_BOLD}az login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
+
+  rd_log "Publishing profile-map to Key Vault '${vault}'..."
+  az keyvault secret set --vault-name "$vault" --name profile-map \
+    --file "${RD_PUT_DIR}/.devcontainer/aws-profile-map.json" > /dev/null \
+    || rd_fail "Publishing profile-map to Key Vault '${vault}' failed" \
+      "If az reported an authentication failure, sign in and retry:" \
+      "  ${RD_BOLD}az login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
+}
+
+if [ "${KIND:-}" = "azure" ]; then
+  rd_publish_config_payload_to_key_vault
+  rd_ok "Secrets published to the Key Vault of instance '${INSTANCE}'. Remote workspaces of this project can now bootstrap."
+  exit 0
+fi
+
 # The Parameter Store prefix is the EC2 publish's address alone, and the
 # resolver's ssh block carries no PARAMETER_PREFIX line: assigning it before
 # the ssh branch dereferenced an unset variable under set -u and ended the

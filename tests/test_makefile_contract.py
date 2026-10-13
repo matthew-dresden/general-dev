@@ -1576,10 +1576,13 @@ def test_cert_install_refuses_before_its_readiness_poll() -> None:
 
 def test_the_cert_issuing_script_refuses_ssh_engines_once_for_all_four() -> None:
     """cert-ca, cert-client, cert-publish and cert-install all route through
-    certs.sh, so the refusal lives at its single resolve point, after it."""
+    certs.sh, so the ssh refusal lives at its single resolve point, after
+    it. The refusal is ssh-only: an azure engine keeps all four subcommands,
+    publishing into its own Key Vault and installing through the azure
+    transport, so a whole-kind ec2 guard would strand it."""
     text = _certs_sh_text()
     resolve_at = text.index("rd_resolve_instance")
-    guard_at = text.index("rd_require_engine_kind ec2")
+    guard_at = text.index('if [ "$(rd_engine_kind)" = "ssh" ]; then')
     assert resolve_at < guard_at
     assert "no TLS material exists for ssh engines" in text
 

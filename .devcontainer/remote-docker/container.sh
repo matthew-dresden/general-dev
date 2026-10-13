@@ -506,9 +506,8 @@ rdc_ensure_secrets_current() {
     rd_log "SSH engine: config seeds into the workspace volume at build time (fresh on every rebuild), no Parameter Store check"
     return 0
   fi
-  rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
 
-  local local_env published
+  local local_env published store_label vault
   local_env="${REPO_ROOT}/shell.env"
   [ -f "$local_env" ] || rd_fail "shell.env not found at ${local_env}" \
     "postCreate bootstraps the container from the copy of this file in Parameter Store," \
@@ -519,10 +518,35 @@ rdc_ensure_secrets_current() {
     "" \
     "What each value does: docs/environment-files.md"
 
-  published="$(rd_aws ssm describe-parameters \
-    --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" \
-    --parameter-filters "Key=Name,Values=${DEVCONTAINER_SSM_PREFIX}/shell.env" \
-    --query 'Parameters[0].LastModifiedDate' --output text)"
+  # The published timestamp answers the same question for both remaining
+  # kinds -- "when was this project's shell.env last published?" -- from its
+  # own store: Key Vault carries it on the secret's attributes.updated, and
+  # Parameter Store on the parameter's LastModifiedDate. Everything after
+  # the store-specific read (the epoch comparison, the stale-and-missing
+  # verdict, the re-publish) is shared, so the two kinds can never disagree
+  # about what "current" means.
+  if [ "$(rd_engine_kind)" = "azure" ]; then
+    rd_require_cmd az "Install: brew install azure-cli"
+    store_label="Key Vault"
+    vault="$(PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" \
+      python3 -m devcontainer_config.cli secrets-vault "$INSTANCE")" \
+      || rd_fail "The Key Vault for instance '${INSTANCE}' could not be read" \
+        "The engine address record names it, and the deploy writes that record." \
+        "" \
+        "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+    published="$(az keyvault secret show --vault-name "$vault" --name shell-env \
+      --query attributes.updated --output tsv)" \
+      || rd_fail "The shell-env secret in Key Vault '${vault}' could not be read" \
+        "If az reported an authentication failure, sign in and retry:" \
+        "  ${RD_BOLD}az login${RD_RESET}, then ${RD_BOLD}make build${RD_RESET}"
+  else
+    rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+    store_label="Parameter Store"
+    published="$(rd_aws ssm describe-parameters \
+      --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" \
+      --parameter-filters "Key=Name,Values=${DEVCONTAINER_SSM_PREFIX}/shell.env" \
+      --query 'Parameters[0].LastModifiedDate' --output text)"
+  fi
 
   if [ -n "$published" ] && [ "$published" != "None" ] \
     && python3 - "$local_env" "$published" <<'PY'
@@ -532,11 +556,11 @@ published = datetime.datetime.fromisoformat(sys.argv[2]).timestamp()
 sys.exit(0 if published >= local_mtime else 1)
 PY
   then
-    rd_ok "Parameter Store copy of shell.env is current"
+    rd_ok "${store_label} copy of shell.env is current"
     return 0
   fi
 
-  rd_log "shell.env is newer than Parameter Store (or was never published), publishing"
+  rd_log "shell.env is newer than ${store_label} (or was never published), publishing"
   PROJECT_NAME="$PROJECT_NAME" "${RD_DIR}/push-secrets.sh" \
     || rd_die "failed to publish secrets to Parameter Store"
 }
@@ -1260,16 +1284,34 @@ rdc_build_remote() {
   # remote path builds for both kinds: the ssh container takes the empty
   # value, which its postCreate never reads, because the seed volume wrote
   # the payload files its file-present branch checks first.
+  #
+  # The azure kind injects its own pair instead -- the engine kind, and the
+  # vault the postCreate bootstrap fetches the payload from -- selected by
+  # the same resolved kind the prelude exported, so the ec2 injection below
+  # it is the byte-identical line it has always been.
+  local env_patch
+  if [ "$(rd_engine_kind)" = "azure" ]; then
+    [ -n "${DEVCONTAINER_VAULT_NAME:-}" ] || rd_fail \
+      "The Key Vault for instance '${INSTANCE}' was not resolved" \
+      "The dispatch prelude reads it from the engine address record the deploy wrote." \
+      "" \
+      "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+    env_patch='| .containerEnv = ((.containerEnv // {}) + {DEVCONTAINER_ENGINE_KIND: $enginetype, DEVCONTAINER_VAULT_NAME: $vaultname})'
+  else
+    env_patch='| .containerEnv = ((.containerEnv // {}) + {DEVCONTAINER_SSM_PREFIX: $ssmprefix})'
+  fi
   RDC_OVERRIDE_CONFIG="$(mktemp "${TMPDIR:-/tmp}/devcontainer-override.XXXXXX")"
   trap 'rm -f "$RDC_OVERRIDE_CONFIG"' EXIT
   rdc_read_configuration \
     | jq --arg mount "source=${volume},target=${CONTAINER_WORKSPACES_ROOT},type=volume" \
       --arg configdir "${REPO_ROOT}/.devcontainer" \
       --arg ssmprefix "${DEVCONTAINER_SSM_PREFIX:-}" \
+      --arg enginetype "$(rd_engine_kind)" \
+      --arg vaultname "${DEVCONTAINER_VAULT_NAME:-}" \
       '.configuration
        | del(.configFilePath)
        | .workspaceMount = $mount
-       | .containerEnv = ((.containerEnv // {}) + {DEVCONTAINER_SSM_PREFIX: $ssmprefix})
+       '"${env_patch}"'
        | if .build.dockerfile then
            .build.dockerfile = "\($configdir)/\(.build.dockerfile)"
            | .build.context = (if .build.context then "\($configdir)/\(.build.context)" else $configdir end)
@@ -1437,6 +1479,24 @@ if command -v docker > /dev/null 2>&1; then
       # REMOTE_INSTANCE_ID for an unlinked instance: no EC2 value may
       # survive, from this run or a leaked one, for an ssh engine.
       unset DEVCONTAINER_SSM_PREFIX
+    elif [ "$(rd_engine_kind)" = "azure" ]; then
+      # An azure engine has no Parameter Store behind it either: clear any
+      # EC2 value the same way, then set the azure pair the build override
+      # and the container's postCreate bootstrap read. The vault comes from
+      # the engine address record the deploy wrote, through the same
+      # `secrets-vault` reader push-secrets.sh resolves it with, so a
+      # missing or key-less record fails here -- before any command runs --
+      # naming that deploy.
+      unset DEVCONTAINER_SSM_PREFIX
+      DEVCONTAINER_ENGINE_KIND=azure
+      export DEVCONTAINER_ENGINE_KIND
+      DEVCONTAINER_VAULT_NAME="$(PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" \
+        python3 -m devcontainer_config.cli secrets-vault "$INSTANCE")" \
+        || rd_fail "The Key Vault for instance '${INSTANCE}' could not be read" \
+          "The engine address record names it, and the deploy writes that record; the reader's own message is above." \
+          "" \
+          "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+      export DEVCONTAINER_VAULT_NAME
     else
       DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
       export DEVCONTAINER_SSM_PREFIX

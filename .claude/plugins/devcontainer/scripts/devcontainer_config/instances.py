@@ -811,6 +811,43 @@ def clear_engine_address(root: Path, name: str) -> int:
     return 1
 
 
+# The engine address record key naming the azure Key Vault the instance's
+# TLS material and configuration payload publish into. `certs.py`'s Key Vault
+# publication client, `cli.py`'s `secrets-vault` print and the container
+# build's staleness probe all resolve the store through `engine_vault_name`
+# below, so the key has one reader rather than one per consumer.
+VAULT_NAME_KEY = "vault_name"
+
+
+def engine_vault_name(root: Path, name: str) -> str:
+    """The Key Vault name `name`'s engine address record carries.
+
+    The single reader of the record's `VAULT_NAME_KEY`, so every consumer
+    that publishes to or compares against the instance's Key Vault derives
+    the same store from the same record. `root` is accepted for call-site
+    uniformity with the rest of the resolution surface and is deliberately
+    unused, exactly as `engine_address` documents for its own.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        EngineAddressError: the record is missing (the remedy names the
+            deploy that writes it), is not one JSON object, or is present
+            but carries no usable `VAULT_NAME_KEY` value (the message
+            names the redeploy that rewrites it).
+    """
+    validate_name(name)
+    vault = engine_address(root, name).get(VAULT_NAME_KEY)
+    if not isinstance(vault, str) or not vault:
+        raise EngineAddressError(
+            f"ERROR: the engine address record for instance {name!r} carries no usable "
+            f"{VAULT_NAME_KEY!r}\n"
+            f"The secrets surface reads '{VAULT_NAME_KEY}' from "
+            f"{engine_address_path(name)}.\n"
+            f"Redeploy to write it: make instance-deploy INSTANCE={name}"
+        )
+    return vault
+
+
 def _recorded_local_port(runner: CommandRunner, context_name: str) -> int | None:
     """The local TCP port `context_name`'s docker context endpoint records, or `None` if absent.
 

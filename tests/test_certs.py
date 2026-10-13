@@ -2140,3 +2140,445 @@ def test_subprocess_runner_invokes_a_real_process_and_captures_output() -> None:
 
     assert result.returncode == 0
     assert result.stdout.strip() == "hello"
+
+
+# ---------------------------------------------------------------------------
+# The Key Vault publication client (the azure engine kind's store): the
+# azure twin of the Parameter Store coverage above. Every test drives a
+# recording Runner double over a real `certs.KeyVaultClient`, so the
+# argv/`--file` split these tests assert is the one production actually
+# takes, and the read-back `publish_to_key_vault` performs is exercised
+# rather than stubbed.
+# ---------------------------------------------------------------------------
+
+
+def _tsv_rendered(value: str) -> str:
+    """What `az --output tsv` prints for `value`: escapes, plus one newline.
+
+    Mirrors the rendering `certs._tsv_value` documents the az CLI carries
+    out, so the fake store answers with the same bytes a real read-back
+    would carry.
+    """
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t") + "\n"
+
+
+class _KeyVaultRecordingRunner:
+    """A `certs.Runner` double: an in-memory Key Vault that spawns nothing.
+
+    A `keyvault secret set` reads the value from the `--file` the client
+    wrote -- recording the file's mode at the moment of the call, since the
+    client removes its temporary directory before returning -- and stores
+    it; a `keyvault secret show` serves it back rendered the way az's tsv
+    output renders a value. `tamper` stands in for the vault returning
+    something other than what was written, applied on the way in so only
+    the read-back disagrees.
+    """
+
+    def __init__(
+        self,
+        failure: subprocess.CompletedProcess[str] | None = None,
+        tamper: object | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.file_modes: list[int] = []
+        self._stored: dict[str, str] = {}
+        self._failure = failure
+        self._tamper = tamper
+
+    def __call__(self, argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        argv = tuple(argv)
+        self.calls.append(argv)
+        if self._failure is not None:
+            return self._failure
+        if "keyvault" in argv and "set" in argv:
+            assert stdin is None, "the az CLI reads the value from --file, never stdin"
+            reference = Path(argv[argv.index("--file") + 1])
+            assert reference.is_file(), (
+                f"the --file document must be a regular file, not {reference}"
+            )
+            self.file_modes.append(stat.S_IMODE(reference.stat().st_mode))
+            value = reference.read_text(encoding="utf-8")
+            name = argv[argv.index("--name") + 1]
+            if self._tamper is not None:
+                value = self._tamper(name, value)
+            self._stored[name] = value
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="{}", stderr="")
+        if "keyvault" in argv and "show" in argv:
+            name = argv[argv.index("--name") + 1]
+            assert name in self._stored, f"read of {name} before it was written"
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=_tsv_rendered(self._stored[name]),
+                stderr="",
+            )
+        raise AssertionError(f"unexpected operation: {argv}")
+
+    def stored(self) -> dict[str, str]:
+        return dict(self._stored)
+
+
+def _key_vault_client(certs: ModuleType, runner: _KeyVaultRecordingRunner) -> object:
+    return certs.KeyVaultClient(runner, vault_name="gd-vault")
+
+
+def test_key_vault_set_argv_carries_the_file_never_a_value(
+    issued_material: _IssuedMaterial,
+) -> None:
+    """The exact `az keyvault secret set` shape, and the value in no argument."""
+    certs = issued_material.certs
+    runner = _KeyVaultRecordingRunner()
+
+    _key_vault_client(certs, runner).write_secret("tls-server-key", "value-\n-lines")
+
+    (argv,) = runner.calls
+    assert argv[:4] == (certs.AZ_EXECUTABLE, "keyvault", "secret", "set")
+    assert "--vault-name" in argv and argv[argv.index("--vault-name") + 1] == "gd-vault"
+    assert "--name" in argv and argv[argv.index("--name") + 1] == "tls-server-key"
+    assert "--file" in argv
+    joined = " ".join(argv)
+    assert "value-" not in joined, "the value itself reached argv"
+    assert "--value" not in argv
+
+
+def test_key_vault_write_document_is_private_and_removed(issued_material: _IssuedMaterial) -> None:
+    """The `--file` document is a 0600 regular file for the duration of the call."""
+    certs = issued_material.certs
+    runner = _KeyVaultRecordingRunner()
+
+    _key_vault_client(certs, runner).write_secret("tls-ca", "cert-bytes")
+
+    assert runner.file_modes == [0o600], (
+        "the --file document holds TLS material and must not be readable by other users: "
+        f"{[oct(mode) for mode in runner.file_modes]}"
+    )
+
+
+def test_key_vault_show_argv_pins_the_query_and_tsv(issued_material: _IssuedMaterial) -> None:
+    certs = issued_material.certs
+    runner = _KeyVaultRecordingRunner()
+    _key_vault_client(certs, runner).write_secret("tls-ca", "cert-bytes")
+
+    runner.calls.clear()
+    stored = _key_vault_client(certs, runner).read_secret("tls-ca")
+
+    (argv,) = runner.calls
+    assert argv[:4] == (certs.AZ_EXECUTABLE, "keyvault", "secret", "show")
+    assert "--query" in argv and argv[argv.index("--query") + 1] == "value"
+    assert "--output" in argv and argv[argv.index("--output") + 1] == "tsv"
+    assert stored == "cert-bytes", "the tsv rendering must round-trip to the stored bytes"
+
+
+def test_key_vault_read_returns_multiline_values_byte_for_byte(
+    issued_material: _IssuedMaterial,
+) -> None:
+    """Escaped newlines, tabs and backslashes render back exactly as stored."""
+    certs = issued_material.certs
+    runner = _KeyVaultRecordingRunner()
+    value = "line-one\nline\ttwo\\three"
+    _key_vault_client(certs, runner).write_secret("tls-ca", value)
+
+    assert _key_vault_client(certs, runner).read_secret("tls-ca") == value
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("ERROR: SecretNotFound: the secret was not found", "KeyVaultSecretNotFoundError"),
+        ("ERROR: AuthorizationFailed: caller not authorized", "KeyVaultUnauthorizedError"),
+        ("ERROR: Please run 'az login' to set up an account.", "KeyVaultUnavailableError"),
+    ],
+)
+def test_key_vault_failures_are_classified_with_their_remedies(
+    issued_material: _IssuedMaterial, stderr: str, expected: str
+) -> None:
+    certs = issued_material.certs
+    runner = _KeyVaultRecordingRunner(
+        failure=subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=stderr)
+    )
+
+    with pytest.raises(certs.KeyVaultError) as excinfo:
+        _key_vault_client(certs, runner).write_secret("tls-server-key", "value")
+
+    assert type(excinfo.value).__name__ == expected
+    assert "tls-server-key" in str(excinfo.value)
+
+
+def test_key_vault_an_unrelated_failure_is_never_called_a_login_problem(
+    issued_material: _IssuedMaterial,
+) -> None:
+    certs = issued_material.certs
+    runner = _KeyVaultRecordingRunner(
+        failure=subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="ERROR: throttled, retry later"
+        )
+    )
+
+    with pytest.raises(certs.KeyVaultUnclassifiedError) as excinfo:
+        _key_vault_client(certs, runner).read_secret("tls-server-key")
+
+    assert "az login" not in str(excinfo.value)
+
+
+def test_key_vault_missing_binary_is_unavailable(issued_material: _IssuedMaterial) -> None:
+    certs = issued_material.certs
+
+    class _NoBinary:
+        def __call__(
+            self, argv: Sequence[str], stdin: str | None
+        ) -> subprocess.CompletedProcess[str]:
+            raise FileNotFoundError("az")
+
+    with pytest.raises(certs.KeyVaultUnavailableError):
+        certs.KeyVaultClient(_NoBinary(), vault_name="gd-vault").read_secret("tls-ca")
+
+
+def test_azure_publication_set_returns_exactly_the_three_secret_names() -> None:
+    certs = _import_certs()
+    names = certs.azure_publication_set("sandbox")
+
+    assert set(names) == {"tls-server-key", "tls-server-cert", "tls-ca"}
+    assert list(names) == [
+        certs.AZURE_SERVER_KEY_SECRET,
+        certs.AZURE_SERVER_CERT_SECRET,
+        certs.AZURE_CA_SECRET,
+    ]
+
+
+@pytest.mark.parametrize("ca_key_spelling", ["ca-key.pem", "ca/ca-key.pem"])
+def test_azure_publication_set_refuses_the_ca_private_key(ca_key_spelling: str) -> None:
+    certs = _import_certs()
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.azure_publication_set("sandbox", [ca_key_spelling])
+
+    assert "never leaves the laptop" in str(excinfo.value)
+
+
+def test_azure_publication_set_refuses_any_other_name() -> None:
+    certs = _import_certs()
+
+    with pytest.raises(certs.CertsError, match="not part of the publication set"):
+        certs.azure_publication_set("sandbox", ["shell-env"])
+
+
+def test_publish_to_key_vault_writes_exactly_the_azure_set(
+    issued_material: _IssuedMaterial,
+) -> None:
+    certs = issued_material.certs
+    runner = _KeyVaultRecordingRunner()
+
+    written = certs.publish_to_key_vault(
+        issued_material.paths, _key_vault_client(certs, runner)
+    )
+
+    assert written == certs.azure_publication_set(issued_material.paths.instance)
+    assert set(runner.stored()) == set(written)
+
+
+def test_publish_to_key_vault_never_sends_the_ca_private_key(
+    issued_material: _IssuedMaterial,
+) -> None:
+    certs = issued_material.certs
+    runner = _KeyVaultRecordingRunner()
+    ca_key_pem = issued_material.paths.ca_key.read_text(encoding="utf-8")
+
+    certs.publish_to_key_vault(issued_material.paths, _key_vault_client(certs, runner))
+
+    for argv in runner.calls:
+        assert ca_key_pem not in " ".join(argv)
+    assert not any("ca-key" in name for name in runner.stored())
+
+
+def test_publish_to_key_vault_publishes_the_server_pair_that_verifies(
+    issued_material: _IssuedMaterial, tmp_path: Path
+) -> None:
+    """The vault ends up holding the key/certificate pair, verified against the CA."""
+    certs = issued_material.certs
+    runner = _KeyVaultRecordingRunner()
+    certs.publish_to_key_vault(issued_material.paths, _key_vault_client(certs, runner))
+    stored = runner.stored()
+
+    cert_path = tmp_path / "kv-cert.pem"
+    key_path = tmp_path / "kv-key.pem"
+    ca_path = tmp_path / "kv-ca.pem"
+    cert_path.write_text(stored[certs.AZURE_SERVER_CERT_SECRET], encoding="utf-8")
+    key_path.write_text(stored[certs.AZURE_SERVER_KEY_SECRET], encoding="utf-8")
+    ca_path.write_text(stored[certs.AZURE_CA_SECRET], encoding="utf-8")
+    assert _verifies_against_ca(cert_path, ca_path)
+    public_key = subprocess.run(
+        ["openssl", "x509", "-in", str(cert_path), "-pubkey", "-noout"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    key_public = subprocess.run(
+        ["openssl", "pkey", "-in", str(key_path), "-pubout"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert public_key == key_public
+
+
+def test_publish_to_key_vault_fails_when_a_secret_does_not_read_back(
+    issued_material: _IssuedMaterial,
+) -> None:
+    certs = issued_material.certs
+    runner = _KeyVaultRecordingRunner(tamper=lambda name, value: value + "corrupted")
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.publish_to_key_vault(issued_material.paths, _key_vault_client(certs, runner))
+
+    message = str(excinfo.value)
+    assert "does not read back as it was written" in message
+    assert issued_material.paths.instance in message
+
+
+def test_publish_to_key_vault_requires_an_existing_ca(tmp_path: Path) -> None:
+    certs = _import_certs()
+    paths = certs.CertPaths(instance=f"kv-{uuid.uuid4().hex[:8]}", root=tmp_path)
+    runner = _KeyVaultRecordingRunner()
+
+    with pytest.raises(certs.CertsError) as excinfo:
+        certs.publish_to_key_vault(paths, _key_vault_client(certs, runner))
+
+    assert "create-ca" in str(excinfo.value)
+    assert runner.calls == []
+
+
+# ---------------------------------------------------------------------------
+# The kind-selected publication surface (`_run_publish` and
+# `publication-set`): the store is selected by `instances.read_kind`, so
+# these tests stand up a fake repository root whose terragrunt.hcl declares
+# the azure kind, point `certs.repo.find_root` at it, and pin what each
+# kind prints -- with `certs.subprocess_runner` replaced so nothing shells
+# out. The instance's own address record lives under DOCKER_CONFIG, which
+# every test here relocates to keep state off the operator's machine.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def _key_vault_docker_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point DOCKER_CONFIG at a per-test directory for the record reads.
+
+    Not autouse: this module's other tests assert their `tmp_path` holds
+    nothing but certificate material, and only the kind-selection tests
+    below read an engine address record at all.
+    """
+    docker_config = tmp_path / "docker-config"
+    docker_config.mkdir()
+    monkeypatch.setenv("DOCKER_CONFIG", str(docker_config))
+    return docker_config
+
+
+def _azure_repo_root(tmp_path: Path, instance: str) -> Path:
+    """A repository root whose `instance` directory declares the azure kind."""
+    instances = importlib.import_module("devcontainer_config.instances")
+    instance_dir = tmp_path / "remote-instances" / instance
+    instance_dir.mkdir(parents=True)
+    instance_dir.joinpath("terragrunt.hcl").write_text(
+        'include "remote" {\n  path = "${dirname(find_in_parent_folders(\'root.hcl\"))}'
+        "/_envcommon/remote-azure.hcl\"\n}\n",
+        encoding="utf-8",
+    )
+    instances.write_engine_address(
+        tmp_path,
+        instance,
+        {"relay_namespace": "gd.servicebus.windows.net", "vault_name": "gd-vault"},
+    )
+    return tmp_path
+
+
+def test_publication_set_prints_the_azure_marked_set_for_an_azure_instance(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    _key_vault_docker_config: Path,
+) -> None:
+    certs = _import_certs()
+    instance = f"az-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(certs.repo, "find_root", lambda _cwd: _azure_repo_root(tmp_path, instance))
+
+    assert certs.main(["publication-set", "--instance", instance]) == 0
+
+    out = capsys.readouterr().out.splitlines()
+    assert out == [
+        f"{certs.AZURE_SERVER_KEY_SECRET} {certs.AZURE_KEYVAULT_MARK}",
+        f"{certs.AZURE_SERVER_CERT_SECRET} {certs.AZURE_KEYVAULT_MARK}",
+        f"{certs.AZURE_CA_SECRET} {certs.AZURE_KEYVAULT_MARK}",
+    ]
+
+
+def test_publication_set_prints_the_parameter_store_set_for_an_ec2_instance(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    certs = _import_certs()
+    instance = f"ec2-{uuid.uuid4().hex[:8]}"
+
+    assert certs.main(["publication-set", "--instance", instance]) == 0
+
+    out = capsys.readouterr().out.splitlines()
+    assert out == [
+        f"/devcontainer/{instance}/tls/server-key.pem SecureString",
+        f"/devcontainer/{instance}/tls/server-cert.pem SecureString",
+        f"/devcontainer/{instance}/tls/ca.pem String",
+    ]
+
+
+def test_publish_routes_an_azure_instance_to_its_key_vault(
+    issued_material: _IssuedMaterial,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    _key_vault_docker_config: Path,
+) -> None:
+    """The azure kind publishes through KeyVaultClient against the record's vault.
+
+    `issued_material` provides a real CA under its own root, the fake repo
+    root declares the kind, and `certs.subprocess_runner` is replaced with
+    an in-memory vault so `main` constructs a client over the same Runner
+    seam production would.
+    """
+    certs = issued_material.certs
+    instance = issued_material.paths.instance
+    monkeypatch.setattr(certs.repo, "find_root", lambda _cwd: _azure_repo_root(tmp_path, instance))
+    runner = _KeyVaultRecordingRunner()
+    monkeypatch.setattr(certs, "subprocess_runner", runner)
+    certs_root = Path(str(issued_material.paths.root))
+
+    exit_code = certs.main(
+        ["publish", "--instance", instance, "--root", str(certs_root)]
+    )
+
+    assert exit_code == 0
+    assert set(runner.stored()) == set(certs.azure_publication_set(instance))
+    out = capsys.readouterr().out.splitlines()
+    assert out == [f"published {name}" for name in certs.azure_publication_set(instance)]
+
+
+def test_publish_reports_a_missing_address_record_with_its_deploy_remedy(
+    issued_material: _IssuedMaterial,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    _key_vault_docker_config: Path,
+) -> None:
+    certs = issued_material.certs
+    instance = issued_material.paths.instance
+    instance_dir = tmp_path / "remote-instances" / instance
+    instance_dir.mkdir(parents=True)
+    instance_dir.joinpath("terragrunt.hcl").write_text(
+        "include {\n  path = find_in_parent_folders(\"_envcommon/remote-azure.hcl\")\n}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(certs.repo, "find_root", lambda _cwd: tmp_path)
+
+    exit_code = certs.main(
+        ["publish", "--instance", instance, "--root", str(issued_material.paths.root)]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "no engine address record" in captured.err
+    assert "make instance-deploy" in captured.err

@@ -1210,6 +1210,169 @@ def test_instance_init_delegates_to_scaffold_and_prints_its_guidance(
     assert runner.calls[0][0] == "aws"
 
 
+# An azure location fixture value, generated so no real region name is stored.
+_AZURE_LOCATION = f"testlocation-{uuid.uuid4().hex[:6]}"
+
+
+def test_instance_init_azure_cli_writes_the_azure_template_with_no_aws_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--cloud azure --location writes the azure template and issues no command:
+    the azure scaffold pins no AMI and allocates CIDRs from files alone."""
+    root = _git_root_with_origin(tmp_path)
+    repo_module = importlib.import_module("devcontainer_config.repo")
+    (root / ".gitignore").write_text(
+        (repo_module.find_root(Path(__file__).resolve().parent) / ".gitignore").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    runner = _InstanceFakeRunner()  # strict: any invocation fails the test
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(
+        monkeypatch,
+        root,
+        ["instance-init", name, "--cloud", "azure", "--location", _AZURE_LOCATION],
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert runner.calls == [], "the azure scaffold must issue no command"
+    scaffolded = root / "remote-instances" / name / "terragrunt.hcl"
+    text = scaffolded.read_text(encoding="utf-8")
+    assert "_envcommon/remote-azure.hcl" in text
+    assert f'location = "{_AZURE_LOCATION}"' in text
+    assert f'vm_size  = "{instance_ops.DEFAULT_AZURE_VM_SIZE}"' in text
+    assert f"Deploy with: make instance-deploy INSTANCE={name}" in out
+
+
+def test_instance_init_azure_cli_requires_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--cloud azure without --location is refused naming the flag, writing nothing."""
+    root = _git_root_with_origin(tmp_path)
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    runner = _InstanceFakeRunner()
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(monkeypatch, root, ["instance-init", name, "--cloud", "azure"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--location" in captured.err
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_instance_init_azure_cli_refuses_region_and_ami(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The EC2-only flags are refused under azure -- the region refusal names
+    its azure equivalent (--location), the AMI refusal states there is no
+    such input; neither flag reaches an aws call."""
+    root = _git_root_with_origin(tmp_path)
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    runner = _InstanceFakeRunner()
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    cases = (
+        (["--region", "us-east-1"], "--location"),
+        (["--ami", "ami-" + uuid.uuid4().hex], "AMI"),
+    )
+    for extra, expected in cases:
+        exit_code = run_cli(
+            monkeypatch,
+            root,
+            [
+                "instance-init",
+                name,
+                "--cloud",
+                "azure",
+                "--location",
+                _AZURE_LOCATION,
+                *extra,
+            ],
+        )
+        captured = capsys.readouterr()
+        assert exit_code == 1, f"{extra} must be refused under azure"
+        assert expected in captured.err, f"{extra}: {captured.err}"
+
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_instance_init_azure_cli_passes_an_explicit_vm_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _git_root_with_origin(tmp_path)
+    repo_module = importlib.import_module("devcontainer_config.repo")
+    (root / ".gitignore").write_text(
+        (repo_module.find_root(Path(__file__).resolve().parent) / ".gitignore").read_text(
+            encoding="utf-8"
+        ),
+        encoding="utf-8",
+    )
+    instance_ops = _import_instance_ops()
+    name = _instance_name()
+    runner = _InstanceFakeRunner()
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(
+        monkeypatch,
+        root,
+        [
+            "instance-init",
+            name,
+            "--cloud",
+            "azure",
+            "--location",
+            _AZURE_LOCATION,
+            "--vm-size",
+            "Standard_D4pls_v5",
+        ],
+    )
+
+    assert exit_code == 0
+    text = (root / "remote-instances" / name / "terragrunt.hcl").read_text(encoding="utf-8")
+    assert 'vm_size  = "Standard_D4pls_v5"' in text
+
+
+def test_instance_init_cli_cloud_choices_are_ec2_and_azure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Anything else is a usage error at exit 2, before any handler runs."""
+    root = _git_root_with_origin(tmp_path)
+    name = _instance_name()
+
+    exit_code = run_cli(monkeypatch, root, ["instance-init", name, "--cloud", "gcp"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "invalid choice" in captured.err
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_instance_init_help_names_the_cloud_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli = import_cli()
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["instance-init", "--help"])
+
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    for flag in ("--cloud", "--location", "--vm-size", "--region", "--ami"):
+        assert flag in out, f"{flag} is missing from instance-init's help"
+
+
 def test_instance_stop_delegates_with_the_recorded_id_and_region(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1164,6 +1164,44 @@ def test_instance_init_help_row_presents_region_as_the_ami_az_lookup_only() -> N
     )
 
 
+def test_instance_init_help_row_names_the_azure_form() -> None:
+    """The row must name the azure invocation form alongside the EC2 one.
+
+    The azure form is INSTANCE=<instance-name> with CLOUD=azure,
+    LOCATION=<location> required and VM_SIZE= optional; the shared
+    INSTANCE=<instance-name> the row already carries is the azure form's
+    own selector, so the azure-specific tail must name the three azure
+    variables.
+    """
+    help_recipe = _help_recipe_body(_makefile_text())
+    rows = [line for line in help_recipe.splitlines() if '"make instance-init"' in line]
+    assert len(rows) == 1
+    assert "CLOUD=azure" in rows[0], "the row must name the azure cloud selector"
+    assert "LOCATION=<location>" in rows[0], (
+        "the row must name the azure location, the one required azure variable"
+    )
+    assert "[VM_SIZE=]" in rows[0], "the row must name VM_SIZE as optional"
+    assert "INSTANCE=<instance-name>" in rows[0], (
+        "the azure form's selector is the shared INSTANCE=<instance-name>"
+    )
+
+
+def test_instance_init_recipe_passes_cloud_location_and_vm_size_when_given() -> None:
+    """CLOUD=, LOCATION= and VM_SIZE= ride the same given-only passthrough
+    style REGION=/AMI= established: absent variables add no flag at all."""
+    recipe = _target_recipe_body(_makefile_text(), "instance-init")
+    for variable, flag in (
+        ("CLOUD", "--cloud"),
+        ("LOCATION", "--location"),
+        ("VM_SIZE", "--vm-size"),
+        ("REGION", "--region"),
+        ("AMI", "--ami"),
+    ):
+        assert f"$(if $({variable}),{flag} $({variable}),)" in recipe, (
+            f"{variable}= must pass through as {flag} only when given"
+        )
+
+
 def test_deploy_applies_the_saved_plan_it_guarded() -> None:
     """The guarded plan is the applied plan: saved with -out, consumed by
     apply, removed on every exit path by the per-instance trap."""

@@ -291,7 +291,7 @@ help:
 	note "INSTANCES" "one remote engine per project under remote-instances/; instance names are project names (e.g. acme)"; \
 	row "make list-instances"   "host"   "List every instance with live status: EC2 state, id, params, certs, forward, context; ssh engines answer reachability instead."; \
 	row "make list-containers"  "host"   "Every container this project owns, local engine plus every instance's, with per-engine reachability."; \
-	row "make instance-init"    "host"   "Scaffold <project>'s directory; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= for the AMI/AZ lookup only; the deployment region is REMOTE_AWS_REGION]"; \
+	row "make instance-init"    "host"   "Writes <project>'s scaffold; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= AMI/AZ lookup; deploys in REMOTE_AWS_REGION]. Azure: CLOUD=azure LOCATION=<location> [VM_SIZE=]"; \
 	row "make instance-deploy"  "remote" "Converge: provision, link id, trust chain if missing, push secrets. Refuses instance replacement without CONFIRM=replace. INSTANCE= | ALL=1"; \
 	row "make instance-status"  "host"   "One instance's live state, or every instance with ALL=1. INSTANCE=<instance-name> | ALL=1"; \
 	row "make instance-plan"    "remote" "Terragrunt plan per instance; bootstraps the instance's state bucket on first run. INSTANCE=<instance-name> | ALL=1"; \
@@ -719,15 +719,18 @@ list-containers:
 	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli container-list --local-context "$(LOCAL_CONTEXT)"
 
 # Writes remote-instances/<name>/terragrunt.hcl and its guidance. Never
-# deploys; the cli prints the guidance messages verbatim. AMI= and REGION=
-# pass through when given; REGION is the scaffold-time AMI/AZ lookup ONLY --
-# it never selects where anything deploys. The deployment region is
-# REMOTE_AWS_REGION, required without a default by every Terragrunt-running
-# target (REMOTE_AWS_REGION_GUARD above), because root.hcl names the shared
-# state bucket from it.
+# deploys; the cli prints the guidance messages verbatim. AMI=, REGION=,
+# CLOUD=, LOCATION= and VM_SIZE= pass through when given; REGION is the
+# scaffold-time AMI/AZ lookup ONLY -- it never selects where anything
+# deploys. The deployment region is REMOTE_AWS_REGION, required without a
+# default by every Terragrunt-running target (REMOTE_AWS_REGION_GUARD
+# above), because root.hcl names the shared state bucket from it.
+# CLOUD=azure switches the scaffold to the azure kind, which requires
+# LOCATION= (the azure location) and takes VM_SIZE=; REGION=/AMI= are
+# refused on azure.
 instance-init:
 	@$(call INSTANCE_USAGE_GUARD,instance-init)
-	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-init "$(INSTANCE)" $(if $(REGION),--region $(REGION),) $(if $(AMI),--ami $(AMI),)
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-init "$(INSTANCE)" $(if $(CLOUD),--cloud $(CLOUD),) $(if $(LOCATION),--location $(LOCATION),) $(if $(VM_SIZE),--vm-size $(VM_SIZE),) $(if $(REGION),--region $(REGION),) $(if $(AMI),--ami $(AMI),)
 
 # Read-only: one instance's live state, or every instance's with ALL=1. The
 # cli exits non-zero when any probe failed, so a loop abort names the

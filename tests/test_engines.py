@@ -164,6 +164,26 @@ def _seed_instance_dir(root: Path, name: str) -> Path:
     return instance_dir
 
 
+def _seed_azure_instance_dir(root: Path, name: str) -> Path:
+    """A minimal azure-kind instance directory under `remote-instances/<name>/`.
+
+    The terragrunt.hcl carries the exact envcommon include line the azure
+    scaffold writes -- the include `instances.read_kind` keys the azure
+    kind on. `_envcommon/remote-azure.hcl` itself deliberately does not
+    exist: the kind is discriminated from the declaration, not from the
+    layer it includes.
+    """
+    instance_dir = root / "remote-instances" / name
+    instance_dir.mkdir(parents=True)
+    (instance_dir / "terragrunt.hcl").write_text(
+        'include "envcommon" {\n'
+        '  path = "${dirname(find_in_parent_folders("root.hcl"))}/_envcommon/remote-azure.hcl"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    return instance_dir
+
+
 def _write_manifest(root: Path, name: str, payload: object) -> Path:
     """A raw engine.json under `remote-instances/<name>/`, exactly as given."""
     manifest = root / "remote-instances" / name / "engine.json"
@@ -227,6 +247,48 @@ def test_read_kind_reports_ec2_for_a_directory_with_neither_file(tmp_path: Path)
     (root / "remote-instances" / name).mkdir(parents=True)
 
     assert instances.read_kind(root, name) == instances.ENGINE_KIND_EC2
+
+
+def test_read_kind_reports_azure_for_the_remote_azure_include(tmp_path: Path) -> None:
+    """A terragrunt.hcl whose envcommon include targets `_envcommon/remote-azure.hcl`
+    declares the azure kind, even though the included file does not exist yet."""
+    instances = _import_instances()
+    root = generated_root(tmp_path)
+    name = _instance_name()
+    _seed_azure_instance_dir(root, name)
+    assert not (root / "remote-instances" / "_envcommon" / "remote-azure.hcl").exists()
+
+    assert instances.read_kind(root, name) == instances.ENGINE_KIND_AZURE
+
+
+def test_read_kind_reports_ec2_for_the_remote_ec2_include(tmp_path: Path) -> None:
+    """The EC2 template's envcommon include names `_envcommon/remote-ec2.hcl`,
+    which keys no azure: the EC2 kind keeps its answer."""
+    instances = _import_instances()
+    root = generated_root(tmp_path)
+    name = _instance_name()
+    instance_dir = root / "remote-instances" / name
+    instance_dir.mkdir(parents=True)
+    (instance_dir / "terragrunt.hcl").write_text(
+        'include "envcommon" {\n'
+        '  path = "${dirname(find_in_parent_folders("root.hcl"))}/_envcommon/remote-ec2.hcl"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    assert instances.read_kind(root, name) == instances.ENGINE_KIND_EC2
+
+
+def test_read_kind_manifest_still_wins_over_an_azure_terragrunt(tmp_path: Path) -> None:
+    """The manifest's precedence is unchanged: a directory declaring both an
+    engine.json and the azure include is the SSH kind."""
+    instances = _import_instances()
+    root = generated_root(tmp_path)
+    name = _instance_name()
+    _seed_azure_instance_dir(root, name)
+    _write_manifest(root, name, _valid_manifest_payload())
+
+    assert instances.read_kind(root, name) == instances.ENGINE_KIND_SSH
 
 
 def test_read_kind_fails_fast_on_an_unparsable_manifest_naming_the_file(
@@ -585,6 +647,38 @@ def test_resolve_instance_ssh_block_is_the_nine_engine_lines_without_ec2_rows(
     assert "TERRAGRUNT_DIR" not in out
     assert "STATE_KEY" not in out
     assert "PARAMETER_PREFIX" not in out
+
+
+def test_resolve_instance_azure_block_is_the_five_lines_without_ec2_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The azure block prints exactly the five rows the kind resolves, and none
+    of the state-key/Parameter Store rows it has no counterpart for.
+
+    `DOCKER_CONTEXT` stays the block's key (lib.sh translates that one line
+    to REMOTE_DOCKER_CONTEXT itself), so no `REMOTE_DOCKER_CONTEXT` line may
+    appear.
+    """
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    _seed_azure_instance_dir(root, name)
+    _clear_resolution_env(monkeypatch)
+
+    exit_code = run_cli(monkeypatch, root, ["resolve-instance"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert out.splitlines() == [
+        f"INSTANCE={name}",
+        f"KIND={instances.ENGINE_KIND_AZURE}",
+        f"TERRAGRUNT_DIR={instances.terragrunt_dir(root, name)}",
+        f"DOCKER_CONTEXT={instances.docker_context(root, name)}",
+        f"CERTS_DIR={instances.certs_dir(name)}",
+    ]
+    assert "STATE_KEY" not in out
+    assert "PARAMETER_PREFIX" not in out
+    assert "REMOTE_DOCKER_CONTEXT" not in out
 
 
 # ---------------------------------------------------------------------------

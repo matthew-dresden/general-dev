@@ -26,6 +26,33 @@ Every value below is supplied to you by the requester unless marked
 "fixed"; a fixed value is the same for every instance and is not a per-request
 choice.
 
+**Once per subscription, before the first instance:** the resource providers
+the deployment uses must be registered. A fresh subscription ships with none
+of them registered, and the failures surface as misleading errors elsewhere
+(a storage create answering `SubscriptionNotFound` is this, not a billing
+problem):
+
+```sh
+for ns in Microsoft.Storage Microsoft.Compute Microsoft.Network \
+          Microsoft.KeyVault Microsoft.ManagedIdentity Microsoft.Relay; do
+  az provider register --namespace "$ns"
+done
+```
+
+**The VM size is quota- and capacity-bound.** A fresh subscription carries a
+zero-core quota for most VM families until a limit is granted, and a family
+with quota can still answer `SkuNotAvailable` in a chosen region (a capacity
+restriction). Check both before fixing the size:
+
+```sh
+az vm list-usage --location <location> -o table | grep -i 'Family vCPU'
+az vm list-skus --location <location> --size <vm-size> -o table   # restrictions: None
+```
+
+Pick a size whose family shows a nonzero quota and no restriction, and set
+`vm_size` (and, for an x64 size, `os_image_urn`) in the scaffolded
+`terragrunt.hcl` accordingly.
+
 ### 2.1 Network
 
 Choose one:

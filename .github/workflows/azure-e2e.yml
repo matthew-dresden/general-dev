@@ -2,9 +2,9 @@
 #
 # Runs the real lifecycle against a disposable instance in eastus: provision,
 # converge, publish, tunnel, daemon handshake, power cycle, teardown, and a
-# zero-residue check. Costs real money for the duration of the run (a cheap VM
-# plus relay listener-hours); it exists because the hermetic suite can fake az
-# but cannot fake Azure.
+# zero-residue check. Costs real money for the duration of the run (a cheap
+# VM plus relay listener-hours); it exists because the hermetic suite can fake
+# az but cannot fake Azure.
 #
 # Authentication is OIDC federation, not a stored client secret: an app
 # registration in the tenant trusts this repository, and the three identifiers
@@ -18,8 +18,9 @@
 #   4. Set repository variables: AZURE_CLIENT_ID, AZURE_TENANT_ID,
 #      AZURE_SUBSCRIPTION_ID.
 # The deploying principal is also the relay sender and vault officer: the e2e
-# writes the app registration's OWN object id into the scaffolded module
-# inputs, so no human identity is involved.
+# writes the app registration's own object id into the scaffolded module
+# inputs, so no human identity is involved. The principal also grants itself
+# the state account's blob data role during the deploy (state_store.ensure).
 name: azure-engine-e2e
 
 on:
@@ -57,6 +58,23 @@ jobs:
           sudo apt-get install -y jq
           sudo npm install -g @devcontainers/cli
 
+      - name: Register the resource providers a fresh subscription needs
+        run: |
+          set -euo pipefail
+          for namespace in Microsoft.Storage Microsoft.Compute Microsoft.Network Microsoft.KeyVault Microsoft.ManagedIdentity Microsoft.Relay; do
+            az provider register --namespace "$namespace" --output none
+          done
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            pending=$(az provider list \
+              --query "[?namespace=='Microsoft.Storage'||namespace=='Microsoft.Compute'||namespace=='Microsoft.Network'||namespace=='Microsoft.KeyVault'||namespace=='Microsoft.ManagedIdentity'||namespace=='Microsoft.Relay'].[registrationState]" \
+              -o tsv | grep -cv Registered || true)
+            [ "$pending" = "0" ] && break
+            sleep 15
+          done
+          az provider list \
+            --query "[?namespace=='Microsoft.Storage'||namespace=='Microsoft.Compute'||namespace=='Microsoft.Network'||namespace=='Microsoft.KeyVault'||namespace=='Microsoft.ManagedIdentity'||namespace=='Microsoft.Relay'].{ns:namespace, state:registrationState}" \
+            -o table
+
       - name: Record the deploying principal's object id
         run: |
           set -euo pipefail
@@ -73,20 +91,21 @@ jobs:
           set -euo pipefail
           file=remote-instances/az-e2e/terragrunt.hcl
           python3 - "$file" "$PRINCIPAL_OBJECT_ID" <<'EOF'
-          import re
           import sys
 
           path, oid = sys.argv[1], sys.argv[2]
-          text = open(path).read()
-          grants = (
-              f"  relay_sender_object_ids = [\"{oid}\"]\n"
-              f"  keyvault_officer_object_ids = [\"{oid}\"]\n"
-          )
-          updated, count = re.subn(r"(  tags = \{)", grants + r"\1", text, count=1)
-          if count != 1:
-              sys.exit(f"could not anchor the grant inputs in {path}")
-          open(path, "w").write(updated)
+          lines = open(path).read().rstrip("\n").split("\n")
+          # The scaffolded file ends with the inputs block's closing brace;
+          # the grants join its last entries, one line above that brace.
+          if lines[-1].strip() != "}":
+              sys.exit(f"{path} does not end with the inputs block's closing brace")
+          grants = [
+              f'  relay_sender_object_ids = ["{oid}"]',
+              f'  keyvault_officer_object_ids = ["{oid}"]',
+          ]
+          open(path, "w").write("\n".join(lines[:-1] + grants + ["}"]) + "\n")
           EOF
+          tail -5 "$file"
 
       - name: Converge (provision, certify, publish)
         run: |
@@ -125,6 +144,7 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          make connect-stop INSTANCE=az-e2e || true
           make clean INSTANCE=az-e2e || true
           make instance-destroy INSTANCE=az-e2e
           make bucket-delete INSTANCE=az-e2e
@@ -133,23 +153,19 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          az group list --query "[?starts_with(name, 'az-e2e')].name" -o tsv | grep . && {
-            echo "ERROR: leftover az-e2e resource groups" >&2
+          leftover_groups=$(az group list --query "[?starts_with(name, 'az-e2e') || starts_with(name, 'rg-aze2e')].name" -o tsv)
+          [ -z "$leftover_groups" ] || {
+            echo "ERROR: leftover resource groups:" >&2
+            echo "$leftover_groups" >&2
             exit 1
-          } || true
-          az storage account list --query "[?starts_with(name, 'tgstate')].name" -o tsv \
-            | grep -F "$(python3 - <<'EOF'
-          from pathlib import Path
-          import sys
-          sys.path.insert(0, ".claude/plugins/devcontainer/scripts")
-          from devcontainer_config import state_store
-          print(state_store.compose(repo_root=Path.cwd(), instance="az-e2e"))
-          EOF
-          )" && {
-            echo "ERROR: leftover state storage account" >&2
+          }
+          leftover_accounts=$(az storage account list --query "[?starts_with(name, 'tgstate')].name" -o tsv)
+          [ -z "$leftover_accounts" ] || {
+            echo "ERROR: leftover state storage accounts:" >&2
+            echo "$leftover_accounts" >&2
             exit 1
-          } || true
-          test ! -e "$HOME/.docker/certs/az-e2e" || {
+          }
+          [ ! -e "$HOME/.docker/certs/az-e2e" ] || {
             echo "ERROR: leftover local certificate directory" >&2
             exit 1
           }

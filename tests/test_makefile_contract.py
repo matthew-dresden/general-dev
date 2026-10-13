@@ -56,6 +56,7 @@ import pytest
 from conftest import _make_variable, _makefile_text, _removed_identifiers, _resolve_make_refs
 from devcontainer_config import helpline, instances
 from devcontainer_config.repo import find_root
+from test_ci_workflow import _COVERAGE_FAIL_UNDER_FLAG, _PACKAGE_COVERAGE_PATH
 
 # Spec Section 4.1.2 requires the `make test` row to stay "no docker, no AWS,
 # no network"; this task's Approach step 2 derives the concrete tokens that
@@ -105,6 +106,28 @@ def _test_recipe_body(makefile_text: str) -> str:
     match = re.search(r"^test:.*\n((?:\t.*\n?)*)", makefile_text, re.MULTILINE)
     assert match is not None, "no test target found in Makefile"
     return match.group(1)
+
+
+def _coverage_recipe_body(makefile_text: str) -> str:
+    """The recipe lines (tab-indented) that follow the `coverage:` target header."""
+    match = re.search(r"^coverage:.*\n((?:\t.*\n?)*)", makefile_text, re.MULTILINE)
+    assert match is not None, "no coverage target found in Makefile"
+    return match.group(1)
+
+
+def _pytest_recipe_body(makefile_text: str, target: str) -> str:
+    """The recipe body of the `test` or `coverage` target, by name.
+
+    Both targets run `$(PYTEST)`; the OFF_MACHINE_TOKENS sweep below pins
+    both of them, so one dispatcher names the recipe each parametrized case
+    sweeps instead of the sweep reaching into per-target helpers directly.
+    """
+    bodies = {
+        "test": _test_recipe_body(makefile_text),
+        "coverage": _coverage_recipe_body(makefile_text),
+    }
+    assert target in bodies, f"no pytest recipe known for target {target!r}"
+    return bodies[target]
 
 
 def _lint_secrets_recipe_body(makefile_text: str) -> str:
@@ -312,9 +335,16 @@ def test_validate_requires_lint_and_test() -> None:
 
 
 @pytest.mark.parametrize("token", OFF_MACHINE_TOKENS)
-def test_test_recipe_has_no_off_machine_token(token: str) -> None:
-    """AC-FUNC-005 / AC-TEST-003: the `test` recipe reaches nothing off this machine."""
-    recipe = _test_recipe_body(_makefile_text())
+@pytest.mark.parametrize("target", ["test", "coverage"])
+def test_test_recipe_has_no_off_machine_token(target: str, token: str) -> None:
+    """AC-FUNC-005 / AC-TEST-003: neither pytest recipe reaches off this machine.
+
+    Parametrized over `test` and `coverage` together: both run `$(PYTEST)`
+    on this host, so both are held to the same hermetic contract (the
+    coverage recipe's expanded pytest command carries no container engine,
+    cloud CLI, remote shell or HTTP token either).
+    """
+    recipe = _pytest_recipe_body(_makefile_text(), target)
     assert token not in recipe.lower()
 
 
@@ -351,6 +381,118 @@ def test_help_quality_section_carries_test_and_lint_secrets_rows() -> None:
     help_recipe = _help_recipe_body(_makefile_text())
     assert '"make test"' in help_recipe
     assert '"make lint-secrets"' in help_recipe
+
+
+# ---------------------------------------------------------------------------
+# The `coverage` target (Track A task-runner encapsulation): CI's coverage
+# gate as a Makefile target, so the exact coverage command CI runs lives in
+# exactly one place and a local run reproduces a red CI step verbatim. The
+# recipe reuses $(PYTEST) -- the same runner and prerequisite guard `test`
+# uses -- rather than restating the pytest command, and expands the package
+# path and fail-under flag CI's step used to inline; those two constants are
+# imported from tests/test_ci_workflow.py, which owns their pyproject parity
+# comments, so CI step, Makefile recipe and pyproject cannot name different
+# trees or thresholds.
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_target_is_phony() -> None:
+    """`coverage` is declared `.PHONY`, the same as every other command target."""
+    assert "coverage" in _phony_targets(_makefile_text())
+
+
+def test_coverage_recipe_expands_pytest_with_the_cov_gate() -> None:
+    """The coverage recipe is the exact CI coverage command, through $(PYTEST)."""
+    recipe = _coverage_recipe_body(_makefile_text())
+    expected = f"$(PYTEST) --cov={_PACKAGE_COVERAGE_PATH} {_COVERAGE_FAIL_UNDER_FLAG}"
+    assert expected in recipe, (
+        f"the coverage recipe must expand to {expected!r}; recipe was: {recipe!r}"
+    )
+
+
+def test_coverage_recipe_reuses_pytest_instead_of_restating_the_command() -> None:
+    """No second pytest command line: the recipe goes through $(PYTEST) only."""
+    recipe = _coverage_recipe_body(_makefile_text())
+    assert "$(PYTEST)" in recipe
+    assert "uv run" not in recipe, (
+        "the coverage recipe must not restate the uv invocation PYTEST already names"
+    )
+
+
+def test_coverage_recipe_guards_the_prerequisite_tools_before_pytest() -> None:
+    """The coverage run passes the same tool guard `test` passes, in the same order."""
+    recipe = _coverage_recipe_body(_makefile_text())
+    guard_index = recipe.find('command -v "$$tool"')
+    pytest_index = recipe.index("$(PYTEST)")
+    assert guard_index != -1, 'no `command -v "$$tool"` guard loop found in the coverage recipe'
+    assert guard_index < pytest_index, "the guard loop must precede the $(PYTEST) invocation"
+    loop = re.search(r"for tool in (\S+); do", recipe)
+    assert loop is not None, "no `for tool in ...; do` guard loop found in the coverage recipe"
+    assert _resolve_make_refs(_makefile_text(), loop.group(1)) == "uv zsh", (
+        "the coverage guard must iterate the same TEST_PREREQUISITE_TOOLS `test` guards"
+    )
+
+
+def test_coverage_help_row_advertised_once_in_quality() -> None:
+    help_recipe = _help_recipe_body(_makefile_text())
+    coverage_rows = [line for line in help_recipe.splitlines() if '"make coverage"' in line]
+    assert len(coverage_rows) == 1, "make help must advertise coverage exactly once"
+    assert '"host"' in coverage_rows[0]
+
+
+# ---------------------------------------------------------------------------
+# The prose gate (Track A): `lint-prose` in the lint composition and
+# .PHONY, the `PROSE_FILES` derivation's excludes, and the checker on disk.
+# The checker's behavior is pinned in tests/test_prose_style.py; this file
+# is the established home for the Makefile wiring (the same role
+# `test_lint_secrets_recipe_forwards_range_variable_to_the_cli` and
+# `test_validate_requires_lint_and_test` play for their targets).
+# ---------------------------------------------------------------------------
+
+
+def test_lint_composition_carries_the_prose_gate_between_spell_and_secrets() -> None:
+    """lint runs the prose gate after lint-spell and before lint-secrets."""
+    match = re.search(r"^lint:(.*)$", _makefile_text(), re.MULTILINE)
+    assert match is not None, "no lint target found in Makefile"
+    prerequisites = match.group(1).split()
+    assert "lint-prose" in prerequisites, "the lint composition must run the prose gate"
+    assert "lint-secrets" in prerequisites, "the lint composition must keep the secrets scan"
+    assert "lint-spell" in prerequisites, "the lint composition must keep the spelling pass"
+    assert (
+        prerequisites.index("lint-spell")
+        < prerequisites.index("lint-prose")
+        < prerequisites.index("lint-secrets")
+    ), "lint-prose must sit after lint-spell and before lint-secrets"
+
+
+def test_lint_prose_target_is_phony() -> None:
+    assert "lint-prose" in _phony_targets(_makefile_text())
+
+
+def test_lint_prose_recipe_runs_the_checker_over_prose_files() -> None:
+    """The target executes .devcontainer/lint-prose.py over $(PROSE_FILES), nothing else."""
+    recipe = _target_recipe_body(_makefile_text(), "lint-prose")
+    assert "python3 .devcontainer/lint-prose.py $(PROSE_FILES)" in recipe
+
+
+def test_prose_files_derivation_carries_the_three_excludes() -> None:
+    """PROSE_FILES is the MD_FILES find minus the skills roster, CLAUDE.md and tests/."""
+    match = re.search(r"^PROSE_FILES \?= (.+)$", _makefile_text(), re.MULTILINE)
+    assert match is not None, "no PROSE_FILES derivation found in Makefile"
+    derivation = match.group(1)
+    assert "-name '*.md'" in derivation
+    assert "$(LINT_EXCLUDES)" in derivation, "PROSE_FILES must derive from LINT_EXCLUDES"
+    assert "-not -path './.agents/skills/*'" in derivation
+    assert "-not -name 'CLAUDE.md'" in derivation
+    assert "-not -path './tests/*'" in derivation
+
+
+def test_prose_checker_exists_beside_its_json_sibling() -> None:
+    root = find_root(Path(__file__).resolve().parent)
+    assert (root / ".devcontainer" / "lint-prose.py").is_file()
+    assert (root / ".devcontainer" / "lint-json.py").is_file(), (
+        "lint-prose.py follows lint-json.py's register; the sibling must stay"
+    )
 
 
 @pytest.mark.parametrize("tool", TEST_PREREQUISITE_TOOLS)

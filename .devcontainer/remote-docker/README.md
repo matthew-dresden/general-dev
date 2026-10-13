@@ -1,12 +1,8 @@
 # remote-docker. Remote Docker engines for devcontainers (EC2 and azure)
 
-Laptop-side tooling that connects VS Code Dev Containers to a Docker engine
-running on a remote instance — an EC2 instance over an AWS SSM port forward,
-or an Azure virtual machine over an Azure Relay hybrid connection, each
-secured with mTLS. Devcontainers run **on the instance**, with source code
-cloned into named
-Docker volumes there, so containers keep running and lose nothing when the
-laptop disconnects, sleeps, or shuts down.
+Laptop-side tooling that connects VS Code Dev Containers to a Docker engine running on a remote instance: an EC2 instance over an AWS SSM port forward, or an Azure virtual machine over an Azure Relay hybrid connection, each secured with mTLS.
+
+- Devcontainers run **on the instance**, with source code cloned into named Docker volumes there, so containers keep running and lose nothing when the laptop disconnects, sleeps, or shuts down.
 
 ## Architecture
 
@@ -30,69 +26,42 @@ flowchart LR
   ps -- "read at container create\nvia instance role (IMDSv2)" --> ctr
 ```
 
-- **No inbound access:** the security group has zero inbound rules. All
-  connectivity is outbound SSM. The docker API is authenticated by mutual TLS,
-  and the daemon's TLS listener is bound to loopback on the instance, so the
-  port forward is the only way to reach it. There is no SSH layer, no key pair
-  and no interactive path to the host at all.
-  The azure kind carries the same doctrine in that cloud's vocabulary: its
-  network security group's rule list is empty, its VM has no public IP, and
-  the transport is an Azure Relay hybrid connection whose listener is a unit
-  on the VM dialing *outward* to the relay service — the laptop's forward is
-  the sender half, authorized by Entra, and the mTLS docker API rides it to
-  the same loopback listener.
-- **Survives disconnects:** `shutdownAction: "none"` in devcontainer.json keeps
-  containers running when VS Code detaches; `live-restore` keeps them running
-  across dockerd restarts; source lives in Docker volumes on the instance.
-- **Secrets:** never in git. `push-secrets.sh` publishes the local gitignored
-  `shell.env` / `aws-profile-map.json` to SSM Parameter Store per project; the
-  postcreate wrapper fetches them on the instance via the instance role. An
-  SSH engine (a `remote-instances/<name>/engine.json` manifest) runs with
-  zero AWS: the same transform is seeded into the workspace volume at build
-  time and refreshable in the running container with `make push-secrets`,
-  and Parameter Store is never involved. An azure engine's copies publish to
-  the instance's own Key Vault instead, and the container fetches them with
-  the VM's managed identity — no stored credential anywhere on the azure
-  path.
+- **No inbound access:** the security group has zero inbound rules. All connectivity is outbound SSM.
+  - The docker API is authenticated by mutual TLS, and the daemon's TLS listener is bound to loopback on the instance, so the port forward is the only way to reach it.
+  - There is no SSH layer, no key pair and no interactive path to the host at all.
+  - The azure kind carries the same doctrine in that cloud's vocabulary: its network security group's rule list is empty, its VM has no public IP, and the transport is an Azure Relay hybrid connection whose listener is a unit on the VM dialing *outward* to the relay service; the laptop's forward is the sender half, authorized by Entra, and the mTLS docker API rides it to the same loopback listener.
+- **Survives disconnects:** `shutdownAction: "none"` in devcontainer.json keeps containers running when VS Code detaches; `live-restore` keeps them running across dockerd restarts; source lives in Docker volumes on the instance.
+- **Secrets:** never in git.
+  - `push-secrets.sh` publishes the local gitignored `shell.env` / `aws-profile-map.json` to SSM Parameter Store per project; the postcreate wrapper fetches them on the instance via the instance role.
+  - An SSH engine (a `remote-instances/<name>/engine.json` manifest) runs with zero AWS: the same transform is seeded into the workspace volume at build time and refreshable in the running container with `make push-secrets`, and Parameter Store is never involved.
+  - An azure engine's copies publish to the instance's own Key Vault instead, and the container fetches them with the VM's managed identity, with no stored credential anywhere on the azure path.
 
 ### Questions this design answers
 
-A short exchange on the decisions the architecture forces; each answer links
-the section that goes deeper.
+A short exchange on the decisions the architecture forces; each answer links the section that goes deeper.
 
-<details>
-<summary>Why does <code>docker context show</code> name a port on <code>127.0.0.1</code>?</summary>
+<details><summary>Why does <code>docker context show</code> name a port on <code>127.0.0.1</code>?</summary>
 
-The context's endpoint is `tcp://127.0.0.1:<port>`: the forward's local
-half. The daemon itself is on the instance, bound to its own loopback, and
-the certificate the client presents is what authenticates you; the port
-number is only where the tunnel answers. See
-[Transport](../../docs/devcontainer.md) in the deep dive.
+- The context's endpoint is `tcp://127.0.0.1:<port>`: the forward's local half.
+- The daemon itself is on the instance, bound to its own loopback, and the certificate the client presents is what authenticates you; the port number is only where the tunnel answers.
+- See [Transport](../../docs/devcontainer.md) in the deep dive.
 
 </details>
 
-<details>
-<summary>What happens when the forward drops?</summary>
+<details><summary>What happens when the forward drops?</summary>
 
-Containers keep running (`shutdownAction: "none"`); only your laptop's
-route to the engine is gone. `make connect-status` names the daemon's
-state, `make connect-refresh` reopens it from the recorded command, and
-`make remote` is the one-step version that also points docker at it. If
-the SSO session expired, the refresh says so: `aws sso login --profile
-<profile>`, then refresh again. See the "Daily workflow, connect &
-disconnect" section below.
+- Containers keep running (`shutdownAction: "none"`); only your laptop's route to the engine is gone.
+- `make connect-status` names the daemon's state, `make connect-refresh` reopens it from the recorded command, and `make remote` is the one-step version that also points docker at it.
+- If the SSO session expired, the refresh says so: `aws sso login --profile <profile>`, then refresh again.
+- See the "Daily workflow, connect & disconnect" section below.
 
 </details>
 
-<details>
-<summary>Where do the certificates live, and who reads them?</summary>
+<details><summary>Where do the certificates live, and who reads them?</summary>
 
-Under `~/.docker/certs/<instance>/` on the laptop, one directory per
-instance: the client certificate `make connect-start` presents, the
-recorded EC2 id, and the trust chain. `make cert-status` reports client
-and CA expiry per instance; renewal is `make cert-client`, and the server
-half is `make cert-publish` + `make cert-install`. See
-[Certificate lifecycle](../../docs/devcontainer.md).
+- Under `~/.docker/certs/<instance>/` on the laptop, one directory per instance: the client certificate `make connect-start` presents, the recorded EC2 id, and the trust chain.
+- `make cert-status` reports client and CA expiry per instance; renewal is `make cert-client`, and the server half is `make cert-publish` + `make cert-install`.
+- See [Certificate lifecycle](../../docs/devcontainer.md).
 
 </details>
 
@@ -102,10 +71,8 @@ half is `make cert-publish` + `make cert-install`. See
 - [session-manager-plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 - docker CLI (a local engine is not required)
 - git
-- azure CLI (`brew install azure-cli`), needed only for azure engines and
-  logged in with `az login` before one is provisioned or connected to
-- Client certificate material for the instance, issued by `make cert-status`'s
-  module (`~/.docker/certs/<instance>/`)
+- azure CLI (`brew install azure-cli`), needed only for azure engines and logged in with `az login` before one is provisioned or connected to
+- Client certificate material for the instance, issued by `make cert-status`'s module (`~/.docker/certs/<instance>/`)
 
 `make build` / `make rebuild` additionally need:
 
@@ -114,19 +81,12 @@ npm install -g @devcontainers/cli
 brew install jq            # and python3, used to compare timestamps
 ```
 
-Every target checks its own prerequisites and fails with the install command
-for whatever is missing. All of the above applies to the remote engine only:
-on a machine that only ever targets a local engine, none of the `REMOTE_*`
-configuration needs to exist, and only the remote targets (`connect`, `shell`,
-`push-secrets`) and commands run while the remote context is active validate
-it.
+- Every target checks its own prerequisites and fails with the install command for whatever is missing.
+- All of the above applies to the remote engine only: on a machine that only ever targets a local engine, none of the `REMOTE_*` configuration needs to exist, and only the remote targets (`connect`, `shell`, `push-secrets`) and commands run while the remote context is active validate it.
 
 ## Scripts
 
-The repo-root `Makefile` is the front door, run `make help` for detailed
-documentation of every operation. It contains no logic of its own; each target
-delegates to one of these scripts, so there is a single implementation per
-operation and both entry points stay in step.
+The repo-root `Makefile` is the front door, run `make help` for detailed documentation of every operation. It contains no logic of its own; each target delegates to one of these scripts, so there is a single implementation per operation and both entry points stay in step.
 
 | Script | Purpose |
 |---|---|
@@ -141,36 +101,27 @@ operation and both entry points stay in step.
 ## Launching a project on the remote engine
 
 1. Push the project repo to GitHub (must be reachable from VS Code).
-2. `./push-secrets.sh`, once per project (re-run after token rotation or
-   template changes). Use `PROJECT_NAME=<repo-basename> ./push-secrets.sh` for
-   other projects.
-3. `make connect`, which opens the SSM port forward and activates the
-   instance's docker context.
-4. VS Code → **Dev Containers: Clone Repository in Container Volume…** →
-   pick the GitHub repo. The postcreate wrapper bootstraps `shell.env` and
-   `aws-profile-map.json` from Parameter Store automatically.
-5. Reconnect later (any laptop state): run `make connect`, then VS Code →
-   **Dev Containers: Attach to Running Container…** (or reopen the recent
-   workspace entry). The container was running the whole time.
+2. `./push-secrets.sh`, once per project (re-run after token rotation or template changes). Use `PROJECT_NAME=<repo-basename> ./push-secrets.sh` for other projects.
+3. `make connect`, which opens the SSM port forward and activates the instance's docker context.
+4. VS Code → **Dev Containers: Clone Repository in Container Volume…** → pick the GitHub repo. The postcreate wrapper bootstraps `shell.env` and `aws-profile-map.json` from Parameter Store automatically.
+5. Reconnect later (any laptop state): run `make connect`, then VS Code → **Dev Containers: Attach to Running Container…** (or reopen the recent workspace entry). The container was running the whole time.
 
-Multiple projects run concurrently: each clone-in-volume creates its own
-volume + container on the shared engine.
+Multiple projects run concurrently: each clone-in-volume creates its own volume + container on the shared engine.
 
 ### Naming instances
 
-New containers are created as `<repo>-<devcontainerId>` (`runArgs` in
-`devcontainer.json`) instead of taking Docker's random names. The id keeps
-every instance distinct, so several clones of the *same* repo coexist, but it
-is ~50 characters, which is no help in the **Attach to Running Container**
-list. Rename each instance to what it is actually for:
+New containers are created as `<repo>-<devcontainerId>` (`runArgs` in `devcontainer.json`) instead of taking Docker's random names.
+
+- The id keeps every instance distinct, so several clones of the *same* repo coexist, but it is ~50 characters, which is no help in the **Attach to Running Container** list.
+- Rename each instance to what it is actually for:
 
 ```bash
 make rename NAME=general-dev-review
 ```
 
-Because every instance of a repo carries the same `devcontainer.config_file`
-label, targets that act on a single container refuse to guess between them.
-`make status` lists them all; `CONTAINER=<name>` selects one:
+Because every instance of a repo carries the same `devcontainer.config_file` label, targets that act on a single container refuse to guess between them.
+
+- `make status` lists them all; `CONTAINER=<name>` selects one:
 
 ```bash
 make stop CONTAINER=general-dev-review
@@ -179,31 +130,18 @@ make clean CONTAINER=general-dev-review
 
 ## Daily workflow, connect & disconnect
 
-One-time setup of this machine (host tools, the SSO profile, and the
-certificate authority and client certificate this transport presents) is what
-the `gd-env-setup-local` and `gd-env-setup-remote` skills do.
-They ask what they need, state any command they cannot run themselves, and
-verify the result rather than assuming it.
+- One-time setup of this machine (host tools, the SSO profile, and the certificate authority and client certificate this transport presents) is what the `gd-env-setup-local` and `gd-env-setup-remote` skills do.
+- They ask what they need, state any command they cannot run themselves, and verify the result rather than assuming it.
 
-The `make` targets run from the repository root and cover the whole lifecycle;
-`make help` documents them. There are no shell aliases: the Makefile already
-gives every capability an alias would wrap, and aliases are one more thing to
-keep in step with it.
+- The `make` targets run from the repository root and cover the whole lifecycle; `make help` documents them.
+- There are no shell aliases: the Makefile already gives every capability an alias would wrap, and aliases are one more thing to keep in step with it.
 
-To drive several engines at once, one per project instance under
-`remote-instances/` plus this machine's own, prefix `ENGINE=local` or
-`ENGINE=<instance-name>` instead of switching contexts; see
-[docs/environment-setup.md](../../docs/environment-setup.md)'s "Working
-with several engines at once", and `make list-instances` for what exists.
+- To drive several engines at once, one per project instance under `remote-instances/` plus this machine's own, prefix `ENGINE=local` or `ENGINE=<instance-name>` instead of switching contexts; see [docs/environment-setup.md](../../docs/environment-setup.md)'s "Working with several engines at once", and `make list-instances` for what exists.
 
 **Connect (or reconnect after sleep/reboot/SSO expiry):**
 
-1. `make connect`, if it fails with an auth error, run
-   `aws sso login --profile default` first.
-2. VS Code → new window → **Dev Containers: Attach to Running Container…**
-   → pick the `vsc-<project>…` container. Your container was running the
-   whole time; terminals and processes inside it are exactly where you left
-   them (a Claude session that lost its terminal resumes with `ccdr`).
+1. `make connect`, if it fails with an auth error, run `aws sso login --profile default` first.
+2. VS Code → new window → **Dev Containers: Attach to Running Container…** → pick the `vsc-<project>…` container. Your container was running the whole time; terminals and processes inside it are exactly where you left them (a Claude session that lost its terminal resumes with `ccdr`).
 
 > Always reconnect via **Attach to Running Container**. Do NOT reopen the
 > "… in volume" Open Recent entry: the extension's clone-in-volume reattach
@@ -214,20 +152,15 @@ with several engines at once", and `make list-instances` for what exists.
 
 **Disconnect, there is nothing to shut down:**
 
-- Just close the VS Code window (or sleep/shut the Mac). Containers on EC2
-  keep running (`shutdownAction: "none"`), including any long-lived agent
-  sessions inside them.
-- `make disconnect` is only needed when you want NEW VS Code / docker
-  operations to target the local OrbStack engine again. It stops nothing
-  remotely, and already-open remote windows are unaffected.
+- Just close the VS Code window (or sleep/shut the Mac). Containers on EC2 keep running (`shutdownAction: "none"`), including any long-lived agent sessions inside them.
+- `make disconnect` is only needed when you want NEW VS Code / docker operations to target the local OrbStack engine again. It stops nothing remotely, and already-open remote windows are unaffected.
 
 ### Git credentials when nothing is attached
 
-While VS Code is attached, the Dev Containers extension forwards the laptop's
-git credentials into the container, so git "just works". Detach, which is the
-point of the tmux session above, and that forwarding is gone. An unattended
-agent can commit but cannot push unless the container holds credentials of its
-own.
+While VS Code is attached, the Dev Containers extension forwards the laptop's git credentials into the container, so git "just works".
+
+- Detach, which is the point of the tmux session above, and that forwarding is gone.
+- An unattended agent can commit but cannot push unless the container holds credentials of its own.
 
 So the container gets a credential of its own:
 
@@ -235,23 +168,18 @@ So the container gets a credential of its own:
 make push-creds
 ```
 
-`make build` runs this as its final step, so a freshly built container already
-has one. Run it again whenever the credential on your machine changes or is
-revoked.
+- `make build` runs this as its final step, so a freshly built container already has one.
+- Run it again whenever the credential on your machine changes or is revoked.
 
-It copies whatever credential already works **on this machine**, asked for via
-`git credential fill`, so it uses your configured helper (osxkeychain on macOS,
-libsecret / gh / store on Linux) with no separate token to maintain. The secret
-travels on stdin, so it appears in neither the exec's arguments nor its inspect
-output, and lands in `~/.git-credentials` mode 600. The command then proves it
-works with `git ls-remote` and fails if the remote rejects it.
+It copies whatever credential already works **on this machine**, asked for via `git credential fill`, so it uses your configured helper (osxkeychain on macOS, libsecret / gh / store on Linux) with no separate token to maintain.
+
+- The secret travels on stdin, so it appears in neither the exec's arguments nor its inspect output, and lands in `~/.git-credentials` mode 600.
+- The command then proves it works with `git ls-remote` and fails if the remote rejects it.
 
 > The credential is stored in a file on the shared engine. Anyone with docker
 > access to that instance can read it.
 
-postCreate writes no credential. It only sets `credential.helper
-store` and the SSH→HTTPS URL rewrite; `GIT_AUTH_METHOD`, `GIT_TOKEN` and the
-ssh-key path in `shell.env` are never consulted.
+postCreate writes no credential. It only sets `credential.helper store` and the SSH→HTTPS URL rewrite; `GIT_AUTH_METHOD`, `GIT_TOKEN` and the ssh-key path in `shell.env` are never consulted.
 
 To check a container's credentials directly, with no VS Code window attached:
 
@@ -260,29 +188,23 @@ docker exec -u vscode <container> bash -lc \
   'cd /workspaces/<project> && GIT_TERMINAL_PROMPT=0 git ls-remote origin'
 ```
 
-`could not read Username` means it has none, run `make push-creds`. Local
-commands like `git status` and `make check` keep working regardless, so this
-failure stays hidden until something tries to push.
+- `could not read Username` means it has none, run `make push-creds`.
+- Local commands like `git status` and `make check` keep working regardless, so this failure stays hidden until something tries to push.
 
 ### Keeping work running across a disconnect
 
-VS Code **terminates terminal processes when the window closes**. Terminal
-persistence (`persistentSessionReviveProcess`) restores the tab and its
-scrollback and starts a fresh shell, a command that was mid-run does not
-resume. No VS Code setting changes that.
+VS Code **terminates terminal processes when the window closes**.
 
-So every terminal opens inside a shared tmux session named `main`
-(`terminal.integrated.profiles.linux` in `devcontainer.json`). The tmux server
-is a daemon VS Code does not own, so anything running in it, a Claude session,
-a long build, survives the window closing. Reattach to the container, open a
-terminal, and you are back in the same session with the work still going.
-Nothing to remember on the way out; `-A` attaches to the existing session or
-creates it.
+- Terminal persistence (`persistentSessionReviveProcess`) restores the tab and its scrollback and starts a fresh shell; a command that was mid-run does not resume.
+- No VS Code setting changes that.
 
-Inside the container, `tm-help` lists every command and key binding. Type
-`tm` and press Tab to discover them; each also takes `--help` for detail.
-They are defined in `.devcontainer/tmux-commands.sh`, sourced into bash and
-zsh by postcreate.
+So every terminal opens inside a shared tmux session named `main` (`terminal.integrated.profiles.linux` in `devcontainer.json`).
+
+- The tmux server is a daemon VS Code does not own, so anything running in it, a Claude session, a long build, survives the window closing.
+- Reattach to the container, open a terminal, and you are back in the same session with the work still going.
+- Nothing to remember on the way out; `-A` attaches to the existing session or creates it.
+
+Inside the container, `tm-help` lists every command and key binding. Type `tm` and press Tab to discover them; each also takes `--help` for detail. They are defined in `.devcontainer/tmux-commands.sh`, sourced into bash and zsh by postcreate.
 
 | Command | Does |
 |---|---|
@@ -300,16 +222,11 @@ zsh by postcreate.
 | `tm-session-kill-all` | Kill every session |
 | `tm-help` | All commands and key bindings |
 
-Every window and pane runs zsh. tmux opens `default-shell`, which is the
-account's login shell and is bash here, so the terminal profile's `zsh`
-argument only applied when it *created* the session: attaching to an existing
-one, or opening a window with `Ctrl+b c`, landed in bash. `tmux.conf` sets
-`default-shell`, and postcreate rewrites that line with the zsh it resolved,
-since a committed config cannot know where zsh was installed.
+- Every window and pane runs zsh.
+- tmux opens `default-shell`, which is the account's login shell and is bash here, so the terminal profile's `zsh` argument only applied when it *created* the session: attaching to an existing one, or opening a window with `Ctrl+b c`, landed in bash.
+- `tmux.conf` sets `default-shell`, and postcreate rewrites that line with the zsh it resolved, since a committed config cannot know where zsh was installed.
 
-A session holds windows, a window holds panes. A window is a whole screen,
-like a tab, and only one is visible at a time; panes are splits inside the
-window you are looking at, and are all visible together.
+A session holds windows, a window holds panes. A window is a whole screen, like a tab, and only one is visible at a time; panes are splits inside the window you are looking at, and are all visible together.
 
 | Key | Does |
 |---|---|
@@ -321,31 +238,20 @@ window you are looking at, and are all visible together.
 | `Ctrl+b [` | Scroll back (`q` exits) |
 | Plain non-persistent shell | pick the `zsh` profile from the terminal dropdown |
 
-The terminal dropdown offers three profiles. `tmux` is the default and always
-opens the shared `main` session. `tmux: pick session` runs `tm-session-pick`, which
-lists the sessions that exist and opens the one you name, creating it if the
-name is new. `zsh` is a plain shell outside tmux. A VS Code profile is fixed
-configuration and cannot list sessions that did not exist when the container
-was built, which is why the choice is made by `tm-session-pick` rather than by more
-profiles.
+- The terminal dropdown offers three profiles.
+- `tmux` is the default and always opens the shared `main` session.
+- `tmux: pick session` runs `tm-session-pick`, which lists the sessions that exist and opens the one you name, creating it if the name is new.
+- `zsh` is a plain shell outside tmux.
+- A VS Code profile is fixed configuration and cannot list sessions that did not exist when the container was built, which is why the choice is made by `tm-session-pick` rather than by more profiles.
 
-The `b` is lowercase and takes no Shift: hold Ctrl, tap `b`, release both, then
-press the second key on its own. Shift appears only when the character itself
-needs it, as in `%` and `"`.
+The `b` is lowercase and takes no Shift: hold Ctrl, tap `b`, release both, then press the second key on its own. Shift appears only when the character itself needs it, as in `%` and `"`.
 
-`.devcontainer/tmux.conf`, installed to `~/.tmux.conf` by postcreate, turns the
-mouse on: the wheel scrolls the pane's own history, clicking focuses a pane,
-and dragging a border resizes one. Without it tmux ignores the wheel and the
-terminal falls back to sending arrow keys, which walks shell history and prints
-`^[[A`. It also raises tmux's scrollback from its 2000-line default to the
-100000 that `devcontainer.json` asks VS Code for, since tmux keeps its own and
-would otherwise discard everything past 2000. Mouse selection becomes tmux's
-rather than the terminal's, so hold Shift while dragging to select for the
-system clipboard.
+- `.devcontainer/tmux.conf`, installed to `~/.tmux.conf` by postcreate, turns the mouse on: the wheel scrolls the pane's own history, clicking focuses a pane, and dragging a border resizes one.
+- Without it tmux ignores the wheel and the terminal falls back to sending arrow keys, which walks shell history and prints `^[[A`.
+- It also raises tmux's scrollback from its 2000-line default to the 100000 that `devcontainer.json` asks VS Code for, since tmux keeps its own and would otherwise discard everything past 2000.
+- Mouse selection becomes tmux's rather than the terminal's, so hold Shift while dragging to select for the system clipboard.
 
-Because every VS Code terminal attaches to the *same* session, opening a second
-terminal tab mirrors the first. Use tmux windows rather than VS Code tabs to
-run several things side by side.
+Because every VS Code terminal attaches to the *same* session, opening a second terminal tab mirrors the first. Use tmux windows rather than VS Code tabs to run several things side by side.
 
 What this does and does not survive:
 
@@ -355,14 +261,11 @@ What this does and does not survive:
 | Losing the SSM tunnel or SSO session | yes |
 | `make stop` / `make restart` / container recreate | **no**, the tmux server dies with the container |
 
-tmux is installed via `EXTRA_APT_PACKAGES` in `shell.env`, so it is published
-to Parameter Store by `make push-secrets` and installed by postCreate. A
-container built before that variable was set will not have it.
+tmux is installed via `EXTRA_APT_PACKAGES` in `shell.env`, so it is published to Parameter Store by `make push-secrets` and installed by postCreate. A container built before that variable was set will not have it.
 
 ## Stopping and rebuilding a project container
 
-Pick the smallest operation that does what you need, a full teardown throws
-away the checkout in the volume.
+Pick the smallest operation that does what you need; a full teardown throws away the checkout in the volume.
 
 | Goal | Do this | Checkout in the volume |
 |---|---|---|
@@ -379,18 +282,16 @@ away the checkout in the volume.
 
 ### First: the volume is the only copy of your work
 
-The clone-in-volume checkout is a working tree independent of your Mac. What
-you change there is on neither the Mac nor GitHub until you push it *from
-inside the container*, and a rebuild re-clones from `origin`, so anything
-unpushed does not come back.
+The clone-in-volume checkout is a working tree independent of your Mac.
+
+- What you change there is on neither the Mac nor GitHub until you push it *from inside the container*, and a rebuild re-clones from `origin`, so anything unpushed does not come back.
 
 ```bash
 make check          # exits non-zero if the volume holds uncommitted or unpushed work
 ```
 
-`make clean` and `make rebuild` run this first and refuse to destroy a dirty
-checkout; `make clean FORCE=1` overrides that deliberately. The underlying
-query, if you want to run it by hand:
+- `make clean` and `make rebuild` run this first and refuse to destroy a dirty checkout; `make clean FORCE=1` overrides that deliberately.
+- The underlying query, if you want to run it by hand:
 
 ```bash
 docker exec -u vscode <container> git -C /workspaces/<project> status --short
@@ -430,13 +331,11 @@ docker inspect <container> --format '{{json .Mounts}}'
 make clean
 ```
 
-It reads the container's own mounts before removing it, so the volumes it
-deletes are the ones actually attached, not guessed from a naming convention, then removes the container, those volumes, and the image. `minikube-config` and
-`vscode` (the Dev Containers extension's engine-wide server cache) are
-excluded as shared (`SHARED_VOLUMES` overrides the list), the VS Code server
-volume is excluded by its mount point, and `devcontainer-base:noble` and
-`vsc-volume-bootstrap` stay cached: they hold no project state and make the
-rebuild faster.
+It reads the container's own mounts before removing it, so the volumes it deletes are the ones actually attached, not guessed from a naming convention, then removes the container, those volumes, and the image.
+
+- `minikube-config` and `vscode` (the Dev Containers extension's engine-wide server cache) are excluded as shared (`SHARED_VOLUMES` overrides the list).
+- The VS Code server volume is excluded by its mount point.
+- `devcontainer-base:noble` and `vsc-volume-bootstrap` stay cached: they hold no project state and make the rebuild faster.
 
 The equivalent by hand:
 
@@ -454,21 +353,13 @@ make build      # create the container
 make rebuild    # clean, then build
 ```
 
-Both block until the container is actually up, through the image build *and*
-postCreate, and exit non-zero if either fails, so they are safe to script.
-`rebuild` checks every prerequisite before destroying anything, so a missing
-tool cannot leave you with neither a container nor a way to create one.
+- Both block until the container is actually up, through the image build *and* postCreate, and exit non-zero if either fails, so they are safe to script.
+- `rebuild` checks every prerequisite before destroying anything, so a missing tool cannot leave you with neither a container nor a way to create one.
 
 What `build` does:
 
-1. Clones the repo from **origin** into a volume named `<repo>-<branch>` on the
-   engine, using the cached base image, then hands the tree to the container's
-   uid.
-2. Generates an override config, the resolved `devcontainer.json` with
-   `workspaceMount` pointed at that volume and `build.dockerfile` and
-   `build.context` rewritten absolute, since the override lives in a temp file
-   and the CLI resolves relative paths against it. The committed file is
-   untouched, so local builds still bind-mount normally.
+1. Clones the repo from **origin** into a volume named `<repo>-<branch>` on the engine, using the cached base image, then hands the tree to the container's uid.
+2. Generates an override config, the resolved `devcontainer.json` with `workspaceMount` pointed at that volume and `build.dockerfile` and `build.context` rewritten absolute, since the override lives in a temp file and the CLI resolves relative paths against it. The committed file is untouched, so local builds still bind-mount normally.
 3. Runs `devcontainer up` against it.
 
 It refuses to start, before touching anything, when:
@@ -479,12 +370,8 @@ It refuses to start, before touching anything, when:
 | `.devcontainer` has uncommitted changes | config is read from your machine while the checkout comes from origin, so the container would not contain the config that built it | `FORCE=1` |
 | `shell.env` newer than the copy in Parameter Store | postCreate bootstraps it from there, so the container would come up with stale configuration | `SKIP_SECRETS_CHECK=1` |
 
-VS Code → **Dev Containers: Clone Repository in Container Volume…** still works
-and produces an equivalent container, `make build` exists because it blocks,
-reports an exit code, and can be scripted.
-
-Reconnect on later sessions with **Attach to Running Container…** per the
-warning above.
+- VS Code → **Dev Containers: Clone Repository in Container Volume…** still works and produces an equivalent container; `make build` exists because it blocks, reports an exit code, and can be scripted.
+- Reconnect on later sessions with **Attach to Running Container…** per the warning above.
 
 ## Instance reference (sandbox `<aws-account-id>`, us-east-1)
 
@@ -497,80 +384,42 @@ warning above.
 | Storage | 100GB gp3 root + 1TB gp3 (6000 IOPS / 500 MB/s) ext4 `-i 8192` at `/var/lib/docker` |
 | Protections | API termination + stop protection enabled; IMDSv2 required, hop limit 2 |
 
-To stop the instance (cost saving), first disable stop protection:
-`aws ec2 modify-instance-attribute --instance-id <ec2-instance-id> --no-disable-api-stop --region us-east-1`
+To stop the instance (cost saving), first disable stop protection: `aws ec2 modify-instance-attribute --instance-id <ec2-instance-id> --no-disable-api-stop --region us-east-1`
 
 ## When something fails
 
-Failures from `docker`, `aws` and the `devcontainer` CLI are translated before
-they reach you. Each one names the cause and the command that fixes it, so a
-message like `conflict: unable to delete ... (must be forced)` arrives as an
-explanation of which other container still holds the image and what to do about
-it. The wrappers are `rd_docker`, `rd_aws` and `rd_devcontainer_up` in
-`lib.sh`; anything with no translation yet still prints the tool's own message,
-labeled as untranslated, rather than a bare exit code.
+Failures from `docker`, `aws` and the `devcontainer` CLI are translated before they reach you.
+
+- Each one names the cause and the command that fixes it, so a message like `conflict: unable to delete ... (must be forced)` arrives as an explanation of which other container still holds the image and what to do about it.
+- The wrappers are `rd_docker`, `rd_aws` and `rd_devcontainer_up` in `lib.sh`.
+- Anything with no translation yet still prints the tool's own message, labeled as untranslated, rather than a bare exit code.
 
 Two rules keep it honest, and both matter when editing these scripts:
 
-- Only calls where a non-zero status is an *error* go through the wrappers.
-  Where it is an *answer*, such as "does this volume exist" or "is this branch
-  ahead of its upstream", the command is called directly and the caller reads
-  the status. `rdc_exec` and `rdc_exec_probe` in `container.sh` are that
-  distinction made explicit.
-- On the bash 3.2 that macOS ships, `set -e` does not apply inside a command
-  substitution. A helper that fails there ends only its own subshell, and its
-  caller carries on with an empty value and reports something else. Anything
-  capturing the output of a function that can fail therefore writes
-  `x="$(f)" || exit $?` rather than relying on `set -e`.
+- Only calls where a non-zero status is an *error* go through the wrappers. Where it is an *answer*, such as "does this volume exist" or "is this branch ahead of its upstream", the command is called directly and the caller reads the status. `rdc_exec` and `rdc_exec_probe` in `container.sh` are that distinction made explicit.
+- On the bash 3.2 that macOS ships, `set -e` does not apply inside a command substitution. A helper that fails there ends only its own subshell, and its caller carries on with an empty value and reports something else. Anything capturing the output of a function that can fail therefore writes `x="$(f)" || exit $?` rather than relying on `set -e`.
 
-`devcontainer up` is the exception to capturing anything at all. It renders a
-live log to the terminal for minutes at a time, and redirecting either of its
-streams changes how it writes: capturing stdout to parse its JSON summary made
-the log arrive without carriage returns, so every line started where the
-previous one ended. Nothing is lost by leaving both alone, because the CLI
-prints that summary to stdout *and* stderr, so it is already the last thing on
-screen. Do not redirect either stream here.
+`devcontainer up` is the exception to capturing anything at all.
+
+- It renders a live log to the terminal for minutes at a time, and redirecting either of its streams changes how it writes: capturing stdout to parse its JSON summary made the log arrive without carriage returns, so every line started where the previous one ended.
+- Nothing is lost by leaving both alone, because the CLI prints that summary to stdout *and* stderr, so it is already the last thing on screen.
+- Do not redirect either stream here.
 
 ## Troubleshooting
 
-- **`bind source path does not exist: /Users/<you>/…` when starting a
-  devcontainer:** you used **Reopen in Container** on a local folder while the
-  remote context was active. Bind mounts are resolved by the *daemon*, so the
-  EC2 engine looked for your Mac path and did not find it. There is nothing to
-  fix in `.devcontainer/`, pick the workflow that matches the context:
-  - Remote engine → **Attach to Running Container…** (or clone-in-volume for
-    the first create of a project). Never Reopen in Container.
-  - Local engine → `make disconnect` first, then Reopen in Container.
-
-  The two working trees are independent: the local folder and the
-  `<project>-<branch>-<hash>` volume are separate checkouts that can hold
-  different uncommitted changes. Check both before assuming work is lost, `docker exec -u vscode <container> git -C /workspaces/<project> status`.
-- **`docker version` hangs / SSH fails:** AWS SSO session expired, run
-  `aws sso login --profile default`. Then re-run `make connect`.
-- **An azure connect fails with 401:** the sender's Entra token expired (it
-  lives roughly an hour). Run `az login`, then
-  `make connect-refresh INSTANCE=<name>`.
-- **The azure relay answers 404, no listener:** the VM-side listener stops
-  itself when idle, because azure bills listener-hours while a connected
-  listener exists. `make connect-start INSTANCE=<name>` starts it first
-  (through one `az vm run-command invoke`) and then opens the forward; run
-  that rather than retrying the call that surfaced the 404.
-- **The azure listener refuses to start:** read why with the same channel
-  the start used: `az vm run-command invoke -g <resource-group> --vm-name
-  <vm-name> --command-id RunShellScript --scripts "journalctl -u gd-relay
-  -n 50 --no-pager"`, then take the action its output names.
-- **Every azure probe dashes / the VM is deallocated:**
-  `make instance-start INSTANCE=<name>` starts the VM and waits until its
-  agent reports ready, then `make remote INSTANCE=<name>` re-opens the
-  forward.
-- **Instance not Online in SSM:** check instance state and
-  `aws ssm describe-instance-information` in us-east-1.
-- **postCreate fails with "shell.env not found … SSM bootstrap failed":**
-  `push-secrets.sh` wasn't run for this project, or the parameter prefix
-  differs, the wrapper uses `/devcontainer/<workspace-basename>` by default
-  (override with `DEVCONTAINER_SSM_PREFIX`).
-- **Back to local development:** `make disconnect`, switches to the
-  `LOCAL_DOCKER_CONTEXT` from `config.env` (`orbstack`). The `default` context
-  points at Docker Desktop's socket, which is not what runs on this laptop.
-  Nothing about the remote engine depends on the local one; the local context
-  only matters when you want to build or run containers on the Mac itself.
+- **`bind source path does not exist: /Users/<you>/…` when starting a devcontainer:** you used **Reopen in Container** on a local folder while the remote context was active.
+  - Bind mounts are resolved by the *daemon*, so the EC2 engine looked for your Mac path and did not find it.
+  - There is nothing to fix in `.devcontainer/`; pick the workflow that matches the context:
+    - Remote engine → **Attach to Running Container…** (or clone-in-volume for the first create of a project). Never Reopen in Container.
+    - Local engine → `make disconnect` first, then Reopen in Container.
+  - The two working trees are independent: the local folder and the `<project>-<branch>-<hash>` volume are separate checkouts that can hold different uncommitted changes. Check both before assuming work is lost: `docker exec -u vscode <container> git -C /workspaces/<project> status`.
+- **`docker version` hangs / SSH fails:** AWS SSO session expired, run `aws sso login --profile default`. Then re-run `make connect`.
+- **An azure connect fails with 401:** the sender's Entra token expired (it lives roughly an hour). Run `az login`, then `make connect-refresh INSTANCE=<name>`.
+- **The azure relay answers 404, no listener:** the VM-side listener stops itself when idle, because azure bills listener-hours while a connected listener exists. `make connect-start INSTANCE=<name>` starts it first (through one `az vm run-command invoke`) and then opens the forward; run that rather than retrying the call that surfaced the 404.
+- **The azure listener refuses to start:** read why with the same channel the start used: `az vm run-command invoke -g <resource-group> --vm-name <vm-name> --command-id RunShellScript --scripts "journalctl -u gd-relay -n 50 --no-pager"`, then take the action its output names.
+- **Every azure probe dashes / the VM is deallocated:** `make instance-start INSTANCE=<name>` starts the VM and waits until its agent reports ready, then `make remote INSTANCE=<name>` re-opens the forward.
+- **Instance not Online in SSM:** check instance state and `aws ssm describe-instance-information` in us-east-1.
+- **postCreate fails with "shell.env not found … SSM bootstrap failed":** `push-secrets.sh` wasn't run for this project, or the parameter prefix differs; the wrapper uses `/devcontainer/<workspace-basename>` by default (override with `DEVCONTAINER_SSM_PREFIX`).
+- **Back to local development:** `make disconnect`, switches to the `LOCAL_DOCKER_CONTEXT` from `config.env` (`orbstack`).
+  - The `default` context points at Docker Desktop's socket, which is not what runs on this laptop.
+  - Nothing about the remote engine depends on the local one; the local context only matters when you want to build or run containers on the Mac itself.

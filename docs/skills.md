@@ -1,44 +1,21 @@
 # Skills
 
-The canonical skills home is `.agents/skills/<name>/SKILL.md`. Every skill
-name is prefixed `gd-`, and cross-references between skills use the bare
-`gd-<name>` form, so the roster is agent-agnostic: any agent that can read
-this repository can resolve every name. Claude Code consumes the same
-roster through the plugin's `skills/` entry,
-`.claude/plugins/devcontainer/skills`, which is a relative symlink to
-`../../../.agents/skills`, a pointer rather than a copy, so each skill is
-also reachable as the Claude Code invocation `/devcontainer:gd-<name>`.
+The canonical skills home is `.agents/skills/<name>/SKILL.md`. Every skill name is prefixed `gd-`, and cross-references between skills use the bare `gd-<name>` form, so the roster is agent-agnostic: any agent that can read this repository can resolve every name.
 
-The table below is the skill roster: one row per skill directory under
-`.agents/skills/`. `tests/test_skill_lint.py`'s `check_plugin` asserts the
-row set and the directory set are equal, so the table cannot drift from
-what is actually installed, and enforces the rest of the structural
-contract in the same run:
+- Claude Code consumes the same roster through the plugin's `skills/` entry, `.claude/plugins/devcontainer/skills`, which is a relative symlink to `../../../.agents/skills`.
+- It is a pointer rather than a copy, so each skill is also reachable as the Claude Code invocation `/devcontainer:gd-<name>`.
 
-- `plugin.json`'s `name` equals the plugin directory name, and
-  `marketplace.json` has exactly one `plugins` entry whose `source` resolves
-  to that same directory.
-- `.claude/settings.json` registers the plugin directory as a `directory`
-  marketplace and enables it in `enabledPlugins`.
-- Every `SKILL.md` opens with a `---`-delimited frontmatter block holding a
-  `name` that matches its directory and the `^gd-[a-z0-9]+(-[a-z0-9]+)*$`
-  pattern, and a non-empty `description` no longer than 500 characters
-  (opencode additionally caps descriptions at 1024; both limits are
-  enforced).
-- Every skill that declares `Interview backend: <backend>` restricts
-  `<backend>` to one of `answers.BACKENDS`, and gives a `## Questions`
-  table with header `| Field | Prompt |` whose `Field` column, as a set,
-  equals `answers.required_fields({"backend": <backend>,
-  "aws_config_enabled": True, "host_proxy": True})`.
-- Every skill's `## Checks` table, when its header line matches exactly
-  `| Check | Prevents | Failure message | Remedy |`, must have a unique
-  `Check` name, a unique `Failure message`, and a non-empty `Remedy` in
-  every row.
-- Every bare `gd-<name>` reference, in any `SKILL.md`, in this document, or
-  in `docs/devcontainer.md`, names a skill present in the roster below.
+The table below is the skill roster: one row per skill directory under `.agents/skills/`.
 
-The families in the table's second column are the index `gd-help` maps in
-prose.
+- `tests/test_skill_lint.py`'s `check_plugin` asserts the row set and the directory set are equal, so the table cannot drift from what is actually installed, and enforces the rest of the structural contract in the same run:
+  - `plugin.json`'s `name` equals the plugin directory name, and `marketplace.json` has exactly one `plugins` entry whose `source` resolves to that same directory.
+  - `.claude/settings.json` registers the plugin directory as a `directory` marketplace and enables it in `enabledPlugins`.
+  - Every `SKILL.md` opens with a `---`-delimited frontmatter block holding a `name` that matches its directory and the `^gd-[a-z0-9]+(-[a-z0-9]+)*$` pattern, and a non-empty `description` no longer than 500 characters (opencode additionally caps descriptions at 1024; both limits are enforced).
+  - Every skill that declares `Interview backend: <backend>` restricts `<backend>` to one of `answers.BACKENDS`, and gives a `## Questions` table with header `| Field | Prompt |` whose `Field` column, as a set, equals `answers.required_fields({"backend": <backend>, "aws_config_enabled": True, "host_proxy": True})`.
+  - Every skill's `## Checks` table, when its header line matches exactly `| Check | Prevents | Failure message | Remedy |`, must have a unique `Check` name, a unique `Failure message`, and a non-empty `Remedy` in every row.
+  - Every bare `gd-<name>` reference, in any `SKILL.md`, in this document, or in `docs/devcontainer.md`, names a skill present in the roster below.
+
+The families in the table's second column are the index `gd-help` maps in prose.
 
 | Skill | Invocation |
 |---|---|
@@ -68,12 +45,9 @@ prose.
 
 ## Installing for agents
 
-The roster above serves any agent you run on this Mac; wiring one is the
-`make skills-install` family, driven interactively by `gd-skills-install`
-(undone by `gd-skills-remove`, recorded in an agent's own configuration by
-`gd-skills-scope`). Two selectors form the matrix, both defaulted by the
-Makefile (`AGENT=both`, `SCOPE=global`) and validated with their accepted
-sets named on any other value:
+The roster above serves any agent you run on this Mac; wiring one is the `make skills-install` family, driven interactively by `gd-skills-install` (undone by `gd-skills-remove`, recorded in an agent's own configuration by `gd-skills-scope`).
+
+- Two selectors form the matrix, both defaulted by the Makefile (`AGENT=both`, `SCOPE=global`) and validated with their accepted sets named on any other value:
 
 | AGENT | SCOPE=global | SCOPE=project | SCOPE=runtime |
 |---|---|---|---|
@@ -81,63 +55,38 @@ sets named on any other value:
 | claude | symlink `general-dev-skills` in `~/.claude/skills` | verifies the tracked `.claude/plugins/devcontainer/skills` relative symlink, wiring it if absent | prints the `claude --settings` one-shot |
 | both | both rows above | both rows above | both rows above |
 
-Every cell is a native-Mac operation touching no devcontainer: a
-devcontainer is not an install target, because the roster lives in the
-checkout that builds the container, not in any image.
+Every cell is a native-Mac operation touching no devcontainer: a devcontainer is not an install target, because the roster lives in the checkout that builds the container, not in any image.
 
-The global scope's one symlink points at this checkout's `.agents/skills`
-with an absolute target, which is fine for a Mac-personal install and is recorded
-by the install output and `make skills-list`. Removal is safe next to
-your own skills by construction: `make skills-remove` deletes only a
-symlink whose resolved target is this repository's skills home. A
-personal skill of yours (a real directory, or a link resolving anywhere
-else) is named in a refusal and left untouched, and install likewise
-refuses to replace an existing `general-dev-skills` entry it did not
-create. Nothing outside the one named path is ever addressed.
+The global scope's one symlink points at this checkout's `.agents/skills` with an absolute target, which is fine for a Mac-personal install and is recorded by the install output and `make skills-list`.
 
-The project scope needs no wiring on the opencode side, because
-`.agents/skills` is the checkout opencode runs in, so it is read natively.
-Claude Code's route is the tracked relative symlink
-`.claude/plugins/devcontainer/skills` to `../../../.agents/skills`, which
-project scope verifies and, if absent, wires with exactly that relative
-target. `make skills-remove` deliberately does not undo it: the adapters
-are versioned repository content, so unwiring is a git change to review,
-not an uninstall.
+- Removal is safe next to your own skills by construction: `make skills-remove` deletes only a symlink whose resolved target is this repository's skills home.
+- A personal skill of yours (a real directory, or a link resolving anywhere else) is named in a refusal and left untouched, and install likewise refuses to replace an existing `general-dev-skills` entry it did not create.
+- Nothing outside the one named path is ever addressed.
 
-The runtime scope changes no filesystem state: it prints a one-shot
-incantation for launching the agent against this checkout from outside
-it, and never executes it; the operator decides:
+The project scope needs no wiring on the opencode side, because `.agents/skills` is the checkout opencode runs in, so it is read natively.
+
+- Claude Code's route is the tracked relative symlink `.claude/plugins/devcontainer/skills` to `../../../.agents/skills`, which project scope verifies and, if absent, wires with exactly that relative target.
+- `make skills-remove` deliberately does not undo it: the adapters are versioned repository content, so unwiring is a git change to review, not an uninstall.
+
+The runtime scope changes no filesystem state: it prints a one-shot incantation for launching the agent against this checkout from outside it, and never executes it; the operator decides:
 
 ```sh
 make skills-install AGENT=opencode SCOPE=runtime
 ```
 
-The opencode incantation carries one caveat worth knowing: an
-`OPENCODE_CONFIG` override replaces the project config rather than
-merging with it, so the printed JSON embeds the provider/model block read
-from `.devcontainer/opencode.json` at generation time plus the
-`skills.paths` override. A bare skills-only file would launch opencode
-with no provider at all. The Claude Code incantation is a `--settings`
-one-shot enabling this checkout's plugin marketplace path, printed only
-when the installed build advertises that flag (decided from
-`claude --help` at run time); a build without it gets an explicit
-unsupported message naming the manual fallback instead: install
-globally with `make skills-install AGENT=claude SCOPE=global`, or
-register the marketplace in `~/.claude/settings.json` by hand.
+The opencode incantation carries one caveat worth knowing: an `OPENCODE_CONFIG` override replaces the project config rather than merging with it, so the printed JSON embeds the provider/model block read from `.devcontainer/opencode.json` at generation time plus the `skills.paths` override. A bare skills-only file would launch opencode with no provider at all.
 
-For where this wiring sits in the fresh-machine sequence, see
-[environment-setup.md](environment-setup.md).
+- The Claude Code incantation is a `--settings` one-shot enabling this checkout's plugin marketplace path, printed only when the installed build advertises that flag (decided from `claude --help` at run time).
+- A build without it gets an explicit unsupported message naming the manual fallback instead: install globally with `make skills-install AGENT=claude SCOPE=global`, or register the marketplace in `~/.claude/settings.json` by hand.
+
+For where this wiring sits in the fresh-machine sequence, see [environment-setup.md](environment-setup.md).
 
 ## Flows
 
-Some recurring developer actions are not a single make target but a named
-flow: a judgment, an answer, or a multi-step procedure spanning several
-targets. Each flow below is listed once here and referenced by name in
-every covering skill's body as the backticked `` `flow: <name>` `` marker,
-so the correspondence is exact in both directions:
-`tests/test_skills_coverage.py` fails when a flow listed here is missing
-from a covering skill's body, and when any skill references a flow this
-section does not list.
+Some recurring developer actions are not a single make target but a named flow: a judgment, an answer, or a multi-step procedure spanning several targets.
+
+- Each flow below is listed once here and referenced by name in every covering skill's body as the backticked `` `flow: <name>` `` marker, so the correspondence is exact in both directions.
+- `tests/test_skills_coverage.py` fails when a flow listed here is missing from a covering skill's body, and when any skill references a flow this section does not list.
 
 | Flow | Covering skill(s) |
 |---|---|
@@ -151,13 +100,8 @@ section does not list.
 ## Coverage guarantee
 
 Coverage over the make-target surface is test-enforced.
-`tests/test_skills_coverage.py` parses the live `make help` output and the
-declared names in `tests/data/help-unadvertised.txt`, the same two
-sources `tests/test_help_snapshot.py` uses to account for every `.PHONY`
-target. It fails, naming each uncovered target, if any target in that
-union is referenced by no `SKILL.md` under `.agents/skills`. The same
-suite pins the roster's structure: every `SKILL.md` carries exactly one
-`## Invocation map` heading, the one section where the make targets a
-skill drives are declared. A make target added without a covering skill, a
-skill body losing its invocation map, and a flow drifting on either side
-of the table above each fail `make test`.
+
+- `tests/test_skills_coverage.py` parses the live `make help` output and the declared names in `tests/data/help-unadvertised.txt`, the same two sources `tests/test_help_snapshot.py` uses to account for every `.PHONY` target.
+- It fails, naming each uncovered target, if any target in that union is referenced by no `SKILL.md` under `.agents/skills`.
+- The same suite pins the roster's structure: every `SKILL.md` carries exactly one `## Invocation map` heading, the one section where the make targets a skill drives are declared.
+- A make target added without a covering skill, a skill body losing its invocation map, and a flow drifting on either side of the table above each fail `make test`.

@@ -65,16 +65,24 @@ import yaml
 from conftest import _makefile_text, _resolve_make_refs
 from gitignore_check import repo_root
 
-# Mirrors `[tool.coverage.run] source` in pyproject.toml (E1-F1-S1-T1) -- the
-# CI coverage step and the coverage tool's own configuration must name the
-# same directory, or the gate in CI measures a different tree than the one
-# `make test` and local `pytest --cov` runs measure.
+# Mirrors `[tool.coverage.run] source` in pyproject.toml (E1-F1-S1-T1). The
+# CI coverage step no longer spells this path itself: its command is exactly
+# `make coverage`, and the Makefile-side pin in tests/test_makefile_contract.py
+# (which imports both constants from here) proves that target expands $(PYTEST)
+# with this exact path and the fail-under flag -- so CI, the Makefile and the
+# coverage tool's own configuration still cannot name different trees or
+# different thresholds.
 _PACKAGE_COVERAGE_PATH = ".claude/plugins/devcontainer/scripts/devcontainer_config"
 
-# Mirrors `[tool.coverage.report] fail_under` in pyproject.toml.
+# Mirrors `[tool.coverage.report] fail_under` in pyproject.toml; see above.
 _COVERAGE_FAIL_UNDER_FLAG = "--cov-fail-under=90"
 
 _MAKE_TEST_COMMAND = "make test"
+
+# The test job's coverage gate runs the shared Makefile target, not an
+# inline pytest command, so the exact CI coverage command lives in exactly
+# one place: the `coverage` recipe this constant names.
+_COVERAGE_COMMAND = "make coverage"
 
 # The suite's shell end-to-end cases parametrize over ("bash", "zsh");
 # `ubuntu-latest`'s base image does not ship zsh, so the
@@ -221,32 +229,33 @@ def test_test_job_runs_make_test_as_its_own_step() -> None:
     assert _MAKE_TEST_COMMAND in _run_step_commands(jobs["test"])
 
 
-def test_test_job_runs_a_coverage_step_naming_the_package_path_and_fail_under() -> None:
+def test_test_job_runs_a_coverage_gate_step_running_make_coverage() -> None:
+    """The coverage gate is the shared `make coverage` target, not an inline command.
+
+    Exactly one run step may carry it, and its command must be exactly
+    `_COVERAGE_COMMAND`: the package path and fail-under flag it expands are
+    pinned on the Makefile side (tests/test_makefile_contract.py, importing
+    the constants above), so a CI step that stopped naming the target, or a
+    target that stopped expanding the gate, fails a pin instead of drifting.
+    """
     jobs = _jobs(_load_workflow())
 
-    coverage_commands = [
-        command for command in _run_step_commands(jobs["test"]) if "--cov" in command
-    ]
+    test_job_commands = _run_step_commands(jobs["test"])
+    coverage_commands = [command for command in test_job_commands if command == _COVERAGE_COMMAND]
 
-    assert coverage_commands, (
-        "expected a coverage step (a run command containing --cov) in the test job"
-    )
-    assert any(
-        _PACKAGE_COVERAGE_PATH in command and _COVERAGE_FAIL_UNDER_FLAG in command
-        for command in coverage_commands
-    ), (
-        f"expected a coverage step naming both {_PACKAGE_COVERAGE_PATH!r} and "
-        f"{_COVERAGE_FAIL_UNDER_FLAG!r}; found commands: {coverage_commands!r}"
+    assert len(coverage_commands) == 1, (
+        f"expected exactly one run step whose command is exactly "
+        f"{_COVERAGE_COMMAND!r}; found commands: {test_job_commands!r}"
     )
 
 
 def test_coverage_step_is_separate_from_the_make_test_step() -> None:
-    """The coverage gate is its own step (Description), not folded into `make test`."""
+    """The coverage gate is its own step, not folded into `make test`."""
     jobs = _jobs(_load_workflow())
 
     test_job_commands = _run_step_commands(jobs["test"])
     make_test_commands = [command for command in test_job_commands if command == _MAKE_TEST_COMMAND]
-    coverage_commands = [command for command in test_job_commands if "--cov" in command]
+    coverage_commands = [command for command in test_job_commands if command == _COVERAGE_COMMAND]
 
     assert make_test_commands
     assert coverage_commands

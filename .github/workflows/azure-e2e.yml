@@ -60,6 +60,19 @@ jobs:
           sudo apt-get install -y jq
           sudo npm install -g @devcontainers/cli
 
+      - name: Install terraform and terragrunt
+        run: |
+          set -euo pipefail
+          wget -qO- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y terraform
+          TG_URL=$(curl -fsSL https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest | python3 -c "import json,sys; print(json.load(sys.stdin)['assets'][0]['browser_download_url'])")
+          sudo curl -fsSL "$TG_URL" -o /usr/local/bin/terragrunt
+          sudo chmod +x /usr/local/bin/terragrunt
+          terraform version
+          terragrunt --version
+
       - name: Register the resource providers a fresh subscription needs
         run: |
           set -euo pipefail
@@ -88,7 +101,10 @@ jobs:
       - name: Scaffold the disposable azure instance
         run: |
           set -euo pipefail
-          make instance-init INSTANCE=az-e2e CLOUD=azure LOCATION=eastus
+          # The size is quota-picked for fresh eastus subscriptions: the
+          # D2pls_v5 default carries a zero-core quota there (see
+          # azure-requirements.md section 2).
+          make instance-init INSTANCE=az-e2e CLOUD=azure LOCATION=eastus VM_SIZE=Standard_D2s_v4
 
       - name: Add the deploying principal to the relay and vault grants
         run: |
@@ -100,16 +116,19 @@ jobs:
           path, oid = sys.argv[1], sys.argv[2]
           lines = open(path).read().rstrip("\n").split("\n")
           # The scaffolded file ends with the inputs block's closing brace;
-          # the grants join its last entries, one line above that brace.
+          # the grants join its last entries, one line above that brace --
+          # alongside the x64 image the quota-picked size needs (the module
+          # default image is the arm64 build).
           if lines[-1].strip() != "}":
               sys.exit(f"{path} does not end with the inputs block's closing brace")
           grants = [
+              '  os_image_urn = "Canonical:ubuntu-24_04-lts:server:latest"',
               f'  relay_sender_object_ids = ["{oid}"]',
               f'  keyvault_officer_object_ids = ["{oid}"]',
           ]
           open(path, "w").write("\n".join(lines[:-1] + grants + ["}"]) + "\n")
           EOF
-          tail -5 "$file"
+          tail -6 "$file"
 
       - name: Converge (provision, certify, publish)
         run: |
@@ -142,7 +161,11 @@ jobs:
       - name: Fleet status shows the azure engine
         run: |
           set -euo pipefail
-          make list-instances
+          # The committed remote-dev EC2 row degrades on a runner with no AWS
+          # identity (the integration workflow's own precedent), which turns
+          # the listing's exit code; the assertion is the azure row itself.
+          make list-instances || true
+          make -s list-instances | grep -E '^az-e2e .*VM running'
 
       - name: Tear everything down
         if: always()

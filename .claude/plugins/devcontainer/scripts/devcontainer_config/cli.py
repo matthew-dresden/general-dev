@@ -130,6 +130,8 @@ from devcontainer_config import (
     instances,
     repo,
     skills_install,
+    transport,
+    transport_azure,
 )
 from devcontainer_config.githooks import (
     HOOK_NAMES,
@@ -659,6 +661,14 @@ def _build_parser() -> argparse.ArgumentParser:
     secrets_vault_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
     secrets_vault_parser.set_defaults(handler=_run_secrets_vault)
 
+    azure_wait_agent_parser = subparsers.add_parser(
+        "azure-wait-agent",
+        help="Wait until one azure instance's VM reports running and its VM agent Ready.",
+        description=_AZURE_WAIT_AGENT_DESCRIPTION,
+    )
+    azure_wait_agent_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    azure_wait_agent_parser.set_defaults(handler=_run_azure_wait_agent)
+
     return parser
 
 
@@ -857,9 +867,10 @@ def _instance_row_values(row: instance_ops.InstanceState, root: Path) -> tuple[s
 
     The STATE column is kind-aware: an SSH engine row carries the
     reachability probe's answer (`ok`/`unreachable`), the one liveness
-    question its kind has, while an EC2 row carries the EC2 power state.
-    The EC2-only probes an ssh engine never ran (`ec2_state`,
-    `params_present`) stay None there, which renders as the same dash an
+    question its kind has; an azure row carries the VM power state its
+    instance view reported; and an EC2 row carries the EC2 power state.
+    The kind-only probes a row never ran (`ec2_state` on azure, and the
+    reverse) stay None there, which renders as the same dash an
     unanswerable probe gets.
     """
     if row.context_exists is True:
@@ -870,6 +881,8 @@ def _instance_row_values(row: instance_ops.InstanceState, root: Path) -> tuple[s
         context = "-"
     if row.engine_reachable is not None:
         state_column = "ok" if row.engine_reachable else "unreachable"
+    elif row.azure_state is not None:
+        state_column = row.azure_state
     else:
         state_column = row.ec2_state or "-"
     return (
@@ -1603,6 +1616,48 @@ def _run_secrets_vault(args: argparse.Namespace) -> int:
     return 0
 
 
+_AZURE_WAIT_AGENT_DESCRIPTION = """Wait for one azure instance's VM to become drivable.
+
+The bounded readiness poll `make cert-install` runs before the install arm
+touches the VM: a freshly started VM's agent answers before the platform
+has finished reporting it running, and an install issued too early fails
+on a daemon that does not exist yet. The engine address record names the
+VM (`resource_group` and `vm_name`, written by the deploy), and the poll
+itself is `transport_azure.wait_agent_ready` -- the one home of the
+instance-view reads -- bounded by AZURE_AGENT_READY_TIMEOUT.
+"""
+
+
+def _run_azure_wait_agent(args: argparse.Namespace) -> int:
+    """Poll the record's VM until it reports running with its VM agent Ready.
+
+    The record is read through `instances.engine_address` (a missing or
+    half-written record fails naming the deploy that rewrites it), and the
+    poll runs through `transport_azure.wait_agent_ready` on the production
+    runner. Everything it waits for is an answer the platform gives, so
+    this handler prints only the confirmed outcome.
+    """
+    root = repo.find_root(Path.cwd())
+    address = instances.engine_address(root, args.name)
+    resource_group = address.get("resource_group")
+    vm_name = address.get("vm_name")
+    if (
+        not isinstance(resource_group, str)
+        or not resource_group
+        or not isinstance(vm_name, str)
+        or not vm_name
+    ):
+        raise instances.EngineAddressError(
+            f"ERROR: the engine address record for instance {args.name!r} carries no "
+            "usable 'resource_group'/'vm_name' pair\n"
+            f"The readiness poll reads both from {instances.engine_address_path(args.name)}.\n"
+            f"Redeploy to write it: make instance-deploy INSTANCE={args.name}"
+        )
+    transport_azure.wait_agent_ready(resource_group, vm_name, transport.subprocess_command_runner)
+    print(f"{args.name}: VM running and its VM agent reports Ready.")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Parse `argv`, run the selected command, and exit the process.
 
@@ -1627,6 +1682,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         instance_ops.InstanceOpsError,
         hostcreds.HostCredsError,
         skills_install.SkillsInstallError,
+        transport_azure.RelayTransportError,
     ) as exc:
         print(str(exc), file=sys.stderr)
         exit_code = 1

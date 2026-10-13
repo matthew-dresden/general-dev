@@ -522,6 +522,8 @@ to state the guard; leave it unset instead.
 | `DOCKER_HANDSHAKE_TIMEOUT` | `30` | `hostprobe.py`'s `read_positive_seconds`, the one place its name, default and validation are declared; `transport.py`'s `handshake` (E6-F2-S1-T2) calls the same function rather than declaring its own copy |
 | `SSH_FORWARD_TIMEOUT` | `30` | `hostprobe.py`'s `read_positive_seconds`, the same shared reader; `transport_ssh.py`'s `wait_ready` bounds by it how long the local end of the `ssh -N -L` forward may take to accept a connection |
 | `DEVCONTAINER_TRANSPORT` | (unset) | guard on `make connect-start`'s transport dispatch; the Makefile's `connect-start` recipe dispatches on the resolved engine's kind first -- `ssh` (the `devcontainer_config.transport_ssh` forward to an SSH engine), `relay` (the `devcontainer_config.transport_azure` relay forward to an azure engine) or `ssm` (the SSM forward to an EC2 instance, which `transport.py`'s `resolve_transport` also gates for the module's own `connect` subcommand) -- and the variable, when set, must agree with the kind or the run is refused naming the conflict; any other value is rejected by name |
+| `AZURE_MATERIAL_INSTALL_TIMEOUT` | `300` | `transport_azure.py`, read by `install_material` for the azure VM's vault fetch and daemon start |
+| `AZURE_AGENT_READY_TIMEOUT` | `300` | `transport_azure.py`, read by `wait_agent_ready` for the bounded power-plus-VM-agent poll that `make cert-install` (azure) and `make instance-start` (azure) drive |
 
 `DOCKER_TLS_PORT` is the port the rootless docker daemon on the instance
 listens on, `127.0.0.1`-only, behind a security group with zero ingress
@@ -567,11 +569,21 @@ time), naming the instance, the endpoint, the port and this variable
 before raising. The ssh child's own teardown reuses
 `transport.stop_forward`, so the grace period that function grants the
 child before escalating to a kill is still bounded by
-`SSM_FORWARD_TIMEOUT`, exactly as for the ssm transport's own child. All
-seven variables, `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`,
+`SSM_FORWARD_TIMEOUT`, exactly as for the ssm transport's own child. The
+azure transport's two bounds follow the same rule:
+`AZURE_MATERIAL_INSTALL_TIMEOUT` bounds how long the VM may take to pull
+its published material and start its daemon, and
+`AZURE_AGENT_READY_TIMEOUT` bounds the readiness poll that waits for a
+freshly started azure VM to report `PowerState/running` with its VM agent
+`Ready` before an install or a start reports done -- the azure counterpart
+of the EC2 path's running-then-SSM-Online wait, read through the same
+shared positive-seconds reader, both naming the variable and its offending
+value when set to something unusable. All
+nine variables, `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`,
 `MATERIAL_INSTALL_TIMEOUT`, `PORT_PROBE_TIMEOUT`,
-`DOCKER_HANDSHAKE_TIMEOUT`, `DEVCONTAINER_TRANSPORT` and
-`SSH_FORWARD_TIMEOUT`, are optional.
+`DOCKER_HANDSHAKE_TIMEOUT`, `DEVCONTAINER_TRANSPORT`,
+`SSH_FORWARD_TIMEOUT`, `AZURE_MATERIAL_INSTALL_TIMEOUT` and
+`AZURE_AGENT_READY_TIMEOUT`, are optional.
 `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`, `MATERIAL_INSTALL_TIMEOUT`,
 `PORT_PROBE_TIMEOUT` and `DOCKER_HANDSHAKE_TIMEOUT` are read by code in this
 repository today: each default above applies

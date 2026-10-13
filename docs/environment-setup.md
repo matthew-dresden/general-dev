@@ -335,8 +335,8 @@ every stage:
 | Open the forward | `make remote INSTANCE=<project>` | Opens the SSM forward as a background daemon, points docker at the engine; returns once docker answers through it |
 | Build and open | `make build INSTANCE=<project>`, then `make reopen INSTANCE=<project>` | Clone into a volume on the engine, build, run postCreate, attach VS Code |
 | Day to day | `make status`, `stop`, `start`, `exec` with `INSTANCE=<project>`; `make list-containers` for the every-engine view | Container lifecycle; the checkout survives all of it |
-| Pause to save cost | `make instance-stop INSTANCE=<project>`, later `make instance-start INSTANCE=<project>` | Stops and starts the EC2 instance; containers, volumes and checkouts survive |
-| Retire | `make instance-destroy INSTANCE=<project>` | Terragrunt destroy plus cleanup of parameters, certificates, context and id |
+| Pause to save cost | `make instance-stop INSTANCE=<project>`, later `make instance-start INSTANCE=<project>` | Stops and starts the instance's VM (the EC2 one here); containers, volumes and checkouts survive |
+| Retire | `make instance-destroy INSTANCE=<project>` | Terragrunt destroy plus cleanup of parameters (EC2), certificates, context and id |
 
 `make list-instances` reports every configured instance's live state at any
 point: EC2 state, recorded id, Parameter Store and certificate material,
@@ -344,7 +344,9 @@ forwarded port, docker context. The probes are kind-aware: an ssh engine
 (one declared by a `remote-instances/<name>/engine.json` manifest, see the
 ssh transport in devcontainer.md) runs no EC2 probe at all and answers one
 reachability probe instead, rendered in the same STATE column as `ok` or
-`unreachable`, with the EC2-only columns dashed.
+`unreachable`; an azure engine answers with its VM power state and its Key
+Vault TLS material, the record's VM name standing in for the EC2 id, with
+the probes its kind does not have dashed.
 `make instance-status INSTANCE=<name>`
 narrows it to one instance; the targets that accept it also take `ALL=1`
 for every configured instance at once.
@@ -405,11 +407,14 @@ deployment region is `REMOTE_AWS_REGION`, which every Terragrunt-running
 target requires with no default.
 
 `make instance-deploy INSTANCE=<name>` converges the instance: terragrunt
-init (bootstrapping the instance's state bucket on the very first
-run), validate, a plan guarded against accidental replacement, apply of
+init (bootstrapping the EC2 instance's state bucket on the very first run,
+or ensuring the azure instance's state storage account), validate, a plan
+guarded against accidental replacement, apply of
 exactly the guarded plan, then follow-ups that run only when a status probe
-reports the corresponding piece missing: recording the applied EC2 id,
-issuing and publishing the certificate material, and pushing secrets. When
+reports the corresponding piece missing: recording the applied address (the
+EC2 id, or the azure engine-address record written from the terragrunt
+outputs), issuing and publishing the certificate material, and pushing
+secrets. When
 the material is already present, the steps are skipped entirely, so a
 deploy never restarts a live daemon; renewals are manual, via
 `make cert-status`. The replacement guard is the safety net worth knowing:
@@ -436,44 +441,52 @@ instance's recorded EC2 id: an `instance-id` file written by
 `make instance-link` and, automatically, by `make instance-deploy`, read by
 every remote target's resolver, so no id variable is ever set by hand,
 and an id dies with its instance. `make cert-status` reports client and CA
-expiry per instance (EC2 engines only; no TLS material exists for an ssh
-engine, so a fleet mixing kinds is refused naming the first ssh engine); a
+expiry per instance (the remote engines only: EC2 and azure both carry TLS
+material locally, and an ssh engine has none, so only an ssh engine is
+refused); a
 renewal is a deliberate, manual step and touches
 nothing on the running instance, because the daemon accepts any client
 certificate that chains to its CA.
 
 ### Stop, start and destroy
 
-`make instance-stop INSTANCE=<name>` stops the EC2 instance and waits until
-it reports stopped; `make instance-start INSTANCE=<name>` starts it again
-and waits for its SSM agent to report ready. Everything on the instance
+`make instance-stop INSTANCE=<name>` stops the instance's VM and waits
+until its platform reports it down (EC2 `stopped`, azure
+`PowerState/deallocated`); `make instance-start INSTANCE=<name>` starts it
+again and waits for its engine agent to report ready (the EC2 SSM agent's
+`Online`, or the azure VM agent's `Ready`). Everything on the instance
 survives the cycle: containers, images, volumes, the cloned checkouts.
 The port forward does not; open it again after a start with
 `make remote INSTANCE=<name>`; if connecting then still fails, reinstall
 the daemon's TLS material with `make cert-install INSTANCE=<name>`.
 
 `make instance-destroy INSTANCE=<name>` runs terragrunt destroy for that
-instance, then cleans up everything Terragrunt does not know about: its
-Parameter Store parameters, its docker context, its certificate directory
-(the recorded id file included). `ALL=1` destroys every configured
+instance, then cleans up everything Terragrunt does not know about: for an
+EC2 instance its Parameter Store parameters, for both kinds its docker
+context and its certificate directory (the recorded id file included; on
+azure the same directory carries the engine-address record). `ALL=1`
+destroys every configured
 instance, and only that form requires `CONFIRM=destroy`, because a typo'd
 ALL should never be all it takes to end the fleet.
 
-Each instance owns its remote-state bucket, and it stands outside that
-instance's lifecycle: one bucket per instance
-(`tg-state-<instance-name>-<region>-<account-id>-<suffix>`, derived in
-`remote-instances/root.hcl` from the instance's name, the region, the
-account and a committed suffix), holding the instance's state key
-(`<name>/terraform.tfstate`). No destroy target deletes it. Two targets
-manage the buckets instead: `make bucket-list` (requires
-`REMOTE_AWS_REGION`) shows every bucket the fleet's template matches and
+Each instance owns its remote-state store, and it stands outside that
+instance's lifecycle: one store per instance, named from
+`remote-instances/root.hcl`'s own template and a committed suffix (the EC2
+kind's S3 bucket is
+`tg-state-<instance-name>-<region>-<account-id>-<suffix>`; the azure kind's
+storage account composes its lowercase-alphanumeric form from the same
+per-instance naming idea, holding a `tfstate` blob container in a
+dedicated `rg-<instance>-state` resource group). No destroy target deletes
+it. Two targets manage the stores instead, per kind: `make bucket-list`
+shows every store the fleet's template matches and
 marks the ones a configured instance owns, and `make bucket-delete
-INSTANCE=<name>` purges every version and deletes one; `ALL=1` deletes
-every bucket in `REMOTE_AWS_REGION` and additionally requires
+INSTANCE=<name>` purges and deletes one; `ALL=1` deletes
+every store in the fleet and additionally requires
 `CONFIRM=delete`, because it takes every instance's state history with
-it. Both are EC2-only by kind: an ssh engine has no state bucket, so a
-fleet mixing kinds is refused naming the first ssh engine, and a mixed
-fleet is scanned deliberately.
+it. The surfaces are per kind (an all-EC2 fleet answers to the aws CLI and
+needs `REMOTE_AWS_REGION`; an all-azure fleet answers to the az CLI), and
+a fleet mixing the two kinds is refused naming them, so the per-kind forms
+run on a fleet configured for one kind at a time.
 
 ### Working with several engines at once
 

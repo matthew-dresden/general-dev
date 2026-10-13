@@ -819,6 +819,56 @@ def clear_engine_address(root: Path, name: str) -> int:
 VAULT_NAME_KEY = "vault_name"
 
 
+# The `location = "..."` input assignment the azure scaffold writes into the
+# per-instance terragrunt.hcl (`_render_azure_terragrunt_hcl` in
+# `instance_ops`), matched as a full-line assignment the same way `read_kind`
+# text-matches the envcommon include: the scaffold owns the line's exact
+# shape, and a commented-out or renamed input reads as missing rather than
+# half-parsed.
+_LOCATION_PATTERN = re.compile(r'^\s*location\s*=\s*"([^"]*)"', re.MULTILINE)
+
+
+def azure_instance_location(root: Path, name: str) -> str:
+    """The azure location input `name`'s scaffolded terragrunt.hcl carries.
+
+    The one reader of the `location` input: the state store composes the
+    storage account's name and placement from it, exactly the component
+    root.hcl's azure locals resolve at Terragrunt time. The assignment is
+    text-matched the same way `read_kind` text-matches the envcommon
+    include -- the scaffold owns the line's exact shape -- so a hand-edited
+    file that dropped the line reads as missing, never as a silently
+    guessed default.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        InstancesError: the terragrunt.hcl is missing (never scaffolded)
+            or carries no `location = "..."` assignment (the message names
+            the scaffold command that writes one).
+    """
+    validate_name(name)
+    terragrunt_hcl = terragrunt_dir(root, name) / "terragrunt.hcl"
+    try:
+        text = terragrunt_hcl.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise InstancesError(
+            f"ERROR: no terragrunt.hcl at {terragrunt_hcl}\n"
+            f"Instance {name!r} has no scaffold, so there is no azure location "
+            "to read.\n"
+            f"Scaffold it first: make instance-init INSTANCE={name} "
+            "CLOUD=azure LOCATION=<location>"
+        ) from exc
+    match = _LOCATION_PATTERN.search(text)
+    if match is None:
+        raise InstancesError(
+            f"ERROR: {terragrunt_hcl} carries no location input\n"
+            f"The azure location is read from the scaffolded "
+            "'location = \"...\"' assignment, and this file has none.\n"
+            f"Scaffold it first: make instance-init INSTANCE={name} "
+            "CLOUD=azure LOCATION=<location>"
+        )
+    return match.group(1)
+
+
 def engine_vault_name(root: Path, name: str) -> str:
     """The Key Vault name `name`'s engine address record carries.
 

@@ -1,11 +1,6 @@
 # Environment files
 
-Four files configure this devcontainer. All four are gitignored: three carry
-per-developer identity and configuration that must not reach git (SSO
-profile selection, git identity, proxy settings and feature toggles), and
-the fourth, the hostcreds manifest, names every credential this machine
-pushes into the container without ever holding a value itself. Each has a
-committed `.example` alongside it.
+Four files configure this devcontainer. All four are gitignored: three carry per-developer identity and configuration that must not reach git (SSO profile selection, git identity, proxy settings and feature toggles), and the fourth, the hostcreds manifest, names every credential this machine pushes into the container without ever holding a value itself. Each has a committed `.example` alongside it.
 
 | File | Example | What it is |
 |---|---|---|
@@ -21,11 +16,11 @@ cp devcontainer-environment-variables.json.example devcontainer-environment-vari
 cp .devcontainer/hostcreds.map.json.example .devcontainer/hostcreds.map.json
 ```
 
-`make init` performs exactly these copies and never overwrites an existing
-file. Then replace every `<PLACEHOLDER>` in the first three files (the
-manifest has none: you edit it by naming real credentials, per the Secrets
-section below). Nothing else is required, placeholders are the only thing
-standing between a fresh clone and a working container.
+`make init` performs exactly these copies and never overwrites an existing file.
+
+- Then replace every `<PLACEHOLDER>` in the first three files.
+- The manifest has none: you edit it by naming real credentials, per the Secrets section below.
+- Nothing else is required; placeholders are the only thing standing between a fresh clone and a working container.
 
 ## Filling them out with Claude
 
@@ -47,8 +42,7 @@ Read .devcontainer/aws-profile-map.json.example and create
 My SSO portal is https://<portal>.awsapps.com/start in us-east-1.
 ```
 
-If you already have working profiles on the host, they can be derived instead
-of retyped:
+If you already have working profiles on the host, they can be derived instead of retyped:
 
 ```text
 Read ~/.aws/config and .devcontainer/aws-profile-map.json.example, then build
@@ -61,13 +55,11 @@ Read ~/.aws/config and .devcontainer/aws-profile-map.json.example, then build
 
 ### The interview route, with a worked example
 
-The `gd-env-setup-local` and `gd-env-setup-remote` skills ask a fixed
-question set: the `FIELDS` schema in the plugin's `answers` module is its
-single source of truth, so every agent asks exactly these questions and
-nothing else. Conditional questions appear only when the branch they belong
-to is taken: `aws_profiles` when `aws_config_enabled` is true,
-`host_proxy_url` when `host_proxy` is true, and the three `remote_*` fields
-when the backend is remote. A worked local interview:
+The `gd-env-setup-local` and `gd-env-setup-remote` skills ask a fixed question set: the `FIELDS` schema in the plugin's `answers` module is its single source of truth, so every agent asks exactly these questions and nothing else.
+
+- Conditional questions appear only when the branch they belong to is taken: `aws_profiles` when `aws_config_enabled` is true, `host_proxy_url` when `host_proxy` is true, and the three `remote_*` fields when the backend is remote.
+
+A worked local interview:
 
 ```text
 agent: Which docker context is this machine's local engine?
@@ -91,18 +83,13 @@ agent: Behind a corporate proxy? (true/false)
 you:  false
 ```
 
-The placeholder-styled values above are illustrative; your real answers
-carry the actual portal URL and twelve-digit account id, and validation
-refuses anything still bracketed.
+- The placeholder-styled values above are illustrative; your real answers carry the actual portal URL and twelve-digit account id, and validation refuses anything still bracketed.
 
-Nothing is written until every answer validates. An unreplaced
-`<placeholder>`, an empty value, an account id that is not twelve digits,
-or a git provider carrying `https://` is each refused by name, and an
-abort after the first answer leaves the working tree exactly as it was.
-When every answer validates, `render` writes all three files in one pass.
+- Nothing is written until every answer validates.
+- An unreplaced `<placeholder>`, an empty value, an account id that is not twelve digits, or a git provider carrying `https://` is each refused by name, and an abort after the first answer leaves the working tree exactly as it was.
+- When every answer validates, `render` writes all three files in one pass.
 
-Remote adds three questions after the first (`i-` instance id, region,
-profile); the transcript is otherwise identical.
+Remote adds three questions after the first (`i-` instance id, region, profile); the transcript is otherwise identical.
 
 ### Where each file's content goes
 
@@ -122,15 +109,11 @@ flowchart TD
   ps -- "postCreate fetches via\ninstance role (remote builds)" --> ctr
 ```
 
-Credentials never ride the Parameter Store path: it carries only the
-credential-free `shell.env` and profile map. See
-[Host credentials (hostcreds)](#host-credentials-hostcreds) below for the
-credential half.
+Credentials never ride the Parameter Store path: it carries only the credential-free `shell.env` and profile map. See [Host credentials (hostcreds)](#host-credentials-hostcreds) below for the credential half.
 
 ## What each value does
 
-`shell.env.example` documents every variable inline. The ones that stop
-provisioning if wrong:
+`shell.env.example` documents every variable inline. The ones that stop provisioning if wrong:
 
 | Variable | Consequence |
 |---|---|
@@ -140,9 +123,7 @@ provisioning if wrong:
 | `AWS_CONFIG_ENABLED` | `false` skips AWS profile generation entirely |
 | `HOST_PROXY` | `true` requires a reachable `HOST_PROXY_URL` or the build fails |
 
-`BASH_ENV` points at the **in-container** path
-(`/workspaces/<repo>/shell.env`), not a host path, the same file is at a
-different location depending on which side reads it.
+- `BASH_ENV` points at the **in-container** path (`/workspaces/<repo>/shell.env`), not a host path; the same file is at a different location depending on which side reads it.
 
 ## Host differences
 
@@ -166,9 +147,7 @@ ip -4 addr show docker0 | awk '/inet /{print $2}' | cut -d/ -f1
 
 ### Running the proxy itself
 
-One script serves all hosts, `.devcontainer/tinyproxy-daemon.sh`, with
-wrappers under `nix-family-os/` and `wsl-family-os/` for discoverability. It
-detects the host family and picks `ss` or `lsof` automatically.
+One script serves all hosts, `.devcontainer/tinyproxy-daemon.sh`, with wrappers under `nix-family-os/` and `wsl-family-os/` for discoverability. It detects the host family and picks `ss` or `lsof` automatically.
 
 | Host | Install tinyproxy | Run from |
 |---|---|---|
@@ -176,9 +155,8 @@ detects the host family and picks `ss` or `lsof` automatically.
 | Linux | `sudo apt-get install tinyproxy` | a normal terminal |
 | Windows | `sudo apt-get install tinyproxy` inside WSL | a **WSL** shell, not PowerShell |
 
-Settings live in `.devcontainer/remote-docker/config.env` alongside the rest of
-the host-side configuration, so nothing has to be exported by hand. Only
-`TINYPROXY_UPSTREAM_HOST` has no default, set it there or in your environment:
+- Settings live in `.devcontainer/remote-docker/config.env` alongside the rest of the host-side configuration, so nothing has to be exported by hand.
+- Only `TINYPROXY_UPSTREAM_HOST` has no default; set it there or in your environment:
 
 ```bash
 make proxy-start
@@ -195,21 +173,18 @@ make proxy-stop
 | `TINYPROXY_READINESS_TIMEOUT` / `TINYPROXY_STOP_TIMEOUT` | `10` |
 | `TINYPROXY_STATE_DIR` | `~/.devcontainer-proxy`, override to run more than one |
 
-Starting the proxy does not make the container use it: set `HOST_PROXY=true`
-and `HOST_PROXY_URL` in `shell.env` for that.
+Starting the proxy does not make the container use it: set `HOST_PROXY=true` and `HOST_PROXY_URL` in `shell.env` for that.
 
 ### Line endings on Windows
 
-A checkout on a Windows filesystem can carry CRLF, which breaks shell scripts.
-The wrapper normalizes `.devcontainer` automatically when it detects WSL. Avoid
-the problem at source by cloning inside the WSL filesystem (`~/...`, not
-`/mnt/c/...`), which is also markedly faster.
+- A checkout on a Windows filesystem can carry CRLF, which breaks shell scripts.
+- The wrapper normalizes `.devcontainer` automatically when it detects WSL.
+- Avoid the problem at source by cloning inside the WSL filesystem (`~/...`, not `/mnt/c/...`), which is also markedly faster.
 
 ### The local docker context
 
-`make disconnect` returns docker to the local engine, whose context name
-differs by host. Set `LOCAL_DOCKER_CONTEXT` in
-`.devcontainer/remote-docker/config.env`:
+- `make disconnect` returns docker to the local engine, whose context name differs by host.
+- Set `LOCAL_DOCKER_CONTEXT` in `.devcontainer/remote-docker/config.env`:
 
 | Host | Typical value |
 |---|---|
@@ -218,14 +193,10 @@ differs by host. Set `LOCAL_DOCKER_CONTEXT` in
 | Linux | `default` |
 | Windows + WSL | `default` |
 
-`make disconnect` lists the contexts that actually exist if the configured one
-does not.
+`make disconnect` lists the contexts that actually exist if the configured one does not.
 
-`make disconnect` and `make local` switch the machine-wide context, which
-every terminal shares. To address the local engine from one terminal
-without switching anything, prefix `ENGINE=local` instead; see
-[environment-setup.md](environment-setup.md)'s "Working with several
-engines at once".
+- `make disconnect` and `make local` switch the machine-wide context, which every terminal shares.
+- To address the local engine from one terminal without switching anything, prefix `ENGINE=local` instead; see [environment-setup.md](environment-setup.md)'s "Working with several engines at once".
 
 ### Prerequisites for `make build`
 
@@ -237,66 +208,44 @@ engines at once".
 | devcontainer CLI | `npm install -g @devcontainers/cli` | same |
 | git, python3 | Xcode command line tools | usually preinstalled |
 
-Every target checks its own prerequisites and fails with the install command
-for whatever is missing.
+Every target checks its own prerequisites and fails with the install command for whatever is missing.
 
 ## Secrets
 
-`shell.env` carries identity and configuration (git identity, AWS profile
-selection, proxy settings) and carries no credential. It is
-published to Parameter Store by `make push-secrets` so a remote container
-can bootstrap itself. Every credential is named in the hostcreds
-manifest and resolved from the developer's own machine, never stored in
-`shell.env`.
+`shell.env` carries identity and configuration (git identity, AWS profile selection, proxy settings) and carries no credential.
+
+- It is published to Parameter Store by `make push-secrets` so a remote container can bootstrap itself.
+- Every credential is named in the hostcreds manifest and resolved from the developer's own machine, never stored in `shell.env`.
 
 ### Host credentials (hostcreds)
 
-`.devcontainer/hostcreds.map.json` (created by `make init` from its
-committed example, gitignored) is the one list of credentials this
-repository pushes: there is no second provider and no offline store. Each
-entry names its source, one of the macOS keychain, git's own credential
-helper, or `aws configure export-credentials`, and nothing else; no value is ever
-written into the manifest.
+`.devcontainer/hostcreds.map.json` (created by `make init` from its committed example, gitignored) is the one list of credentials this repository pushes: there is no second provider and no offline store.
 
-`make creds-init` prompts once (getpass) for each keychain entry whose item
-does not exist yet and stores it through `security -i`, with the value on
-stdin: a value is never accepted as a command-line argument, because an
-argument reaches the process table, where any other user on this machine
-can read it. `CREDS_INIT_ARGS='--stdin NAME'` feeds one value from stdin
-for automation.
+- Each entry names its source, one of the macOS keychain, git's own credential helper, or `aws configure export-credentials`, and nothing else; no value is ever written into the manifest.
 
-`make push-creds` (run automatically by `make build`) resolves every entry
-on the host and pushes one `<NAME>.env` fragment per credential into the
-container under `~/.hostcreds/`, where shell startup sources it, so each
-credential arrives as an environment variable and a value never reaches
-the process table. Git entries also seed `~/.git-credentials` inside the
-container. A credential whose source command fails fails the push: there is
-no fallback to a local copy, and a container is never shipped a subset of
-the manifest. `make verify-container` re-checks the pushed credentials
-inside the container.
+- `make creds-init` prompts once (getpass) for each keychain entry whose item does not exist yet and stores it through `security -i`, with the value on stdin.
+- A value is never accepted as a command-line argument, because an argument reaches the process table, where any other user on this machine can read it.
+- `CREDS_INIT_ARGS='--stdin NAME'` feeds one value from stdin for automation.
 
-An `aws-export` entry resolves through `aws configure export-credentials`
-on the host, using the developer's already-valid AWS SSO session; the
-container itself holds no AWS credential for this path.
+- `make push-creds` (run automatically by `make build`) resolves every entry on the host and pushes one `<NAME>.env` fragment per credential into the container under `~/.hostcreds/`, where shell startup sources it, so each credential arrives as an environment variable and a value never reaches the process table.
+- Git entries also seed `~/.git-credentials` inside the container.
+- A credential whose source command fails fails the push: there is no fallback to a local copy, and a container is never shipped a subset of the manifest.
+- `make verify-container` re-checks the pushed credentials inside the container.
+
+An `aws-export` entry resolves through `aws configure export-credentials` on the host, using the developer's already-valid AWS SSO session; the container itself holds no AWS credential for this path.
 
 #### The manifest schema
 
-The manifest is a JSON object mapping a credential name to an entry with a
-`source` key and optional per-source labels. An empty object is valid and
-pushes nothing (distinct from the file being absent, which is an error).
-Validation is fail-fast and complete: one run lists every problem in the
-file, each naming its entry, rather than stopping at the first.
+The manifest is a JSON object mapping a credential name to an entry with a `source` key and optional per-source labels.
 
-A credential name matches `[A-Z][A-Z0-9_]*`: an uppercase letter, then
-uppercase letters, digits or underscores. The name becomes both a shell
-variable the startup block exports and a `<NAME>.env` fragment filename,
-and the store directory is case-insensitive on macOS, where differently
-cased names would collide as filenames. Reserved names are refused however
-well-formed: `PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`,
-`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`. A
-manifest name becomes a shell variable at startup, and one of these would
-silently shadow the real thing. `<project>` below is the checkout
-directory's name.
+- An empty object is valid and pushes nothing (distinct from the file being absent, which is an error).
+- Validation is fail-fast and complete: one run lists every problem in the file, each naming its entry, rather than stopping at the first.
+
+- A credential name matches `[A-Z][A-Z0-9_]*`: an uppercase letter, then uppercase letters, digits or underscores.
+- The name becomes both a shell variable the startup block exports and a `<NAME>.env` fragment filename, and the store directory is case-insensitive on macOS, where differently cased names would collide as filenames.
+- Reserved names are refused however well-formed: `PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`.
+- A manifest name becomes a shell variable at startup, and one of these would silently shadow the real thing.
+- `<project>` below is the checkout directory's name.
 
 | Source | Labels | Defaults | Resolves on the host through | Reaches the container as |
 |---|---|---|---|---|
@@ -304,71 +253,34 @@ directory's name.
 | `git` | `host` (required: a bare hostname, no scheme, path, port or user part) | none | `git credential fill`, fed the host on stdin | a line in `~/.git-credentials`; no environment variable |
 | `aws-export` | `profile` (optional) | `profile` `default` | `aws configure export-credentials --profile <profile>` | the three standard AWS variables, plus the raw JSON document under `<NAME>` |
 
-The default keychain service names this project and this credential, so
-one checkout's items cannot collide with another's without the operator
-choosing an explicit `service` label. The account is asymmetric on purpose:
-storing (creds-init) always writes one, either the manifest's or the
-credential's own `NAME` when it set none, because `add-generic-password`
-without `-a` fails on current macOS, while the read and the probe omit
-`-a` entirely when the manifest sets none, since an empty account
-constraint matches a different item than no account constraint at all.
+- The default keychain service names this project and this credential, so one checkout's items cannot collide with another's without the operator choosing an explicit `service` label.
+- The account is asymmetric on purpose: storing (creds-init) always writes one, either the manifest's or the credential's own `NAME` when it set none, because `add-generic-password` without `-a` fails on current macOS, while the read and the probe omit `-a` entirely when the manifest sets none, since an empty account constraint matches a different item than no account constraint at all.
 
-The one entry this repository's committed configuration expects:
-`ZAI_API_KEY` from the keychain, because `.devcontainer/opencode.json`
-interpolates `{env:ZAI_API_KEY}` and opencode authenticates with nothing
-when the variable is absent.
+The one entry this repository's committed configuration expects: `ZAI_API_KEY` from the keychain, because `.devcontainer/opencode.json` interpolates `{env:ZAI_API_KEY}` and opencode authenticates with nothing when the variable is absent.
 
 #### What a push does
 
-`make push-creds` resolves every entry through the
-`devcontainer_config.cli creds-fragments` subcommand on the host and
-aborts with exit 1, naming the failed credential on stderr, when ANY entry
-is unresolvable: a container silently shipping a subset of the manifest is
-the one failure the command must make impossible. Each resolved credential
-becomes one `<NAME>.env` fragment, written at mode 0600 into a fresh
-temporary directory, then piped into the container over `docker exec`
-stdin (never on an argument, where the host's process table would carry
-it) under umask 077. The store directory `~/.hostcreds` is enforced at
-mode 700 on every push, and each fragment's 0600 mode is verified after it
-lands rather than trusted from the exec's exit status.
+- `make push-creds` resolves every entry through the `devcontainer_config.cli creds-fragments` subcommand on the host and aborts with exit 1, naming the failed credential on stderr, when ANY entry is unresolvable: a container silently shipping a subset of the manifest is the one failure the command must make impossible.
+- Each resolved credential becomes one `<NAME>.env` fragment, written at mode 0600 into a fresh temporary directory, then piped into the container over `docker exec` stdin (never on an argument, where the host's process table would carry it) under umask 077.
+- The store directory `~/.hostcreds` is enforced at mode 700 on every push, and each fragment's 0600 mode is verified after it lands rather than trusted from the exec's exit status.
 
-An `aws-export` fragment carries the session's `Expiration`, so its
-exports are wrapped in a guard comparing that expiry against the wall
-clock: while the session is live the variables export normally, and past
-it nothing exports and one notice line goes to stderr when a shell opens,
-`notice: <NAME> expired; refresh with: make push-creds`, naming the
-refresh command. A git entry's fragment is comment-only: the credential
-lives in `~/.git-credentials` (seeded by the same push, with
-`credential.helper` reset to exactly `store` and the result proven with
-`git ls-remote origin`) and git reads it through its own helper; copying
-it into an environment variable would widen its exposure to every process
-in the container without giving git anything it does not already have.
+An `aws-export` fragment carries the session's `Expiration`, so its exports are wrapped in a guard comparing that expiry against the wall clock.
+
+- While the session is live the variables export normally, and past it nothing exports and one notice line goes to stderr when a shell opens, `notice: <NAME> expired; refresh with: make push-creds`, naming the refresh command.
+- A git entry's fragment is comment-only: the credential lives in `~/.git-credentials` (seeded by the same push, with `credential.helper` reset to exactly `store` and the result proven with `git ls-remote origin`) and git reads it through its own helper.
+- Copying it into an environment variable would widen its exposure to every process in the container without giving git anything it does not already have.
 
 #### The secrets scanner
 
-`make lint-secrets` (staged content by default, `RANGE=<a>..<b>` for a
-commit range) additionally compares every scanned line against the
-hostcreds values resolved live from this machine's manifest, so a real
-credential value is caught even when it matches no generic pattern. A
-credential whose source command fails is reported by name as unavailable
-rather than failing the scan, and a resolved value never reaches stdout,
-stderr or the report: the finding names the credential, never the value.
-There is no ignore list and no suppression annotation.
+- `make lint-secrets` (staged content by default, `RANGE=<a>..<b>` for a commit range) additionally compares every scanned line against the hostcreds values resolved live from this machine's manifest, so a real credential value is caught even when it matches no generic pattern.
+- A credential whose source command fails is reported by name as unavailable rather than failing the scan, and a resolved value never reaches stdout, stderr or the report: the finding names the credential, never the value.
+- There is no ignore list and no suppression annotation.
 
-`AWS_PROFILE` selects the profile the aws CLI resolves credentials through
-on the host-side cert publishing path: `certs.py`'s Parameter Store client
-takes no profile argument, so `make cert-publish` passes the profile the
-way the aws CLI reads it, and the CLI's own resolution, including an
-already-valid SSO session for that profile, applies. It defaults to
-`default` when unset and is never set by this repository.
+`AWS_PROFILE` selects the profile the aws CLI resolves credentials through on the host-side cert publishing path: `certs.py`'s Parameter Store client takes no profile argument, so `make cert-publish` passes the profile the way the aws CLI reads it, and the CLI's own resolution, including an already-valid SSO session for that profile, applies. It defaults to `default` when unset and is never set by this repository.
 
 ### Certificate lifetimes
 
-`.claude/plugins/devcontainer/scripts/devcontainer_config/certs.py` is the
-single definition site for these three variables (E6-F1-S1-T1): every
-`create_ca`, `issue_server` and `issue_client` call resolves its own
-lifetime from the matching variable below, never a literal at the call
-site.
+`.claude/plugins/devcontainer/scripts/devcontainer_config/certs.py` is the single definition site for these three variables (E6-F1-S1-T1): every `create_ca`, `issue_server` and `issue_client` call resolves its own lifetime from the matching variable below, never a literal at the call site.
 
 | Variable | Default | Defined in |
 |---|---|---|
@@ -376,142 +288,61 @@ site.
 | `CERT_SERVER_DAYS` | `365` | `certs.py`, read by `issue_server` |
 | `CERT_CLIENT_DAYS` | `90` | `certs.py`, read by `issue_client` |
 
-Each of the three is optional: the default above applies whenever it is
-unset. When set, the value must be a positive whole number of days;
-`certs.py` rejects a non-integer value (exit naming the variable, "is not
-an integer") or a value that is zero or negative ("must be a positive
-integer") rather than silently falling back to the default or to an
-unbounded lifetime.
+- Each of the three is optional: the default above applies whenever it is unset.
+- When set, the value must be a positive whole number of days.
+- `certs.py` rejects a non-integer value (exit naming the variable, "is not an integer") or a value that is zero or negative ("must be a positive integer") rather than silently falling back to the default or to an unbounded lifetime.
 
 ### Certificate expiry warning
 
-`CERT_WARN_DAYS` (E6-F1-S1-T2) governs `make cert-status`'s warning window
-, read in exactly one place,
-`certs._resolve_cert_warn_days`, and threaded from there into every
-`certs.classify` call the report makes, never a second literal `14`
-anywhere else in `certs.py`.
+`CERT_WARN_DAYS` (E6-F1-S1-T2) governs `make cert-status`'s warning window, read in exactly one place, `certs._resolve_cert_warn_days`, and threaded from there into every `certs.classify` call the report makes, never a second literal `14` anywhere else in `certs.py`.
 
 | Variable | Default | Defined in |
 |---|---|---|
 | `CERT_WARN_DAYS` | `14` | `certs.py`, read by `_resolve_cert_warn_days` for `make cert-status` |
 
-`CERT_WARN_DAYS` is optional; the default of `14` applies whenever it is
-unset. When set, it must be a non-negative whole number of days: `certs.py`
-rejects a non-integer value or a negative value, naming the
-variable, its value and the expected form, before any row of the report is
-rendered, the identical fail-fast rule the three lifetime variables above
-follow.
+- `CERT_WARN_DAYS` is optional; the default of `14` applies whenever it is unset.
+- When set, it must be a non-negative whole number of days: `certs.py` rejects a non-integer value or a negative value, naming the variable, its value and the expected form, before any row of the report is rendered, the identical fail-fast rule the three lifetime variables above follow.
 
-`make cert-status`'s exit code is deliberately three-valued: `0` when every
-certificate is outside the warning window, `0` with a `RENEW` row naming the
-`gd-cert-lifecycle INSTANCE=<name>` invocation that reissues it when a
-certificate is inside the window but not yet expired, and `1` when any
-certificate has already expired. A `RENEW` that failed the build would train
-the operator to ignore it, and a certificate with days left on it still
-works; only an already-expired certificate is a build-breaking failure. An
-unreadable or unparsable certificate file is reported by naming the path
-and the parse failure, never silently classified as `expired`, because that
-would send the operator to reissue material that may be perfectly valid. `make
-cert-status` reports the `ca` and `client` roles it finds locally under
-`certs.DEFAULT_CERTS_ROOT`/`instances.certs_root()`'s certificate-directory
-root (`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/`
-when `DOCKER_CONFIG` is unset; see the "Instances" section's `DOCKER_CONFIG`
-row below); the server certificate is never reported because it is never
-persisted to that path in the first place.
-`certs.issue_server` generates it into a temporary directory it removes
-before returning, handing the material back as PEM text instead (see the
-certificate-storage paragraph below for the full rule).
+- `make cert-status`'s exit code is deliberately three-valued: `0` when every certificate is outside the warning window, `0` with a `RENEW` row naming the `gd-cert-lifecycle INSTANCE=<name>` invocation that reissues it when a certificate is inside the window but not yet expired, and `1` when any certificate has already expired.
+- A `RENEW` that failed the build would train the operator to ignore it, and a certificate with days left on it still works; only an already-expired certificate is a build-breaking failure.
+- An unreadable or unparsable certificate file is reported by naming the path and the parse failure, never silently classified as `expired`, because that would send the operator to reissue material that may be perfectly valid.
+- `make cert-status` reports the `ca` and `client` roles it finds locally under `certs.DEFAULT_CERTS_ROOT`/`instances.certs_root()`'s certificate-directory root (`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/` when `DOCKER_CONFIG` is unset; see the "Instances" section's `DOCKER_CONFIG` row below).
+- The server certificate is never reported because it is never persisted to that path in the first place; `certs.issue_server` generates it into a temporary directory it removes before returning, handing the material back as PEM text instead (see the certificate-storage paragraph below for the full rule).
 
-`certs.py` shells out to the `openssl` binary on `PATH` for every operation
-above and requires OpenSSL 3.0 or later: signing a certificate passes
-`x509 -req -copy_extensions copy`, a flag OpenSSL added in 3.0 and that
-LibreSSL, including the `/usr/bin/openssl` macOS ships by default, does not
-implement (`unknown option -copy_extensions`). On macOS, `brew install
-openssl` installs the `openssl@3` keg; add `$(brew --prefix openssl@3)/bin`
-to the FRONT of `PATH` in the shell profile rather than relying on the
-Homebrew prefix's own `bin` directory already being ahead of `/usr/bin`
-(Homebrew does not guarantee `openssl@3` is symlinked into that shared
-prefix on every install), then confirm `openssl version` reports `OpenSSL
-3.x`, not `LibreSSL`; on Linux/WSL, most current distributions'
-`apt-get install openssl` already satisfies the floor.
-The `gd-env-setup-local` skill checks this alongside the other host
-tools, and `certs/SKILL.md`'s `## Failure semantics` documents the failure
-this produces when the requirement is unmet.
+`certs.py` shells out to the `openssl` binary on `PATH` for every operation above and requires OpenSSL 3.0 or later.
 
-The certificate authority and client material these variables govern is
-never stored in this repository: it lives outside the checkout entirely,
-under `certs.DEFAULT_CERTS_ROOT`/`instances.certs_root()`'s `<instance>/`
-directory (`$DOCKER_CONFIG/certs/<instance>/`, or
-`~/.docker/certs/<instance>/` when `DOCKER_CONFIG` is unset; the rule
-5.5), the same "outside the repository, not merely ignored" rule this
-document's other private files (`shell.env`,
-`.devcontainer/aws-profile-map.json`,
-`devcontainer-environment-variables.json`) follow for a different reason
-higher up in this file. The server key and certificate are never persisted
-under that path: `certs.issue_server` generates both inside a
-`tempfile.TemporaryDirectory` at modes `0600` and `0644` respectively and
-removes that directory before returning, handing them back as PEM text for
-the caller to publish directly (`certs/SKILL.md`'s `## Material` states the
-same rule).
+- Signing a certificate passes `x509 -req -copy_extensions copy`, a flag OpenSSL added in 3.0 and that LibreSSL, including the `/usr/bin/openssl` macOS ships by default, does not implement (`unknown option -copy_extensions`).
+- On macOS, `brew install openssl` installs the `openssl@3` keg; add `$(brew --prefix openssl@3)/bin` to the FRONT of `PATH` in the shell profile rather than relying on the Homebrew prefix's own `bin` directory already being ahead of `/usr/bin` (Homebrew does not guarantee `openssl@3` is symlinked into that shared prefix on every install), then confirm `openssl version` reports `OpenSSL 3.x`, not `LibreSSL`.
+- On Linux/WSL, most current distributions' `apt-get install openssl` already satisfies the floor.
+- The `gd-env-setup-local` skill checks this alongside the other host tools, and `certs/SKILL.md`'s `## Failure semantics` documents the failure this produces when the requirement is unmet.
+
+The certificate authority and client material these variables govern is never stored in this repository: it lives outside the checkout entirely, under `certs.DEFAULT_CERTS_ROOT`/`instances.certs_root()`'s `<instance>/` directory (`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/` when `DOCKER_CONFIG` is unset; the rule 5.5), the same "outside the repository, not merely ignored" rule this document's other private files (`shell.env`, `.devcontainer/aws-profile-map.json`, `devcontainer-environment-variables.json`) follow for a different reason higher up in this file.
+
+- The server key and certificate are never persisted under that path: `certs.issue_server` generates both inside a `tempfile.TemporaryDirectory` at modes `0600` and `0644` respectively and removes that directory before returning, handing them back as PEM text for the caller to publish directly (`certs/SKILL.md`'s `## Material` states the same rule).
 
 ### Transport
 
-`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py`
-(E6-F2-S1-T1) is the SSM port forward manager: it builds the
-`aws ssm start-session --document-name AWS-StartPortForwardingSession`
-argument vector that carries the docker API (no SSH element anywhere in
-it), allocates the local end of that forward, and detects when it is ready
-by waiting for the session process to report its port opened and then
-confirming it with a connection to the local port, rather than waiting a
-fixed amount of time. E6-F2-S1-T2 adds this module's other half: creating
-or updating the per-instance docker context that carries the TLS material
-(`transport.ensure_context`) and completing the `docker version` handshake
-that proves the whole path works (`transport.handshake`), translating a
-handshake failure into the SAN requirement or a connection diagnosis
-(`transport.diagnose_handshake_failure`) rather than a bare, opaque TLS
-error; see `docs/devcontainer.md`'s "Transport" section.
-`.claude/plugins/devcontainer/scripts/devcontainer_config/hostprobe.py`
-(E1-F3-S1-T1) is the docker-handshake probe `gd-instance-list`, `gd-env-setup-local` and
-`gd-env-setup-remote` share for their own, simpler "does the engine answer" check.
+`.claude/plugins/devcontainer/scripts/devcontainer_config/transport.py` (E6-F2-S1-T1) is the SSM port forward manager: it builds the `aws ssm start-session --document-name AWS-StartPortForwardingSession` argument vector that carries the docker API (no SSH element anywhere in it), allocates the local end of that forward, and detects when it is ready by waiting for the session process to report its port opened and then confirming it with a connection to the local port, rather than waiting a fixed amount of time.
+
+- E6-F2-S1-T2 adds this module's other half: creating or updating the per-instance docker context that carries the TLS material (`transport.ensure_context`) and completing the `docker version` handshake that proves the whole path works (`transport.handshake`), translating a handshake failure into the SAN requirement or a connection diagnosis (`transport.diagnose_handshake_failure`) rather than a bare, opaque TLS error; see `docs/devcontainer.md`'s "Transport" section.
+- `.claude/plugins/devcontainer/scripts/devcontainer_config/hostprobe.py` (E1-F3-S1-T1) is the docker-handshake probe `gd-instance-list`, `gd-env-setup-local` and `gd-env-setup-remote` share for their own, simpler "does the engine answer" check.
 
 `DEVCONTAINER_TRANSPORT` guards the transport `make connect-start` opens.
-There are three transports, so the guard has three accepted
-values: `ssm`, the SSM port forward to an EC2 instance,
-`ssh`, the managed `ssh -N -L` forward to a generic SSH engine (an
-instance whose `remote-instances/<name>/engine.json` manifest declares
-it), and `relay`, the azure relay forward to an azure engine (whose
-relay address record the deploy writes). A value outside that set is
-refused by name rather than silently redirected.
 
-It has two readers, and they dispatch differently by design: the Makefile's
-`connect-start` recipe resolves the instance first and reads the engine's
-kind off the address block resolution exports (`rd_engine_kind` in lib.sh,
-the one predicate every kind-aware target reads), so an `ssh` engine routes
-to the `devcontainer_config.transport_ssh` forward, an `azure` engine to
-the `devcontainer_config.transport_azure` relay forward, and an `ec2`
-engine to the ssm forward whether or not the variable is set. The variable
-is a guard around that dispatch, never the selector: unset, the kind alone
-decides, which is why an operator naming an ssh engine never sets it; set,
-the value must agree with the kind: an explicit `ssm` behind an ssh engine
-or an azure engine, an explicit `ssh` behind an ec2 engine or an azure
-engine, or an explicit `relay` behind an ssh engine or an ec2 engine, is
-refused by name as the conflict it
-is. `transport.py`'s `resolve_transport`, which the ssm module's own
-`connect` subcommand calls, still accepts only
-`ssm`: the ssm transport remains opt-in there, and the `ssh` value never
-reaches that reader, because it routes to
-`devcontainer_config.transport_ssh`, which declares no selector of its
-own. Any other non-empty value exits non-zero before any transport
-starts, printing an `ERROR:` line to stderr naming the variable, the
-offending value and the accepted values. No branch silently defaults.
+- There are three transports, so the guard has three accepted values: `ssm`, the SSM port forward to an EC2 instance; `ssh`, the managed `ssh -N -L` forward to a generic SSH engine (an instance whose `remote-instances/<name>/engine.json` manifest declares it); and `relay`, the azure relay forward to an azure engine (whose relay address record the deploy writes).
+- A value outside that set is refused by name rather than silently redirected.
 
-The one value the two readers do not agree on is the empty string: the
-Makefile's `${DEVCONTAINER_TRANSPORT:-}` substitution treats a set-but-empty
-value the same as unset and dispatches on engine kind, while `resolve_transport`'s
-`os.environ.get` returns the empty string itself rather than the default, which
-is not in the accepted set, so it raises `TransportError` naming the empty
-value. Setting the variable to an explicit empty string is not a supported way
-to state the guard; leave it unset instead.
+It has two readers, and they dispatch differently by design.
+
+- The Makefile's `connect-start` recipe resolves the instance first and reads the engine's kind off the address block resolution exports (`rd_engine_kind` in lib.sh, the one predicate every kind-aware target reads), so an `ssh` engine routes to the `devcontainer_config.transport_ssh` forward, an `azure` engine to the `devcontainer_config.transport_azure` relay forward, and an `ec2` engine to the ssm forward whether or not the variable is set.
+- The variable is a guard around that dispatch, never the selector: unset, the kind alone decides, which is why an operator naming an ssh engine never sets it; set, the value must agree with the kind: an explicit `ssm` behind an ssh engine or an azure engine, an explicit `ssh` behind an ec2 engine or an azure engine, or an explicit `relay` behind an ssh engine or an ec2 engine, is refused by name as the conflict it is.
+- `transport.py`'s `resolve_transport`, which the ssm module's own `connect` subcommand calls, still accepts only `ssm`: the ssm transport remains opt-in there, and the `ssh` value never reaches that reader, because it routes to `devcontainer_config.transport_ssh`, which declares no selector of its own.
+- Any other non-empty value exits non-zero before any transport starts, printing an `ERROR:` line to stderr naming the variable, the offending value and the accepted values. No branch silently defaults.
+
+The one value the two readers do not agree on is the empty string.
+
+- The Makefile's `${DEVCONTAINER_TRANSPORT:-}` substitution treats a set-but-empty value the same as unset and dispatches on engine kind, while `resolve_transport`'s `os.environ.get` returns the empty string itself rather than the default, which is not in the accepted set, so it raises `TransportError` naming the empty value.
+- Setting the variable to an explicit empty string is not a supported way to state the guard; leave it unset instead.
 
 | Variable | Default | Defined in |
 |---|---|---|
@@ -527,169 +358,68 @@ to state the guard; leave it unset instead.
 | `AZURE_LISTENER_START_TIMEOUT` | `240` | `transport_azure.py`, read by `start_listener` for the synchronous `az vm run-command invoke` that starts the VM-side relay listener before a forward opens |
 | `GD_RELAY_IDLE_TIMEOUT_SECONDS` | `900` on the VM | VM-side: read by the relay listener unit on the azure VM (`gd-relay-listener.py`'s `parse_idle_timeout`), never by anything on this laptop; it is the idle self-stop deadline after which the listener stops its own unit, because azure bills listener-hours while a hybrid connection has a connected listener. `0` disables the self-stop entirely |
 
-`DOCKER_TLS_PORT` is the port the rootless docker daemon on the instance
-listens on, `127.0.0.1`-only, behind a security group with zero ingress
-rules; `transport.py` reads it in exactly one place and
-never hardcodes `2376` at any call site. The local end of the forward is a
-different, per-instance port: allocated and recorded in the instance's
-docker context endpoint (never a fixed number), reused
-across reconnects when that context already exists. `SSM_FORWARD_TIMEOUT`
-has two readers, and raising it affects both: `transport.wait_ready` bounds
-by it how long it waits for the session process to announce the port
-opened and then confirm that with a connection attempt, naming the
-instance, the port and this variable before raising; `transport.stop_forward`
-separately bounds by the same variable the grace period it gives the
-session process to exit cleanly after asking it to terminate, before
-escalating to a kill. `DOCKER_HANDSHAKE_TIMEOUT` is read by two callers that
-each bound a different `docker version` call, but through one shared
-reader: `hostprobe.read_positive_seconds` is the single place this
-variable's name, the `30` default and the finite/positive validation are
-declared (AC-FUNC-007), and both `hostprobe.py`'s `probe_docker` handshake
-check (one single `docker version` call) and `transport.py`'s `handshake`
-(E6-F2-S1-T2, which retries its own `docker version` call against a
-context it may have just created, until it answers or this deadline
-passes) call that same function rather than either declaring its own copy
-of the variable or its default. `transport.py`'s own
-`_positive_seconds_from_env` wraps `read_positive_seconds`'s
-`HostProbeError` in its own `TransportError` naming the variable, its
-offending value and the default, so a caller of `transport.py` never needs
-to catch an exception type owned by `hostprobe.py`; both
-`_forward_timeout_seconds` (`SSM_FORWARD_TIMEOUT`) and
-`_handshake_timeout_seconds` (`DOCKER_HANDSHAKE_TIMEOUT`) call that one
-wrap rather than each declaring its own. Naming the context, the local
-port and this variable together is a different error,
-`DockerHandshakeTimeoutError`, which `transport.handshake` raises instead,
-only once the retried `docker version` call itself either never answers
-before the deadline or answers with no budget left for the rootless probe
-that follows it, since `handshake` already knows the context and the port at
-that point, which the timeout reader itself never does. `SSH_FORWARD_TIMEOUT`
-is the ssh transport's counterpart of `SSM_FORWARD_TIMEOUT`:
-`devcontainer_config.transport_ssh`'s `wait_ready` bounds by it how long it
-waits for the local end of the `ssh -N -L` forward to accept a connection
-(readiness always being a real connection attempt, never the elapsed
-time), naming the instance, the endpoint, the port and this variable
-before raising. The ssh child's own teardown reuses
-`transport.stop_forward`, so the grace period that function grants the
-child before escalating to a kill is still bounded by
-`SSM_FORWARD_TIMEOUT`, exactly as for the ssm transport's own child. The
-azure transport's three bounds follow the same rule:
-`AZURE_MATERIAL_INSTALL_TIMEOUT` bounds how long the VM may take to pull
-its published material and start its daemon, and
-`AZURE_AGENT_READY_TIMEOUT` bounds the readiness poll that waits for a
-freshly started azure VM to report `PowerState/running` with its VM agent
-`Ready` before an install or a start reports done -- the azure counterpart
-of the EC2 path's running-then-SSM-Online wait -- while
-`AZURE_LISTENER_START_TIMEOUT` bounds the connect-time start of the
-VM-side listener itself: the VM dials out to the relay, its listener unit
-stops when idle so the relay accrues listener-hours only while work is
-happening, and a forward's reopen therefore runs one synchronous
-run-command that starts the unit and waits for it to report active before
-binding the local port, because a listener not yet running answers a
-docker call with a 404 no-listener refusal. All three are read through the
-same shared positive-seconds reader, each naming the variable and its
-offending value when set to something unusable.
-`GD_RELAY_IDLE_TIMEOUT_SECONDS` is the idle self-stop deadline itself, and
-it is a VM-side variable: the listener unit on the azure VM reads it
-(`0` disables the self-stop entirely), and nothing in this repository's
-host-side code ever does. All
-eleven variables, `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`,
-`MATERIAL_INSTALL_TIMEOUT`, `PORT_PROBE_TIMEOUT`,
-`DOCKER_HANDSHAKE_TIMEOUT`, `DEVCONTAINER_TRANSPORT`,
-`SSH_FORWARD_TIMEOUT`, `AZURE_MATERIAL_INSTALL_TIMEOUT`,
-`AZURE_AGENT_READY_TIMEOUT`, `AZURE_LISTENER_START_TIMEOUT` and
-`GD_RELAY_IDLE_TIMEOUT_SECONDS`, are optional.
-`DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`, `MATERIAL_INSTALL_TIMEOUT`,
-`PORT_PROBE_TIMEOUT`, `DOCKER_HANDSHAKE_TIMEOUT`, `SSH_FORWARD_TIMEOUT`,
-`AZURE_MATERIAL_INSTALL_TIMEOUT`, `AZURE_AGENT_READY_TIMEOUT` and
-`AZURE_LISTENER_START_TIMEOUT` are read by code on this laptop today: each
-default above applies
-whenever the variable is unset, and each reader rejects a non-numeric or
-non-positive value naming the variable and its value rather than
-silently falling back to the default. `DEVCONTAINER_TRANSPORT`'s readers apply the same fail-fast rule to every
-non-empty value other than `ssh` or `ssm`: the Makefile's `connect-start` recipe
-rejects it by name, and `transport.py`'s `resolve_transport` rejects
-everything but `ssm`; the one value the Makefile additionally accepts,
-`ssh`, never reaches that reader, since it routes to
-`devcontainer_config.transport_ssh`. The one value they disagree on
-otherwise, the empty string, is documented above.
+- `DOCKER_TLS_PORT` is the port the rootless docker daemon on the instance listens on, `127.0.0.1`-only, behind a security group with zero ingress rules; `transport.py` reads it in exactly one place and never hardcodes `2376` at any call site.
+- The local end of the forward is a different, per-instance port: allocated and recorded in the instance's docker context endpoint (never a fixed number), reused across reconnects when that context already exists.
+- `SSM_FORWARD_TIMEOUT` has two readers, and raising it affects both.
+  - `transport.wait_ready` bounds by it how long it waits for the session process to announce the port opened and then confirm that with a connection attempt, naming the instance, the port and this variable before raising.
+  - `transport.stop_forward` separately bounds by the same variable the grace period it gives the session process to exit cleanly after asking it to terminate, before escalating to a kill.
+- `DOCKER_HANDSHAKE_TIMEOUT` is read by two callers that each bound a different `docker version` call, but through one shared reader.
+  - `hostprobe.read_positive_seconds` is the single place this variable's name, the `30` default and the finite/positive validation are declared (AC-FUNC-007), and both `hostprobe.py`'s `probe_docker` handshake check (one single `docker version` call) and `transport.py`'s `handshake` (E6-F2-S1-T2, which retries its own `docker version` call against a context it may have just created, until it answers or this deadline passes) call that same function rather than either declaring its own copy of the variable or its default.
+  - `transport.py`'s own `_positive_seconds_from_env` wraps `read_positive_seconds`'s `HostProbeError` in its own `TransportError` naming the variable, its offending value and the default, so a caller of `transport.py` never needs to catch an exception type owned by `hostprobe.py`; both `_forward_timeout_seconds` (`SSM_FORWARD_TIMEOUT`) and `_handshake_timeout_seconds` (`DOCKER_HANDSHAKE_TIMEOUT`) call that one wrap rather than each declaring its own.
+  - Naming the context, the local port and this variable together is a different error, `DockerHandshakeTimeoutError`, which `transport.handshake` raises instead, only once the retried `docker version` call itself either never answers before the deadline or answers with no budget left for the rootless probe that follows it, since `handshake` already knows the context and the port at that point, which the timeout reader itself never does.
+- `SSH_FORWARD_TIMEOUT` is the ssh transport's counterpart of `SSM_FORWARD_TIMEOUT`.
+  - `devcontainer_config.transport_ssh`'s `wait_ready` bounds by it how long it waits for the local end of the `ssh -N -L` forward to accept a connection (readiness always being a real connection attempt, never the elapsed time), naming the instance, the endpoint, the port and this variable before raising.
+  - The ssh child's own teardown reuses `transport.stop_forward`, so the grace period that function grants the child before escalating to a kill is still bounded by `SSM_FORWARD_TIMEOUT`, exactly as for the ssm transport's own child.
+- The azure transport's three bounds follow the same rule.
+  - `AZURE_MATERIAL_INSTALL_TIMEOUT` bounds how long the VM may take to pull its published material and start its daemon.
+  - `AZURE_AGENT_READY_TIMEOUT` bounds the readiness poll that waits for a freshly started azure VM to report `PowerState/running` with its VM agent `Ready` before an install or a start reports done (the azure counterpart of the EC2 path's running-then-SSM-Online wait).
+  - `AZURE_LISTENER_START_TIMEOUT` bounds the connect-time start of the VM-side listener itself: the VM dials out to the relay, its listener unit stops when idle so the relay accrues listener-hours only while work is happening, and a forward's reopen therefore runs one synchronous run-command that starts the unit and waits for it to report active before binding the local port, because a listener not yet running answers a docker call with a 404 no-listener refusal.
+  - All three are read through the same shared positive-seconds reader, each naming the variable and its offending value when set to something unusable.
+- `GD_RELAY_IDLE_TIMEOUT_SECONDS` is the idle self-stop deadline itself, and it is a VM-side variable: the listener unit on the azure VM reads it (`0` disables the self-stop entirely), and nothing in this repository's host-side code ever does.
+
+All eleven variables, `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`, `MATERIAL_INSTALL_TIMEOUT`, `PORT_PROBE_TIMEOUT`, `DOCKER_HANDSHAKE_TIMEOUT`, `DEVCONTAINER_TRANSPORT`, `SSH_FORWARD_TIMEOUT`, `AZURE_MATERIAL_INSTALL_TIMEOUT`, `AZURE_AGENT_READY_TIMEOUT`, `AZURE_LISTENER_START_TIMEOUT` and `GD_RELAY_IDLE_TIMEOUT_SECONDS`, are optional.
+
+- `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`, `MATERIAL_INSTALL_TIMEOUT`, `PORT_PROBE_TIMEOUT`, `DOCKER_HANDSHAKE_TIMEOUT`, `SSH_FORWARD_TIMEOUT`, `AZURE_MATERIAL_INSTALL_TIMEOUT`, `AZURE_AGENT_READY_TIMEOUT` and `AZURE_LISTENER_START_TIMEOUT` are read by code on this laptop today: each default above applies whenever the variable is unset, and each reader rejects a non-numeric or non-positive value naming the variable and its value rather than silently falling back to the default.
+- `DEVCONTAINER_TRANSPORT`'s readers apply the same fail-fast rule to every non-empty value other than `ssh` or `ssm`: the Makefile's `connect-start` recipe rejects it by name, and `transport.py`'s `resolve_transport` rejects everything but `ssm`; the one value the Makefile additionally accepts, `ssh`, never reaches that reader, since it routes to `devcontainer_config.transport_ssh`.
+- The one value they disagree on otherwise, the empty string, is documented above.
 
 ### State bucket name components
 
-`remote-instances/root.hcl`'s `state_bucket_name` local composes each
-instance's Terraform state bucket name from the instance's own name,
-`basename(path_relative_to_include())`, the including directory under
-`remote-instances/`, plus the region in `REMOTE_AWS_REGION`, the AWS
-account, and a committed suffix. The instance name is derived, never typed,
-so the bucket cannot disagree with the directory it belongs to;
-`tests/test_state_bucket_name.py` pins the composition and the committed
-suffix the same way `root.hcl` declares them.
+`remote-instances/root.hcl`'s `state_bucket_name` local composes each instance's Terraform state bucket name from the instance's own name, `basename(path_relative_to_include())`, the including directory under `remote-instances/`, plus the region in `REMOTE_AWS_REGION`, the AWS account, and a committed suffix.
+
+- The instance name is derived, never typed, so the bucket cannot disagree with the directory it belongs to.
+- `tests/test_state_bucket_name.py` pins the composition and the committed suffix the same way `root.hcl` declares them.
 
 ### State store name components
 
-The azure kind's state store — one storage account per instance, in one
-dedicated `rg-<instance>-state` resource group — composes its name from
-`remote-instances/root-azure.hcl`'s own two declarations, the name template
-and the committed suffix, the same declaration shape the bucket above uses.
-Azure's law for a storage account name is narrower than an instance name: 3
-to 24 lowercase alphanumeric characters, globally unique, so
-`devcontainer_config.state_store` sanitizes the instance component
-(lowercased, stripped to alphanumerics, capped) and makes the composition
-collision-proof with a deterministic digest of the four components — the
-instance name, the location, the subscription, the suffix — rather than a
-random value, so a fresh clone composes the same name and finds the account
-an earlier bootstrap provisioned instead of minting an orphaned second one.
-Because Terragrunt's configuration language has no hash function to
-re-derive that digest, the composed names travel to the backend through one
-side-car, `remote-instances/<instance>/.state-store.json`, written before
-any Terragrunt command runs and read by `root-azure.hcl`'s remote_state
-block: one naming authority, one handoff file.
-`tests/test_state_store.py` pins the composition, the sanitization and the
-24-character law the way the root declares them.
+The azure kind's state store (one storage account per instance, in one dedicated `rg-<instance>-state` resource group) composes its name from `remote-instances/root-azure.hcl`'s own two declarations, the name template and the committed suffix, the same declaration shape the bucket above uses.
+
+- Azure's law for a storage account name is narrower than an instance name: 3 to 24 lowercase alphanumeric characters, globally unique.
+- `devcontainer_config.state_store` sanitizes the instance component (lowercased, stripped to alphanumerics, capped) and makes the composition collision-proof with a deterministic digest of the four components (the instance name, the location, the subscription, the suffix) rather than a random value, so a fresh clone composes the same name and finds the account an earlier bootstrap provisioned instead of minting an orphaned second one.
+- Because Terragrunt's configuration language has no hash function to re-derive that digest, the composed names travel to the backend through one side-car, `remote-instances/<instance>/.state-store.json`, written before any Terragrunt command runs and read by `root-azure.hcl`'s remote_state block: one naming authority, one handoff file.
+- `tests/test_state_store.py` pins the composition, the sanitization and the 24-character law the way the root declares them.
 
 ### Repository slug derivation
 
-`devcontainer_config.repo.repo_slug` derives the repo-slug component of a
-docker context name (the `<repo-slug>-<name>` pattern the docker context
-row of `remote-instances/README.md`'s artifacts table documents) from
-`git config --get remote.origin.url`, applying a `basename()`-plus-
-`trimsuffix(".git")` transform to that URL. The read is bounded, for
-readers of the variable, by `REPO_SLUG_GIT_TIMEOUT_SECONDS`, resolved
-through `hostprobe.py`'s `read_positive_seconds`, the same shared
-reader `transport.py` uses for `DOCKER_HANDSHAKE_TIMEOUT`.
-`read_positive_seconds` rejects a non-numeric or non-positive value by
-name rather than silently falling back to the default, and `repo.repo_slug`
-reads a `10` second default for that git-remote read.
+`devcontainer_config.repo.repo_slug` derives the repo-slug component of a docker context name (the `<repo-slug>-<name>` pattern the docker context row of `remote-instances/README.md`'s artifacts table documents) from `git config --get remote.origin.url`, applying a `basename()`-plus-`trimsuffix(".git")` transform to that URL.
+
+- The read is bounded, for readers of the variable, by `REPO_SLUG_GIT_TIMEOUT_SECONDS`, resolved through `hostprobe.py`'s `read_positive_seconds`, the same shared reader `transport.py` uses for `DOCKER_HANDSHAKE_TIMEOUT`.
+- `read_positive_seconds` rejects a non-numeric or non-positive value by name rather than silently falling back to the default, and `repo.repo_slug` reads a `10` second default for that git-remote read.
 
 | Variable | Default | Defined in |
 |---|---|---|
 | `REPO_SLUG_GIT_TIMEOUT_SECONDS` | `10` | Resolved through `hostprobe.py`'s `read_positive_seconds`; read by `devcontainer_config.repo.repo_slug` |
 
-`read_positive_seconds` applies the same fail-fast rule
-`DOCKER_HANDSHAKE_TIMEOUT`'s reader applies to every reader of
-`REPO_SLUG_GIT_TIMEOUT_SECONDS`: it rejects a non-numeric or non-positive
-value by name rather than silently falling back to the default.
+`read_positive_seconds` applies the same fail-fast rule `DOCKER_HANDSHAKE_TIMEOUT`'s reader applies to every reader of `REPO_SLUG_GIT_TIMEOUT_SECONDS`: it rejects a non-numeric or non-positive value by name rather than silently falling back to the default.
 
 ### Instances
 
-`.claude/plugins/devcontainer/scripts/devcontainer_config/instances.py` is
-the single module that turns an instance name into every artifact spec
-Section 9's addressing table names (the Terragrunt directory, the state
-key, the docker context, the Parameter Store prefix, the certificate
-directory, the recorded EC2 instance id, and the recorded forwarded port)
-and the single module that decides which instance a command means.
-`resolve-instance` is its entry
-point (`PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m
-devcontainer_config.cli resolve-instance`): it prints the resolved name
-and the statically derivable half of the addressing block, everything
-except the forwarded port, which needs a real docker context, as one
-`KEY=value` line per artifact on stdout, so the shell layer reads values
-rather than re-deriving them, and prints nothing to stdout and exits 1
-with the operator-facing text on stderr on any resolution failure.
+`.claude/plugins/devcontainer/scripts/devcontainer_config/instances.py` is the single module that turns an instance name into every artifact spec Section 9's addressing table names (the Terragrunt directory, the state key, the docker context, the Parameter Store prefix, the certificate directory, the recorded EC2 instance id, and the recorded forwarded port) and the single module that decides which instance a command means.
 
-The certificate-directory row honors `DOCKER_CONFIG`, the real docker
-CLI's own variable for relocating its configuration home, so an operator
-who has moved it also gets certificate material addressed under the same,
-moved location:
+- `resolve-instance` is its entry point (`PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.cli resolve-instance`): it prints the resolved name and the statically derivable half of the addressing block, everything except the forwarded port, which needs a real docker context, as one `KEY=value` line per artifact on stdout, so the shell layer reads values rather than re-deriving them.
+- It prints nothing to stdout and exits 1 with the operator-facing text on stderr on any resolution failure.
+
+The certificate-directory row honors `DOCKER_CONFIG`, the real docker CLI's own variable for relocating its configuration home, so an operator who has moved it also gets certificate material addressed under the same, moved location:
 
 | Variable | Default | Governs |
 |---|---|---|
@@ -698,113 +428,44 @@ moved location:
 | `DEFAULT_REMOTE_INSTANCE` | Unset | `instances.resolve`'s second resolution step, read directly from the process environment when `INSTANCE` is unset. Optional; has no entry in `shell.env.example`. Same format as `INSTANCE`: a non-empty path segment of at most `instances.MAX_INSTANCE_NAME_LENGTH` (63) characters. |
 | `ENGINE` | Unset | Addresses one engine explicitly instead of following the machine-wide active docker context: `local` names this machine's engine (`LOCAL_DOCKER_CONTEXT`), any other value must name an instance directory under `remote-instances/`, and every docker call the run makes is aimed at that engine's context without any `docker context use`. Read by the Makefile (exported to its recipes when set) and by `lib.sh`'s `rd_engine_context`, which derives the context through `instances.docker_context` and fails fast when the value names nothing this repository can address. Both `ENGINE=x make <target>` and `make <target> ENGINE=x` reach it. The three context switchers (`make local`, `make disconnect`, `make remote`) refuse under it. See `docs/environment-setup.md`'s "Working with several engines at once". |
 
-The block `resolve-instance` prints is resolver output, not a set of
-variables to set: nothing under `ENGINE_`, and no `KIND`, is ever read
-back from the environment. For an EC2 instance the block carries
-`INSTANCE`, `TERRAGRUNT_DIR`, `STATE_KEY`, `DOCKER_CONTEXT`,
-`PARAMETER_PREFIX` and `CERTS_DIR`. For an SSH engine the Terragrunt,
-state-key and Parameter Store rows do not exist, and the block instead
-carries `KIND=ssh` plus the manifest's validated values as `ENGINE_HOST`,
-`ENGINE_PORT`, `ENGINE_USER` and `ENGINE_DOCKER_ADDR`, and the composed
-`ENGINE_ENDPOINT`. For an azure engine the state-key and Parameter Store
-rows do not exist either — its deployment state lives behind the shared
-azure layer and its relay carries no SSM material, so those two
-derivations name nothing the kind addresses — and the block is
-`INSTANCE`, `KIND=azure`, `TERRAGRUNT_DIR`, `DOCKER_CONTEXT` and
-`CERTS_DIR`: the Terragrunt, context and certificate rows the EC2 block
-carries, without the two that name nothing this kind addresses. The
-`ENGINE_` prefix is what lets the shell layer's
-export loop consume every line generically, and `KIND` is what
-`lib.sh`'s `rd_engine_kind` reads to tell the kinds apart downstream
-(`connect-start`'s dispatch, the kind refusals, the ssh delivery in
-`push-secrets.sh`). The one ssh-transport value an operator sets,
-`SSH_FORWARD_TIMEOUT`, is tabled in the Transport section above.
+The block `resolve-instance` prints is resolver output, not a set of variables to set: nothing under `ENGINE_`, and no `KIND`, is ever read back from the environment.
 
-`DEFAULT_REMOTE_INSTANCE` is the second step of the instance-resolution
-order, evaluated once per resolution by
-`instances.resolve`:
+- For an EC2 instance the block carries `INSTANCE`, `TERRAGRUNT_DIR`, `STATE_KEY`, `DOCKER_CONTEXT`, `PARAMETER_PREFIX` and `CERTS_DIR`.
+- For an SSH engine the Terragrunt, state-key and Parameter Store rows do not exist, and the block instead carries `KIND=ssh` plus the manifest's validated values as `ENGINE_HOST`, `ENGINE_PORT`, `ENGINE_USER` and `ENGINE_DOCKER_ADDR`, and the composed `ENGINE_ENDPOINT`.
+- For an azure engine the state-key and Parameter Store rows do not exist either (its deployment state lives behind the shared azure layer and its relay carries no SSM material, so those two derivations name nothing the kind addresses), and the block is `INSTANCE`, `KIND=azure`, `TERRAGRUNT_DIR`, `DOCKER_CONTEXT` and `CERTS_DIR`: the Terragrunt, context and certificate rows the EC2 block carries, without the two that name nothing this kind addresses.
+- The `ENGINE_` prefix is what lets the shell layer's export loop consume every line generically, and `KIND` is what `lib.sh`'s `rd_engine_kind` reads to tell the kinds apart downstream (`connect-start`'s dispatch, the kind refusals, the ssh delivery in `push-secrets.sh`).
+- The one ssh-transport value an operator sets, `SSH_FORWARD_TIMEOUT`, is tabled in the Transport section above.
 
-1. `INSTANCE` in the process environment. Every remote make target accepts
-   it (`make <target> INSTANCE=<name>`, or `INSTANCE=<name> make <target>`,
-   both spellings travel to the recipes); outside make, set it directly in
-   the environment the resolver runs in:
-   `INSTANCE=<name> PYTHONPATH=.claude/plugins/devcontainer/scripts
-   python3 -m devcontainer_config.cli resolve-instance`.
+`DEFAULT_REMOTE_INSTANCE` is the second step of the instance-resolution order, evaluated once per resolution by `instances.resolve`:
+
+1. `INSTANCE` in the process environment. Every remote make target accepts it (`make <target> INSTANCE=<name>`, or `INSTANCE=<name> make <target>`, both spellings travel to the recipes); outside make, set it directly in the environment the resolver runs in: `INSTANCE=<name> PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.cli resolve-instance`.
 2. `DEFAULT_REMOTE_INSTANCE` from `shell.env`.
-3. The sole directory under `remote-instances/`, when exactly one is
-   configured.
+3. The sole directory under `remote-instances/`, when exactly one is configured.
 4. Otherwise: failure.
 
-Both `INSTANCE` and `DEFAULT_REMOTE_INSTANCE` are read directly from the
-process environment by `instances.resolve`, the identical convention
-`transport.resolve_transport` already establishes for
-`DEVCONTAINER_TRANSPORT` above rather than an injected mapping. Three edge
-cases each produce their own distinct outcome instead of folding into one
-failure:
+Both `INSTANCE` and `DEFAULT_REMOTE_INSTANCE` are read directly from the process environment by `instances.resolve`, the identical convention `transport.resolve_transport` already establishes for `DEVCONTAINER_TRANSPORT` above rather than an injected mapping. Three edge cases each produce their own distinct outcome instead of folding into one failure:
 
-- `INSTANCE` naming no directory under `remote-instances/` fails, listing
-  every instance actually configured.
-- `INSTANCE` set while the local backend is active is a warning on
-  stderr, not an error: the value names nothing on that backend and is
-  simply unused, so nothing is resolved and nothing fails. This outcome is
-  gated on `resolve-instance`'s own `--local-backend-active` flag (there is
-  no other caller of `instances.resolve` yet): passing `INSTANCE=<name>
-  ... resolve-instance` alone still resolves against `remote-instances/`
-  and fails if `<name>` names no directory there; passing `INSTANCE=<name>
-  ... resolve-instance --local-backend-active` is what produces the
-  warning. A future caller that already knows the active backend (the
-  Makefile) passes `local_backend_active=True` to
-  `instances.resolve` directly instead of through this flag.
-- An empty (or absent) `remote-instances/` directory on a remote backend
-  fails, directing the operator to `gd-env-setup-remote`.
+- `INSTANCE` naming no directory under `remote-instances/` fails, listing every instance actually configured.
+- `INSTANCE` set while the local backend is active is a warning on stderr, not an error: the value names nothing on that backend and is simply unused, so nothing is resolved and nothing fails.
+  - This outcome is gated on `resolve-instance`'s own `--local-backend-active` flag (there is no other caller of `instances.resolve` yet): passing `INSTANCE=<name> ... resolve-instance` alone still resolves against `remote-instances/` and fails if `<name>` names no directory there; passing `INSTANCE=<name> ... resolve-instance --local-backend-active` is what produces the warning.
+  - A future caller that already knows the active backend (the Makefile) passes `local_backend_active=True` to `instances.resolve` directly instead of through this flag.
+- An empty (or absent) `remote-instances/` directory on a remote backend fails, directing the operator to `gd-env-setup-remote`.
 
-Ambiguity, meaning more than one instance configured while neither selector
-chose one, fails naming every configured instance and both remedies,
-`make <target> INSTANCE=<name>` and `DEFAULT_REMOTE_INSTANCE='<name>'` in
-`shell.env`, with exit code 1 and no partial work: resolution happens
-before any docker or AWS call.
+- Ambiguity, meaning more than one instance configured while neither selector chose one, fails naming every configured instance and both remedies, `make <target> INSTANCE=<name>` and `DEFAULT_REMOTE_INSTANCE='<name>'` in `shell.env`, with exit code 1 and no partial work: resolution happens before any docker or AWS call.
 
-`DEFAULT_REMOTE_INSTANCE` has no default and no entry in
-`shell.env.example`: unset, it is simply the second resolution step
-producing nothing, and resolution proceeds to the third. A developer who
-wants one instance to be their implicit default sets it in their own
-`shell.env`.
+`DEFAULT_REMOTE_INSTANCE` has no default and no entry in `shell.env.example`: unset, it is simply the second resolution step producing nothing, and resolution proceeds to the third. A developer who wants one instance to be their implicit default sets it in their own `shell.env`.
 
-The one artifact in this section that is a *state* file rather than a
-pure derivation is the recorded EC2 instance id: an `instance-id` file
-inside the instance's certificate directory (`instances.certs_dir(name)`,
-so `$DOCKER_CONFIG/certs/<name>/instance-id`, or
-`~/.docker/certs/<name>/instance-id` when `DOCKER_CONFIG` is unset).
-`make instance-link INSTANCE=<name> INSTANCE_ID=<id>` writes it, the
-only deliberate writer; `make instance-deploy` records the applied id
-there automatically at apply time; and every remote target's resolver
-reads it, so the id travels with the instance it names instead of in a
-variable set by hand. `make instance-destroy` removes the whole
-certificate directory, id file included, so a retired instance cannot
-leave a stale id behind to misdirect a power or status operation.
+- The one artifact in this section that is a *state* file rather than a pure derivation is the recorded EC2 instance id: an `instance-id` file inside the instance's certificate directory (`instances.certs_dir(name)`, so `$DOCKER_CONFIG/certs/<name>/instance-id`, or `~/.docker/certs/<name>/instance-id` when `DOCKER_CONFIG` is unset).
+- `make instance-link INSTANCE=<name> INSTANCE_ID=<id>` writes it, the only deliberate writer; `make instance-deploy` records the applied id there automatically at apply time; and every remote target's resolver reads it, so the id travels with the instance it names instead of in a variable set by hand.
+- `make instance-destroy` removes the whole certificate directory, id file included, so a retired instance cannot leave a stale id behind to misdirect a power or status operation.
 
-The azure kind's sibling record lives in that same directory beside it:
-`engine-address.json` (`$DOCKER_CONFIG/certs/<name>/engine-address.json`,
-or `~/.docker/certs/<name>/engine-address.json` when `DOCKER_CONFIG` is
-unset), the relay address record the deploy writes once the relay's
-hybrid connection and its local forward endpoint are known — read from the
-Terragrunt outputs at apply time, never composed by hand. It carries the
-values the azure surfaces address the engine through: the relay namespace,
-the hybrid connection, the VM's name and resource id, the resource group,
-the Key Vault's name and URI, and the location. `make instance-deploy` is
-its single writer (an apply that produces no usable output for a key
-refuses rather than recording a partial record), the relay transport and
-the vault-reading surfaces are its readers, and `make instance-destroy`
-removes it with the rest of the certificate directory, so a retired azure
-engine leaves no address a later run could dial by mistake.
+The azure kind's sibling record lives in that same directory beside it: `engine-address.json` (`$DOCKER_CONFIG/certs/<name>/engine-address.json`, or `~/.docker/certs/<name>/engine-address.json` when `DOCKER_CONFIG` is unset), the relay address record the deploy writes once the relay's hybrid connection and its local forward endpoint are known, read from the Terragrunt outputs at apply time and never composed by hand.
+
+- It carries the values the azure surfaces address the engine through: the relay namespace, the hybrid connection, the VM's name and resource id, the resource group, the Key Vault's name and URI, and the location.
+- `make instance-deploy` is its single writer (an apply that produces no usable output for a key refuses rather than recording a partial record), the relay transport and the vault-reading surfaces are its readers, and `make instance-destroy` removes it with the rest of the certificate directory, so a retired azure engine leaves no address a later run could dial by mistake.
 
 ### What did not change
 
-- `shell.env` is still published to Parameter Store by `make push-secrets`
-  so remote containers can bootstrap themselves.
-- `build` and `rebuild` publish `shell.env` themselves when it is newer than
-  the stored copy, so editing it is enough, no separate step to remember.
-- The container's **git credential** does not come from `shell.env`. It is
-  copied from the credential helper already working on your machine by the
-  git half of `make push-creds`, which `make build` runs automatically,
-  whenever the manifest names a git-source entry.
+- `shell.env` is still published to Parameter Store by `make push-secrets` so remote containers can bootstrap themselves.
+- `build` and `rebuild` publish `shell.env` themselves when it is newer than the stored copy, so editing it is enough, no separate step to remember.
+- The container's **git credential** does not come from `shell.env`. It is copied from the credential helper already working on your machine by the git half of `make push-creds`, which `make build` runs automatically, whenever the manifest names a git-source entry.

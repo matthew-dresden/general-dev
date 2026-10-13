@@ -27,7 +27,7 @@ ENGINE                            pick where builds and containers live
 INSTANCES                         one remote engine per project under remote-instances/; instance names are project names (e.g. acme)
   make list-instances     host    List every instance with live status: EC2 state, id, params, certs, forward, context; ssh engines answer reachability instead.
   make list-containers    host    Every container this project owns, local engine plus every instance's, with per-engine reachability.
-  make instance-init      host    Scaffold <project>'s directory; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= for the AMI/AZ lookup only; the deployment region is REMOTE_AWS_REGION]
+  make instance-init      host    Writes <project>'s scaffold; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= AMI/AZ lookup; deploys in REMOTE_AWS_REGION]. Azure: CLOUD=azure LOCATION=<location> [VM_SIZE=]
   make instance-deploy    remote  Converge: provision, link id, trust chain if missing, push secrets. Refuses instance replacement without CONFIRM=replace. INSTANCE= | ALL=1
   make instance-status    host    One instance's live state, or every instance with ALL=1. INSTANCE=<instance-name> | ALL=1
   make instance-plan      remote  Terragrunt plan per instance; bootstraps the instance's state bucket on first run. INSTANCE=<instance-name> | ALL=1

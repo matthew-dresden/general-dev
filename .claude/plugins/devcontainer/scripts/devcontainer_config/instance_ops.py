@@ -118,6 +118,22 @@ AMI_SSM_PARAMETER_PATH = (
 # proven cheapest size for a throwaway test engine.
 DEFAULT_INSTANCE_TYPE = "c8g.xlarge"
 
+# The default azure VM size the azure scaffold writes when the caller names
+# none, the one sizing default the azure kind carries. Sourced by the cli's
+# `--vm-size` default the same way the manifest defaults are, so a changed
+# default moves everywhere at once.
+DEFAULT_AZURE_VM_SIZE = "Standard_D2pls_v5"
+
+# The region default the EC2 scaffold applies when the caller names none:
+# the same default the make instance-* targets and the cli's other
+# instance subcommands document. It drives only the scaffold-time AMI
+# lookup and the written availability zone -- never where anything
+# deploys -- and is deliberately `None`-able in `scaffold`'s signature, so
+# "no region was given" is a state the azure refusal can see: the azure
+# kind takes its region from its location, and a silently applied default
+# would be a refused input made to look accepted.
+DEFAULT_REGION = "us-east-1"
+
 # Root and data volume size (GiB) a scaffold starts with; both are commonly
 # edited inputs the generated file's guidance message points at.
 DEFAULT_VOLUME_SIZE_GB = 30
@@ -334,14 +350,17 @@ class ScaffoldResult:
 
     `path` is the generated terragrunt.hcl; `vpc_cidr` is the freshly
     allocated block (its instance subnet is 10.x.1.0/24, and is written
-    into the file); `ami` is the AMI the file pins (the caller's override,
-    or the one resolved from SSM); `messages` is the guidance a caller
-    prints verbatim.
+    into the file -- the azure kind writes the same allocation under its
+    `vnet_cidr` input); `ami` is the AMI the file pins (the caller's
+    override, or the one resolved from SSM), and None for the azure kind,
+    which pins no image at scaffold time (the does-not-apply meaning None
+    already carries elsewhere in this package); `messages` is the guidance
+    a caller prints verbatim.
     """
 
     path: Path
     vpc_cidr: str
-    ami: str
+    ami: str | None
     messages: tuple[str, ...]
 
 
@@ -412,6 +431,45 @@ def _cidrs_exhausted_message() -> str:
         "deployment's terragrunt.hcl.\n"
         "Retire an instance (make instance-destroy) or allocate the new "
         "deployment's CIDRs by hand in its terragrunt.hcl."
+    )
+
+
+def _unknown_cloud_message(cloud: str) -> str:
+    return (
+        f"ERROR: unknown cloud {cloud!r}\n"
+        "The scaffold writes an ec2 or an azure deployment; nothing else "
+        "exists yet.\n"
+        "Retry with CLOUD=ec2 (the default) or CLOUD=azure."
+    )
+
+
+def _azure_location_missing_message() -> str:
+    return (
+        "ERROR: an azure scaffold requires a location\n"
+        "The --location input is where the VM and its vnet deploy, and it "
+        "has no default: a silently chosen location would deploy the engine "
+        "somewhere the operator never asked for.\n"
+        "Pass one: make instance-init INSTANCE=<name> CLOUD=azure LOCATION=<location>"
+    )
+
+
+def _azure_region_given_message() -> str:
+    return (
+        "ERROR: refusing an aws region on an azure scaffold\n"
+        "The azure kind has no aws region: --region is an EC2-only input, "
+        "and an azure deployment goes to the --location the scaffold's "
+        "location input names, which no aws call reads.\n"
+        "Pass that instead: make instance-init INSTANCE=<name> CLOUD=azure "
+        "LOCATION=<location>"
+    )
+
+
+def _azure_ami_given_message() -> str:
+    return (
+        "ERROR: refusing an AMI on an azure scaffold\n"
+        "The azure kind pins no machine image at scaffold time: the image is "
+        "fixed by the shared azure layer, not chosen per deployment.\n"
+        "Retry without AMI=/--ami."
     )
 
 
@@ -552,6 +610,61 @@ def _render_terragrunt_hcl(
     return "\n".join(lines) + "\n"
 
 
+def _render_azure_terragrunt_hcl(
+    name: str, location: str, vm_size: str, vpc_cidr: str, subnet_cidr: str
+) -> str:
+    """The per-instance terragrunt.hcl text for the azure kind.
+
+    The same three parts as the EC2 template, honoring
+    `remote-instances/README.md`'s conventions: the root include, the
+    envcommon include (targeting `_envcommon/remote-azure.hcl`, the file
+    `instances.read_kind` keys the azure kind on), and an `inputs` block
+    carrying only what differs for this one deployment. The header keeps
+    the EC2 template's conventions -- the directory name is the instance's
+    identity, every input is the operator's to edit, and the deploy command
+    is the follow-on step. The include targets land with the azure provider
+    slice and are deliberately not validated here: scaffolding writes the
+    declaration, it does not check the layer it includes.
+    """
+    lines = [
+        f"# remote-instances/{name}/terragrunt.hcl",
+        "#",
+        "# The directory name IS this instance's identity, and instance names are",
+        "# project names (e.g. acme).",
+        "#",
+        "# Everything in the inputs block below is yours to edit freely: location,",
+        "# VM size, volume sizes and tags. Apply any edit with:",
+        f"#   make instance-deploy INSTANCE={name}",
+        "",
+        'include "root" {',
+        '  path = find_in_parent_folders("root.hcl")',
+        "}",
+        "",
+        'include "envcommon" {',
+        '  path = "${dirname(find_in_parent_folders("root.hcl"))}/_envcommon/remote-azure.hcl"',
+        "}",
+        "",
+        "inputs = {",
+        f'  instance_name = "{name}"',
+        f'  name_prefix   = "{name}"',
+        "",
+        f'  location = "{location}"',
+        f'  vm_size  = "{vm_size}"',
+        "",
+        f"  root_volume_size_gb = {DEFAULT_VOLUME_SIZE_GB}",
+        f"  data_volume_size_gb = {DEFAULT_VOLUME_SIZE_GB}",
+        "",
+        f'  vnet_cidr   = "{vpc_cidr}"',
+        f'  subnet_cidr = "{subnet_cidr}"',
+        "",
+        "  tags = {",
+        f'    Environment = "{name}"',
+        "  }",
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def _append_scaffold_ignore(root: Path, name: str) -> Path:
     """Hide `remote-instances/<name>/` from git by appending it to `.gitignore`.
 
@@ -612,15 +725,34 @@ def _append_scaffold_ignore(root: Path, name: str) -> Path:
 
 
 def scaffold(
-    root: Path, name: str, *, region: str, ami: str | None, runner: Runner
+    root: Path,
+    name: str,
+    *,
+    cloud: str = instances.ENGINE_KIND_EC2,
+    region: str | None = None,
+    ami: str | None = None,
+    location: str | None = None,
+    vm_size: str = DEFAULT_AZURE_VM_SIZE,
+    runner: Runner,
 ) -> ScaffoldResult:
     """Write `remote-instances/<name>/terragrunt.hcl` for a new instance.
 
     Refuses anything that would make the file a lie: a name that fails
     `instances.validate_name`, a docker context name that would exceed
     `DOCKER_CONTEXT_NAME_LIMIT`, or a directory that already exists. The
-    default AMI is Canonical's current Ubuntu 24.04 arm64 image, resolved
-    through SSM via `runner` unless the caller passes `ami` explicitly.
+    `cloud` parameter selects the template: the EC2 kind the target has
+    always scaffolded, or the azure kind whose envcommon include targets
+    `_envcommon/remote-azure.hcl` (the include `instances.read_kind` keys
+    the azure kind on; the file itself lands with the azure provider slice
+    and is deliberately not validated here). The EC2 default AMI is
+    Canonical's current Ubuntu 24.04 arm64 image, resolved through SSM via
+    `runner` unless the caller passes `ami` explicitly; the azure kind pins
+    no image and issues no command at all, so its refusals are the only
+    azure-specific surface: `region`/`ami`, the EC2 inputs, are refused
+    when given (the azure equivalents are the `location` input; there is no
+    AMI input), and `location` is required. `region` is None when the
+    caller named none, and the EC2 path applies `DEFAULT_REGION`; the
+    azure path never reads it.
     Never runs Terragrunt: applying the file is `make instance-deploy`'s
     job, and the returned guidance says so. Writing the directory also
     appends `remote-instances/<name>/` to the repository `.gitignore`
@@ -630,9 +762,10 @@ def scaffold(
     with nothing written.
 
     Raises:
-        ScaffoldError: the name is invalid, the context name would be too
-            long, the directory already exists, the default AMI could
-            not be resolved (naming the manual AMI= override), or
+        ScaffoldError: the name is invalid, the cloud is unknown, an azure
+            input is missing or is an EC2-only one, the context name would
+            be too long, the directory already exists, the default AMI
+            could not be resolved (naming the manual AMI= override), or
             `.gitignore` is missing or lacks the per-instance scaffold
             block's anchor rule (naming what to update).
     """
@@ -640,6 +773,8 @@ def scaffold(
         instances.validate_name(name)
     except instances.InvalidInstanceNameError as exc:
         raise ScaffoldError(_invalid_name_message(name)) from exc
+    if cloud not in (instances.ENGINE_KIND_EC2, instances.ENGINE_KIND_AZURE):
+        raise ScaffoldError(_unknown_cloud_message(cloud))
     context = instances.docker_context(root, name)
     if len(context) > DOCKER_CONTEXT_NAME_LIMIT:
         raise ScaffoldError(_context_length_message(context))
@@ -647,14 +782,47 @@ def scaffold(
     if directory.exists():
         raise ScaffoldError(_exists_message(directory, name))
 
-    resolved_ami = ami if ami is not None else _default_ami(runner, region)
+    if cloud == instances.ENGINE_KIND_AZURE:
+        if location is None:
+            raise ScaffoldError(_azure_location_missing_message())
+        if region is not None:
+            raise ScaffoldError(_azure_region_given_message())
+        if ami is not None:
+            raise ScaffoldError(_azure_ami_given_message())
+        vpc_cidr, subnet_cidr = _allocate_cidrs(root)
+        _append_scaffold_ignore(root, name)
+        hcl_path = directory / "terragrunt.hcl"
+        directory.mkdir(parents=True)
+        hcl_path.write_text(
+            _render_azure_terragrunt_hcl(name, location, vm_size, vpc_cidr, subnet_cidr),
+            encoding="utf-8",
+        )
+        return ScaffoldResult(
+            path=hcl_path,
+            vpc_cidr=vpc_cidr,
+            ami=None,
+            messages=(
+                f"created {hcl_path}",
+                "Commonly edited inputs: location, vm_size, root_volume_size_gb, "
+                "data_volume_size_gb and tags.",
+                f"Deploy with: make instance-deploy INSTANCE={name}",
+            ),
+        )
+
+    resolved_region = region if region is not None else DEFAULT_REGION
+    resolved_ami = ami if ami is not None else _default_ami(runner, resolved_region)
     vpc_cidr, subnet_cidr = _allocate_cidrs(root)
     _append_scaffold_ignore(root, name)
     hcl_path = directory / "terragrunt.hcl"
     directory.mkdir(parents=True)
     hcl_path.write_text(
         _render_terragrunt_hcl(
-            name, region, resolved_ami, vpc_cidr, subnet_cidr, ami_from_ssm=ami is None
+            name,
+            resolved_region,
+            resolved_ami,
+            vpc_cidr,
+            subnet_cidr,
+            ami_from_ssm=ami is None,
         ),
         encoding="utf-8",
     )

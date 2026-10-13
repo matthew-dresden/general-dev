@@ -641,6 +641,262 @@ def test_scaffold_fails_fast_when_gitignore_is_missing(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# scaffold, azure cloud
+# ---------------------------------------------------------------------------
+
+
+# The azure location fixture every azure scaffold test passes: a generated,
+# location-shaped value, so no real region name is stored in this file.
+def _azure_location() -> str:
+    return f"testlocation-{uuid.uuid4().hex[:6]}"
+
+
+def test_scaffold_azure_writes_the_azure_contract(tmp_path: Path) -> None:
+    """The azure template carries the README's three parts with the azure
+    inputs, issues no command, and validates nothing it only includes."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name("acme")
+    location = _azure_location()
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root, name, cloud=instances.ENGINE_KIND_AZURE, location=location, runner=runner
+    )
+
+    assert result.path == root / "remote-instances" / name / "terragrunt.hcl"
+    assert result.ami is None, "the azure kind pins no image at scaffold time"
+    assert runner.calls == [], "the azure scaffold issues no command at all"
+    text = result.path.read_text(encoding="utf-8")
+    # The README's conventions: the directory name is the identity, every
+    # input is the operator's to edit, and the deploy command follows.
+    assert f"# remote-instances/{name}/terragrunt.hcl" in text
+    assert "The directory name IS this instance's identity" in text
+    assert f"#   make instance-deploy INSTANCE={name}" in text
+    assert 'include "root" {' in text
+    assert 'path = find_in_parent_folders("root.hcl")' in text
+    assert (
+        'path = "${dirname(find_in_parent_folders("root.hcl"))}'
+        '/_envcommon/remote-azure.hcl"' in text
+    )
+    assert f'instance_name = "{name}"' in text
+    assert f'name_prefix   = "{name}"' in text
+    assert f'location = "{location}"' in text
+    assert f'vm_size  = "{ops.DEFAULT_AZURE_VM_SIZE}"' in text
+    assert f"root_volume_size_gb = {ops.DEFAULT_VOLUME_SIZE_GB}" in text
+    assert f"data_volume_size_gb = {ops.DEFAULT_VOLUME_SIZE_GB}" in text
+    assert 'vnet_cidr   = "10.100.0.0/16"' in text
+    assert 'subnet_cidr = "10.100.1.0/24"' in text
+    assert f'Environment = "{name}"' in text
+    # Forward-looking: the scaffold writes the declaration without checking
+    # the layer or provider it names.
+    assert not (root / "remote-instances" / "_envcommon" / "remote-azure.hcl").exists()
+    assert not (root / "provider" / "azure").exists()
+    assert any(f"created {result.path}" in message for message in result.messages)
+    assert any(f"make instance-deploy INSTANCE={name}" in message for message in result.messages)
+
+
+def test_scaffold_azure_vm_size_default_is_the_constant(tmp_path: Path) -> None:
+    """The unpassed --vm-size default lands in the template from the one
+    constant, which this test pins to the specified value."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root,
+        _instance_name(),
+        cloud=instances.ENGINE_KIND_AZURE,
+        location=_azure_location(),
+        runner=runner,
+    )
+
+    assert ops.DEFAULT_AZURE_VM_SIZE == "Standard_D2pls_v5"
+    assert f'vm_size  = "{ops.DEFAULT_AZURE_VM_SIZE}"' in result.path.read_text(encoding="utf-8")
+
+
+def test_scaffold_azure_vm_size_override_lands_in_the_template(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root,
+        _instance_name(),
+        cloud=instances.ENGINE_KIND_AZURE,
+        location=_azure_location(),
+        vm_size="Standard_D4pls_v5",
+        runner=runner,
+    )
+
+    assert 'vm_size  = "Standard_D4pls_v5"' in result.path.read_text(encoding="utf-8")
+
+
+def _git_root_gitignore_text() -> str:
+    """The committed `.gitignore` text `_git_root` seeds a scratch checkout with.
+
+    The azure refusal tests assert the gitignore is untouched; reading the
+    same source `_git_root` copies from keeps the expected value one
+    derivation from the fixture, not a second hand-typed copy.
+    """
+    repo = _import_repo()
+    real_repo_root = repo.find_root(Path(__file__).resolve().parent)
+    return subprocess.run(
+        ["git", "-C", str(real_repo_root), "show", "HEAD:.gitignore"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def test_scaffold_azure_requires_a_location(tmp_path: Path) -> None:
+    """No default location exists: the refusal names the input and writes nothing."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.ScaffoldError) as exc_info:
+        ops.scaffold(root, name, cloud=instances.ENGINE_KIND_AZURE, runner=runner)
+
+    message = str(exc_info.value)
+    assert "--location" in message and "LOCATION=<location>" in message
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+    assert (root / ".gitignore").read_text(encoding="utf-8") == _git_root_gitignore_text()
+
+
+def test_scaffold_azure_refuses_a_region_naming_the_location_equivalent(
+    tmp_path: Path,
+) -> None:
+    """The EC2 region input is refused on azure: the message names the azure
+    equivalent (--location / LOCATION=) and nothing is written."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.ScaffoldError) as exc_info:
+        ops.scaffold(
+            root,
+            name,
+            cloud=instances.ENGINE_KIND_AZURE,
+            region=REGION,
+            location=_azure_location(),
+            runner=runner,
+        )
+
+    message = str(exc_info.value)
+    assert "region" in message.lower()
+    assert "--location" in message
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_scaffold_azure_refuses_an_ami(tmp_path: Path) -> None:
+    """There is no AMI input on azure: the refusal says so and writes nothing."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.ScaffoldError) as exc_info:
+        ops.scaffold(
+            root,
+            name,
+            cloud=instances.ENGINE_KIND_AZURE,
+            ami=_ami_id(),
+            location=_azure_location(),
+            runner=runner,
+        )
+
+    message = str(exc_info.value)
+    assert "AMI" in message
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_scaffold_azure_refuses_an_unknown_cloud(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.ScaffoldError) as exc_info:
+        ops.scaffold(root, name, cloud="gcp", runner=runner)
+
+    message = str(exc_info.value)
+    assert "gcp" in message
+    assert "ec2" in message and "azure" in message
+    assert runner.calls == []
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_scaffold_azure_skips_claimed_cidrs_like_the_ec2_scaffold(tmp_path: Path) -> None:
+    """The same CIDR-allocation helper answers both clouds: a sibling claiming
+    10.100 pushes the azure deployment to the next free block."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    _sibling_with_cidr(root, "claimed", "10.100.0.0/16")
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root,
+        _instance_name(),
+        cloud=instances.ENGINE_KIND_AZURE,
+        location=_azure_location(),
+        runner=runner,
+    )
+
+    assert result.vpc_cidr == "10.101.0.0/16"
+    assert 'vnet_cidr   = "10.101.0.0/16"' in result.path.read_text(encoding="utf-8")
+    assert 'subnet_cidr = "10.101.1.0/24"' in result.path.read_text(encoding="utf-8")
+
+
+def test_scaffold_azure_appends_the_same_gitignore_entry(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name()
+
+    ops.scaffold(
+        root,
+        name,
+        cloud=instances.ENGINE_KIND_AZURE,
+        location=_azure_location(),
+        runner=_FakeRunner(),
+    )
+
+    lines = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
+    entry = f"remote-instances/{name}/"
+    assert lines.count(entry) == 1
+    assert lines.index(entry) == lines.index(ops.GITIGNORE_SCAFFOLD_ANCHOR) + 1
+
+
+def test_scaffold_azure_ec2_region_default_applies_only_when_unset(tmp_path: Path) -> None:
+    """A region-less EC2 scaffold applies DEFAULT_REGION itself; the CLI no
+    longer fills one in ahead of the azure refusal."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    ami = _ami_id()
+    runner = _FakeRunner()
+    runner.queue(_ok(ami))
+
+    result = ops.scaffold(root, _instance_name(), ami=ami, runner=runner)
+
+    assert ops.DEFAULT_REGION == "us-east-1"
+    text = result.path.read_text(encoding="utf-8")
+    assert f'availability_zone  = "{ops.DEFAULT_REGION}a"' in text
+
+
+# ---------------------------------------------------------------------------
 # Per-instance id store
 # ---------------------------------------------------------------------------
 

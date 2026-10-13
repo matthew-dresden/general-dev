@@ -129,6 +129,14 @@ jobs:
           EOF
           tail -6 "$file"
 
+      - name: Create the publishable configuration files
+        run: |
+          set -euo pipefail
+          # The runner's checkout carries no shell.env (gitignored by
+          # design); the example defaults are what the converge publishes
+          # and what the container's postcreate bootstraps from the vault.
+          make init
+
       - name: Converge (provision, certify, publish)
         run: |
           set -euo pipefail

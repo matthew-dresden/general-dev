@@ -165,6 +165,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import secrets
@@ -182,11 +183,13 @@ from devcontainer_config import instances, repo
 # The three external commands this module ever shells out to. Every openssl
 # argv built here starts with `OPENSSL_EXECUTABLE`; every Parameter Store
 # argv the client below builds starts with `AWS_EXECUTABLE`; every Key Vault
-# argv the azure client builds starts with `AZ_EXECUTABLE`; nothing else
-# in this module names an executable (AC-FUNC-006).
+# argv the azure client builds starts with `AZ_EXECUTABLE`; every Secret
+# Manager argv the gcp client builds starts with `GCLOUD_EXECUTABLE`;
+# nothing else in this module names an executable (AC-FUNC-006).
 OPENSSL_EXECUTABLE = "openssl"
 AWS_EXECUTABLE = "aws"
 AZ_EXECUTABLE = "az"
+GCLOUD_EXECUTABLE = "gcloud"
 
 # spec Section 5.5's material root. A parameter of `CertPaths`, not a literal
 # baked into any function body, so the test suite can point an entire run at
@@ -317,6 +320,37 @@ AZURE_PUBLISHABLE: dict[str, str] = {
 # when the instance's engine kind is azure, the same role the Parameter
 # Store type column plays for the ec2 set.
 AZURE_KEYVAULT_MARK = "azure-key-vault"
+
+# The gcp engine kind's publication set: the same three filenames, mapped to
+# Secret Manager secret-id leaves -- Secret Manager permits `[A-Za-z0-9_-]`,
+# so the dash-joined forms the azure set uses carry over unchanged. The CA
+# private key is absent from this mapping for the same reason it is absent
+# from `_PUBLISHABLE`, and `gcp_publication_set` refuses it by name through
+# the same `_is_ca_private_key_request` rule.
+GCP_SERVER_KEY_SECRET = "tls-server-key"
+GCP_SERVER_CERT_SECRET = "tls-server-cert"
+GCP_CA_SECRET = "tls-ca"
+GCP_CHECKSUM_SECRET = "tls-checksum"
+
+GCP_PUBLISHABLE: dict[str, str] = {
+    SERVER_KEY_FILENAME: GCP_SERVER_KEY_SECRET,
+    SERVER_CERT_FILENAME: GCP_SERVER_CERT_SECRET,
+    CA_CERT_FILENAME: GCP_CA_SECRET,
+}
+
+# The two configuration-payload secret-id leaves `push-secrets.sh` publishes
+# beside the TLS material, declared here so the status probe, the cleanup
+# arm and the shell script all compose the same ids from one set of leaves
+# rather than each restating its own literals. They are not part of
+# `GCP_PUBLISHABLE`: publishing them is the shell publish's job, and the
+# certificate publication set never grows a non-certificate entry.
+GCP_SHELL_ENV_SECRET = "shell-env"
+GCP_PROFILE_MAP_SECRET = "profile-map"
+
+# The marker `certs publication-set` prints after each Secret Manager secret
+# id when the instance's engine kind is gcp, the same role
+# AZURE_KEYVAULT_MARK plays for the azure set.
+GCP_SECRET_MANAGER_MARK = "gcp-secret-manager"
 
 # Every spelling of "the CA private key" `publication_set` must recognize and
 # refuse by name rather than falling through to the generic "not
@@ -1068,6 +1102,316 @@ class KeyVaultClient:
                 handle.write(value)
             argv = self._set_argv(secret_name, document_path)
             self._invoke(argv, secret_name, operation=KEYVAULT_SET_OP)
+
+
+# ---------------------------------------------------------------------------
+# The Secret Manager publication client. This section is the gcp engine
+# kind's twin of the two clients above, and it mirrors their discipline
+# exactly: the value travels in a `--data-file` pointing at a 0600 file
+# inside a 0700 directory removed before returning, never an argument; the
+# decision to create versus version-add is made from an explicit probe,
+# never from a caught error; every write is read back through
+# `versions access latest` and byte-compared before the caller may report
+# it published; the same injectable Runner seam substitutes a fake in
+# tests; and the failure classes name the remedy. `gcloud` authenticates
+# ambiently, so the client takes a project id and no credential.
+# ---------------------------------------------------------------------------
+
+# The three `gcloud secrets` subcommands this client ever issues. Declared
+# once so each is named identically in the argv it builds and in the
+# operation name an error message reports for it.
+SECRETS_CREATE_OP = "secrets create"
+SECRETS_VERSIONS_ADD_OP = "secrets versions add"
+SECRETS_ACCESS_OP = "secrets versions access latest"
+SECRETS_DESCRIBE_OP = "secrets describe"
+
+# The write's `--data-file` document, created at mode 0600 inside the
+# temporary 0700 directory the write removes before returning -- the same
+# discipline `PUT_DOCUMENT_FILENAME` and `PUT_SECRET_FILENAME` document for
+# the aws and azure paths.
+PUT_SECRET_DATA_FILENAME = "put-secret.bin"
+
+# Substrings the gcloud CLI's stderr carries when the thing a probe names
+# does not exist, and when the caller has no ambient identity. Matched
+# literally, not parsed, because gcloud's own error rendering is plain
+# text. Only the not-found set is ever diagnosed as "the secret is
+# missing"; every other non-zero exit is classified by the shared rule
+# below (`_raise_for_secret_failure`), because asserting a cause for a
+# failure that is not one hands the operator a remediation that cannot
+# work.
+SECRET_NOT_FOUND_MARKERS: tuple[str, ...] = ("NOT_FOUND", "not found", "404")
+GCLOUD_AUTH_MARKER = "gcloud auth login"
+GCLOUD_PERMISSION_MARKERS: tuple[str, ...] = ("PERMISSION_DENIED", "403")
+GCLOUD_NO_CREDENTIALS_MARKERS: tuple[str, ...] = (
+    "Your credentials have expired",
+    "could not obtain an access token",
+    "(gcloud.auth)",
+)
+
+
+class SecretManagerError(RuntimeError):
+    """Base class for every failure the Secret Manager client raises.
+
+    Every raise site names the offending secret id and states the remedy,
+    so an operator reading the message knows what to do next without
+    consulting this module.
+    """
+
+
+class SecretManagerUnavailableError(SecretManagerError):
+    """The `gcloud` binary is missing, or no ambient credential resolved."""
+
+
+class SecretManagerUnauthorizedError(SecretManagerError):
+    """The caller's identity is not authorized for the project's secrets."""
+
+
+class SecretManagerSecretNotFoundError(SecretManagerError):
+    """No secret exists under the id a read asked for."""
+
+
+class SecretManagerUnclassifiedError(SecretManagerError):
+    """The store rejected the operation for a reason this client does not classify."""
+
+
+def _secret_unavailable_no_binary_message(secret_id: str) -> str:
+    return (
+        f"ERROR: cannot reach Secret Manager for {secret_id}\n"
+        "The gcloud CLI is not on PATH.\n"
+        "Install the Google Cloud CLI ('brew install google-cloud-sdk' on macOS), "
+        "then retry."
+    )
+
+
+def _secret_unavailable_no_login_message(secret_id: str) -> str:
+    return (
+        f"ERROR: cannot reach Secret Manager for {secret_id}\n"
+        "No ambient gcloud credential resolved.\n"
+        "Run 'gcloud auth login' to refresh the credentials, then retry."
+    )
+
+
+def _secret_unauthorized_message(secret_id: str, project_id: str) -> str:
+    return (
+        f"ERROR: access denied for {secret_id} in project '{project_id}'\n"
+        "The caller's identity is not authorized for this project's secrets.\n"
+        "Ask an operator to grant the missing Secret Manager permission on this "
+        "project, then retry."
+    )
+
+
+def _secret_not_found_message(secret_id: str, project_id: str) -> str:
+    return (
+        f"ERROR: no secret named {secret_id} in project '{project_id}'\n"
+        "The store reported the secret as missing.\n"
+        f"Publish it first: run the publication that writes '{secret_id}' and retry."
+    )
+
+
+def _secret_unclassified_failure_message(secret_id: str, operation: str, returncode: int) -> str:
+    return (
+        f"ERROR: cannot complete '{operation}' for {secret_id}\n"
+        f"The gcloud CLI exited with status {returncode}; this is not a missing "
+        "credential, an access-denied response, or a not-found response, so this "
+        "client does not guess a cause.\n"
+        "The gcloud CLI's diagnostic is not repeated here because it may contain "
+        "response detail this client does not echo; re-run the command by hand "
+        "(add '--log-http' for detail) to see it directly, then retry."
+    )
+
+
+def _raise_for_secret_failure(
+    secret_id: str, project_id: str, operation: str, returncode: int, stderr: str
+) -> NoReturn:
+    if any(marker in stderr for marker in SECRET_NOT_FOUND_MARKERS):
+        raise SecretManagerSecretNotFoundError(_secret_not_found_message(secret_id, project_id))
+    if any(marker in stderr for marker in GCLOUD_PERMISSION_MARKERS):
+        raise SecretManagerUnauthorizedError(_secret_unauthorized_message(secret_id, project_id))
+    if GCLOUD_AUTH_MARKER in stderr or any(
+        marker in stderr for marker in GCLOUD_NO_CREDENTIALS_MARKERS
+    ):
+        raise SecretManagerUnavailableError(_secret_unavailable_no_login_message(secret_id))
+    raise SecretManagerUnclassifiedError(
+        _secret_unclassified_failure_message(secret_id, operation, returncode)
+    )
+
+
+class SecretManagerClient:
+    """Writes and reads individual secrets in the project `project_id` names.
+
+    The gcp twin of `ParameterStoreClient` and `KeyVaultClient`, bound to
+    one project instead of addressing paths or vaults. `runner` and
+    `project_id` are the only inputs: no credential, endpoint or region is
+    read from anywhere else in this class, because gcloud resolves its
+    ambient session and its own configured project fallback the way any
+    other invocation on this host does -- and the project id is passed
+    explicitly on every call so the store can never drift with the CLI's
+    ambient configuration.
+    """
+
+    def __init__(self, runner: Runner, *, project_id: str) -> None:
+        self._runner = runner
+        self._project_id = project_id
+
+    def _describe_argv(self, secret_id: str) -> list[str]:
+        """The probe argv: exit status alone decides create versus version-add."""
+        return [
+            GCLOUD_EXECUTABLE,
+            "secrets",
+            "describe",
+            secret_id,
+            "--project",
+            self._project_id,
+        ]
+
+    def _create_argv(self, secret_id: str, file_path: Path) -> list[str]:
+        """The first-publish argv: the value rides `--data-file`, never an argument."""
+        return [
+            GCLOUD_EXECUTABLE,
+            "secrets",
+            "create",
+            secret_id,
+            "--project",
+            self._project_id,
+            f"--data-file={file_path}",
+        ]
+
+    def _versions_add_argv(self, secret_id: str, file_path: Path) -> list[str]:
+        """The re-publish argv: a new version of the existing secret."""
+        return [
+            GCLOUD_EXECUTABLE,
+            "secrets",
+            "versions",
+            "add",
+            secret_id,
+            "--project",
+            self._project_id,
+            f"--data-file={file_path}",
+        ]
+
+    def _access_argv(self, secret_id: str) -> list[str]:
+        """The read argv: `versions access latest` prints the stored bytes raw."""
+        return [
+            GCLOUD_EXECUTABLE,
+            "secrets",
+            "versions",
+            "access",
+            "latest",
+            "--secret",
+            secret_id,
+            "--project",
+            self._project_id,
+        ]
+
+    def _invoke(
+        self, argv: list[str], secret_id: str, *, operation: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Run `argv` through the injected runner and translate any failure.
+
+        The one place every operation's error handling passes through, the
+        same single-seam shape the two clients above give their own
+        operations: the translation from a gcloud exit code or a missing
+        binary to a `SecretManagerError` subclass exists once, not once per
+        operation.
+        """
+        try:
+            result = self._runner(argv, None)
+        except FileNotFoundError as exc:
+            raise SecretManagerUnavailableError(
+                _secret_unavailable_no_binary_message(secret_id)
+            ) from exc
+        if result.returncode != 0:
+            _raise_for_secret_failure(
+                secret_id, self._project_id, operation, result.returncode, result.stderr
+            )
+        return result
+
+    def secret_exists(self, secret_id: str) -> bool:
+        """Whether `secret_id` exists, loudly on any answer but yes or no.
+
+        The explicit probe the write path decides create-versus-version-add
+        from, the same probe-before-mutate discipline the state stores
+        apply: a confirmed-missing secret answers False, a present one
+        True, and any other outcome -- a 403 on a project this identity
+        cannot see, an unreachable endpoint -- raises with the remedy,
+        never misread as "missing".
+
+        Raises:
+            SecretManagerUnavailableError: the store could not be reached.
+            SecretManagerUnauthorizedError: the caller lacks access.
+            SecretManagerUnclassifiedError: any other failure.
+        """
+        try:
+            self._invoke(self._describe_argv(secret_id), secret_id, operation=SECRETS_DESCRIBE_OP)
+        except SecretManagerSecretNotFoundError:
+            return False
+        return True
+
+    def read_secret(self, secret_id: str) -> str:
+        """The value stored under `secret_id`, byte for byte.
+
+        The read counterpart of `write_secret`, and symmetric with it:
+        `publish_to_secret_manager` uses it to confirm each published
+        secret independently, rather than trusting the write call's own
+        exit code. `versions access latest` prints the stored bytes raw
+        with no trailing newline added (verified live, NUL bytes included),
+        so the stdout is compared to what was written without trimming.
+
+        Raises:
+            SecretManagerUnavailableError: the store could not be reached.
+            SecretManagerUnauthorizedError: the caller lacks access to
+                this project.
+            SecretManagerSecretNotFoundError: no secret exists under this
+                id.
+            SecretManagerError: the read answered nothing, which is not a
+                state a published secret can be in.
+            SecretManagerUnclassifiedError: the store rejected the
+                operation for a reason this client does not classify.
+        """
+        result = self._invoke(self._access_argv(secret_id), secret_id, operation=SECRETS_ACCESS_OP)
+        if result.stdout == "":
+            raise SecretManagerError(
+                f"ERROR: the read of {secret_id} returned nothing\n"
+                f"Project '{self._project_id}' answered successfully but printed no "
+                "value, which is not a state a published secret can be in.\n"
+                "Re-run the publication, and check whether another process is "
+                "writing the same project."
+            )
+        return result.stdout
+
+    def write_secret(self, secret_id: str, value: str) -> None:
+        """Store `value` under `secret_id`, adding a version when it already exists.
+
+        The one place in this repository a Secret Manager secret is
+        written. The argv invariant is the two clients' own, restated for
+        gcp: `value` travels inside a `--data-file` document written to a
+        private file this method creates and removes, and never appears in
+        argv, so no sensitive material -- a TLS private key included -- can
+        reach the process table. The create-versus-version-add decision is
+        made from `secret_exists`' explicit probe, never from a caught
+        error: `secrets create` answers the first publish (and creates the
+        secret's first version from the same `--data-file`), and
+        `versions add` answers every publish after it.
+
+        Raises:
+            SecretManagerUnavailableError: the store could not be reached.
+            SecretManagerUnauthorizedError: the caller lacks access to
+                this project.
+            SecretManagerUnclassifiedError: the store rejected the
+                operation for a reason this client does not classify.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            document_path = Path(directory) / PUT_SECRET_DATA_FILENAME
+            descriptor = os.open(document_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(value)
+            if self.secret_exists(secret_id):
+                argv = self._versions_add_argv(secret_id, document_path)
+                operation = SECRETS_VERSIONS_ADD_OP
+            else:
+                argv = self._create_argv(secret_id, document_path)
+                operation = SECRETS_CREATE_OP
+            self._invoke(argv, secret_id, operation=operation)
 
 
 def _publication_contents(paths: CertPaths) -> dict[str, str]:
@@ -1872,6 +2216,152 @@ def azure_publication_set(instance: str, filenames: Sequence[str] | None = None)
     return tuple(AZURE_PUBLISHABLE[name] for name in validated)
 
 
+def gcp_secret_id(prefix: str, leaf: str) -> str:
+    """The full Secret Manager secret id for `leaf` under the sanitized `prefix`.
+
+    The one composition of the `<prefix>-<leaf>` shape the gcp kind's six
+    per-instance secrets carry -- the four TLS-and-checksum leaves this
+    module publishes and the two configuration-payload leaves
+    `push-secrets.sh` publishes -- so the write side and every later
+    reader (the VM's startup script, the status probe, the cleanup arm)
+    compose the same ids from one rule, never from two spellings of it.
+    """
+    return f"{prefix}-{leaf}"
+
+
+def gcp_instance_secret_ids(prefix: str) -> tuple[str, ...]:
+    """All six Secret Manager secret ids one gcp instance's state lives under.
+
+    The three TLS secrets, the checksum secret beside them, and the two
+    configuration-payload secrets -- in publication order. The status
+    probe asks for exactly these six and the cleanup arm deletes exactly
+    these six, both through this one tuple, so a leaf added to one without
+    the other is impossible by construction.
+    """
+    return (
+        gcp_secret_id(prefix, GCP_SERVER_KEY_SECRET),
+        gcp_secret_id(prefix, GCP_SERVER_CERT_SECRET),
+        gcp_secret_id(prefix, GCP_CA_SECRET),
+        gcp_secret_id(prefix, GCP_CHECKSUM_SECRET),
+        gcp_secret_id(prefix, GCP_SHELL_ENV_SECRET),
+        gcp_secret_id(prefix, GCP_PROFILE_MAP_SECRET),
+    )
+
+
+def gcp_material_checksum(contents: dict[str, str]) -> str:
+    """The sha256 of the three PEM bodies concatenated, in publication order.
+
+    The one value the gcp kind's boot-applied install is decided by:
+    `publish_to_secret_manager` writes this checksum beside the material it
+    covers, the VM's startup script (whose contract this module and
+    `transport_gcp` own) compares the checksum it fetched against the
+    `general-dev/tls-checksum` guest attribute, and
+    `transport_gcp.applied_checksum_matches` compares the store's checksum
+    against the same attribute from the laptop. Deterministic by
+    construction -- the same three bodies always hash to the same value --
+    so the comparison needs no canonical form beyond this function's own
+    fixed order.
+    """
+    material = "".join(contents[filename] for filename in GCP_PUBLISHABLE)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def gcp_publication_set(instance: str, filenames: Sequence[str] | None = None) -> tuple[str, ...]:
+    """The Secret Manager secret ids `instance`'s material may publish (the gcp kind).
+
+    The gcp twin of `publication_set` and `azure_publication_set`: the
+    same three filenames, refused through the same rules -- the CA private
+    key under any spelling, and anything outside the set by name -- mapped
+    to the secret-id leaves `GCP_PUBLISHABLE` declares, prefixed by the
+    sanitized instance name and completed by the checksum leaf, so the
+    default answer is four ids: the three TLS secrets and
+    `<prefix>-tls-checksum`, whose value `publish_to_secret_manager`
+    computes. The prefix is derived here the same way the deploy mints the
+    record's `secrets_prefix` (`instances.sanitize_gcp_name`), so the
+    listing and the store can never disagree. Passing `filenames`
+    restricts (or, for any name outside the TLS set, rejects) the returned
+    names -- it never adds one; the checksum id rides every publication
+    and is not itself a `filenames` entry.
+
+    Raises:
+        CertsError: `instance` is empty or contains a path separator
+            (`_validate_instance`, checked before anything is returned),
+            or `filenames` names the CA private key under any spelling, or
+            any other name outside the three names this function maps.
+        instances.InvalidGCPNameError: the instance name has no legal
+            sanitized form to prefix the ids with.
+    """
+    validated = _validated_publication_names(instance, filenames, GCP_PUBLISHABLE)
+    prefix = instances.sanitize_gcp_name(instance)
+    ids = [gcp_secret_id(prefix, GCP_PUBLISHABLE[name]) for name in validated]
+    # The checksum secret rides every publication: the boot-applied install
+    # is decided by it, so a set without it would publish material no VM
+    # could ever confirm.
+    ids.append(gcp_secret_id(prefix, GCP_CHECKSUM_SECRET))
+    return tuple(ids)
+
+
+def publish_to_secret_manager(
+    paths: CertPaths, client: SecretManagerClient, *, prefix: str
+) -> tuple[str, ...]:
+    """Publish `paths.instance`'s TLS material to Secret Manager, returning the ids written.
+
+    The gcp twin of `publish` and `publish_to_key_vault`, and it inherits
+    their guarantees wholesale by consuming the same `_publication_contents`
+    head and the same read-back discipline: `issue_server`'s output reaches
+    the store through `SecretManagerClient.write_secret`, which passes every
+    value in a `--data-file` inside a removed 0700 directory rather than in
+    argv, so the key never touches the process table; only the four ids
+    `gcp_publication_set` allows are written -- the three TLS secrets plus
+    `<prefix>-tls-checksum`, whose value `gcp_material_checksum` computes
+    over the same contents; and every secret is read back through
+    `SecretManagerClient.read_secret` and byte-compared against what was
+    written before this function reports it published.
+
+    The checksum secret is what makes the install boot-applied rather than
+    pushed: the VM's startup script fetches the three secrets and this
+    checksum on every boot, compares the checksum against the
+    `general-dev/tls-checksum` guest attribute, and applies the material
+    only on drift -- so `prefix` must be exactly the prefix the deploy
+    recorded, because that is the prefix the VM fetches by.
+
+    Raises:
+        CertsError: the CA is missing, so there is nothing to sign with;
+            or `prefix` is not the sanitized form of `paths.instance`,
+            which would publish material the VM would never fetch.
+        SecretManagerError: the store rejected or could not serve a
+            write. Deliberately not translated -- the
+            `SecretManagerError` subclasses already carry the remedy an
+            operator needs, and re-wrapping them here would only bury it.
+    """
+    expected_prefix = instances.sanitize_gcp_name(paths.instance)
+    if prefix != expected_prefix:
+        raise CertsError(
+            f"ERROR: the secrets prefix {prefix!r} does not match instance "
+            f"{paths.instance!r}\n"
+            f"The gcp kind publishes under the sanitized instance name "
+            f"({expected_prefix!r}), and the VM's startup script fetches under the "
+            "prefix the engine address record recorded.\n"
+            f"Redeploy to rewrite the record: make instance-deploy "
+            f"INSTANCE={paths.instance}"
+        )
+    contents = _publication_contents(paths)
+    checksum = gcp_material_checksum(contents)
+    publications: list[tuple[str, str]] = [
+        (gcp_secret_id(prefix, GCP_PUBLISHABLE[filename]), contents[filename])
+        for filename in GCP_PUBLISHABLE
+    ]
+    publications.append((gcp_secret_id(prefix, GCP_CHECKSUM_SECRET), checksum))
+    written: list[str] = []
+    for secret_id, value in publications:
+        client.write_secret(secret_id, value)
+        stored = client.read_secret(secret_id)
+        if stored != value:
+            raise CertsError(_read_back_mismatch_message(secret_id, paths, len(value), len(stored)))
+        written.append(secret_id)
+    return tuple(written)
+
+
 def not_after(cert_path: Path) -> datetime.datetime:
     """The `notAfter` timestamp `cert_path` carries, as a timezone-aware UTC `datetime`.
 
@@ -2182,7 +2672,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "publish",
         help=(
             "Publish this instance's TLS material to its engine kind's store "
-            "(Parameter Store for ec2, the instance's Key Vault for azure)."
+            "(Parameter Store for ec2, the instance's Key Vault for azure, "
+            "Secret Manager for gcp)."
         ),
     )
     add_instance_arguments(publish_parser)
@@ -2249,10 +2740,13 @@ def _run_publish(args: argparse.Namespace) -> int:
 
     The store is selected by the instance's engine kind
     (`instances.read_kind`): the ec2 kind publishes to Parameter Store as it
-    always has, and the azure kind publishes to the Key Vault named in its
+    always has, the azure kind publishes to the Key Vault named in its
     engine address record (`instances.engine_vault_name`, whose refusal
-    names the deploy that writes the record). An ssh engine is refused by
-    `certs.sh` before this handler runs and reaches no store from here.
+    names the deploy that writes the record), and the gcp kind publishes to
+    Secret Manager in the project the record names, under the prefix the
+    record recorded -- the same deploy remedy for a missing or half-written
+    record. An ssh engine is refused by `certs.sh` before this handler runs
+    and reaches no store from here.
     """
     paths = CertPaths(instance=args.instance, root=args.root)
     try:
@@ -2270,6 +2764,18 @@ def _run_publish(args: argparse.Namespace) -> int:
         ):
             print(f"published {secret_name}")
         return 0
+    if kind == instances.ENGINE_KIND_GCP:
+        try:
+            project_id = instances.gcp_project_id(root, args.instance)
+            prefix = instances.gcp_secrets_prefix(root, args.instance)
+        except instances.InstancesError as exc:
+            raise CertsError(str(exc)) from exc
+        written = publish_to_secret_manager(
+            paths, SecretManagerClient(subprocess_runner, project_id=project_id), prefix=prefix
+        )
+        for secret_id in written:
+            print(f"published {secret_id}")
+        return 0
     client = ParameterStoreClient(subprocess_runner, region=args.region)
     for path in publish(paths, client):
         print(f"published {path}")
@@ -2281,7 +2787,9 @@ def _run_publication_set(args: argparse.Namespace) -> int:
 
     The ec2 set is the Parameter Store entries spec Section 5.3 names; the
     azure set is the Key Vault secret names, azure-marked so the operator
-    can tell at a glance which store the name addresses.
+    can tell at a glance which store the name addresses; the gcp set is the
+    Secret Manager secret ids -- the three TLS secrets plus the checksum
+    secret -- gcp-marked the same way.
     """
     try:
         root = repo.find_root(Path.cwd())
@@ -2291,6 +2799,10 @@ def _run_publication_set(args: argparse.Namespace) -> int:
     if kind == instances.ENGINE_KIND_AZURE:
         for secret_name in azure_publication_set(args.instance):
             print(f"{secret_name} {AZURE_KEYVAULT_MARK}")
+        return 0
+    if kind == instances.ENGINE_KIND_GCP:
+        for secret_id in gcp_publication_set(args.instance):
+            print(f"{secret_id} {GCP_SECRET_MANAGER_MARK}")
         return 0
     for entry in publication_set(args.instance):
         print(f"{entry.parameter_path} {entry.parameter_type}")

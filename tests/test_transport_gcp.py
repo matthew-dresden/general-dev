@@ -32,6 +32,7 @@ import io
 import os
 import signal
 import socket
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -792,3 +793,380 @@ def test_main_verify_without_client_material_names_the_cert_remedy(
     assert exit_code == 1
     assert "no client certificate exists" in captured.err
     assert launcher.children == [], "no tunnel may spawn behind a refused certificate"
+
+
+# ---------------------------------------------------------------------------
+# The boot-applied install: the compare and wait logic the cert-install
+# flow and the start path drive. The runner double here is in the
+# `(argv, stdin) -> CompletedProcess` shape -- the `instance_ops.Runner`
+# shape these helpers take -- not the `CommandRunner` shape the tunnel
+# tests above use, because the guest-attribute and secret reads are plain
+# gcloud subprocess calls.
+# ---------------------------------------------------------------------------
+
+
+class _GcloudFake:
+    """A strict runner double in the `(argv, stdin)` shape, answering from a
+    fixture map with an optional function of the argv.
+
+    A command the fixture map does not name raises, so a stray gcloud call
+    fails the test instead of passing silently; a callable value is called
+    with the argv so a test can answer statefully (an attribute that flips
+    to TRUE on the third poll, for example).
+    """
+
+    def __init__(self, responses: dict[tuple[str, ...], object]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        key = tuple(argv)
+        self.calls.append(key)
+        answer = self.responses.get(key)
+        if callable(answer):
+            return answer(key)
+        if answer is None:
+            raise AssertionError(f"_GcloudFake received an unrecorded command: {key!r}")
+        return answer
+
+
+def _gcp_ok(stdout: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+
+
+def _gcp_err(stderr: str, *, returncode: int = 1) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr=stderr)
+
+
+def _attribute_command(key: str) -> tuple[str, ...]:
+    return (
+        "gcloud",
+        "compute",
+        "instances",
+        "get-guest-attributes",
+        _NAME,
+        f"--query-path=general-dev/{key}",
+        "--zone",
+        _ZONE,
+        "--project",
+        _PROJECT,
+        "--format",
+        "value(value)",
+    )
+
+
+def _checksum_secret_command() -> tuple[str, ...]:
+    return (
+        "gcloud",
+        "secrets",
+        "versions",
+        "access",
+        "latest",
+        "--secret",
+        f"{_NAME}-tls-checksum",
+        "--project",
+        _PROJECT,
+    )
+
+
+_CHECKSUM = "a" * 64
+
+
+def _checksum_fixture(
+    *, published: str = _CHECKSUM, applied: str | None = _CHECKSUM
+) -> _GcloudFake:
+    """The two-read fixture every comparison drives: the store's checksum and
+    the VM's applied attribute, each addressable independently."""
+    responses: dict[tuple[str, ...], object] = {
+        _checksum_secret_command(): _gcp_ok(f"{published}\n"),
+    }
+    if applied is None:
+        responses[_attribute_command("tls-checksum")] = _gcp_err(
+            "ERROR: (gcloud.compute.instances.get-guest-attributes) general-dev/tls-checksum "
+            "not found",
+        )
+    else:
+        responses[_attribute_command("tls-checksum")] = _gcp_ok(f"{applied}\n")
+    return _GcloudFake(responses)
+
+
+def test_gcp_material_record_values_reads_the_quadruple() -> None:
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+
+    assert transport_gcp.gcp_material_record_values(record, instance=_NAME) == (
+        _NAME,
+        _ZONE,
+        _PROJECT,
+        _NAME,
+    )
+
+
+def test_gcp_material_record_values_refuses_a_record_without_a_prefix() -> None:
+    transport_gcp = _import_transport_gcp()
+    record = {
+        instances.GCP_INSTANCE_NAME_KEY: _NAME,
+        instances.ZONE_KEY: _ZONE,
+        instances.PROJECT_ID_KEY: _PROJECT,
+    }
+
+    with pytest.raises(transport_gcp.GCPConfigError, match="make instance-deploy"):
+        transport_gcp.gcp_material_record_values(record, instance=_NAME)
+
+
+def test_gcp_material_record_values_refuses_an_unsanitized_prefix() -> None:
+    transport_gcp = _import_transport_gcp()
+    record = {
+        instances.GCP_INSTANCE_NAME_KEY: _NAME,
+        instances.ZONE_KEY: _ZONE,
+        instances.PROJECT_ID_KEY: _PROJECT,
+        instances.SECRETS_PREFIX_KEY: "Not_Sanitized",
+    }
+
+    with pytest.raises(transport_gcp.GCPConfigError, match="secrets_prefix"):
+        transport_gcp.gcp_material_record_values(record, instance=_NAME)
+
+
+def test_guest_attribute_argv_pins_the_format_flag() -> None:
+    """The format flag is not optional: without it gcloud prints a table."""
+    transport_gcp = _import_transport_gcp()
+
+    assert transport_gcp.build_guest_attribute_argv(
+        instance_name=_NAME, zone=_ZONE, project_id=_PROJECT, key="tls-checksum"
+    ) == list(_attribute_command("tls-checksum"))
+
+
+def test_read_guest_attribute_trims_and_answers_absent() -> None:
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+
+    present = _GcloudFake({_attribute_command("tls-checksum"): _gcp_ok("TRUE\n")})
+    assert (
+        transport_gcp.read_guest_attribute(record, present, instance=_NAME, key="tls-checksum")
+        == "TRUE"
+    )
+
+    absent_stderr = _GcloudFake({_attribute_command("tls-checksum"): _gcp_err("... not found ...")})
+    assert (
+        transport_gcp.read_guest_attribute(
+            record, absent_stderr, instance=_NAME, key="tls-checksum"
+        )
+        is None
+    )
+
+    empty = _GcloudFake({_attribute_command("tls-checksum"): _gcp_ok("")})
+    assert (
+        transport_gcp.read_guest_attribute(record, empty, instance=_NAME, key="tls-checksum")
+        is None
+    )
+
+
+def test_read_guest_attribute_raises_a_real_failure_with_the_command() -> None:
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+    runner = _GcloudFake(
+        {_attribute_command("tls-checksum"): _gcp_err("ERROR: zone does not exist")}
+    )
+
+    with pytest.raises(transport_gcp.GCPTransportError, match="zone does not exist"):
+        transport_gcp.read_guest_attribute(record, runner, instance=_NAME, key="tls-checksum")
+
+
+def test_read_published_checksum_pins_the_access_argv_and_trims() -> None:
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+    runner = _GcloudFake({_checksum_secret_command(): _gcp_ok(f"{_CHECKSUM}\n")})
+
+    assert transport_gcp.read_published_checksum(record, runner, instance=_NAME) == _CHECKSUM
+    assert runner.calls == [_checksum_secret_command()]
+
+
+def test_read_published_checksum_refuses_a_missing_secret_naming_the_publish() -> None:
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+    runner = _GcloudFake({_checksum_secret_command(): _gcp_err("ERROR: ... not found: 404.")})
+
+    with pytest.raises(transport_gcp.GCPConfigError, match="cert-publish"):
+        transport_gcp.read_published_checksum(record, runner, instance=_NAME)
+
+
+def test_applied_checksum_matches_answers_true_false_and_drifted() -> None:
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+
+    assert transport_gcp.applied_checksum_matches(record, _checksum_fixture(), instance=_NAME)
+    assert not transport_gcp.applied_checksum_matches(
+        record, _checksum_fixture(applied=None), instance=_NAME
+    ), "an absent attribute is the never-applied state, not an error"
+    assert not transport_gcp.applied_checksum_matches(
+        record, _checksum_fixture(applied="b" * 64), instance=_NAME
+    ), "a drifted attribute is the reboot case, not an error"
+
+
+def test_wait_applied_checksum_returns_the_checksum_once_applied() -> None:
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+    # The attribute flips to the published checksum on the third poll; the
+    # flip is decided by the poll count, never by time.
+    polls = {"count": 0}
+
+    def flip(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        polls["count"] += 1
+        if polls["count"] >= 3:
+            return _gcp_ok(f"{_CHECKSUM}\n")
+        return _gcp_ok(f"{'b' * 64}\n")
+
+    runner = _GcloudFake(
+        {
+            _checksum_secret_command(): _gcp_ok(_CHECKSUM),
+            _attribute_command("tls-checksum"): flip,
+        }
+    )
+    ticks = iter(range(0, 100, 10))
+    paced: list[float] = []
+
+    checksum = transport_gcp.wait_applied_checksum(
+        record,
+        runner,
+        instance=_NAME,
+        pace=paced.append,
+        clock=lambda: next(ticks),
+        deadline_seconds=90.0,
+    )
+
+    assert checksum == _CHECKSUM
+    assert polls["count"] == 3, (
+        "the flip is decided by the poll count: two drifted reads, then the match"
+    )
+    assert len(paced) == 1, "one drifted loop means one paced wait, never a fixed sleep"
+
+
+def test_wait_applied_checksum_times_out_naming_the_budget_and_the_vm_error() -> None:
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+    runner = _GcloudFake(
+        {
+            _checksum_secret_command(): _gcp_ok(_CHECKSUM),
+            _attribute_command("tls-checksum"): _gcp_ok("c" * 64),
+            _attribute_command("error"): _gcp_ok("fetch failed: 403"),
+        }
+    )
+    ticks = iter(range(0, 100, 10))
+
+    with pytest.raises(transport_gcp.GCPTransportError) as excinfo:
+        transport_gcp.wait_applied_checksum(
+            record,
+            runner,
+            instance=_NAME,
+            pace=lambda _seconds: None,
+            clock=lambda: next(ticks),
+            deadline_seconds=15.0,
+        )
+
+    message = str(excinfo.value)
+    assert transport_gcp.MATERIAL_APPLY_TIMEOUT_ENV_VAR in message
+    assert "fetch failed: 403" in message, "the VM's own diagnostic decorates the timeout"
+
+
+def test_wait_applied_checksum_stops_immediately_on_an_expired_session() -> None:
+    """An expired gcloud session is the one cause no budget can fix: the wait
+    stops on the first read instead of burning the deadline."""
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+    runner = _GcloudFake(
+        {
+            _checksum_secret_command(): _gcp_err(
+                "Your credentials have expired. Run gcloud auth login"
+            )
+        }
+    )
+    paced: list[float] = []
+
+    with pytest.raises(transport_gcp.GCPTransportError, match="gcloud auth login"):
+        transport_gcp.wait_applied_checksum(
+            record,
+            runner,
+            instance=_NAME,
+            pace=paced.append,
+            clock=lambda: 0.0,
+            deadline_seconds=900.0,
+        )
+
+    assert paced == []
+
+
+def test_wait_provisioned_returns_on_the_true_marker() -> None:
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+    runner = _GcloudFake({_attribute_command("provisioned"): _gcp_ok("TRUE\n")})
+
+    transport_gcp.wait_provisioned(
+        record, runner, instance=_NAME, pace=lambda _seconds: None, clock=lambda: 0.0
+    )
+
+
+def test_wait_provisioned_polls_past_absence_and_times_out() -> None:
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+    polls = {"count": 0}
+
+    def absent_then_present(argv: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        polls["count"] += 1
+        if polls["count"] >= 2:
+            return _gcp_ok("TRUE\n")
+        return _gcp_err("not found")
+
+    runner = _GcloudFake({_attribute_command("provisioned"): absent_then_present})
+    first_ticks = iter(range(0, 100, 10))
+
+    transport_gcp.wait_provisioned(
+        record,
+        runner,
+        instance=_NAME,
+        pace=lambda _seconds: None,
+        clock=lambda: next(first_ticks),
+        deadline_seconds=60.0,
+    )
+    assert polls["count"] == 2
+
+    always_absent = _GcloudFake(
+        {
+            _attribute_command("provisioned"): _gcp_err("not found"),
+            _attribute_command("error"): _gcp_err("not found"),
+        }
+    )
+    second_ticks = iter(range(0, 100, 10))
+    with pytest.raises(transport_gcp.GCPTransportError) as excinfo:
+        transport_gcp.wait_provisioned(
+            record,
+            always_absent,
+            instance=_NAME,
+            pace=lambda _seconds: None,
+            clock=lambda: next(second_ticks),
+            deadline_seconds=15.0,
+        )
+
+    assert transport_gcp.PROVISIONED_TIMEOUT_ENV_VAR in str(excinfo.value)
+
+
+def test_material_timeouts_read_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport_gcp = _import_transport_gcp()
+    monkeypatch.setenv(transport_gcp.MATERIAL_APPLY_TIMEOUT_ENV_VAR, "12.5")
+    monkeypatch.setenv(transport_gcp.PROVISIONED_TIMEOUT_ENV_VAR, "45")
+    assert transport_gcp.material_apply_timeout_seconds() == 12.5
+    assert transport_gcp.provisioned_timeout_seconds() == 45.0
+
+    monkeypatch.setenv(transport_gcp.MATERIAL_APPLY_TIMEOUT_ENV_VAR, "nope")
+    with pytest.raises(transport_gcp.GCPTransportError, match="positive"):
+        transport_gcp.material_apply_timeout_seconds()

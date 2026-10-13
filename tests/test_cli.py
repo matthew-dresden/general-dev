@@ -1811,3 +1811,229 @@ def test_secrets_vault_and_gcp_zone_print_one_line_from_the_record(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.out == f"{_GCP_ZONE}\n"
+
+
+# ---------------------------------------------------------------------------
+# The gcp accessors: gcp-project-id, gcp-secrets-prefix, gcp-applied-checksum.
+# ---------------------------------------------------------------------------
+
+
+def test_gcp_project_id_and_secrets_prefix_print_one_line_from_the_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`gcp-project-id` and `gcp-secrets-prefix` print the record's values and
+    nothing else; a missing record names the deploy that writes it."""
+    from devcontainer_config import instances as instances_module
+
+    root = _git_root_with_origin(tmp_path)
+    monkeypatch.setenv(instances_module.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+
+    for accessor in ("gcp-project-id", "gcp-secrets-prefix"):
+        exit_code = run_cli(monkeypatch, root, [accessor, "sandbox"])
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "make instance-deploy INSTANCE=sandbox" in captured.err
+
+    instances_module.write_engine_address(
+        root,
+        "sandbox",
+        {
+            "instance_name": "sandbox",
+            "zone": _GCP_ZONE,
+            "project_id": _GCP_PROJECT_ID,
+            "region": "us-east1",
+            "secrets_prefix": "sandbox",
+            "state_bucket": "gdstate-sandbox-deadbeef",
+        },
+    )
+    exit_code = run_cli(monkeypatch, root, ["gcp-project-id", "sandbox"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == f"{_GCP_PROJECT_ID}\n"
+
+    exit_code = run_cli(monkeypatch, root, ["gcp-secrets-prefix", "sandbox"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == "sandbox\n"
+
+
+def test_gcp_secrets_prefix_refuses_an_unsanitized_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A prefix the sanitizer does not accept back unchanged reads as the
+    half-written record it is, naming the deploy that rewrites it."""
+    from devcontainer_config import instances as instances_module
+
+    root = _git_root_with_origin(tmp_path)
+    monkeypatch.setenv(instances_module.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    instances_module.write_engine_address(
+        root,
+        "sandbox",
+        {
+            "instance_name": "sandbox",
+            "zone": _GCP_ZONE,
+            "project_id": _GCP_PROJECT_ID,
+            "region": "us-east1",
+            "secrets_prefix": "Not_Sanitized",
+            "state_bucket": "gdstate-sandbox-deadbeef",
+        },
+    )
+
+    exit_code = run_cli(monkeypatch, root, ["gcp-secrets-prefix", "sandbox"])
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "secrets_prefix" in captured.err
+    assert "make instance-deploy INSTANCE=sandbox" in captured.err
+
+
+def test_gcp_applied_checksum_waits_for_the_vm_to_confirm_the_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The accessor polls through `transport_gcp.wait_applied_checksum` on the
+    production runner, and prints only the confirmed outcome."""
+    from devcontainer_config import instance_ops as instance_ops_module
+    from devcontainer_config import instances as instances_module
+    from devcontainer_config import transport_gcp as transport_gcp_module
+
+    root = _git_root_with_origin(tmp_path)
+    monkeypatch.setenv(instances_module.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    instances_module.write_engine_address(
+        root,
+        "sandbox",
+        {
+            "instance_name": "sandbox",
+            "zone": _GCP_ZONE,
+            "project_id": _GCP_PROJECT_ID,
+            "region": "us-east1",
+            "secrets_prefix": "sandbox",
+            "state_bucket": "gdstate-sandbox-deadbeef",
+        },
+    )
+    checksum = "a" * 64
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(argv: list[str], stdin: str | None):
+        calls.append(tuple(argv))
+        if "versions" in argv and "access" in argv:
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout=checksum, stderr="")
+        if "get-guest-attributes" in argv:
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=f"{checksum}\n", stderr=""
+            )
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(instance_ops_module, "subprocess_runner", fake_runner)
+    monkeypatch.setattr(transport_gcp_module, "material_apply_timeout_seconds", lambda: 5.0)
+
+    exit_code = run_cli(monkeypatch, root, ["gcp-applied-checksum", "sandbox"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == (
+        "sandbox: the VM's applied TLS material matches the published checksum.\n"
+    )
+    assert any("versions" in call for call in calls), "the secret read ran through gcloud"
+    assert any("get-guest-attributes" in call for call in calls), (
+        "the attribute read ran through gcloud"
+    )
+
+
+def test_gcp_applied_checksum_surfaces_a_wait_failure_with_its_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from devcontainer_config import instance_ops as instance_ops_module
+    from devcontainer_config import instances as instances_module
+
+    root = _git_root_with_origin(tmp_path)
+    monkeypatch.setenv(instances_module.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    instances_module.write_engine_address(
+        root,
+        "sandbox",
+        {
+            "instance_name": "sandbox",
+            "zone": _GCP_ZONE,
+            "project_id": _GCP_PROJECT_ID,
+            "region": "us-east1",
+            "secrets_prefix": "sandbox",
+            "state_bucket": "gdstate-sandbox-deadbeef",
+        },
+    )
+
+    def failing_runner(argv: list[str], stdin: str | None):
+        return subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="Your credentials have expired"
+        )
+
+    monkeypatch.setattr(instance_ops_module, "subprocess_runner", failing_runner)
+
+    exit_code = run_cli(monkeypatch, root, ["gcp-applied-checksum", "sandbox"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "gcloud auth login" in captured.err
+
+
+def test_instance_list_renders_a_gcp_engine_s_status_in_the_state_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The gcp kind's describe status answers the STATE column the azure
+    power state answers for its own kind."""
+    import json as json_module
+
+    from devcontainer_config import instance_ops as instance_ops_module
+    from devcontainer_config import instances as instances_module
+
+    root = _git_root_with_origin(tmp_path)
+    monkeypatch.setenv(instances_module.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    name = "gcpvm"
+    (root / "remote-instances" / name).mkdir(parents=True)
+    (root / "remote-instances" / name / "terragrunt.hcl").write_text(
+        'include {\n  path = find_in_parent_folders("_envcommon/remote-gcp.hcl")\n}\n',
+        encoding="utf-8",
+    )
+    instances_module.write_engine_address(
+        root,
+        name,
+        {
+            "instance_name": name,
+            "zone": _GCP_ZONE,
+            "project_id": _GCP_PROJECT_ID,
+            "region": "us-east1",
+            "secrets_prefix": name,
+            "state_bucket": f"gdstate-{name}-deadbeef",
+        },
+    )
+    commands: list[tuple[str, ...]] = []
+
+    def fake_runner(argv: list[str], stdin: str | None):
+        commands.append(tuple(argv))
+        if "compute" in argv and "describe" in argv:
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="RUNNING\n", stderr="")
+        if "secrets" in argv and "describe" in argv:
+            return subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="not found: 404."
+            )
+        if "context" in argv and "inspect" in argv:
+            return subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="no such context: x"
+            )
+        raise AssertionError(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(instance_ops_module, "subprocess_runner", fake_runner)
+
+    exit_code = run_cli(monkeypatch, root, ["instance-list"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    header = captured.out.splitlines()[0].split()
+    assert header == ["INSTANCE", "STATE", "ID", "PARAMS", "CERTS", "FORWARD", "CONTEXT"]
+    row = captured.out.splitlines()[1].split()
+    assert row[0] == name
+    assert row[1] == "RUNNING", "the STATE column renders the gcp VM status"
+    assert row[2] == name
+
+    exit_code = run_cli(monkeypatch, root, ["instance-status", name, "--json"])
+    payload = json_module.loads(capsys.readouterr().out)
+    assert payload["gcp_state"] == "RUNNING"
+    assert payload["azure_state"] is None
+    assert payload["ec2_state"] is None

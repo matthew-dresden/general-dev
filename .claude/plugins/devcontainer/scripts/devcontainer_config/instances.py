@@ -1005,6 +1005,9 @@ def engine_vault_name(root: Path, name: str) -> str:
 ZONE_KEY = "zone"
 PROJECT_ID_KEY = "project_id"
 GCP_INSTANCE_NAME_KEY = "instance_name"
+REGION_KEY = "region"
+SECRETS_PREFIX_KEY = "secrets_prefix"
+STATE_BUCKET_KEY = "state_bucket"
 
 # The strict shapes the record's `zone` and `project_id` values must match
 # before anything composes them into a gcloud argument vector: a zone is
@@ -1074,6 +1077,146 @@ def gcp_zone(root: Path, name: str) -> str:
     validate_name(name)
     return _validated_gcp_record_value(
         engine_address(root, name).get(ZONE_KEY), ZONE_KEY, ZONE_PATTERN, instance=name
+    )
+
+
+# The strict shapes the record's `region` and `state_bucket` values must
+# match before anything composes them into a gcloud argument or a Terragrunt
+# handoff: a region is the lowercase location slug (us-east1), and a bucket
+# name is the GCS form of 3-63 lowercase letters, digits, hyphens,
+# underscores and dots, starting and ending alphanumerically. Anything
+# outside these is refused outright, the same discipline the zone and
+# project patterns above apply.
+REGION_PATTERN = re.compile(r"^[a-z0-9-]+$")
+STATE_BUCKET_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$")
+
+# The pass-through shape `gcp_secrets_prefix` validates the record's prefix
+# against before its own sanitizer round-trip: non-empty, nothing more --
+# the sanitizer is the prefix's real grammar, and this pattern only exists
+# because `_validated_gcp_record_value` takes one.
+_NON_EMPTY_PATTERN = re.compile(r".+")
+
+
+def gcp_project_id(root: Path, name: str) -> str:
+    """The gcp project id `name`'s engine address record carries.
+
+    The single reader of the record's `PROJECT_ID_KEY`, so every consumer
+    that publishes, probes or deletes in the instance's project (the certs
+    publication client, the state store, the cleanup arm) derives the same
+    value from the same record. `root` is accepted for call-site uniformity
+    with the rest of the resolution surface and is deliberately unused,
+    exactly as `gcp_zone` documents for its own.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        EngineAddressError: the record is missing (the remedy names the
+            deploy that writes it), is not one JSON object, or carries no
+            usable, well-formed `PROJECT_ID_KEY` value (the message names
+            the redeploy that rewrites it).
+    """
+    validate_name(name)
+    return _validated_gcp_record_value(
+        engine_address(root, name).get(PROJECT_ID_KEY),
+        PROJECT_ID_KEY,
+        PROJECT_ID_PATTERN,
+        instance=name,
+    )
+
+
+def gcp_region(root: Path, name: str) -> str:
+    """The gcp region `name`'s engine address record carries.
+
+    The single reader of the record's `REGION_KEY`: the state store creates
+    the instance's bucket in the region the deploy recorded, so the bucket
+    the bootstrap provisions and the bucket Terragrunt's gcs backend later
+    writes state to can never disagree about placement.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        EngineAddressError: the record is missing (the remedy names the
+            deploy that writes it), is not one JSON object, or carries no
+            usable, well-formed `REGION_KEY` value (the message names the
+            redeploy that rewrites it).
+    """
+    validate_name(name)
+    return _validated_gcp_record_value(
+        engine_address(root, name).get(REGION_KEY), REGION_KEY, REGION_PATTERN, instance=name
+    )
+
+
+def gcp_secrets_prefix(root: Path, name: str) -> str:
+    """The Secret Manager secret-id prefix `name`'s engine address record carries.
+
+    The single reader of the record's `SECRETS_PREFIX_KEY`. The prefix is
+    the sanitized instance name (`instances.sanitize_gcp_name`) the deploy
+    minted, and the record must carry it in exactly that already-sanitized
+    form: a value that does not round-trip through the sanitizer unchanged
+    would compose secret ids no publish ever wrote, read as the
+    not-yet-deployed state it effectively is, and the refusal names the
+    redeploy that rewrites the record -- the same round-trip discipline
+    `devcontainer_config.transport_gcp.gcp_values` applies to the record's
+    `instance_name`.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        EngineAddressError: the record is missing (the remedy names the
+            deploy that writes it), is not one JSON object, or carries no
+            usable `SECRETS_PREFIX_KEY` value -- not a non-empty string,
+            or one the sanitizer does not accept back unchanged (the
+            message names the redeploy that rewrites it).
+    """
+    validate_name(name)
+    prefix = _validated_gcp_record_value(
+        engine_address(root, name).get(SECRETS_PREFIX_KEY),
+        SECRETS_PREFIX_KEY,
+        _NON_EMPTY_PATTERN,
+        instance=name,
+    )
+    try:
+        round_tripped = sanitize_gcp_name(prefix)
+    except InvalidGCPNameError as exc:
+        raise EngineAddressError(
+            f"ERROR: the engine address record for instance {name!r} carries a "
+            f"malformed {SECRETS_PREFIX_KEY!r}\n"
+            f"{exc}\n"
+            f"The value comes from {engine_address_path(name)}; the prefix is the "
+            "sanitized instance name the deploy minted, so the record must carry one "
+            "the sanitizer accepts.\n"
+            f"Redeploy to rewrite it: make instance-deploy INSTANCE={name}"
+        ) from exc
+    if round_tripped != prefix:
+        raise EngineAddressError(
+            f"ERROR: the engine address record for instance {name!r} carries a "
+            f"malformed {SECRETS_PREFIX_KEY!r}\n"
+            f"{prefix!r} is not already in its sanitized form "
+            f"({round_tripped!r}); the publish and fetch paths compose secret ids "
+            "from the value verbatim.\n"
+            f"Redeploy to rewrite it: make instance-deploy INSTANCE={name}"
+        )
+    return prefix
+
+
+def gcp_state_bucket(root: Path, name: str) -> str:
+    """The state bucket name `name`'s engine address record carries.
+
+    The single reader of the record's `STATE_BUCKET_KEY`, so the deploy's
+    record and the state store's own composition can be compared rather
+    than trusted: the deploy reads the value the ensure step wrote to the
+    side-car, and this accessor is how anything else verifies it.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        EngineAddressError: the record is missing (the remedy names the
+            deploy that writes it), is not one JSON object, or carries no
+            usable, well-formed `STATE_BUCKET_KEY` value (the message names
+            the redeploy that rewrites it).
+    """
+    validate_name(name)
+    return _validated_gcp_record_value(
+        engine_address(root, name).get(STATE_BUCKET_KEY),
+        STATE_BUCKET_KEY,
+        STATE_BUCKET_PATTERN,
+        instance=name,
     )
 
 

@@ -161,6 +161,78 @@ if [ "${KIND:-}" = "azure" ]; then
   exit 0
 fi
 
+# The gcp engine's config channel is Secret Manager in the project the
+# engine address record names: the same transformed payload the EC2 path
+# publishes to Parameter Store is stored there as two secrets named under
+# the instance's sanitized prefix, and the VM's startup fetch (the
+# container's postCreate for the container's own workspace) reads them back
+# with the VM's metadata-server identity. Every value rides a --data-file
+# pointing into the 0700 trap-cleaned directory the payload was rendered
+# into, never an argument -- the same invariant devcontainer_config.certs'
+# SecretManagerClient enforces for every secret write it issues, applied at
+# this script's level. The create-versus-version-add decision is an
+# explicit probe (`gcloud secrets describe`), never a caught error, the
+# same probe-before-mutate discipline the state stores apply.
+rd_publish_config_payload_to_secret_manager() {
+  local prefix project scripts_dir
+  scripts_dir="${REPO_ROOT}/.claude/plugins/devcontainer/scripts"
+  rd_require_cmd gcloud "Install: brew install google-cloud-sdk"
+  prefix="$(PYTHONPATH="$scripts_dir" python3 -m devcontainer_config.cli gcp-secrets-prefix "$INSTANCE")" \
+    || rd_fail "The Secret Manager prefix for instance '${INSTANCE}' could not be read" \
+      "The engine address record names it, and the deploy writes that record; the reader's own message is above." \
+      "" \
+      "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+  project="$(PYTHONPATH="$scripts_dir" python3 -m devcontainer_config.cli gcp-project-id "$INSTANCE")" \
+    || rd_fail "The gcp project for instance '${INSTANCE}' could not be read" \
+      "The engine address record names it, and the deploy writes that record; the reader's own message is above." \
+      "" \
+      "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+
+  # The values travel in --data-file documents, never in argv: shell.env
+  # carries every credential this repository has, and an argument is
+  # visible in the process table to any other process on this machine for
+  # as long as the call runs. One directory, created at mode 0700 and
+  # removed by an EXIT trap, the same discipline the EC2 publish below
+  # applies to its --cli-input-json document.
+  RD_PUT_DIR="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/rd-put.XXXXXX")"
+  trap 'rm -rf "$RD_PUT_DIR"' EXIT
+  write_config_payload "$RD_PUT_DIR"
+
+  if gcloud secrets describe "${prefix}-shell-env" --project "$project" > /dev/null 2>&1; then
+    rd_log "Publishing ${prefix}-shell-env to Secret Manager (new version)..."
+    gcloud secrets versions add "${prefix}-shell-env" --project "$project" \
+      --data-file="${RD_PUT_DIR}/shell.env" > /dev/null \
+      || rd_fail "Publishing ${prefix}-shell-env to Secret Manager failed" \
+        "If gcloud reported an authentication failure, sign in and retry:" \
+        "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
+    rd_log "Publishing ${prefix}-profile-map to Secret Manager (new version)..."
+    gcloud secrets versions add "${prefix}-profile-map" --project "$project" \
+      --data-file="${RD_PUT_DIR}/.devcontainer/aws-profile-map.json" > /dev/null \
+      || rd_fail "Publishing ${prefix}-profile-map to Secret Manager failed" \
+        "If gcloud reported an authentication failure, sign in and retry:" \
+        "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
+  else
+    rd_log "Creating ${prefix}-shell-env in Secret Manager..."
+    gcloud secrets create "${prefix}-shell-env" --project "$project" \
+      --data-file="${RD_PUT_DIR}/shell.env" > /dev/null \
+      || rd_fail "Creating ${prefix}-shell-env in Secret Manager failed" \
+        "If gcloud reported an authentication failure, sign in and retry:" \
+        "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
+    rd_log "Creating ${prefix}-profile-map in Secret Manager..."
+    gcloud secrets create "${prefix}-profile-map" --project "$project" \
+      --data-file="${RD_PUT_DIR}/.devcontainer/aws-profile-map.json" > /dev/null \
+      || rd_fail "Creating ${prefix}-profile-map in Secret Manager failed" \
+        "If gcloud reported an authentication failure, sign in and retry:" \
+        "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
+  fi
+}
+
+if [ "${KIND:-}" = "gcp" ]; then
+  rd_publish_config_payload_to_secret_manager
+  rd_ok "Secrets published to Secret Manager for instance '${INSTANCE}'. Remote workspaces of this project can now bootstrap."
+  exit 0
+fi
+
 # The Parameter Store prefix is the EC2 publish's address alone, and the
 # resolver's ssh block carries no PARAMETER_PREFIX line: assigning it before
 # the ssh branch dereferenced an unset variable under set -u and ended the

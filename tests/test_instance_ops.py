@@ -2516,3 +2516,345 @@ def test_scaffold_gcp_refuses_the_other_clouds_inputs(tmp_path: Path) -> None:
         assert expected in str(exc_info.value), f"{extra}: {exc_info.value}"
 
     assert runner.calls == []
+
+
+# ---------------------------------------------------------------------------
+# state / power / cleanup: the gcp engine kind
+# ---------------------------------------------------------------------------
+
+
+def _write_gcp_scaffold(root: Path, name: str) -> Path:
+    """The per-instance terragrunt.hcl the gcp scaffold writes, in miniature.
+
+    The include text is what `read_kind` keys the gcp kind on.
+    """
+    directory = root / "remote-instances" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    hcl = directory / "terragrunt.hcl"
+    hcl.write_text(
+        'include "envcommon" {\n'
+        '  path = "${dirname(find_in_parent_folders("root-gcp.hcl"))}'
+        '/_envcommon/remote-gcp.hcl"\n'
+        "}\n"
+        "\n"
+        "inputs = {\n"
+        f'  project_id = "{_gcp_project_id()}"\n'
+        f'  zone       = "us-east1-b"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    return hcl
+
+
+_GCP_ZONE = "us-east1-b"
+_GCP_REGION = "us-east1"
+
+
+def _write_gcp_engine_address(root: Path, name: str) -> str:
+    """The engine address record the deploy writes, from generated values.
+
+    Returns the project id the record carries.
+    """
+    instances = _import_instances()
+    project = _gcp_project_id()
+    instances.write_engine_address(
+        root,
+        name,
+        {
+            "instance_name": name,
+            "zone": _GCP_ZONE,
+            "project_id": project,
+            "region": _GCP_REGION,
+            "secrets_prefix": name,
+            "state_bucket": f"gdstate-{name}-deadbeef",
+        },
+    )
+    return project
+
+
+def _gcp_describe_argv(name: str, project: str) -> tuple[str, ...]:
+    transport_gcp = importlib.import_module("devcontainer_config.transport_gcp")
+    return (
+        "gcloud",
+        *transport_gcp.build_instance_status_argv(
+            instance_name=name, zone=_GCP_ZONE, project_id=project
+        ),
+    )
+
+
+def _gcp_secret_describe_argv(secret_id: str, project: str) -> tuple[str, ...]:
+    return ("gcloud", "secrets", "describe", secret_id, "--project", project)
+
+
+def test_state_for_a_gcp_engine_probes_the_vm_and_the_six_secrets(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    certs = _import_certs()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    project = _write_gcp_engine_address(root, name)
+    runner = _FakeRunner()
+    runner.queue(_ok("RUNNING\n"))
+    for secret_id in certs.gcp_instance_secret_ids(name):
+        runner.queue(_ok(f"projects/p/secrets/{secret_id}\n"))
+    runner.queue(_err("no such context: anything"))
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.gcp_state == "RUNNING"
+    assert snapshot.ec2_state is None and snapshot.azure_state is None
+    assert snapshot.recorded_id == name, "the record's VM name is the gcp row's display id"
+    assert snapshot.params_present is True
+    assert snapshot.certs_present is False
+    assert snapshot.context_exists is False
+    assert snapshot.lookup_error is None
+    assert runner.calls[0][1:4] == ("compute", "instances", "describe")
+    assert runner.calls[1:7] == [
+        _gcp_secret_describe_argv(secret_id, project)
+        for secret_id in certs.gcp_instance_secret_ids(name)
+    ]
+    assert all(call[0] != "aws" and call[0] != "az" for call in runner.calls), (
+        "a gcp engine runs no aws or azure probe at all"
+    )
+
+
+def test_state_gcp_a_missing_secret_answers_params_false(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    _write_gcp_engine_address(root, name)
+    runner = _FakeRunner()
+    runner.queue(_ok("RUNNING\n"))
+    runner.queue(_ok("present\n"))  # first secret present
+    runner.queue(_err("ERROR: ... not found: 404."))  # second missing: enough to answer
+    runner.queue(_err("no such context: anything"))
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.params_present is False
+    assert snapshot.lookup_error is None
+
+
+def test_state_gcp_a_secret_probe_failure_is_a_lookup_error(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    _write_gcp_engine_address(root, name)
+    runner = _FakeRunner()
+    runner.queue(_ok("RUNNING\n"))
+    runner.queue(_err("ERROR: PERMISSION_DENIED"))
+    runner.queue(_err("no such context: anything"))
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.params_present is None
+    assert snapshot.lookup_error is not None
+    assert "PERMISSION_DENIED" in snapshot.lookup_error
+
+
+def test_state_gcp_a_missing_record_degrades_with_the_deploy_remedy(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    runner = _FakeRunner()
+    runner.queue(_err("no such context: anything"))
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.gcp_state is None
+    assert snapshot.params_present is None
+    assert snapshot.recorded_id is None
+    assert snapshot.lookup_error is not None
+    assert "engine-address.json" in snapshot.lookup_error
+    assert f"make instance-deploy INSTANCE={name}" in snapshot.lookup_error
+    assert all(call[0] != "gcloud" for call in runner.calls), (
+        "a row with no record runs no gcloud probe at all"
+    )
+
+
+def test_stop_gcp_stops_and_polls_to_terminated(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    _write_gcp_engine_address(root, name)
+    sleeps: list[float] = []
+    runner = _FakeRunner()
+    runner.queue(_ok(""))  # the stop call
+    runner.queue(_ok("STOPPING\n"))  # the poll: not yet
+    runner.queue(_ok("TERMINATED\n"))  # the poll: done
+
+    message = ops.stop(root, name, region=REGION, runner=runner, sleep=sleeps.append)
+
+    assert name in message
+    assert "stopped" in message
+    assert runner.calls[0][:5] == ("gcloud", "compute", "instances", "stop", name)
+    assert "--zone" in runner.calls[0] and "--project" in runner.calls[0]
+    assert runner.calls[1][1:4] == ("compute", "instances", "describe")
+    assert sleeps == [ops.POWER_POLL_SECONDS], "one not-yet answer paced one poll interval"
+
+
+def test_stop_gcp_is_idempotent_when_already_terminated(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    _write_gcp_engine_address(root, name)
+    sleeps: list[float] = []
+    runner = _FakeRunner()
+    runner.queue(_ok(""))  # the stop call
+    runner.queue(_ok("TERMINATED\n"))  # the poll: done on the first read
+
+    message = ops.stop(root, name, region=REGION, runner=runner, sleep=sleeps.append)
+
+    assert "stopped" in message
+    assert sleeps == [], "the first read answers the target, so no waiting happens"
+
+
+def test_stop_gcp_timeout_names_the_last_observed_status(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    _write_gcp_engine_address(root, name)
+    runner = _FakeRunner()
+    runner.queue(_ok(""))
+    for _ in range(ops.POWER_POLL_LIMIT):
+        runner.queue(_ok("STOPPING\n"))
+
+    with pytest.raises(ops.PowerError) as exc_info:
+        ops.stop(root, name, region=REGION, runner=runner, sleep=lambda _s: None)
+
+    message = str(exc_info.value)
+    assert "STOPPING" in message
+    assert str(ops.POWER_POLL_LIMIT) in message
+    assert name in message
+
+
+def test_gcp_power_without_a_record_names_the_deploy(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.PowerError) as exc_info:
+        ops.stop(root, name, region=REGION, runner=runner, sleep=lambda _s: None)
+
+    message = str(exc_info.value)
+    assert "engine-address.json" in message
+    assert f"make instance-deploy INSTANCE={name}" in message
+    assert runner.calls == []
+
+
+def test_start_gcp_waits_for_the_provisioned_marker(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    _write_gcp_engine_address(root, name)
+    sleeps: list[float] = []
+    runner = _FakeRunner()
+    runner.queue(_ok(""))  # the start call
+    runner.queue(_err("not found"))  # the marker read: not yet
+    runner.queue(_ok("TRUE\n"))  # the marker read: ready
+
+    message = ops.start(root, name, region=REGION, runner=runner, sleep=sleeps.append)
+
+    assert name in message
+    assert "provisioning complete" in message
+    assert runner.calls[0][:5] == ("gcloud", "compute", "instances", "start", name)
+    assert sleeps == [5.0], "the not-yet marker answer paced one poll interval"
+    assert runner.calls[1][5] == "--query-path=general-dev/provisioned", (
+        "the start wait gates on the provisioning marker, never on describe status alone"
+    )
+
+
+def test_start_gcp_surfaces_a_failed_readiness_read_as_a_power_error(
+    tmp_path: Path,
+) -> None:
+    """The readiness wait is transport_gcp's (the one home of the poll), and
+    an unfixable failure crosses into this module only as `PowerError`."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    _write_gcp_engine_address(root, name)
+    runner = _FakeRunner()
+    runner.queue(_ok(""))  # the start call
+    runner.queue(_err("Your credentials have expired. Run gcloud auth login"))
+
+    with pytest.raises(ops.PowerError) as exc_info:
+        ops.start(root, name, region=REGION, runner=runner, sleep=lambda _s: None)
+
+    assert "gcloud auth login" in str(exc_info.value)
+
+
+def test_cleanup_gcp_deletes_the_six_secrets_and_tolerates_absent(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    certs = _import_certs()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    project = _write_gcp_engine_address(root, name)
+    runner = _FakeRunner()
+    for index, _secret_id in enumerate(certs.gcp_instance_secret_ids(name)):
+        if index % 2 == 0:
+            runner.queue(_ok(""))  # deleted
+        else:
+            runner.queue(_err("ERROR: ... not found: 404."))  # already absent
+    runner.queue(_err('context "nope": context not found'))  # the context inspect: absent
+
+    messages = ops.cleanup(root, name, region=REGION, runner=runner)
+
+    assert any("absent; nothing to delete" in message for message in messages)
+    assert sum("deleted secret" in message for message in messages) == 3
+    assert runner.calls[:6] == [
+        ("gcloud", "secrets", "delete", secret_id, "--project", project)
+        for secret_id in certs.gcp_instance_secret_ids(name)
+    ]
+    assert all(call[0] != "aws" for call in runner.calls), (
+        "a gcp engine has no SSM surface for cleanup to touch"
+    )
+
+
+def test_cleanup_gcp_still_aggregates_failures(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    certs = _import_certs()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    _write_gcp_engine_address(root, name)
+    runner = _FakeRunner()
+    for _ in certs.gcp_instance_secret_ids(name):
+        runner.queue(_err("ERROR: PERMISSION_DENIED"))
+    runner.queue(_err("docker daemon exploded"))  # the context inspect fails for real
+
+    with pytest.raises(ops.CleanupError) as exc_info:
+        ops.cleanup(root, name, region=REGION, runner=runner)
+
+    message = str(exc_info.value)
+    assert "PERMISSION_DENIED" in message
+    assert "docker daemon exploded" in message
+
+
+def test_cleanup_gcp_a_missing_record_fails_but_still_removes_the_rest(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    runner = _FakeRunner()
+    runner.queue(_err('context "nope": context not found'))  # the context inspect: absent
+
+    with pytest.raises(ops.CleanupError) as exc_info:
+        ops.cleanup(root, name, region=REGION, runner=runner)
+
+    message = str(exc_info.value)
+    assert "engine address record" in message or "secrets_prefix" in message

@@ -116,7 +116,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import NoReturn
 
-from devcontainer_config import instances, repo, transport
+from devcontainer_config import certs, instances, repo, transport
 from devcontainer_config.hostprobe import (
     DOCKER_HANDSHAKE_TIMEOUT_DEFAULT_SECONDS,
     DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR,
@@ -131,6 +131,51 @@ GCLOUD_BINARY = "gcloud"
 # there behind the IAP-only ingress rule, and the local end is whatever
 # `transport.allocate_local_port` allocated for the context.
 _TUNNEL_TARGET_PORT = "2376"
+
+# ---------------------------------------------------------------------------
+# The boot-applied install contract (shared with slice 5's startup script).
+# The VM's startup script fetches the TLS secrets and the checksum secret
+# on every boot, applies the material only on drift, restarts the daemon,
+# and records what it did in guest attributes under the namespace below:
+# `tls-checksum` carries the checksum of the material it applied (written
+# only after the apply and the daemon restart succeeded), `provisioned`
+# carries TRUE once a boot finished its success path at all (material or
+# not -- a first boot that precedes the first publish is a success), and
+# `error` carries the last failure's diagnostic. Every wait this module
+# exposes gates on these attributes, never on `instances describe`'s
+# status alone: a VM that reports RUNNING has merely been scheduled, and
+# the marker attributes are the only evidence the provisioning the
+# listener needs actually ran.
+# ---------------------------------------------------------------------------
+
+GUEST_ATTRIBUTE_NAMESPACE = "general-dev"
+GUEST_ATTRIBUTE_CHECKSUM_KEY = "tls-checksum"
+GUEST_ATTRIBUTE_PROVISIONED_KEY = "provisioned"
+_GUEST_ATTRIBUTE_ERROR_KEY = "error"
+GUEST_ATTRIBUTE_PROVISIONED_VALUE = "TRUE"
+
+# The deadline the material-apply wait may run to: a reboot plus a startup
+# script that fetches four secrets, rewrites material and restarts the
+# daemon, bounded and configurable the same way every other wait in this
+# package is (read through `hostprobe.read_positive_seconds`).
+MATERIAL_APPLY_TIMEOUT_ENV_VAR = "GCP_MATERIAL_APPLY_TIMEOUT"
+_MATERIAL_APPLY_TIMEOUT_DEFAULT_SECONDS = 900.0
+
+# The deadline the provisioned-marker wait (the start path's readiness
+# gate) may run to -- the gcp counterpart of the azure agent-ready wait's
+# `AZURE_AGENT_READY_TIMEOUT` (default 300), read through the same shared
+# reader.
+PROVISIONED_TIMEOUT_ENV_VAR = "GCP_PROVISIONED_TIMEOUT"
+_PROVISIONED_TIMEOUT_DEFAULT_SECONDS = 300.0
+
+# One attribute read every this many seconds inside either deadline --
+# never a fixed wait outside the loop, the same pacing discipline the
+# azure poll keeps.
+_GUEST_ATTRIBUTE_POLL_SECONDS = 5.0
+
+# The gcloud command this module's attribute and secret reads are issued
+# through, declared once beside the runner seam below.
+GCLOUD_GUEST_ATTRIBUTES_OP = "instances get-guest-attributes"
 
 _TUNNEL_CONNECT_TIMEOUT_ENV_VAR = "GCP_TUNNEL_CONNECT_TIMEOUT"
 _TUNNEL_CONNECT_TIMEOUT_DEFAULT_SECONDS = 60.0
@@ -388,6 +433,422 @@ def build_tunnel_argv(
 
 
 # ---------------------------------------------------------------------------
+# The boot-applied install: the compare and wait logic the cert-install
+# flow and the start path drive. GCP has no run-command channel, so the
+# material is applied by the VM's own startup script at the next boot, and
+# everything this module offers the laptop side is a read: the store's
+# checksum, the guest attributes recording what the VM applied, and the
+# bounded waits over both.
+# ---------------------------------------------------------------------------
+
+
+def _pace(seconds: float) -> None:
+    """One bounded wait between probes.
+
+    The same bounded-wait primitive `transport_ssh._pace` rests on: an
+    empty selector blocks for at most `seconds` (a real I/O wait, never a
+    sleep) and returns once the slice has passed. Defined here, ahead of
+    both the readiness poll below and the boot-applied waits above it in
+    call order, so the module has one pacer and no ordering surprise.
+    """
+    selector = selectors.DefaultSelector()
+    try:
+        selector.select(timeout=seconds)
+    finally:
+        selector.close()
+
+
+# The Runner the boot-applied helpers issue gcloud through: given the full
+# argv and an optional stdin document, return a completed process. The same
+# shape `instance_ops.Runner` takes; declared as its own alias here rather
+# than imported because `instance_ops` imports this module for the wait
+# helpers below, and one direction of that import edge must stay empty.
+GcloudRunner = Callable[..., "subprocess.CompletedProcess[str]"]
+
+
+def gcp_material_record_values(
+    record: dict[str, object], *, instance: str
+) -> tuple[str, str, str, str]:
+    """The `(instance_name, zone, project_id, secrets_prefix)` quadruple the record carries.
+
+    `gcp_values` validates the triple the tunnel dials by; this extends the
+    same record with `SECRETS_PREFIX_KEY`, the prefix the VM's startup
+    script fetches its secrets by, validated by the identical round-trip
+    through `instances.sanitize_gcp_name` -- a record prefix the sanitizer
+    does not accept back unchanged would compose secret ids no publish ever
+    wrote, and reads as the not-yet-deployed state it effectively is.
+
+    Raises:
+        GCPConfigError: any key is missing, is not a non-empty string, or
+            breaks its shape (the message names the deploy that rewrites
+            the record).
+    """
+    instance_name, zone, project_id = gcp_values(record, instance=instance)
+    prefix = record.get(instances.SECRETS_PREFIX_KEY)
+    if not isinstance(prefix, str) or not prefix:
+        raise GCPConfigError(
+            f"ERROR: the engine address record for instance {instance!r} carries "
+            f"no usable {instances.SECRETS_PREFIX_KEY!r}\n"
+            f"The boot-applied install fetches the TLS secrets under the prefix "
+            f"the record records, reading '{instances.SECRETS_PREFIX_KEY}' from "
+            f"{instances.engine_address_path(instance)}.\n"
+            f"Redeploy to write it: make instance-deploy INSTANCE={instance}"
+        )
+    try:
+        round_tripped = instances.sanitize_gcp_name(prefix)
+    except instances.InvalidGCPNameError as exc:
+        raise GCPConfigError(
+            f"{exc}\n"
+            f"The value comes from {instances.engine_address_path(instance)}; the "
+            "startup script fetches under it verbatim, so the record must carry one "
+            "the sanitizer accepts.\n"
+            f"Redeploy to rewrite it: make instance-deploy INSTANCE={instance}"
+        ) from exc
+    if round_tripped != prefix:
+        raise GCPConfigError(
+            f"ERROR: the engine address record for instance {instance!r} carries a "
+            f"malformed {instances.SECRETS_PREFIX_KEY!r}\n"
+            f"{prefix!r} is not already in its sanitized form "
+            f"({round_tripped!r}); the startup script fetches under the value "
+            "verbatim.\n"
+            f"Redeploy to rewrite it: make instance-deploy INSTANCE={instance}"
+        )
+    return instance_name, zone, project_id, prefix
+
+
+def build_guest_attribute_argv(
+    *, instance_name: str, zone: str, project_id: str, key: str
+) -> list[str]:
+    """The `gcloud compute instances get-guest-attributes` argv for one key.
+
+    The format flag is not optional: without it gcloud prints a table, and
+    every reader of this output compares plain values. `--query-path`
+    names the key under `GUEST_ATTRIBUTE_NAMESPACE`, the one namespace the
+    startup script and this module share.
+    """
+    return [
+        GCLOUD_BINARY,
+        "compute",
+        "instances",
+        "get-guest-attributes",
+        instance_name,
+        f"--query-path={GUEST_ATTRIBUTE_NAMESPACE}/{key}",
+        "--zone",
+        zone,
+        "--project",
+        project_id,
+        "--format",
+        "value(value)",
+    ]
+
+
+def build_instance_status_argv(*, instance_name: str, zone: str, project_id: str) -> list[str]:
+    """The `gcloud compute instances describe` argv answering the status alone."""
+    return [
+        GCLOUD_BINARY,
+        "compute",
+        "instances",
+        "describe",
+        instance_name,
+        "--zone",
+        zone,
+        "--project",
+        project_id,
+        "--format",
+        "value(status)",
+    ]
+
+
+# The substrings that mark a failed guest-attribute or secret read as "the
+# thing read does not exist", and the ones that mark a failing session as
+# one no amount of waiting can fix (the same auth set the tunnel-exit
+# diagnosis classifies). Absent is an answer the waits keep polling past;
+# auth is an answer they stop on.
+_ATTRIBUTE_ABSENT_MARKERS: tuple[str, ...] = ("not found", "NOT_FOUND", "404")
+
+
+def _run_gcloud(
+    runner: GcloudRunner, argv: Sequence[str], *, what: str
+) -> subprocess.CompletedProcess[str]:
+    """Run one gcloud argv, wrapping a spawn failure in this module's error."""
+    try:
+        return runner(list(argv), None)
+    except OSError as exc:
+        raise GCPTransportError(
+            f"ERROR: could not run {GCLOUD_BINARY} for {what}\n"
+            f"{exc}\n"
+            "Install the Google Cloud CLI (brew install google-cloud-sdk), "
+            "authenticate with 'gcloud auth login', then retry."
+        ) from exc
+
+
+def read_guest_attribute(
+    record: dict[str, object], runner: GcloudRunner, *, instance: str, key: str
+) -> str | None:
+    """One guest attribute's value, or None when it is confirmed absent.
+
+    Absent is exactly one of two answers: the read failed with a
+    not-found-shaped diagnostic (the attribute was never written), or the
+    VM answered successfully with nothing (an attribute read before the
+    first boot has finished writing it). Every other failure -- an expired
+    session, a wrong zone, a missing VM -- raises with gcloud's remedy,
+    never misread as "not applied yet".
+
+    Raises:
+        GCPConfigError: the record is missing or malformed, or the
+            instance is not found where the record says it is.
+        GCPTransportError: the read failed for any other reason.
+    """
+    instance_name, zone, project_id, _ = gcp_material_record_values(record, instance=instance)
+    argv = build_guest_attribute_argv(
+        instance_name=instance_name, zone=zone, project_id=project_id, key=key
+    )
+    result = _run_gcloud(
+        runner, argv, what=f"the guest attribute {GUEST_ATTRIBUTE_NAMESPACE}/{key}"
+    )
+    if result.returncode == 0:
+        return result.stdout.strip() or None
+    if any(marker in result.stderr for marker in _ATTRIBUTE_ABSENT_MARKERS):
+        return None
+    raise GCPTransportError(
+        f"ERROR: reading guest attribute {GUEST_ATTRIBUTE_NAMESPACE}/{key} of "
+        f"{instance_name!r} failed\n"
+        f"{' '.join(argv)} exited {result.returncode}\n"
+        f"{result.stderr.strip()}\n"
+        "Resolve the failure above, then retry."
+    )
+
+
+def read_published_checksum(
+    record: dict[str, object], runner: GcloudRunner, *, instance: str
+) -> str:
+    """The checksum secret's value, exactly as `certs.publish_to_secret_manager` wrote it.
+
+    `versions access latest` prints the stored bytes raw (verified live);
+    both sides of the applied comparison are hex digests, so whitespace
+    carries no information and is trimmed before the compare -- the TLS
+    bytes themselves are never compared here.
+
+    Raises:
+        GCPConfigError: the record is missing or malformed, or the
+            checksum secret does not exist yet (the remedy names the
+            `cert-publish` that writes it).
+        GCPTransportError: the read failed for any other reason.
+    """
+    _instance_name, _zone, project_id, prefix = gcp_material_record_values(
+        record, instance=instance
+    )
+    secret_id = certs.gcp_secret_id(prefix, certs.GCP_CHECKSUM_SECRET)
+    argv = [
+        GCLOUD_BINARY,
+        "secrets",
+        "versions",
+        "access",
+        "latest",
+        "--secret",
+        secret_id,
+        "--project",
+        project_id,
+    ]
+    result = _run_gcloud(runner, argv, what=f"the checksum secret {secret_id}")
+    if result.returncode != 0:
+        if any(marker in result.stderr for marker in _ATTRIBUTE_ABSENT_MARKERS):
+            raise GCPConfigError(
+                f"ERROR: no checksum secret {secret_id!r} in project '{project_id}'\n"
+                "The boot-applied install compares the VM's applied material against "
+                "the checksum the publish writes beside it, and this publish has not "
+                "run yet.\n"
+                f"Publish first: make cert-publish INSTANCE={instance}"
+            )
+        raise GCPTransportError(
+            f"ERROR: reading the checksum secret {secret_id!r} failed\n"
+            f"{' '.join(argv)} exited {result.returncode}\n"
+            f"{result.stderr.strip()}\n"
+            "If gcloud reported an authentication failure, run 'gcloud auth login', "
+            "then retry."
+        )
+    return result.stdout.strip()
+
+
+def applied_checksum_matches(
+    record: dict[str, object], runner: GcloudRunner, *, instance: str
+) -> bool:
+    """Whether the VM's applied TLS material is exactly the published material.
+
+    The one comparison the gcp `cert-install` flow is decided by: True only
+    when the `general-dev/tls-checksum` guest attribute exists and equals
+    the store's checksum secret -- meaning the startup script fetched,
+    verified and applied exactly what is published and restarted the
+    daemon under it. False when the attribute is absent or drifted (the
+    reboot case), never when a read failed for a real reason: those raise,
+    so a caller cannot mistake an unreachable VM for an out-of-date one.
+
+    Raises:
+        GCPConfigError: the record is missing or malformed, or the
+            checksum secret does not exist yet.
+        GCPTransportError: a read failed for any other reason.
+    """
+    published = read_published_checksum(record, runner, instance=instance)
+    applied = read_guest_attribute(
+        record, runner, instance=instance, key=GUEST_ATTRIBUTE_CHECKSUM_KEY
+    )
+    if applied is None:
+        return False
+    return applied == published
+
+
+def material_apply_timeout_seconds() -> float:
+    """`GCP_MATERIAL_APPLY_TIMEOUT`, read fresh, exactly once per apply wait."""
+    return _positive_seconds_from_env(
+        MATERIAL_APPLY_TIMEOUT_ENV_VAR, _MATERIAL_APPLY_TIMEOUT_DEFAULT_SECONDS
+    )
+
+
+def provisioned_timeout_seconds() -> float:
+    """`GCP_PROVISIONED_TIMEOUT`, read fresh, exactly once per provisioned wait."""
+    return _positive_seconds_from_env(
+        PROVISIONED_TIMEOUT_ENV_VAR, _PROVISIONED_TIMEOUT_DEFAULT_SECONDS
+    )
+
+
+def _auth_failure_cannot_wait(diagnostic: str) -> bool:
+    """Whether `diagnostic` names a cause no amount of polling can fix."""
+    return any(marker in diagnostic.lower() for marker in _AUTH_FAILURE_MARKERS)
+
+
+def _last_error_attribute(record: dict[str, object], runner: GcloudRunner, *, instance: str) -> str:
+    """The VM's `general-dev/error` diagnostic, or a placeholder when unreadable.
+
+    Best-effort by design: the wait's failure message is more useful with
+    the VM's own failure note in it, but this read must never displace the
+    timeout it decorates with an error of its own.
+    """
+    try:
+        return (
+            read_guest_attribute(record, runner, instance=instance, key=_GUEST_ATTRIBUTE_ERROR_KEY)
+            or "(the VM recorded no error attribute)"
+        )
+    except GCPTransportError:
+        return "(the VM's error attribute could not be read)"
+
+
+def wait_applied_checksum(
+    record: dict[str, object],
+    runner: GcloudRunner,
+    *,
+    instance: str,
+    pace: Callable[[float], None] = _pace,
+    clock: Callable[[], float] = time.monotonic,
+    deadline_seconds: float | None = None,
+) -> str:
+    """Poll until the VM's applied checksum equals the store's; return the checksum.
+
+    The bounded half of the boot-applied install: after the reboot the
+    `cert-install` flow issues, the startup script fetches the secrets,
+    applies them on drift, restarts the daemon and rewrites the
+    `general-dev/tls-checksum` attribute -- and this poll ends only when
+    the attribute says the applied material is the published one. While the
+    VM is not RUNNING, or its reads answer not-yet/absent, the poll keeps
+    pacing; an expired gcloud session is the one cause that stops it
+    immediately, because no budget fixes it. The deadline is
+    `GCP_MATERIAL_APPLY_TIMEOUT` (default 900) unless passed explicitly,
+    the way tests walk it without waiting.
+
+    Returns:
+        The published checksum the VM is now confirmed to have applied.
+
+    Raises:
+        GCPConfigError: the record is missing or malformed, or the
+            checksum secret does not exist yet.
+        GCPTransportError: a read failed with an unfixable cause, or the
+            deadline ran out (the message carries the last observed
+            attribute and the VM's own `general-dev/error` diagnostic).
+    """
+    if deadline_seconds is None:
+        deadline_seconds = material_apply_timeout_seconds()
+    deadline = clock() + deadline_seconds
+    observed = "no attribute read answered"
+    while True:
+        try:
+            if applied_checksum_matches(record, runner, instance=instance):
+                return read_published_checksum(record, runner, instance=instance)
+            applied = read_guest_attribute(
+                record, runner, instance=instance, key=GUEST_ATTRIBUTE_CHECKSUM_KEY
+            )
+            observed = applied if applied is not None else "(attribute absent)"
+        except GCPTransportError as exc:
+            if _auth_failure_cannot_wait(str(exc)):
+                raise
+            observed = str(exc)
+        if clock() >= deadline:
+            raise GCPTransportError(
+                f"ERROR: instance {instance!r} did not apply the published TLS "
+                f"material within {deadline_seconds:g}s\n"
+                f"The last observed {GUEST_ATTRIBUTE_NAMESPACE}/"
+                f"{GUEST_ATTRIBUTE_CHECKSUM_KEY} was {observed!r}; the VM's own "
+                f"diagnostic: {_last_error_attribute(record, runner, instance=instance)}\n"
+                f"Raise {MATERIAL_APPLY_TIMEOUT_ENV_VAR} if this instance is simply "
+                "slow, and read the startup script's own log on the VM "
+                "(serial console output) for its fetch and apply steps."
+            )
+        pace(_GUEST_ATTRIBUTE_POLL_SECONDS)
+
+
+def wait_provisioned(
+    record: dict[str, object],
+    runner: GcloudRunner,
+    *,
+    instance: str,
+    pace: Callable[[float], None] = _pace,
+    clock: Callable[[], float] = time.monotonic,
+    deadline_seconds: float | None = None,
+) -> None:
+    """Poll until the VM's `general-dev/provisioned` attribute reports TRUE.
+
+    The marker gate every wait that assumes provisioning runs behind (the
+    azure live lesson, applied to gcp): `instances describe` reporting
+    RUNNING means the VM was scheduled, nothing more, and the startup
+    script's own success marker is the only evidence the provisioning the
+    listener needs actually ran. While the attribute is absent the poll
+    keeps pacing -- a first boot has not finished yet -- and an expired
+    gcloud session stops it immediately. The deadline is
+    `GCP_PROVISIONED_TIMEOUT` (default 300, the azure agent-ready wait's
+    default) unless passed explicitly.
+
+    Raises:
+        GCPConfigError: the record is missing or malformed.
+        GCPTransportError: a read failed with an unfixable cause, or the
+            deadline ran out (the message carries the VM's own
+            `general-dev/error` diagnostic).
+    """
+    if deadline_seconds is None:
+        deadline_seconds = provisioned_timeout_seconds()
+    deadline = clock() + deadline_seconds
+    while True:
+        try:
+            observed = read_guest_attribute(
+                record, runner, instance=instance, key=GUEST_ATTRIBUTE_PROVISIONED_KEY
+            )
+            if observed == GUEST_ATTRIBUTE_PROVISIONED_VALUE:
+                return
+        except GCPTransportError as exc:
+            if _auth_failure_cannot_wait(str(exc)):
+                raise
+        if clock() >= deadline:
+            raise GCPTransportError(
+                f"ERROR: instance {instance!r} never reported "
+                f"{GUEST_ATTRIBUTE_NAMESPACE}/{GUEST_ATTRIBUTE_PROVISIONED_KEY}="
+                f"{GUEST_ATTRIBUTE_PROVISIONED_VALUE} within {deadline_seconds:g}s\n"
+                f"The VM's own diagnostic: "
+                f"{_last_error_attribute(record, runner, instance=instance)}\n"
+                f"Raise {PROVISIONED_TIMEOUT_ENV_VAR} if this instance is simply "
+                "slow, and read the startup script's own log on the VM "
+                "(serial console output) for its provisioning steps."
+            )
+        pace(_GUEST_ATTRIBUTE_POLL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
 # Timeouts: read fresh through the shared hostprobe reader, never hard-coded.
 # ---------------------------------------------------------------------------
 
@@ -434,20 +895,6 @@ def _handshake_timeout_seconds() -> float:
 # Readiness: the local port accepting a connection, paced by a real I/O
 # wait; child death surfaced with its own stderr tail.
 # ---------------------------------------------------------------------------
-
-
-def _pace(seconds: float) -> None:
-    """One bounded wait between probes.
-
-    The same bounded-wait primitive `transport_ssh._pace` rests on: an
-    empty selector blocks for at most `seconds` (a real I/O wait, never a
-    sleep) and returns once the slice has passed.
-    """
-    selector = selectors.DefaultSelector()
-    try:
-        selector.select(timeout=seconds)
-    finally:
-        selector.close()
 
 
 def diagnose_tunnel_exit(returncode: int | None, stderr_tail: str, *, instance: str) -> str:

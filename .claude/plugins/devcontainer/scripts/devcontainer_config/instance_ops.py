@@ -87,7 +87,14 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from devcontainer_config import certs, containers, forwards, instances, transport_azure
+from devcontainer_config import (
+    certs,
+    containers,
+    forwards,
+    instances,
+    transport_azure,
+    transport_gcp,
+)
 from devcontainer_config.hostprobe import (
     CommandResult,
     CommandRunner,
@@ -97,13 +104,15 @@ from devcontainer_config.hostprobe import (
 
 # The external commands this module asks a runner to invoke. Every aws
 # argv below starts with AWS_EXECUTABLE; every docker argv with
-# DOCKER_EXECUTABLE; every ssh reachability probe with SSH_EXECUTABLE; and
+# DOCKER_EXECUTABLE; every ssh reachability probe with SSH_EXECUTABLE;
 # every azure VM argv the azure arms below build starts with AZ_EXECUTABLE;
+# and every gcp argv the gcp arms below build starts with GCLOUD_EXECUTABLE;
 # nothing else names an executable.
 AWS_EXECUTABLE = "aws"
 DOCKER_EXECUTABLE = "docker"
 SSH_EXECUTABLE = "ssh"
 AZ_EXECUTABLE = "az"
+GCLOUD_EXECUTABLE = "gcloud"
 
 # The SSM public parameter holding Canonical's current Ubuntu 24.04 arm64
 # image for the region the scaffold targets. Read once per scaffold when the
@@ -180,6 +189,11 @@ POWER_POLL_SECONDS = 5
 STOPPED_STATE = "stopped"
 RUNNING_STATE = "running"
 SSM_ONLINE_STATUS = "Online"
+
+# The gcp VM status the stop poll waits for: `TERMINATED` is gcp's own
+# spelling of "the VM is deallocated and billing for compute is stopped",
+# and `reset` refuses an instance in exactly this state (start instead).
+GCP_TERMINATED_STATUS = "TERMINATED"
 
 # The `--query` that turns one `aws ec2 describe-instances` call straight
 # into the instance's `State.Name` text.
@@ -1182,6 +1196,11 @@ class InstanceState:
     `azure_state` is the azure kind's power column (the `powerState` the
     instance view reports, e.g. `VM running`) and None for every other
     kind; an EC2 row answers in `ec2_state` exactly as it always did.
+
+    `gcp_state` is the gcp kind's power column (the `status` the instance
+    describe reports, e.g. `RUNNING` or `TERMINATED`) and None for every
+    other kind; an azure row answers in `azure_state`, an EC2 row in
+    `ec2_state`, and each kind's other columns stay None there.
     """
 
     name: str
@@ -1189,6 +1208,7 @@ class InstanceState:
     recorded_id: str | None
     ec2_state: str | None
     azure_state: str | None
+    gcp_state: str | None
     params_present: bool | None
     certs_present: bool | None
     client_cert_days_left: int | None
@@ -1360,6 +1380,77 @@ def _azure_secrets_present(runner: Runner, vault_name: str) -> bool:
     return True
 
 
+def _gcp_record_targets(address: dict[str, object], name: str) -> tuple[str, str, str]:
+    """The `(instance_name, zone, project_id)` triple the gcp arms act on.
+
+    The record is read through `transport_gcp.gcp_values`, the one
+    validator of the triple the tunnel dials by: a record present but
+    missing a key this surface needs reads as the not-yet-deployed state
+    it effectively is, and the probe failure says so.
+
+    Raises:
+        _ProbeFailure: any key is missing or breaks its shape.
+    """
+    try:
+        return transport_gcp.gcp_values(address, instance=name)
+    except transport_gcp.GCPConfigError as exc:
+        raise _ProbeFailure(_one_line(str(exc))) from exc
+
+
+def _gcp_vm_state(runner: Runner, instance_name: str, zone: str, project_id: str) -> str | None:
+    """The VM's `status` from one `gcloud compute instances describe` call.
+
+    `RUNNING`, `TERMINATED`, `PROVISIONING` and their classmates come back
+    as the platform spelled them; an empty answer (a describe that raced a
+    state transition) reads as None, the could-not-answer meaning every
+    probe's None carries.
+
+    Raises:
+        _ProbeFailure: the describe failed or answered unusable output.
+    """
+    argv = transport_gcp.build_instance_status_argv(
+        instance_name=instance_name, zone=zone, project_id=project_id
+    )
+    observed = _probe_run(runner, argv).stdout.strip()
+    if observed in ("", "None"):
+        return None
+    return observed
+
+
+def _gcp_secrets_present(runner: Runner, prefix: str, project_id: str) -> bool:
+    """Whether all six of the instance's Secret Manager secrets exist.
+
+    Six probes aggregated: the project is asked for each secret the
+    publication and payload paths write (`certs.gcp_instance_secret_ids`,
+    the same set the publish and push paths write), every probe must
+    answer, and one not-found answer means the material is not there.
+
+    Raises:
+        _ProbeFailure: a probe failed for any reason other than a missing
+            secret.
+    """
+    for secret_id in certs.gcp_instance_secret_ids(prefix):
+        argv = [
+            GCLOUD_EXECUTABLE,
+            "secrets",
+            "describe",
+            secret_id,
+            "--project",
+            project_id,
+        ]
+        try:
+            result = runner(argv, None)
+        except OSError as exc:
+            raise _ProbeFailure(_one_line(str(exc))) from exc
+        if result.returncode != 0:
+            if any(marker in result.stderr for marker in ("not found", "NOT_FOUND", "404")):
+                return False
+            raise _ProbeFailure(
+                f"{' '.join(argv)} exited {result.returncode}: {_one_line(result.stderr)}"
+            )
+    return True
+
+
 def _engine_reach_argv(values: dict[str, object], timeout_seconds: float) -> list[str]:
     """The one-shot `ssh ... docker version` argv proving an engine is reachable.
 
@@ -1465,8 +1556,11 @@ def state(root: Path, name: str, *, runner: Runner) -> InstanceState:
     vault the engine address record names) replace the EC2 describe and the
     describe-parameters probe, the record's VM name stands in as the row's
     display id, and a missing record degrades the row with the deploy
-    remedy instead of aborting the listing. An EC2 instance keeps exactly
-    the probe set and order it always had.
+    remedy instead of aborting the listing. A gcp engine answers the same
+    way from its own platform: the VM status and the six Secret Manager
+    secrets (under the prefix the record records, in the project the record
+    names) replace them, and the record's VM name is the display id. An
+    EC2 instance keeps exactly the probe set and order it always had.
 
     Raises:
         StateError: `name` fails `instances.validate_name` -- a malformed
@@ -1491,6 +1585,7 @@ def state(root: Path, name: str, *, runner: Runner) -> InstanceState:
 
     ec2_state: str | None = None
     azure_state: str | None = None
+    gcp_state: str | None = None
     displayed_id: str | None = instance_id
     engine_reachable: bool | None = None
     params_present: bool | None = None
@@ -1531,6 +1626,36 @@ def state(root: Path, name: str, *, runner: Runner) -> InstanceState:
                 else:
                     try:
                         params_present = _azure_secrets_present(runner, vault_name)
+                    except _ProbeFailure as exc:
+                        record(exc)
+    elif kind == instances.ENGINE_KIND_GCP:
+        gcp_address: dict[str, object] | None = None
+        try:
+            gcp_address = instances.engine_address(root, name)
+        except instances.InstancesError as exc:
+            record(exc)
+        if gcp_address is not None:
+            try:
+                vm_name, zone, project_id = _gcp_record_targets(gcp_address, name)
+            except _ProbeFailure as exc:
+                record(exc)
+            else:
+                # The VM name is the gcp row's display id, exactly as the
+                # azure row displays its record's VM name: the kind has no
+                # EC2 id, and the record the deploy wrote is the
+                # addressable identity the power operations act on.
+                displayed_id = vm_name
+                try:
+                    gcp_state = _gcp_vm_state(runner, vm_name, zone, project_id)
+                except _ProbeFailure as exc:
+                    record(exc)
+                try:
+                    prefix = instances.gcp_secrets_prefix(root, name)
+                except instances.InstancesError as exc:
+                    record(exc)
+                else:
+                    try:
+                        params_present = _gcp_secrets_present(runner, prefix, project_id)
                     except _ProbeFailure as exc:
                         record(exc)
     elif instance_id is not None:
@@ -1577,6 +1702,7 @@ def state(root: Path, name: str, *, runner: Runner) -> InstanceState:
         recorded_id=displayed_id,
         ec2_state=ec2_state,
         azure_state=azure_state,
+        gcp_state=gcp_state,
         params_present=params_present,
         certs_present=certs_present,
         client_cert_days_left=client_cert_days_left,
@@ -1869,6 +1995,141 @@ def _azure_start(root: Path, name: str, *, runner: Runner, sleep: Callable[[floa
     )
 
 
+# ---------------------------------------------------------------------------
+# Power operations, gcp arm.
+# ---------------------------------------------------------------------------
+
+
+def _gcp_power_targets(root: Path, name: str) -> tuple[str, str, str]:
+    """The `(instance_name, zone, project_id)` triple the gcp power operation acts on.
+
+    All three come from the engine address record the deploy wrote, through
+    `transport_gcp.gcp_values` (the one validator of the triple) -- never a
+    second, ad hoc read of the record's JSON.
+
+    Raises:
+        PowerError: the record is missing (its own message names the deploy
+            that writes it) or carries no usable target triple.
+    """
+    try:
+        address = instances.engine_address(root, name)
+    except instances.InstancesError as exc:
+        raise PowerError(f"ERROR: {exc}") from exc
+    try:
+        return _gcp_record_targets(address, name)
+    except _ProbeFailure as exc:
+        raise PowerError(f"ERROR: {_one_line(str(exc))}") from exc
+
+
+def _run_power_gcp(
+    runner: Runner, operation_args: Sequence[str]
+) -> subprocess.CompletedProcess[str]:
+    """Run one gcloud command in the power path, raising `PowerError` on any failure."""
+    argv = [GCLOUD_EXECUTABLE, *operation_args]
+    try:
+        result = runner(argv, None)
+    except OSError as exc:
+        raise PowerError(
+            f"ERROR: could not run {' '.join(argv)}\n"
+            f"{_one_line(str(exc))}\n"
+            "Install the Google Cloud CLI (brew install google-cloud-sdk) and sign "
+            "in with 'gcloud auth login', then retry."
+        ) from exc
+    if result.returncode != 0:
+        raise PowerError(
+            f"ERROR: {' '.join(argv)} exited {result.returncode}\n"
+            f"{_one_line(result.stderr)}\n"
+            "Resolve the failure above, then retry the power operation."
+        )
+    return result
+
+
+def _poll_gcp_status(
+    runner: Runner,
+    instance_name: str,
+    zone: str,
+    project_id: str,
+    *,
+    target: str,
+    sleep: Callable[[float], None],
+) -> None:
+    """Poll the VM's `status` until it equals `target`.
+
+    At most `POWER_POLL_LIMIT` describes, `POWER_POLL_SECONDS` apart (via
+    the injected `sleep`) -- the same cadence the EC2 and azure polls keep.
+
+    Raises:
+        PowerError: a state read failed, or the limit was exhausted naming
+            the last observed state.
+    """
+    describe = transport_gcp.build_instance_status_argv(
+        instance_name=instance_name, zone=zone, project_id=project_id
+    )
+    observed = ""
+    for _ in range(POWER_POLL_LIMIT):
+        result = _run_power_gcp(runner, describe[1:])
+        observed = result.stdout.strip()
+        if observed == target:
+            return
+        sleep(POWER_POLL_SECONDS)
+    raise PowerError(
+        f"ERROR: VM {instance_name} did not reach {target!r} within "
+        f"{POWER_POLL_LIMIT} polls at {POWER_POLL_SECONDS}s intervals\n"
+        f"The last observed status was {observed!r}.\n"
+        f"Check the instance directly: gcloud compute instances describe "
+        f"{instance_name} --zone {zone} --project {project_id}"
+    )
+
+
+def _gcp_stop(root: Path, name: str, *, runner: Runner, sleep: Callable[[float], None]) -> str:
+    """Stop `name`'s VM and wait until the platform reports it TERMINATED.
+
+    Idempotent the same way the EC2 and azure stops are: an already-
+    TERMINATED VM answers the poll's first read.
+    """
+    instance_name, zone, project_id = _gcp_power_targets(root, name)
+    _run_power_gcp(
+        runner,
+        ["compute", "instances", "stop", instance_name, "--zone", zone, "--project", project_id],
+    )
+    _poll_gcp_status(
+        runner, instance_name, zone, project_id, target=GCP_TERMINATED_STATUS, sleep=sleep
+    )
+    return (
+        f"Instance {name!r} ({instance_name}) is stopped.\n"
+        f"Start it again with: make instance-start INSTANCE={name}"
+    )
+
+
+def _gcp_start(root: Path, name: str, *, runner: Runner, sleep: Callable[[float], None]) -> str:
+    """Start `name`'s VM, then wait for the provisioning marker's own readiness.
+
+    The bounded readiness wait is `transport_gcp.wait_provisioned` -- the
+    one home of the guest-attribute poll -- so the cli's accessor and this
+    path drive the identical bounded poll, never two copies. The wait
+    gates on the `general-dev/provisioned` guest attribute the startup
+    script writes, never on describe status alone: RUNNING means the VM
+    was scheduled, and the marker is the evidence provisioning ran.
+    """
+    instance_name, zone, project_id = _gcp_power_targets(root, name)
+    _run_power_gcp(
+        runner,
+        ["compute", "instances", "start", instance_name, "--zone", zone, "--project", project_id],
+    )
+    try:
+        transport_gcp.wait_provisioned(
+            instances.engine_address(root, name), runner, instance=name, pace=sleep
+        )
+    except transport_gcp.GCPTransportError as exc:
+        raise PowerError(f"ERROR: {_one_line(str(exc))}") from exc
+    return (
+        f"Instance {name!r} ({instance_name}) is running and its startup script "
+        f"reports provisioning complete.\n"
+        f"If connecting later fails, reinstall the daemon's client material: "
+        f"make cert-install INSTANCE={name}"
+    )
+
+
 def stop(
     root: Path,
     name: str,
@@ -1881,8 +2142,9 @@ def stop(
 
     Kind-aware: an azure instance's VM is deallocated and the poll waits
     for `PowerState/deallocated` (`region` is an EC2-only concept and is
-    unused on that arm); an EC2 instance keeps exactly the flow it always
-    had.
+    unused on that arm); a gcp instance's VM is stopped and the poll waits
+    for `TERMINATED` (`region` is unused on that arm too); an EC2 instance
+    keeps exactly the flow it always had.
 
     Idempotent: stopping an already-stopped instance succeeds, and the poll
     observes the target state on its first read, so no waiting happens.
@@ -1890,13 +2152,16 @@ def stop(
     Raises:
         PowerError: `name` is invalid, the kind's addressable identity is
             not recorded (naming `make instance-link` for EC2, the deploy
-            that writes the record for azure), a platform call fails, or
-            the instance never reached its target state within the polling
-            limit.
+            that writes the record for azure and gcp), a platform call
+            fails, or the instance never reached its target state within
+            the polling limit.
     """
     _validated(name, PowerError)
-    if _power_kind(root, name) == instances.ENGINE_KIND_AZURE:
+    kind = _power_kind(root, name)
+    if kind == instances.ENGINE_KIND_AZURE:
         return _azure_stop(root, name, runner=runner, sleep=sleep)
+    if kind == instances.ENGINE_KIND_GCP:
+        return _gcp_stop(root, name, runner=runner, sleep=sleep)
     instance_id = _require_instance_id(root, name)
     _run_power_aws(
         runner,
@@ -1921,16 +2186,22 @@ def start(
 
     Kind-aware: an azure VM is started and the shared readiness poll waits
     for `PowerState/running` plus the VM agent's `Ready` (the azure
-    counterpart of the SSM-agent wait; `region` is unused on that arm); an
-    EC2 instance keeps exactly the flow it always had.
+    counterpart of the SSM-agent wait; `region` is unused on that arm); a
+    gcp VM is started and the readiness poll waits for the
+    `general-dev/provisioned` guest attribute the startup script writes --
+    the gcp counterpart of the SSM-agent wait (`region` is unused on that
+    arm too); an EC2 instance keeps exactly the flow it always had.
 
     Raises:
         PowerError: `name` is invalid, the kind's addressable identity is
             not recorded, a platform call fails, or either wait timed out.
     """
     _validated(name, PowerError)
-    if _power_kind(root, name) == instances.ENGINE_KIND_AZURE:
+    kind = _power_kind(root, name)
+    if kind == instances.ENGINE_KIND_AZURE:
         return _azure_start(root, name, runner=runner, sleep=sleep)
+    if kind == instances.ENGINE_KIND_GCP:
+        return _gcp_start(root, name, runner=runner, sleep=sleep)
     instance_id = _require_instance_id(root, name)
     _run_power_aws(
         runner,
@@ -2083,20 +2354,67 @@ def _remove_certificate_directory(name: str, *, failures: list[str], messages: l
         messages.append(f"no certificate directory at {cert_directory}; nothing to remove")
 
 
+def _delete_gcp_secret(
+    runner: Runner,
+    failures: list[str],
+    messages: list[str],
+    *,
+    secret_id: str,
+    project_id: str,
+) -> None:
+    """Delete one Secret Manager secret, tolerating an already-absent one.
+
+    A not-found answer is the desired end state, reported like the context
+    removal's absent case; any other failure lands in `failures`, the same
+    aggregate `cleanup` raises at the end. Shared by the gcp cleanup arm's
+    loop over the six per-instance secrets.
+
+    Raises:
+        CleanupError: the six secret ids could not be composed because the
+            engine address record is missing the prefix.
+    """
+    argv = [
+        GCLOUD_EXECUTABLE,
+        "secrets",
+        "delete",
+        secret_id,
+        "--project",
+        project_id,
+    ]
+    try:
+        result = runner(list(argv), None)
+    except OSError as exc:
+        failures.append(f"delete secret {secret_id}: {_one_line(str(exc))}")
+        return
+    if result.returncode == 0:
+        messages.append(f"deleted secret {secret_id}")
+        return
+    if any(marker in result.stderr for marker in ("not found", "NOT_FOUND", "404")):
+        messages.append(f"secret {secret_id} is absent; nothing to delete")
+        return
+    failures.append(
+        f"delete secret {secret_id}: {' '.join(argv)} exited {result.returncode}: "
+        f"{_one_line(result.stderr)}"
+    )
+
+
 def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str, ...]:
     """Tear down everything `name` scattered outside its Terragrunt directory.
 
     Kind-aware: an EC2 instance's cleanup deletes every SSM parameter under
-    the instance's prefix before the shared steps; an azure instance's has
-    no SSM surface at all (its TLS material lives in its terraform-managed
-    Key Vault and its configuration payload beside it), so the parameter
-    step is skipped entirely and `region` goes unused on that arm. Both
-    kinds then remove the instance's docker context and delete its
-    certificate-material directory -- `instances.certs_dir(name)` in full,
-    which for the azure kind carries the engine-address.json record too.
-    Every operation is attempted even after an earlier one failed, and all
-    failures are raised together in ONE `CleanupError` at the end, so a
-    docker failure never hides deletions that still needed to happen.
+    the instance's prefix before the shared steps; a gcp instance's deletes
+    the six Secret Manager secrets the publish and payload paths wrote
+    (`region` is an EC2-only concept and is unused on that arm); an azure
+    instance's has no SSM surface at all (its TLS material lives in its
+    terraform-managed Key Vault and its configuration payload beside it),
+    so the parameter step is skipped entirely and `region` goes unused on
+    that arm. All kinds then remove the instance's docker context and
+    delete its certificate-material directory -- `instances.certs_dir(name)`
+    in full, which for the azure and gcp kinds carries the
+    engine-address.json record too. Every operation is attempted even after
+    an earlier one failed, and all failures are raised together in ONE
+    `CleanupError` at the end, so a docker failure never hides deletions
+    that still needed to happen.
 
     A nonzero `docker context inspect` counts as "the context is absent,
     nothing to remove" only when docker's own answer says so (`no such
@@ -2104,13 +2422,13 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
     or unreachable daemon, say -- is recorded as a failed operation, so
     cleanup never reports success while the context survives.
 
-    The remote-state bucket -- and the azure kind's storage account beside
-    it -- are deliberately out of scope: each instance's store is derived
-    in `remote-instances/root.hcl` from its own name, so its lifecycle is
-    a Terragrunt/backend concern, never an instance's.
+    The remote-state bucket -- and the azure kind's storage account and the
+    gcp kind's GCS bucket beside it -- are deliberately out of scope: each
+    instance's store is derived from its own name in the cloud root, so its
+    lifecycle is a Terragrunt/backend concern, never an instance's.
 
     Raises:
-        CleanupError: `name` is invalid, or any aws/docker/filesystem
+        CleanupError: `name` is invalid, or any aws/gcloud/docker/filesystem
             operation failed (the message names every failed operation).
     """
     _validated(name, CleanupError)
@@ -2162,6 +2480,22 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
                     )
                     if deleted is not None:
                         messages.append(f"deleted parameter {parameter_name}")
+
+    if kind == instances.ENGINE_KIND_GCP:
+        try:
+            project_id = instances.gcp_project_id(root, name)
+            prefix = instances.gcp_secrets_prefix(root, name)
+        except instances.InstancesError as exc:
+            failures.append(_one_line(str(exc)))
+        else:
+            for secret_id in certs.gcp_instance_secret_ids(prefix):
+                _delete_gcp_secret(
+                    runner,
+                    failures,
+                    messages,
+                    secret_id=secret_id,
+                    project_id=project_id,
+                )
 
     _remove_docker_context(root, name, runner, failures=failures, messages=messages)
     _remove_certificate_directory(name, failures=failures, messages=messages)

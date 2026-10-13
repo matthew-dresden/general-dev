@@ -741,3 +741,21 @@ deliberately with `make instance-stop`, or by an idle policy on the
 subscription. Fix: `make instance-start INSTANCE=<name>` starts the VM and
 waits until its agent reports ready, then `make remote INSTANCE=<name>`
 re-opens the forward.
+
+**The deploy dies in `SubscriptionNotFound` on a storage create.** Symptom:
+`instance-deploy` fails while bootstrapping the state store, and the raw
+output is `(SubscriptionNotFound) Subscription <id> was not found.` Cause:
+a fresh subscription has the resource providers unregistered, and azure's
+error for it surfaces here first. Fix: register them — the command block is
+in [azure-requirements.md](azure-requirements.md), section 2's once-per-
+subscription note — then re-run the deploy.
+
+**The apply dies in a VM quota or SKU error.** Symptom: `terragrunt apply`
+fails with `exceeding approved <family> Cores quota` (the subscription has a
+zero-core limit for that VM family) or `SkuNotAvailable` (the family has
+quota but the region has no capacity). Cause: azure rations VM families per
+region, and a fresh subscription starts at zero for most of them. Fix: pick
+a size whose family shows nonzero quota and no restriction — the check
+commands are in [azure-requirements.md](azure-requirements.md), section 2 —
+then set `vm_size` (and `os_image_urn` for an x64 size) in the scaffolded
+`terragrunt.hcl` and re-run `make instance-deploy INSTANCE=<name>`.

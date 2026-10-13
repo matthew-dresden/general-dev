@@ -823,17 +823,19 @@ def test_scaffold_azure_refuses_an_ami(tmp_path: Path) -> None:
 
 
 def test_scaffold_azure_refuses_an_unknown_cloud(tmp_path: Path) -> None:
+    """The gcp kind is a real choice now; only clouds none of the arms serve
+    are refused, naming every cloud the scaffold writes."""
     ops = _import_instance_ops()
     root = _git_root(tmp_path)
     name = _instance_name()
     runner = _FakeRunner()
 
     with pytest.raises(ops.ScaffoldError) as exc_info:
-        ops.scaffold(root, name, cloud="gcp", runner=runner)
+        ops.scaffold(root, name, cloud="alicloud", runner=runner)
 
     message = str(exc_info.value)
-    assert "gcp" in message
-    assert "ec2" in message and "azure" in message
+    assert "alicloud" in message
+    assert "ec2" in message and "azure" in message and "gcp" in message
     assert runner.calls == []
     assert not (root / "remote-instances" / name).exists()
 
@@ -2296,3 +2298,221 @@ def test_cleanup_azure_still_aggregates_failures(tmp_path: Path) -> None:
     message = str(exc_info.value)
     assert "docker daemon exploded" in message
     assert all(call[0] != "aws" for call in runner.calls)
+
+
+# ---------------------------------------------------------------------------
+# The gcp scaffold arm: the template, the sanitized-name inputs, and the
+# per-cloud refusals.
+# ---------------------------------------------------------------------------
+
+
+def _gcp_project_id() -> str:
+    """A project id fixture value, generated so no real project is named."""
+    return f"proj-{uuid.uuid4().hex[:10]}"
+
+
+def _gcp_zone() -> str:
+    return "us-east1-b"
+
+
+def test_scaffold_gcp_writes_the_gcp_contract(tmp_path: Path) -> None:
+    """The gcp template carries the README's three parts with the gcp inputs.
+
+    The instance_name and name_prefix inputs carry the SANITIZED name (the
+    provenance comment says where it came from), the region is derived from
+    the zone with its own comment, and the scaffold issues no command and
+    pins no image -- the same issues-nothing contract the azure arm keeps.
+    """
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name("acme")
+    project = _gcp_project_id()
+    zone = _gcp_zone()
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root,
+        name,
+        cloud=instances.ENGINE_KIND_GCP,
+        project=project,
+        zone=zone,
+        runner=runner,
+    )
+
+    assert result.path == root / "remote-instances" / name / "terragrunt.hcl"
+    assert result.ami is None, "the gcp kind pins no image at scaffold time"
+    assert runner.calls == [], "the gcp scaffold issues no command at all"
+    text = result.path.read_text(encoding="utf-8")
+    assert 'path = find_in_parent_folders("root-gcp.hcl")' in text
+    assert (
+        'path = "${dirname(find_in_parent_folders("root-gcp.hcl"))}'
+        '/_envcommon/remote-gcp.hcl"' in text
+    )
+    # The sanitized name carries the provenance comment, and the two inputs
+    # it feeds agree with the sanitizer's own answer.
+    sanitized = instances.sanitize_gcp_name(name)
+    assert f'instance_name = "{sanitized}"' in text
+    assert f'name_prefix   = "{sanitized}"' in text
+    assert "instances.sanitize_gcp_name" in text
+    assert f'project_id = "{project}"' in text
+    assert f'zone       = "{zone}"' in text
+    # The region is derived, commented, and never an input of its own.
+    assert 'region = "us-east1"' in text
+    assert "Derived from the zone" in text
+    assert f'vm_size = "{ops.DEFAULT_GCP_VM_SIZE}"' in text
+    assert f"root_volume_size_gb = {ops.DEFAULT_VOLUME_SIZE_GB}" in text
+    assert f"data_volume_size_gb = {ops.DEFAULT_VOLUME_SIZE_GB}" in text
+    assert 'vpc_cidr   = "10.100.0.0/16"' in text
+    assert f'Environment = "{name}"' in text
+    # Forward-looking: the scaffold writes the declaration without checking
+    # the layer or provider it names.
+    assert not (root / "remote-instances" / "_envcommon" / "remote-gcp.hcl").exists()
+    assert any(f"make instance-deploy INSTANCE={name}" in message for message in result.messages)
+
+
+def test_scaffold_gcp_sanitizes_an_underscored_name(tmp_path: Path) -> None:
+    """A name needing sanitization lands sanitized in the gcp inputs alone.
+
+    The directory, the docker context and the tags carry the instance name
+    as it is; only the platform-naming inputs carry the sanitized form.
+    """
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = "my" + "_" + "engine"
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root,
+        name,
+        cloud=instances.ENGINE_KIND_GCP,
+        project=_gcp_project_id(),
+        zone=_gcp_zone(),
+        runner=runner,
+    )
+
+    text = result.path.read_text(encoding="utf-8")
+    assert f'instance_name = "{instances.sanitize_gcp_name(name)}"' in text
+    assert f'Environment = "{name}"' in text
+
+
+def test_scaffold_gcp_refuses_a_name_with_no_legal_form(tmp_path: Path) -> None:
+    """A leading digit has no RFC1035 fix; the refusal writes nothing."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.ScaffoldError) as exc_info:
+        ops.scaffold(
+            root,
+            "9lives",
+            cloud=instances.ENGINE_KIND_GCP,
+            project=_gcp_project_id(),
+            zone=_gcp_zone(),
+            runner=runner,
+        )
+
+    assert "invalid gcp resource name" in str(exc_info.value)
+    assert not (root / "remote-instances" / "9lives").exists()
+
+
+def test_scaffold_gcp_vm_size_default_is_the_constant(tmp_path: Path) -> None:
+    """The unpassed --vm-size default is the gcp constant, never azure's."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root,
+        _instance_name(),
+        cloud=instances.ENGINE_KIND_GCP,
+        project=_gcp_project_id(),
+        zone=_gcp_zone(),
+        runner=runner,
+    )
+
+    assert ops.DEFAULT_GCP_VM_SIZE == "e2-standard-2"
+    assert f'vm_size = "{ops.DEFAULT_GCP_VM_SIZE}"' in result.path.read_text(encoding="utf-8")
+
+
+def test_scaffold_gcp_vm_size_override_lands_in_the_template(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    runner = _FakeRunner()
+
+    result = ops.scaffold(
+        root,
+        _instance_name(),
+        cloud=instances.ENGINE_KIND_GCP,
+        project=_gcp_project_id(),
+        zone=_gcp_zone(),
+        vm_size="e2-standard-8",
+        runner=runner,
+    )
+
+    assert 'vm_size = "e2-standard-8"' in result.path.read_text(encoding="utf-8")
+
+
+def test_scaffold_gcp_requires_project_and_zone(tmp_path: Path) -> None:
+    """No default project or zone exists; each refusal names its input."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.ScaffoldError) as project_exc:
+        ops.scaffold(
+            root,
+            _instance_name(),
+            cloud=instances.ENGINE_KIND_GCP,
+            zone=_gcp_zone(),
+            runner=runner,
+        )
+    assert "--project" in str(project_exc.value)
+
+    with pytest.raises(ops.ScaffoldError) as zone_exc:
+        ops.scaffold(
+            root,
+            _instance_name(),
+            cloud=instances.ENGINE_KIND_GCP,
+            project=_gcp_project_id(),
+            runner=runner,
+        )
+    assert "--zone" in str(zone_exc.value)
+
+    assert runner.calls == []
+    assert not (root / "remote-instances").exists() or not any(
+        (root / "remote-instances").iterdir()
+    ), "a refusal must write nothing"
+
+
+def test_scaffold_gcp_refuses_the_other_clouds_inputs(tmp_path: Path) -> None:
+    """Region, location and AMI are refused under gcp, each naming its way out."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    runner = _FakeRunner()
+
+    cases = (
+        ({"region": "us-east-1"}, "--zone"),
+        ({"location": "westeurope"}, "--zone"),
+        ({"ami": "ami-" + uuid.uuid4().hex}, "AMI"),
+    )
+    for extra, expected in cases:
+        with pytest.raises(ops.ScaffoldError) as exc_info:
+            ops.scaffold(
+                root,
+                _instance_name(),
+                cloud=instances.ENGINE_KIND_GCP,
+                project=_gcp_project_id(),
+                zone=_gcp_zone(),
+                runner=runner,
+                **extra,
+            )
+        assert expected in str(exc_info.value), f"{extra}: {exc_info.value}"
+
+    assert runner.calls == []

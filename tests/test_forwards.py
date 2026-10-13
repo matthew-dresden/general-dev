@@ -1462,3 +1462,224 @@ def test_default_spawner_creates_the_log_parent_directory(
 
     assert process.returncode == 0
     assert log_file.parent.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# The iap kind: the child argv, the record's gcp triple, and the open
+# dispatch that accepts the --zone-distinguished form. The iap transport
+# reads the engine address record itself, so these tests only prove the
+# lifecycle wires the right command, cross-checks the zone flag against the
+# record, and fails fast on a missing or mismatched one.
+# ---------------------------------------------------------------------------
+
+_GCP_ZONE = "us-east1-b"
+_GCP_PROJECT = "proj-123456"
+_GCP_TRIPLE = f"iap://{_GCP_PROJECT}/{_GCP_ZONE}/x"
+
+
+def _write_gcp_address(instance: str) -> None:
+    instances.write_engine_address(
+        None,
+        instance,
+        {
+            "instance_name": instance,
+            "zone": _GCP_ZONE,
+            "project_id": _GCP_PROJECT,
+            "region": "us-east1",
+            "secrets_prefix": instance,
+            "state_bucket": f"{instance}-state",
+        },
+    )
+
+
+def test_kind_iap_constant_is_the_string_the_make_dispatch_routes_on() -> None:
+    assert forwards.KIND_IAP == "iap"
+
+
+def test_child_argv_iap_form_builds_the_transport_gcp_connect_command() -> None:
+    argv = forwards.child_argv("x", "general-dev-x", "", "", kind=forwards.KIND_IAP)
+
+    assert argv[1:3] == ("-u", "-m")
+    assert argv[3:5] == ("devcontainer_config.transport_gcp", "connect")
+    assert argv[5:] == ("--name", "x", "--context", "general-dev-x")
+    assert "--instance-id" not in argv, "the iap route must never carry the ssm form's id"
+    assert "--zone" not in argv, (
+        "the zone lives in the engine address record the transport reads; "
+        "the --zone flag only distinguishes the form at the CLI"
+    )
+
+
+def test_open_forward_iap_kind_records_the_triple_and_engine_kind(
+    tmp_path: Path,
+) -> None:
+    tmp_path = _git_root(tmp_path)
+    _write_gcp_address("x")
+    spawner = _Spawner(pid=784)
+
+    def runner(_command: object, _timeout: float | None) -> CommandResult:
+        return CommandResult(
+            exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", runner)
+        message = forwards.open_forward(
+            "unused-for-iap",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=forwards.KIND_IAP,
+            engine={"zone": _GCP_ZONE},
+            spawner=spawner,
+            poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
+        )
+
+    assert _GCP_TRIPLE in message
+    record = forwards.read_record("x")
+    assert record is not None
+    assert record.engine_kind == forwards.KIND_IAP
+    assert record.instance_id == _GCP_TRIPLE
+    assert spawner.argv is not None
+    assert spawner.argv[3:5] == ("devcontainer_config.transport_gcp", "connect")
+    assert "--name" in spawner.argv and "x" in spawner.argv
+    assert "--host" not in spawner.argv, "the iap form carries no ssh engine values"
+
+
+def test_open_forward_iap_kind_fails_fast_without_the_address_record(
+    tmp_path: Path,
+) -> None:
+    tmp_path = _git_root(tmp_path)
+    spawner = _Spawner(pid=785)
+
+    with pytest.raises(ForwardError) as exc_info:
+        forwards.open_forward(
+            "unused-for-iap",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=forwards.KIND_IAP,
+            engine={"zone": _GCP_ZONE},
+            spawner=spawner,
+            poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
+        )
+
+    assert "unusable" in str(exc_info.value)
+    assert "make instance-deploy INSTANCE=x" in str(exc_info.value), (
+        "a missing record names the deploy that writes it, before anything is spawned"
+    )
+    assert spawner.argv is None, "the failure must precede the spawn"
+
+
+def test_open_forward_iap_kind_refuses_a_zone_flag_that_disagrees_with_the_record(
+    tmp_path: Path,
+) -> None:
+    """A stale --zone flag fails at open time naming the mismatch, never as a
+    daemon dialing the wrong place a spawn later."""
+    tmp_path = _git_root(tmp_path)
+    _write_gcp_address("x")
+    spawner = _Spawner(pid=786)
+
+    with pytest.raises(ForwardError) as exc_info:
+        forwards.open_forward(
+            "unused-for-iap",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=forwards.KIND_IAP,
+            engine={"zone": "europe-west4-c"},
+            spawner=spawner,
+            poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
+        )
+
+    message = str(exc_info.value)
+    assert "does not match" in message
+    assert "europe-west4-c" in message and _GCP_ZONE in message
+    assert spawner.argv is None, "the mismatch must precede the spawn"
+
+
+def test_open_forward_iap_kind_requires_the_zone() -> None:
+    spawner = _Spawner(pid=787)
+
+    with pytest.raises(ForwardError, match="requires the zone"):
+        forwards.open_forward(
+            "unused-for-iap",
+            "general-dev-x",
+            "",
+            "",
+            Path("."),
+            kind=forwards.KIND_IAP,
+            spawner=spawner,
+            poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
+        )
+
+
+def test_parse_open_flags_identifies_the_iap_form_by_zone() -> None:
+    values, kind = forwards._parse_open_flags(
+        ["--name", "x", "--zone", _GCP_ZONE, "--context", "general-dev-x"]
+    )
+    assert kind == forwards.KIND_IAP
+    assert values == {"name": "x", "zone": _GCP_ZONE, "context": "general-dev-x"}
+
+
+def test_parse_open_flags_keeps_the_relay_form_when_zone_is_absent() -> None:
+    _, kind = forwards._parse_open_flags(["--name", "x", "--context", "general-dev-x"])
+    assert kind == forwards.KIND_RELAY
+
+
+def test_parse_open_flags_refuses_a_vector_carrying_both_identifying_flags() -> None:
+    """`--host` beside `--zone` is genuine ambiguity: the mixed-forms refusal
+    fires, never a quiet pick of whichever branch is checked first."""
+    with pytest.raises(ForwardError, match="exactly one transport form"):
+        forwards._parse_open_flags(
+            ["--name", "x", "--zone", _GCP_ZONE, "--context", "general-dev-x", "--host", "h"]
+        )
+
+
+def test_parse_open_flags_refuses_iap_form_carrying_a_stray_flag() -> None:
+    with pytest.raises(ForwardError, match="the iap form takes only"):
+        forwards._parse_open_flags(
+            ["--name", "x", "--zone", _GCP_ZONE, "--context", "general-dev-x", "--port", "22"]
+        )
+
+
+def test_parse_open_flags_refuses_an_incomplete_iap_form() -> None:
+    with pytest.raises(ForwardError) as exc_info:
+        forwards._parse_open_flags(["--name", "x", "--zone", _GCP_ZONE])
+    assert "missing required flags" in str(exc_info.value)
+    assert "context" in str(exc_info.value)
+
+
+def test_main_open_accepts_the_iap_flag_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _git_root(tmp_path)
+    _write_gcp_address("x")
+    spawner = _Spawner(pid=788)
+
+    def runner(_command: object, _timeout: float | None) -> CommandResult:
+        return CommandResult(
+            exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+        )
+
+    monkeypatch.setattr(forwards, "_context_port_runner", runner)
+    monkeypatch.setattr(forwards, "_default_spawner", spawner)
+    monkeypatch.setattr(forwards, "_default_port_probe", lambda _port: True)
+    monkeypatch.chdir(root)
+
+    exit_code = forwards.main(
+        ["open", "--name", "x", "--zone", _GCP_ZONE, "--context", "general-dev-x"]
+    )
+
+    assert exit_code == 0
+    assert "is open" in capsys.readouterr().out
+    record = forwards.read_record("x")
+    assert record is not None
+    assert record.engine_kind == forwards.KIND_IAP
+    assert record.instance_id == _GCP_TRIPLE

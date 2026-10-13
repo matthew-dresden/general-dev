@@ -62,6 +62,7 @@ The tooling is macOS-first: the keychain credential source, the OrbStack context
 | zsh | ships with macOS | `zsh --version` |
 | aws CLI v2 | `brew install awscli` | `aws --version` prints `aws-cli/2…` |
 | azure CLI | `brew install azure-cli` | `az version` prints a version and a set of module versions |
+| gcloud CLI | `brew install google-cloud-sdk` | `gcloud version` prints a version |
 | gh | `brew install gh`, then `gh auth login` | `gh auth status` reports a login |
 | devcontainer CLI | `npm install -g @devcontainers/cli` | `devcontainer --version` |
 | jq | `brew install jq` | `jq --version` |
@@ -74,6 +75,10 @@ Two of those need one more step beyond installation:
 The azure CLI row is needed only when azure engines are in play; a machine that never targets one never runs it.
 
 - `az login` must succeed before an azure engine is provisioned or connected to, because the relay token the forward presents and the state store's subscription lookup both resolve through that login.
+
+The gcloud CLI row is the same shape for gcp engines: needed only when one is in play.
+
+- `gcloud auth login` must succeed before a gcp engine is connected to, because the IAP tunnel is the gcloud CLI's own process and authenticates with the operator's ambient session.
 
 Verify: every row's command above answers without an error.
 

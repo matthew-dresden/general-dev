@@ -122,9 +122,15 @@ DEFAULT_INSTANCE_TYPE = "c8g.xlarge"
 
 # The default azure VM size the azure scaffold writes when the caller names
 # none, the one sizing default the azure kind carries. Sourced by the cli's
-# `--vm-size` default the same way the manifest defaults are, so a changed
+# `--vm-size` help text the same way the manifest defaults are, so a changed
 # default moves everywhere at once.
 DEFAULT_AZURE_VM_SIZE = "Standard_D2pls_v5"
+
+# The default gcp VM size the gcp scaffold writes when the caller names
+# none, the one sizing default the gcp kind carries. Sourced by the cli's
+# `--vm-size` help text the same way, so a changed default moves everywhere
+# at once.
+DEFAULT_GCP_VM_SIZE = "e2-standard-2"
 
 # The region default the EC2 scaffold applies when the caller names none:
 # the same default the make instance-* targets and the cli's other
@@ -449,9 +455,9 @@ def _cidrs_exhausted_message() -> str:
 def _unknown_cloud_message(cloud: str) -> str:
     return (
         f"ERROR: unknown cloud {cloud!r}\n"
-        "The scaffold writes an ec2 or an azure deployment; nothing else "
-        "exists yet.\n"
-        "Retry with CLOUD=ec2 (the default) or CLOUD=azure."
+        "The scaffold writes an ec2, an azure or a gcp deployment; nothing "
+        "else exists yet.\n"
+        "Retry with CLOUD=ec2 (the default), CLOUD=azure or CLOUD=gcp."
     )
 
 
@@ -481,6 +487,58 @@ def _azure_ami_given_message() -> str:
         "ERROR: refusing an AMI on an azure scaffold\n"
         "The azure kind pins no machine image at scaffold time: the image is "
         "fixed by the shared azure layer, not chosen per deployment.\n"
+        "Retry without AMI=/--ami."
+    )
+
+
+def _gcp_project_missing_message() -> str:
+    return (
+        "ERROR: a gcp scaffold requires a project\n"
+        "The --project input is the gcp project the VM and its VPC deploy "
+        "into, and it has no default: a silently chosen project would "
+        "deploy the engine somewhere the operator never asked for.\n"
+        "Pass one: make instance-init INSTANCE=<name> CLOUD=gcp PROJECT=<project-id>"
+    )
+
+
+def _gcp_zone_missing_message() -> str:
+    return (
+        "ERROR: a gcp scaffold requires a zone\n"
+        "The --zone input is where the VM deploys, and it has no default: "
+        "a silently chosen zone would deploy the engine somewhere the "
+        "operator never asked for. The region is derived from the zone "
+        "(us-east1-b means us-east1), never chosen separately.\n"
+        "Pass one: make instance-init INSTANCE=<name> CLOUD=gcp PROJECT=<project-id> ZONE=<zone>"
+    )
+
+
+def _gcp_region_given_message() -> str:
+    return (
+        "ERROR: refusing a region on a gcp scaffold\n"
+        "The gcp kind has no region input: --region is an EC2-only input, "
+        "and a gcp deployment goes to the --zone the scaffold's zone input "
+        "names, from which the region is derived.\n"
+        "Pass that instead: make instance-init INSTANCE=<name> CLOUD=gcp "
+        "PROJECT=<project-id> ZONE=<zone>"
+    )
+
+
+def _gcp_location_given_message() -> str:
+    return (
+        "ERROR: refusing an azure location on a gcp scaffold\n"
+        "--location is the azure kind's placement input, and a gcp "
+        "deployment takes its placement from --zone (the region is derived "
+        "from the zone), which no azure call reads.\n"
+        "Pass that instead: make instance-init INSTANCE=<name> CLOUD=gcp "
+        "PROJECT=<project-id> ZONE=<zone>"
+    )
+
+
+def _gcp_ami_given_message() -> str:
+    return (
+        "ERROR: refusing an AMI on a gcp scaffold\n"
+        "The gcp kind pins no machine image at scaffold time: the image is "
+        "fixed by the shared gcp layer, not chosen per deployment.\n"
         "Retry without AMI=/--ami."
     )
 
@@ -681,6 +739,85 @@ def _render_azure_terragrunt_hcl(
     return "\n".join(lines) + "\n"
 
 
+def _render_gcp_terragrunt_hcl(
+    name: str,
+    sanitized_name: str,
+    project_id: str,
+    zone: str,
+    region: str,
+    vm_size: str,
+    vpc_cidr: str,
+    subnet_cidr: str,
+) -> str:
+    """The per-instance terragrunt.hcl text for the gcp kind.
+
+    The same three parts as the EC2 and azure templates, honoring
+    `remote-instances/README.md`'s conventions: the root include (targeting
+    `root-gcp.hcl`, the gcp root whose backend and provider block this kind
+    runs under), the envcommon include (targeting
+    `_envcommon/remote-gcp.hcl`, the file `instances.read_kind` keys the
+    gcp kind on), and an `inputs` block carrying only what differs for this
+    one deployment. The `instance_name` and `name_prefix` inputs carry the
+    SANITIZED name (`instances.sanitize_gcp_name`), not the instance name
+    itself: a gcp VM name must be a legal RFC1035 label, and the secrets
+    prefix a later slice mints is derived from the same sanitized value, so
+    the provenance comment below says where the value came from. The region
+    is derived from the zone (`zone[:-2]`: us-east1-b means us-east1) with
+    its own comment, never an input the operator chooses separately. The
+    include targets land with the gcp provider slice and are deliberately
+    not validated here: scaffolding writes the declaration, it does not
+    check the layer it includes.
+    """
+    lines = [
+        f"# remote-instances/{name}/terragrunt.hcl",
+        "#",
+        "# The directory name IS this instance's identity, and instance names are",
+        "# project names (e.g. acme).",
+        "#",
+        "# Everything in the inputs block below is yours to edit freely: project,",
+        "# zone, VM size, volume sizes and tags. Apply any edit with:",
+        f"#   make instance-deploy INSTANCE={name}",
+        "",
+        'include "root" {',
+        '  path = find_in_parent_folders("root-gcp.hcl")',
+        "}",
+        "",
+        'include "envcommon" {',
+        '  path = "${dirname(find_in_parent_folders("root-gcp.hcl"))}/_envcommon/remote-gcp.hcl"',
+        "}",
+        "",
+        "inputs = {",
+        "  # instances.sanitize_gcp_name of the instance name: a gcp VM name must",
+        "  # be a legal RFC1035 label, and the secrets prefix a later slice mints",
+        "  # is derived from this same sanitized value.",
+        f'  instance_name = "{sanitized_name}"',
+        f'  name_prefix   = "{sanitized_name}"',
+        "",
+        f'  project_id = "{project_id}"',
+        f'  zone       = "{zone}"',
+        "",
+        "  # Derived from the zone: us-east1-b means us-east1. Change the zone and",
+        "  # the region follows; it is never chosen separately.",
+        f'  region = "{region}"',
+        "",
+        f"  # {DEFAULT_GCP_VM_SIZE}: 2 vCPU / 4 GiB, the sizing default for a",
+        "  # real engine on this kind.",
+        f'  vm_size = "{vm_size}"',
+        "",
+        f"  root_volume_size_gb = {DEFAULT_VOLUME_SIZE_GB}",
+        f"  data_volume_size_gb = {DEFAULT_VOLUME_SIZE_GB}",
+        "",
+        f'  vpc_cidr   = "{vpc_cidr}"',
+        f'  subnet_cidr = "{subnet_cidr}"',
+        "",
+        "  tags = {",
+        f'    Environment = "{name}"',
+        "  }",
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def _append_scaffold_ignore(root: Path, name: str) -> Path:
     """Hide `remote-instances/<name>/` from git by appending it to `.gitignore`.
 
@@ -748,7 +885,9 @@ def scaffold(
     region: str | None = None,
     ami: str | None = None,
     location: str | None = None,
-    vm_size: str = DEFAULT_AZURE_VM_SIZE,
+    project: str | None = None,
+    zone: str | None = None,
+    vm_size: str | None = None,
     runner: Runner,
 ) -> ScaffoldResult:
     """Write `remote-instances/<name>/terragrunt.hcl` for a new instance.
@@ -757,18 +896,26 @@ def scaffold(
     `instances.validate_name`, a docker context name that would exceed
     `DOCKER_CONTEXT_NAME_LIMIT`, or a directory that already exists. The
     `cloud` parameter selects the template: the EC2 kind the target has
-    always scaffolded, or the azure kind whose envcommon include targets
-    `_envcommon/remote-azure.hcl` (the include `instances.read_kind` keys
-    the azure kind on; the file itself lands with the azure provider slice
-    and is deliberately not validated here). The EC2 default AMI is
-    Canonical's current Ubuntu 24.04 arm64 image, resolved through SSM via
-    `runner` unless the caller passes `ami` explicitly; the azure kind pins
-    no image and issues no command at all, so its refusals are the only
-    azure-specific surface: `region`/`ami`, the EC2 inputs, are refused
-    when given (the azure equivalents are the `location` input; there is no
-    AMI input), and `location` is required. `region` is None when the
-    caller named none, and the EC2 path applies `DEFAULT_REGION`; the
-    azure path never reads it.
+    always scaffolded, the azure kind whose envcommon include targets
+    `_envcommon/remote-azure.hcl`, or the gcp kind whose include targets
+    `_envcommon/remote-gcp.hcl` (each include is what
+    `instances.read_kind` keys its kind on; the shared layers themselves
+    land with their provider slices and are deliberately not validated
+    here). The EC2 default AMI is Canonical's current Ubuntu 24.04 arm64
+    image, resolved through SSM via `runner` unless the caller passes `ami`
+    explicitly; the azure and gcp kinds pin no image and issue no command
+    at all, so their refusals are the only cloud-specific surfaces: the
+    EC2-only `region`/`ami` inputs are refused when given to either (the
+    azure equivalent is the `location` input, the gcp equivalent the
+    `zone` input, from which the gcp region is derived; there is no AMI
+    input on either kind), `location` is required on azure, and `project`
+    and `zone` are required on gcp. `region` is None when the caller named
+    none, and the EC2 path applies `DEFAULT_REGION`; the azure and gcp
+    paths never read it. `vm_size` is None when the caller named none, and
+    each VM kind applies its own constant default (`DEFAULT_AZURE_VM_SIZE`,
+    `DEFAULT_GCP_VM_SIZE`) rather than sharing one: a silently applied
+    azure size inside a gcp template would be a refused input made to look
+    accepted.
     Never runs Terragrunt: applying the file is `make instance-deploy`'s
     job, and the returned guidance says so. Writing the directory also
     appends `remote-instances/<name>/` to the repository `.gitignore`
@@ -778,18 +925,24 @@ def scaffold(
     with nothing written.
 
     Raises:
-        ScaffoldError: the name is invalid, the cloud is unknown, an azure
-            input is missing or is an EC2-only one, the context name would
-            be too long, the directory already exists, the default AMI
-            could not be resolved (naming the manual AMI= override), or
-            `.gitignore` is missing or lacks the per-instance scaffold
-            block's anchor rule (naming what to update).
+        ScaffoldError: the name is invalid, the cloud is unknown, a
+            cloud-specific input is missing or is another cloud's, the
+            name has no legal gcp form under
+            `instances.sanitize_gcp_name`, the context name would be too
+            long, the directory already exists, the default AMI could not
+            be resolved (naming the manual AMI= override), or `.gitignore`
+            is missing or lacks the per-instance scaffold block's anchor
+            rule (naming what to update).
     """
     try:
         instances.validate_name(name)
     except instances.InvalidInstanceNameError as exc:
         raise ScaffoldError(_invalid_name_message(name)) from exc
-    if cloud not in (instances.ENGINE_KIND_EC2, instances.ENGINE_KIND_AZURE):
+    if cloud not in (
+        instances.ENGINE_KIND_EC2,
+        instances.ENGINE_KIND_AZURE,
+        instances.ENGINE_KIND_GCP,
+    ):
         raise ScaffoldError(_unknown_cloud_message(cloud))
     context = instances.docker_context(root, name)
     if len(context) > DOCKER_CONTEXT_NAME_LIMIT:
@@ -805,12 +958,13 @@ def scaffold(
             raise ScaffoldError(_azure_region_given_message())
         if ami is not None:
             raise ScaffoldError(_azure_ami_given_message())
+        resolved_vm_size = vm_size if vm_size is not None else DEFAULT_AZURE_VM_SIZE
         vpc_cidr, subnet_cidr = _allocate_cidrs(root)
         _append_scaffold_ignore(root, name)
         hcl_path = directory / "terragrunt.hcl"
         directory.mkdir(parents=True)
         hcl_path.write_text(
-            _render_azure_terragrunt_hcl(name, location, vm_size, vpc_cidr, subnet_cidr),
+            _render_azure_terragrunt_hcl(name, location, resolved_vm_size, vpc_cidr, subnet_cidr),
             encoding="utf-8",
         )
         return ScaffoldResult(
@@ -821,6 +975,51 @@ def scaffold(
                 f"created {hcl_path}",
                 "Commonly edited inputs: location, vm_size, root_volume_size_gb, "
                 "data_volume_size_gb and tags.",
+                f"Deploy with: make instance-deploy INSTANCE={name}",
+            ),
+        )
+
+    if cloud == instances.ENGINE_KIND_GCP:
+        if project is None:
+            raise ScaffoldError(_gcp_project_missing_message())
+        if zone is None:
+            raise ScaffoldError(_gcp_zone_missing_message())
+        if region is not None:
+            raise ScaffoldError(_gcp_region_given_message())
+        if location is not None:
+            raise ScaffoldError(_gcp_location_given_message())
+        if ami is not None:
+            raise ScaffoldError(_gcp_ami_given_message())
+        try:
+            sanitized_name = instances.sanitize_gcp_name(name)
+        except instances.InvalidGCPNameError as exc:
+            raise ScaffoldError(str(exc)) from exc
+        resolved_vm_size = vm_size if vm_size is not None else DEFAULT_GCP_VM_SIZE
+        vpc_cidr, subnet_cidr = _allocate_cidrs(root)
+        _append_scaffold_ignore(root, name)
+        hcl_path = directory / "terragrunt.hcl"
+        directory.mkdir(parents=True)
+        hcl_path.write_text(
+            _render_gcp_terragrunt_hcl(
+                name,
+                sanitized_name,
+                project,
+                zone,
+                zone[:-2],
+                resolved_vm_size,
+                vpc_cidr,
+                subnet_cidr,
+            ),
+            encoding="utf-8",
+        )
+        return ScaffoldResult(
+            path=hcl_path,
+            vpc_cidr=vpc_cidr,
+            ami=None,
+            messages=(
+                f"created {hcl_path}",
+                "Commonly edited inputs: project_id, zone, vm_size, "
+                "root_volume_size_gb, data_volume_size_gb and tags.",
                 f"Deploy with: make instance-deploy INSTANCE={name}",
             ),
         )

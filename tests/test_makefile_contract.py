@@ -803,7 +803,7 @@ def test_connect_start_recipe_rejects_an_unrecognized_transport() -> None:
     assert "ERROR" in result.stderr
     assert "DEVCONTAINER_TRANSPORT" in result.stderr
     assert "bogus-transport" in result.stderr
-    for accepted in ("ssh", "ssm", "relay"):
+    for accepted in ("ssh", "ssm", "relay", "iap"):
         assert accepted in result.stderr, (
             f"the accepted-values refusal must name {accepted}, which the dispatch routes"
         )
@@ -839,6 +839,49 @@ def test_connect_recipe_dispatches_the_azure_engine_to_the_relay_route() -> None
     # The mirror guards: relay behind an ssh or an EC2 engine is refused.
     assert "DEVCONTAINER_TRANSPORT=relay selects the azure relay transport" in recipe
     assert "DEVCONTAINER_TRANSPORT=relay needs the engine named" in recipe
+
+
+def test_connect_recipe_dispatches_the_gcp_engine_to_the_iap_route() -> None:
+    """The gcp kind routes to the iap form, whose distinguishing flag is --zone.
+
+    The zone is read through the cli's gcp-zone reader -- the same accessor
+    the shell entry points consume -- and the transport reads the rest of
+    the engine address record itself, so the route carries the name, the
+    zone and the context and nothing else. The gcp contradiction refusals
+    name all three other transports symmetrically, the way the ssh and
+    azure refusals do.
+    """
+    text = _makefile_text()
+    recipe = _connect_recipe_body(text)
+    assert 'elif [ "$$kind" = "gcp" ]; then' in recipe, (
+        "the kind dispatch must carry the gcp branch"
+    )
+    assert 'route="iap"' in recipe
+    route_case_at = recipe.index('case "$$route"')
+    iap_at = recipe.index("iap)", route_case_at)
+    iap_branch = recipe[iap_at : recipe.index(";;", iap_at)]
+    assert "--name" in iap_branch and "--context" in iap_branch and "--zone" in iap_branch
+    assert "devcontainer_config.cli gcp-zone" in iap_branch, (
+        "the zone must come from the record's one cli accessor, never a second read"
+    )
+    for forbidden in ("--instance-id", "--host", "--profile", "--region", "--docker-addr"):
+        assert forbidden not in iap_branch, (
+            f"the iap route must never carry {forbidden}: the address record is the config"
+        )
+    for guard in ("REMOTE_AWS_REGION is required", "REMOTE_AWS_PROFILE is required"):
+        assert guard not in iap_branch, "the iap branch opens no AWS session"
+    # The gcp contradiction refusals, symmetric with the ssh and azure ones.
+    for other in ("ssm", "ssh", "relay"):
+        assert f"DEVCONTAINER_TRANSPORT={other}" in recipe and "is a gcp engine" in recipe
+        assert "set it to iap" in recipe
+    # The mirror guards: iap behind an ssh, azure or EC2 engine is refused.
+    assert "DEVCONTAINER_TRANSPORT=iap selects the gcp IAP tunnel transport" in recipe
+    assert "DEVCONTAINER_TRANSPORT=iap needs the engine named" in recipe
+    # The accepted-values refusal names all four transports.
+    assert (
+        "ssm (the EC2 SSM forward), ssh (the SSH engine forward), relay (the azure "
+        "relay forward), and iap (the gcp IAP tunnel forward)" in recipe
+    )
 
 
 def test_shell_env_example_documents_the_transport_selector() -> None:
@@ -1328,7 +1371,9 @@ def test_instance_init_help_row_presents_region_as_the_ami_az_lookup_only() -> N
 
     instance-init's REGION= resolves the default AMI and the written
     availability zone at scaffold time; the deployment region is
-    REMOTE_AWS_REGION. The row must say so.
+    REMOTE_AWS_REGION. The row must say so -- the description budget the
+    three-cloud row shares is tight, so the compression lives in the
+    placeholders, never in this scoping statement.
     """
     help_recipe = _help_recipe_body(_makefile_text())
     rows = [line for line in help_recipe.splitlines() if '"make instance-init"' in line]
@@ -1343,22 +1388,38 @@ def test_instance_init_help_row_presents_region_as_the_ami_az_lookup_only() -> N
 def test_instance_init_help_row_names_the_azure_form() -> None:
     """The row must name the azure invocation form alongside the EC2 one.
 
-    The azure form is INSTANCE=<instance-name> with CLOUD=azure,
-    LOCATION=<location> required and VM_SIZE= optional; the shared
-    INSTANCE=<instance-name> the row already carries is the azure form's
-    own selector, so the azure-specific tail must name the three azure
-    variables.
+    The azure form is INSTANCE= with CLOUD=azure and LOCATION= required
+    (VM_SIZE= shares the per-cloud default the cli documents); the shared
+    INSTANCE= the row carries is the azure form's own selector, so the
+    azure-specific tail names the two azure variables the operator must
+    choose.
     """
     help_recipe = _help_recipe_body(_makefile_text())
     rows = [line for line in help_recipe.splitlines() if '"make instance-init"' in line]
     assert len(rows) == 1
     assert "CLOUD=azure" in rows[0], "the row must name the azure cloud selector"
-    assert "LOCATION=<location>" in rows[0], (
+    assert "LOCATION=" in rows[0], (
         "the row must name the azure location, the one required azure variable"
     )
-    assert "[VM_SIZE=]" in rows[0], "the row must name VM_SIZE as optional"
-    assert "INSTANCE=<instance-name>" in rows[0], (
-        "the azure form's selector is the shared INSTANCE=<instance-name>"
+    assert "INSTANCE=" in rows[0], "the azure form's selector is the shared INSTANCE="
+
+
+def test_instance_init_help_row_names_the_gcp_form() -> None:
+    """The row must name the gcp invocation form alongside the other two.
+
+    The gcp form is INSTANCE= with CLOUD=gcp, PROJECT= and ZONE= required
+    (the region is derived from the zone, so it is never advertised as a
+    choice), and the row must name every cloud selector the scaffold
+    serves, so an operator scanning for their cloud finds it.
+    """
+    help_recipe = _help_recipe_body(_makefile_text())
+    rows = [line for line in help_recipe.splitlines() if '"make instance-init"' in line]
+    assert len(rows) == 1
+    assert "CLOUD=gcp" in rows[0], "the row must name the gcp cloud selector"
+    assert "PROJECT=" in rows[0], "the row must name the gcp project, a required gcp variable"
+    assert "ZONE=" in rows[0], "the row must name the gcp zone, a required gcp variable"
+    assert "REGION=" in rows[0] and "AMI/AZ" in rows[0], (
+        "the region choice advertised must stay the EC2 AMI/AZ lookup, never a gcp input"
     )
 
 

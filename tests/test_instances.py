@@ -1059,3 +1059,207 @@ def test_azure_instance_location_rejects_an_invalid_name(tmp_path: Path) -> None
 
     with pytest.raises(instances.InvalidInstanceNameError):
         instances.azure_instance_location(tmp_path, "../escape")
+
+
+# ---------------------------------------------------------------------------
+# The gcp engine kind: read_kind's gcp branch, the one name sanitizer, and
+# the zone accessor the shell entry points consume.
+# ---------------------------------------------------------------------------
+
+
+def _seed_gcp_scaffold(root: Path, name: str) -> Path:
+    """The per-instance terragrunt.hcl the gcp scaffold writes, in miniature.
+
+    The include text is what `read_kind` keys the gcp kind on -- the
+    scaffold owns the line's exact shape, so the fixture writes that shape.
+    """
+    directory = root / "remote-instances" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    hcl = directory / "terragrunt.hcl"
+    hcl.write_text(
+        'include "envcommon" {\n'
+        '  path = "${dirname(find_in_parent_folders("root-gcp.hcl"))}'
+        '/_envcommon/remote-gcp.hcl"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    return hcl
+
+
+def test_read_kind_gcp_include_declares_the_gcp_kind(tmp_path: Path) -> None:
+    instances = _import_instances()
+    _seed_gcp_scaffold(tmp_path, "sandbox")
+
+    assert instances.read_kind(tmp_path, "sandbox") == instances.ENGINE_KIND_GCP
+
+
+def test_read_kind_manifest_still_wins_over_a_gcp_include(tmp_path: Path) -> None:
+    """The manifest's ssh declaration outranks everything, gcp included."""
+    instances = _import_instances()
+    _seed_gcp_scaffold(tmp_path, "sandbox")
+    (tmp_path / "remote-instances" / "sandbox" / "engine.json").write_text(
+        json.dumps(
+            {
+                "kind": "ssh",
+                "host": "engine.example",
+                "user": "operator",
+                "port": 22,
+                "docker_addr": "/var/run/docker.sock",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert instances.read_kind(tmp_path, "sandbox") == instances.ENGINE_KIND_SSH
+
+
+def test_read_kind_azure_include_wins_over_a_gcp_include(tmp_path: Path) -> None:
+    """Both include targets in one file declare the azure kind, never gcp.
+
+    The azure arm of `read_kind` is checked first, so a file an operator
+    spliced both includes into cannot silently read as the gcp kind.
+    """
+    instances = _import_instances()
+    directory = tmp_path / "remote-instances" / "sandbox"
+    directory.mkdir(parents=True)
+    (directory / "terragrunt.hcl").write_text(
+        '  path = "${dirname(find_in_parent_folders("root-azure.hcl"))}'
+        '/_envcommon/remote-azure.hcl"\n'
+        '  path = "${dirname(find_in_parent_folders("root-gcp.hcl"))}'
+        '/_envcommon/remote-gcp.hcl"\n',
+        encoding="utf-8",
+    )
+
+    assert instances.read_kind(tmp_path, "sandbox") == instances.ENGINE_KIND_AZURE
+
+
+def test_read_kind_a_bare_terragrunt_hcl_is_still_ec2(tmp_path: Path) -> None:
+    instances = _import_instances()
+    directory = tmp_path / "remote-instances" / "sandbox"
+    directory.mkdir(parents=True)
+    (directory / "terragrunt.hcl").write_text("inputs = {}\n", encoding="utf-8")
+
+    assert instances.read_kind(tmp_path, "sandbox") == instances.ENGINE_KIND_EC2
+
+
+@pytest.mark.parametrize(
+    ("raw", "sanitized"),
+    (
+        ("acme", "acme"),
+        ("Acme", "acme"),
+        ("my_engine", "my-engine"),
+        ("Engine.One", "engine-one"),
+    ),
+)
+def test_sanitize_gcp_name_lowercases_and_replaces(raw: str, sanitized: str) -> None:
+    instances = _import_instances()
+
+    assert instances.sanitize_gcp_name(raw) == sanitized
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        "9lives",
+        "engine-",
+        "-" + "a",
+    ),
+)
+def test_sanitize_gcp_name_refuses_shapes_it_cannot_fix(raw: str) -> None:
+    instances = _import_instances()
+
+    with pytest.raises(instances.InvalidGCPNameError) as exc_info:
+        instances.sanitize_gcp_name(raw)
+
+    message = str(exc_info.value)
+    assert "invalid gcp resource name" in message
+    assert "Choose" in message, "the refusal must name the operator's way out"
+
+
+def test_sanitize_gcp_name_refuses_the_over_length_form_at_the_boundary() -> None:
+    instances = _import_instances()
+    bound = instances.GCP_NAME_MAX_LENGTH
+
+    assert instances.sanitize_gcp_name("a" * bound) == "a" * bound
+    with pytest.raises(instances.InvalidGCPNameError):
+        instances.sanitize_gcp_name("a" * (bound + 1))
+
+
+def test_gcp_zone_reads_what_write_engine_address_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    instances.write_engine_address(
+        tmp_path,
+        "sandbox",
+        {
+            "instance_name": "sandbox",
+            "zone": "us-east1-b",
+            "project_id": "proj-123456",
+            "region": "us-east1",
+            "secrets_prefix": "sandbox",
+            "state_bucket": "sandbox-state",
+        },
+    )
+
+    assert instances.gcp_zone(tmp_path, "sandbox") == "us-east1-b"
+
+
+def test_gcp_zone_missing_record_names_the_deploy_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+
+    with pytest.raises(instances.EngineAddressError) as exc_info:
+        instances.gcp_zone(tmp_path, "sandbox")
+
+    message = str(exc_info.value)
+    assert "no engine address record" in message
+    assert "make instance-deploy INSTANCE=sandbox" in message
+
+
+def test_gcp_zone_malformed_value_names_the_redeploy_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    instances.write_engine_address(tmp_path, "sandbox", {"zone": "US-EAST1-B"})
+
+    with pytest.raises(instances.EngineAddressError) as exc_info:
+        instances.gcp_zone(tmp_path, "sandbox")
+
+    message = str(exc_info.value)
+    assert "malformed 'zone'" in message
+    assert "make instance-deploy INSTANCE=sandbox" in message
+
+
+def test_resolve_instance_cli_prints_the_gcp_address_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The gcp kind prints exactly the five-key shape the azure kind prints.
+
+    INSTANCE, KIND, TERRAGRUNT_DIR, DOCKER_CONTEXT and CERTS_DIR -- and
+    nothing else: the state-key and Parameter Store rows name nothing a
+    kind without SSM material addresses, and the export loop consumes every
+    KEY=value line generically.
+    """
+    root = generated_root(tmp_path)
+    _init_repo_with_origin(root, "acme-devcontainer")
+    _seed_gcp_scaffold(root, "sandbox")
+    instances = _import_instances()
+    _clear_resolution_env(monkeypatch)
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+
+    exit_code = run_cli(monkeypatch, root, ["resolve-instance"])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert out.splitlines() == [
+        "INSTANCE=sandbox",
+        "KIND=gcp",
+        f"TERRAGRUNT_DIR={root / 'remote-instances' / 'sandbox'}",
+        "DOCKER_CONTEXT=acme-devcontainer-sandbox",
+        f"CERTS_DIR={instances.certs_dir('sandbox')}",
+    ]

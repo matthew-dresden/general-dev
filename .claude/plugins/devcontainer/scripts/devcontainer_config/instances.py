@@ -135,11 +135,21 @@ ENGINE_KIND_EC2 = "ec2"
 # naming the relay's local endpoint is `engine_address_path`'s file below.
 ENGINE_KIND_AZURE = "azure"
 
-# The envcommon include target `read_kind` keys the azure kind on, matched
-# as text in `terragrunt.hcl` -- the one file the azure scaffold writes --
+# The fifth engine kind: a gcp virtual machine deployed by the same
+# Terragrunt layer, whose envcommon include targets
+# `_envcommon/remote-gcp.hcl`. Its transport is a gcloud IAP tunnel
+# (`devcontainer_config.transport_gcp`) carrying the same mTLS docker API,
+# so like the azure kind it has no EC2 id and no Parameter Store prefix;
+# the record naming the tunnel's addressing values (instance_name, zone,
+# project_id and the rest) is `engine_address_path`'s file below.
+ENGINE_KIND_GCP = "gcp"
+
+# The envcommon include targets `read_kind` keys the azure and gcp kinds on,
+# matched as text in `terragrunt.hcl` -- the one file each scaffold writes --
 # because the include line is the whole declaration and no Terragrunt parse
 # exists in this stdlib-only package.
 _AZURE_ENVCOMMON_TARGET = "_envcommon/remote-azure.hcl"
+_GCP_ENVCOMMON_TARGET = "_envcommon/remote-gcp.hcl"
 
 # The engine manifest's defaults and bounds. Declared once here, the module
 # that owns addressing, so `instance_ops.scaffold_engine`'s write side and
@@ -271,6 +281,17 @@ class EngineManifestError(InstancesError):
     caller (the resolve-instance block, or `instance_ops.scaffold_engine`,
     which wraps it in its own `ScaffoldError`) needs no per-field handling;
     the message names the offending field and the rule it broke.
+    """
+
+
+class InvalidGCPNameError(InstancesError):
+    """Raised when a name has no legal RFC1035-sanitized form.
+
+    `sanitize_gcp_name` raises this one class for every shape it cannot
+    legitimately produce -- a leading digit, a trailing hyphen, an
+    over-long result -- so a caller (the gcp scaffold arm, the transport's
+    record validation) needs no per-case handling; the message names the
+    offending character or shape and the rule it broke.
     """
 
 
@@ -624,14 +645,15 @@ def validate_engine_values(payload: object) -> dict[str, object]:
 
 
 def read_kind(root: Path, name: str) -> str:
-    """The engine kind `name`'s directory declares: ssh, azure, else ec2.
+    """The engine kind `name`'s directory declares: ssh, azure, gcp, else ec2.
 
     The discriminator the resolver layer addresses an instance through, in
     precedence order: a `remote-instances/<name>/engine.json` manifest
     declares an SSH engine and wins over everything else; a terragrunt.hcl
     whose envcommon include targets `_envcommon/remote-azure.hcl` declares
-    the azure kind; anything else (a terragrunt.hcl without that include,
-    or, for backward compatibility of `discover`, which lists every
+    the azure kind; one whose include targets `_envcommon/remote-gcp.hcl`
+    declares the gcp kind; anything else (a terragrunt.hcl with neither
+    include, or, for backward compatibility of `discover`, which lists every
     directory regardless of contents, a directory with neither file) is the
     EC2 kind. A manifest that exists but is not valid JSON fails fast here,
     at first touch, rather than surfacing later as a parse error in a
@@ -644,10 +666,12 @@ def read_kind(root: Path, name: str) -> str:
         _parsed_manifest(root, name)
         return ENGINE_KIND_SSH
     terragrunt_hcl = terragrunt_dir(root, name) / "terragrunt.hcl"
-    if terragrunt_hcl.is_file() and _AZURE_ENVCOMMON_TARGET in terragrunt_hcl.read_text(
-        encoding="utf-8"
-    ):
-        return ENGINE_KIND_AZURE
+    if terragrunt_hcl.is_file():
+        text = terragrunt_hcl.read_text(encoding="utf-8")
+        if _AZURE_ENVCOMMON_TARGET in text:
+            return ENGINE_KIND_AZURE
+        if _GCP_ENVCOMMON_TARGET in text:
+            return ENGINE_KIND_GCP
     return ENGINE_KIND_EC2
 
 
@@ -674,6 +698,82 @@ def engine_endpoint(root: Path, name: str) -> str:
     """
     values = engine_manifest(root, name)
     return f"ssh://{values['user']}@{values['host']}:{values['port']}"
+
+
+# ---------------------------------------------------------------------------
+# The gcp engine kind: the one name sanitizer its platform-wide RFC1035
+# naming rule demands, and the record accessors its slice reads.
+# ---------------------------------------------------------------------------
+
+
+# A gcp VM name (and the secrets prefix minted from it) must be a legal
+# RFC1035 label: lowercase letters, digits and hyphens, starting with a
+# letter and ending alphanumeric, at most `GCP_NAME_MAX_LENGTH` characters.
+# The bound is the gcp VM-name ceiling (63) tightened to leave room for the
+# suffixes the platform's derived names (`gd-<name>` units, secret paths)
+# append, and one sanitizer serves both the VM name and the later secrets
+# prefix so the two can never drift apart.
+GCP_NAME_MAX_LENGTH = 32
+
+_GCP_NAME_BODY_PATTERN = re.compile(r"[^a-z0-9-]+")
+
+
+def sanitize_gcp_name(name: str) -> str:
+    """`name` as a legal RFC1035 label, or a refusal naming what cannot be fixed.
+
+    The ONE sanitizer the gcp kind's derived names go through -- the VM
+    name today, the secrets prefix later -- so both carry the same form by
+    construction, never by two independently written transformations. The
+    transformation is deliberately conservative: the name is lowercased and
+    every run of characters outside `[a-z0-9-]` is replaced with a single
+    hyphen; everything else is refused, because the shapes a sanitizer must
+    not silently invent are exactly the ones the platform would reject or
+    an operator would not recognize. A result starting with a digit (the
+    instance name itself did), ending with a hyphen (the name did, after
+    replacement), or longer than `GCP_NAME_MAX_LENGTH` characters raises,
+    naming the offending character or shape -- choosing a different spelling
+    is the operator's decision, never this function's guess.
+
+    Returns:
+        The sanitized name, usable as a gcp VM name and as the secrets
+        prefix this repo mints from it.
+
+    Raises:
+        InvalidGCPNameError: the sanitized form would start with a digit,
+            end with a hyphen, or exceed `GCP_NAME_MAX_LENGTH` characters.
+    """
+    sanitized = _GCP_NAME_BODY_PATTERN.sub("-", name.lower())
+    if not sanitized:
+        raise InvalidGCPNameError(
+            f"ERROR: invalid gcp resource name {name!r}\n"
+            "The sanitized form is empty, so no legal RFC1035 label can be "
+            "derived from it.\n"
+            "Choose an instance name with letters, digits or hyphens in it."
+        )
+    if not sanitized[0].isalpha() or not sanitized[0].islower():
+        raise InvalidGCPNameError(
+            f"ERROR: invalid gcp resource name {name!r}\n"
+            f"The sanitized form {sanitized!r} starts with {sanitized[0]!r}, and an "
+            "RFC1035 label must start with a lowercase letter.\n"
+            "Choose an instance name starting with a letter."
+        )
+    if sanitized.endswith("-"):
+        raise InvalidGCPNameError(
+            f"ERROR: invalid gcp resource name {name!r}\n"
+            f"The sanitized form {sanitized!r} ends with '-', and an RFC1035 label "
+            "must end with a letter or digit.\n"
+            "Choose an instance name ending with a letter or digit."
+        )
+    if len(sanitized) > GCP_NAME_MAX_LENGTH:
+        raise InvalidGCPNameError(
+            f"ERROR: invalid gcp resource name {name!r}\n"
+            f"The sanitized form {sanitized!r} is {len(sanitized)} characters, above the "
+            f"{GCP_NAME_MAX_LENGTH} bound this repository pins so the platform's "
+            "derived names built from it stay legal.\n"
+            f"Choose a shorter instance name (at most {GCP_NAME_MAX_LENGTH} characters "
+            "after sanitizing)."
+        )
+    return sanitized
 
 
 # ---------------------------------------------------------------------------
@@ -896,6 +996,85 @@ def engine_vault_name(root: Path, name: str) -> str:
             f"Redeploy to write it: make instance-deploy INSTANCE={name}"
         )
     return vault
+
+
+# The engine address record keys the gcp kind's consumers read, declared
+# once beside the one accessor below so every reader (the cli's gcp-zone
+# print, the forwards opener, the transport) names the key through this
+# module rather than restating its own literal.
+ZONE_KEY = "zone"
+PROJECT_ID_KEY = "project_id"
+GCP_INSTANCE_NAME_KEY = "instance_name"
+
+# The strict shapes the record's `zone` and `project_id` values must match
+# before anything composes them into a gcloud argument vector: a zone is
+# the lowercase `<region>-<zone-letter>` form gcloud takes (the region slug
+# itself carries digits -- us-east1-b -- so the class is letters, digits and
+# hyphens, anchored to end in one hyphen-plus-letter), and a project id is
+# the gcp id form of 6-30 lowercase letters, digits and hyphens. Anything
+# outside these -- a scheme, a path, whitespace, a shell metacharacter --
+# would compose a dial aimed somewhere else, so the record is refused
+# outright rather than escaped, the same discipline transport_azure applies
+# to the values it composes into URLs.
+ZONE_PATTERN = re.compile(r"^[a-z0-9-]+-[a-z]$")
+PROJECT_ID_PATTERN = re.compile(r"^[a-z0-9-]{6,30}$")
+
+
+def _validated_gcp_record_value(
+    value: object, key: str, pattern: re.Pattern[str], *, instance: str
+) -> str:
+    """One gcp record key's string value, present and shape-validated.
+
+    The one refusal shape every gcp record read takes: a record present but
+    missing the key -- or carrying one that does not match its pattern --
+    names the redeploy that rewrites it, the same deploy remedy a missing
+    record names, so a half-written record reads as the not-yet-deployed
+    state it effectively is.
+
+    Raises:
+        EngineAddressError: the key is missing, is not a non-empty string,
+            or does not match `pattern`.
+    """
+    if not isinstance(value, str) or not value:
+        raise EngineAddressError(
+            f"ERROR: the engine address record for instance {instance!r} carries no "
+            f"usable {key!r}\n"
+            f"The gcp surface reads '{key}' from {engine_address_path(instance)}.\n"
+            f"Redeploy to write it: make instance-deploy INSTANCE={instance}"
+        )
+    if pattern.fullmatch(value) is None:
+        raise EngineAddressError(
+            f"ERROR: the engine address record for instance {instance!r} carries a "
+            f"malformed {key!r}\n"
+            f"{value!r} does not match the shape gcloud's own arguments take; the "
+            f"value comes from {engine_address_path(instance)}.\n"
+            f"Redeploy to rewrite it: make instance-deploy INSTANCE={instance}"
+        )
+    return value
+
+
+def gcp_zone(root: Path, name: str) -> str:
+    """The gcp zone `name`'s engine address record carries.
+
+    The single reader of the record's `ZONE_KEY`, so every consumer that
+    prints, routes or dials the instance's zone (the cli's `gcp-zone`
+    entry point, the forwards opener's `--zone` hand-off, the transport's
+    own cross-check) derives the same value from the same record. `root`
+    is accepted for call-site uniformity with the rest of the resolution
+    surface and is deliberately unused, exactly as `engine_vault_name`
+    documents for its own.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        EngineAddressError: the record is missing (the remedy names the
+            deploy that writes it), is not one JSON object, or carries no
+            usable, well-formed `ZONE_KEY` value (the message names the
+            redeploy that rewrites it).
+    """
+    validate_name(name)
+    return _validated_gcp_record_value(
+        engine_address(root, name).get(ZONE_KEY), ZONE_KEY, ZONE_PATTERN, instance=name
+    )
 
 
 def _recorded_local_port(runner: CommandRunner, context_name: str) -> int | None:

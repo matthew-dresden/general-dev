@@ -27,7 +27,7 @@ ENGINE                            pick where builds and containers live
 INSTANCES                         one remote engine per project under remote-instances/; instance names are project names (e.g. acme)
   make list-instances     host    List every instance with live status: EC2 state, id, params, certs, forward, context; ssh engines answer reachability instead.
   make list-containers    host    Every container this project owns, local engine plus every instance's, with per-engine reachability.
-  make instance-init      host    Writes <project>'s scaffold; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= AMI/AZ lookup; deploys in REMOTE_AWS_REGION]. Azure: CLOUD=azure LOCATION=<location> [VM_SIZE=]
+  make instance-init      host    Scaffolds <project>; never deploys. INSTANCE=<n> [AMI=] [REGION= AMI/AZ lookup; deploys in REMOTE_AWS_REGION]. Azure: CLOUD=azure LOCATION=<loc> GCP: CLOUD=gcp PROJECT=<p> ZONE=<z>
   make instance-deploy    remote  Converge: provision, record the engine address (EC2 links the id, azure the record), trust chain, push secrets. Refuses replacement without CONFIRM=replace. INSTANCE= | ALL=1
   make instance-status    host    One instance's live state, or every instance with ALL=1. INSTANCE=<instance-name> | ALL=1
   make instance-plan      remote  Terragrunt plan per instance; bootstraps the state bucket (EC2) or ensures the azure state store on first run. INSTANCE=<instance-name> | ALL=1
@@ -44,7 +44,7 @@ INSTANCES                         one remote engine per project under remote-ins
   make cert-install       remote  Have the instance fetch the published material and start its daemon. Run after cert-publish.
   make cert-status        host    Client and CA expiry per instance. Remote engines only (EC2 and azure); ssh engines carry no TLS material.
   make push-secrets       remote  Publish shell.env and aws-profile-map.json to the engine's store (Parameter Store, or Key Vault for azure). Remote builds do this when needed.
-  make connect-start      remote  Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json, relay for azure engines); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>).
+  make connect-start      remote  Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json, relay for azure, iap for gcp); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>).
   make connect-status     host    Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1
   make connect-stop       host    Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1
   make connect-refresh    host    Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1

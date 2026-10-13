@@ -2263,22 +2263,29 @@ def test_resolve_transport_defaults_to_ssm_when_unset(monkeypatch: pytest.Monkey
     assert transport.resolve_transport() == transport.TRANSPORT_SSM
 
 
-def test_resolve_transport_tells_a_caller_the_ssh_value_was_removed(
+def test_resolve_transport_tells_a_caller_where_the_ssh_value_belongs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The removed value gets its own message, not a generic rejection.
+    """The `ssh` value gets its own message, not a generic rejection.
 
-    Someone exporting `ssh` from an old shell profile has a different problem
-    from someone with a typo, and saying the transport was removed is more
-    useful than listing accepted values at them.
+    `ssh` is a first-class engine kind now, dispatched by engine kind at
+    `make connect-start` and routed to `transport_ssh`. This module's
+    reader still refuses it, because it gates the EC2/ssm path alone, and
+    the message says where the value does belong instead of claiming it
+    was removed, which stopped being true the moment the ssh engine landed.
     """
     transport = _import_transport()
     monkeypatch.setenv(transport.DEVCONTAINER_TRANSPORT_ENV_VAR, "ssh")
     with pytest.raises(transport.TransportError) as excinfo:
         transport.resolve_transport()
     message = str(excinfo.value)
-    assert "removed at cutover" in message
-    assert transport.TRANSPORT_SSM in message, "the message must name what to use instead"
+    assert transport.DEVCONTAINER_TRANSPORT_ENV_VAR in message, (
+        "the message must name the variable it refuses"
+    )
+    assert transport.TRANSPORT_SSM in message, "the message must name the accepted value"
+    assert "removed" not in message, (
+        "ssh is an engine kind, not a removed surface; the message must not claim otherwise"
+    )
 
 
 def test_resolve_transport_reads_the_opt_in_ssm_value(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2327,30 +2334,34 @@ def _non_comment_transport_call_sites(root: Path) -> list[str]:
     return call_sites
 
 
-def test_build_path_contains_a_devcontainer_config_transport_call_site() -> None:
-    """AC-TEST-001, AC-FUNC-001: the build-path gap the Description names, asserted mechanically.
+def test_build_path_no_longer_invokes_the_foreground_transport_connect() -> None:
+    """The build path reaches the transport module only where it means to.
 
-    Before this task, `grep -rn devcontainer_config.transport Makefile
-    .devcontainer` returns only the two comment references the Description
-    names (`certs.py`, `hostprobe.py`) and no call site, so `make connect`
-    could never be pointed at the SSM transport no matter what
-    `DEVCONTAINER_TRANSPORT` was set to. This inspects the actual build
-    path files on disk (`Makefile`'s `connect` target and anything under
-    `.devcontainer/`) for a genuine, non-comment call site, rather than
-    inspecting `transport.py`'s own CLI, which existed on both sides of the
-    gap and cannot distinguish "reachable from the build path" from
-    "reachable if a caller already knew the incantation".
+    This test once pinned the opposite (AC-TEST-001, AC-FUNC-001: that the
+    build path could reach `transport connect` at all, the gap the older
+    Description named). The foreground `connect` idles until interrupted --
+    it blocked `make up` on a dead forward forever and read a Ctrl-C as
+    success against a forward that had just closed -- so every caller that
+    opened a forward through it, connect-start's dispatch and rdc_up's ssm
+    refresh alike, now goes through the daemonized `devcontainer_config.forwards
+    open` (pinned by test_makefile_contract and test_engine_container_path).
+    What remains to pin here, mechanically over the same inventory: the
+    module is still genuinely reached from the build path -- `certs.sh`'s
+    material install -- so this test's "no connect" half cannot pass because
+    the inventory went blind, and none of those call sites is the foreground
+    connect anymore.
     """
     call_sites = _non_comment_transport_call_sites(_repo_root())
 
     assert call_sites, (
         "grep -rn devcontainer_config.transport Makefile .devcontainer found no "
-        "non-comment call site: the build path cannot be pointed at the SSM transport."
+        "non-comment call site: the inventory this test reasons over is broken."
     )
-    assert any("devcontainer_config.transport connect" in site for site in call_sites), (
-        f"a devcontainer_config.transport reference exists ({call_sites}) but none of them "
-        "invoke the 'connect' entry point that wires ensure_context and handshake into the "
-        "forward."
+    assert not any("devcontainer_config.transport connect" in site for site in call_sites), (
+        f"a build-path call site still invokes the foreground 'transport connect' "
+        f"({call_sites}): the daemonized devcontainer_config.forwards open -- "
+        "idempotent, returning after readiness -- is the only forward opener the "
+        "build path may run."
     )
 
 

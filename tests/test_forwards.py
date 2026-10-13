@@ -8,10 +8,14 @@ the test queues to the log, aliveness and signal delivery are injected so
 no real process is ever probed or signalled, and the port probe is a
 callable the test owns. The transport's readiness marker -- the line it
 prints only after the docker context answered a handshake through the
-tunnel -- is the one confirmation the open path accepts, and the tests pin
-both its acceptance and every failure around it: a child that dies first,
-a poll limit exhausted (with the child stopped, never orphaned), a stop
-whose port refuses to close, and a record that cannot be parsed.
+tunnel -- is the confirmation the open path accepts, but never on its own:
+every spawn empties the log first, so only the current attempt's lines are
+readable, and the recorded port must answer a real TCP probe before
+success. The tests pin both confirmations and every failure around them: a
+child that dies first, a poll limit exhausted (with the child stopped,
+never orphaned), a stale line that must not satisfy a new attempt, a port
+that never answers, a stop whose port refuses to close, and a record that
+cannot be parsed.
 """
 
 from __future__ import annotations
@@ -165,6 +169,7 @@ def test_open_spawns_the_transport_confirms_and_records(tmp_path: Path) -> None:
             tmp_path,
             spawner=spawner,
             poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
         )
 
     assert "pid 777" in message and "51368" in message
@@ -206,6 +211,7 @@ def test_open_polls_until_the_readiness_marker_arrives(tmp_path: Path) -> None:
             tmp_path,
             spawner=spawner,
             poll_clock=write_marker_later,
+            port_probe=lambda _port: True,
         )
 
     assert "is open" in message
@@ -253,6 +259,7 @@ def test_open_replaces_a_stale_record_and_says_so(tmp_path: Path) -> None:
             tmp_path,
             spawner=spawner,
             poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
         )
 
     assert "stale record" in message
@@ -325,6 +332,151 @@ def test_open_raises_when_the_forwarded_port_cannot_be_read(tmp_path: Path) -> N
                 spawner=spawner,
                 poll_clock=lambda _seconds: None,
             )
+
+
+# ---------------------------------------------------------------------------
+# Stale-log regression: readiness can only be satisfied by the current
+# attempt. A connect-stop removes the record but leaves the daemon log; an
+# open that appended to it and scanned it whole declared the new forward
+# open on the previous daemon's `Connected:` line while the tunnel was
+# still establishing, and the container check that followed hit a refused
+# connection. The fix under test: every spawn empties the log first, and
+# the recorded port must answer a real probe before success.
+# ---------------------------------------------------------------------------
+
+
+def _context_port_stub(_command: object, _timeout: float | None) -> CommandResult:
+    """The port read the regression tests drive: a context carrying tcp://127.0.0.1:51368."""
+    return CommandResult(
+        exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+    )
+
+
+def test_open_is_never_satisfied_by_a_stale_logs_readiness_line(tmp_path: Path) -> None:
+    """A pre-seeded `Connected:` line with a silent child cannot fake an open.
+
+    The stale line sits in the log exactly as a previous daemon left it
+    after its stop; this attempt's child writes nothing and serves nothing.
+    The open must keep polling and fail -- never return success on content
+    an earlier attempt wrote.
+    """
+    tmp_path = _git_root(tmp_path)
+    log = forwards.log_path("x")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(READINESS_LINE, encoding="utf-8")
+    spawner = _Spawner(announce=False)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", _context_port_stub)
+        with pytest.raises(ForwardError, match="announced no readiness"):
+            forwards.open_forward(
+                "i-abc",
+                "general-dev-x",
+                "profile",
+                "us-east-1",
+                tmp_path,
+                spawner=spawner,
+                poll_clock=lambda _seconds: None,
+                poll_limit=3,
+            )
+
+
+def test_second_open_is_satisfied_only_by_the_new_attempts_own_line(tmp_path: Path) -> None:
+    """Truncate semantics across two opens of one instance.
+
+    The first daemon's readiness line survives its stop in the log; the
+    second open must begin from an emptied log -- pinned by what the spawn
+    finds in the file -- and succeed only once its own attempt has written
+    the marker, never on the leftover line.
+    """
+    tmp_path = _git_root(tmp_path)
+    log = forwards.log_path("x")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(READINESS_LINE, encoding="utf-8")
+    contents_at_spawn: list[str] = []
+    new_attempt_wrote: list[bool] = []
+
+    class _RecordingSpawner(_Spawner):
+        def __call__(self, argv: object, log_path: Path) -> _FakePopen:
+            contents_at_spawn.append(log_path.read_text(encoding="utf-8"))
+            return super().__call__(argv, log_path)
+
+    def write_the_new_line(_seconds: float) -> None:
+        new_attempt_wrote.append(True)
+        log.write_text(READINESS_LINE, encoding="utf-8")
+
+    spawner = _RecordingSpawner(announce=False)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", _context_port_stub)
+        message = forwards.open_forward(
+            "i-abc",
+            "general-dev-x",
+            "profile",
+            "us-east-1",
+            tmp_path,
+            spawner=spawner,
+            poll_clock=write_the_new_line,
+            port_probe=lambda _port: True,
+        )
+
+    assert "is open" in message
+    assert contents_at_spawn == [""], "the second spawn must begin from an emptied log"
+    assert new_attempt_wrote, "success must wait for the new attempt's own line"
+
+
+def test_refresh_is_satisfied_only_by_the_new_attempts_own_line(tmp_path: Path) -> None:
+    """Refresh re-runs the recorded argv and polls the same log, so the same
+    per-attempt guarantee must hold there: the replaced daemon's leftover
+    line can never satisfy the refresh's own readiness wait."""
+    tmp_path = _git_root(tmp_path)
+    _record(tmp_path, "x", pid=999999999, port=51368)
+    log = forwards.log_path("x")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(READINESS_LINE, encoding="utf-8")
+    spawner = _Spawner(announce=False)
+    new_attempt_wrote: list[bool] = []
+
+    def write_the_new_line(_seconds: float) -> None:
+        new_attempt_wrote.append(True)
+        log.write_text(READINESS_LINE, encoding="utf-8")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", _context_port_stub)
+        message = forwards.refresh_forward(
+            "x",
+            tmp_path,
+            spawner=spawner,
+            poll_clock=write_the_new_line,
+            port_probe=lambda _port: True,
+        )
+
+    assert "refreshed forward" in message
+    assert new_attempt_wrote, "the refresh must wait for the new attempt's own line"
+
+
+def test_open_fails_when_the_port_never_answers_despite_the_marker(tmp_path: Path) -> None:
+    """The belt behind the belt: even a fresh, current-attempt readiness line
+    cannot declare a port that refuses connections open. The daemon is
+    stopped (never orphaned) and no record is written."""
+    tmp_path = _git_root(tmp_path)
+    spawner = _Spawner(pid=555)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", _context_port_stub)
+        with pytest.raises(ForwardError, match="never accepted a connection"):
+            forwards.open_forward(
+                "i-abc",
+                "general-dev-x",
+                "profile",
+                "us-east-1",
+                tmp_path,
+                spawner=spawner,
+                poll_clock=lambda _seconds: None,
+                port_probe=lambda _port: False,
+            )
+
+    assert spawner.process.terminated, "a port that never answers must not orphan the daemon"
+    assert forwards.read_record("x") is None, "a failed open writes no record"
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +648,7 @@ def test_refresh_respawns_the_recorded_command_and_re_records(tmp_path: Path) ->
             tmp_path,
             spawner=spawner,
             poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
         )
 
     assert "refreshed forward" in message and "pid 8888" in message
@@ -548,6 +701,7 @@ def test_main_open_prints_the_message_and_exits_zero(
 
     monkeypatch.setattr(forwards, "_context_port_runner", runner)
     monkeypatch.setattr(forwards, "_default_spawner", spawner)
+    monkeypatch.setattr(forwards, "_default_port_probe", lambda _port: True)
     monkeypatch.chdir(root)
     exit_code = forwards.main(
         [
@@ -660,3 +814,280 @@ def test_module_entry_point_invokes_main_under_the_dunder_guard() -> None:
     assert any("sys.exit(main())" in call for call in calls), (
         "the __main__ guard must exit through this module's own main()"
     )
+
+
+# ---------------------------------------------------------------------------
+# The ssh kind: the child argv, the record's engine kind and endpoint, and
+# the open dispatch that accepts the ssh flag form.
+# ---------------------------------------------------------------------------
+
+_SSH_ENGINE = {
+    "kind": instances.ENGINE_KIND_SSH,
+    "host": "engine-x.example.invalid",
+    "user": "dev-x",
+    "port": 2222,
+    "docker_addr": "/var/run/docker-x.sock",
+}
+_SSH_ENDPOINT = "ssh://dev-x@engine-x.example.invalid:2222"
+
+
+def test_child_argv_ssh_form_builds_the_transport_ssh_connect_command() -> None:
+    argv = forwards.child_argv(
+        "x", "general-dev-x", "", "", kind=instances.ENGINE_KIND_SSH, engine=_SSH_ENGINE
+    )
+
+    assert argv[1:3] == ("-u", "-m")
+    assert argv[3:5] == ("devcontainer_config.transport_ssh", "connect")
+    assert argv[5:] == (
+        "--name",
+        "x",
+        "--host",
+        "engine-x.example.invalid",
+        "--port",
+        "2222",
+        "--user",
+        "dev-x",
+        "--docker-addr",
+        "/var/run/docker-x.sock",
+        "--context",
+        "general-dev-x",
+    )
+
+
+def test_child_argv_ssm_form_is_unchanged_by_the_kind_parameter() -> None:
+    """The default kind builds the byte-identical ssm vector it always built."""
+    assert forwards.child_argv("i-abc", "general-dev-x", "profile", "us-east-1") == _child_argv()
+
+
+def test_child_argv_ssh_requires_the_engine_values() -> None:
+    with pytest.raises(ForwardError, match="engine manifest values"):
+        forwards.child_argv("x", "general-dev-x", "", "", kind=instances.ENGINE_KIND_SSH)
+
+
+def test_record_round_trips_engine_kind_and_defaults_old_records_to_ssm() -> None:
+    record = ForwardRecord(
+        pid=4242,
+        instance="x",
+        instance_id=_SSH_ENDPOINT,
+        context="general-dev-x",
+        port=51368,
+        argv=_child_argv(),
+        log="/log",
+        started_at="2026-10-01T12:00:00+00:00",
+        engine_kind=instances.ENGINE_KIND_SSH,
+    )
+    again = ForwardRecord.from_json(record.to_json())
+    assert again == record
+
+    payload = json.loads(record.to_json())
+    del payload["engine_kind"]
+    old = ForwardRecord.from_json(json.dumps(payload))
+    assert old.engine_kind == forwards.KIND_SSM, (
+        "a record written before the field existed must read back as the ssm kind"
+    )
+
+
+def test_open_forward_ssh_kind_records_the_endpoint_and_engine_kind(tmp_path: Path) -> None:
+    tmp_path = _git_root(tmp_path)
+    spawner = _Spawner(pid=778)
+
+    def runner(_command: object, _timeout: float | None) -> CommandResult:
+        return CommandResult(
+            exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", runner)
+        message = forwards.open_forward(
+            "unused-for-ssh",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=instances.ENGINE_KIND_SSH,
+            engine=_SSH_ENGINE,
+            spawner=spawner,
+            poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
+        )
+
+    assert _SSH_ENDPOINT in message
+    record = forwards.read_record("x")
+    assert record is not None
+    assert record.engine_kind == instances.ENGINE_KIND_SSH
+    assert record.instance_id == _SSH_ENDPOINT
+    assert spawner.argv is not None
+    assert spawner.argv[3:5] == ("devcontainer_config.transport_ssh", "connect")
+
+
+def test_open_forward_ssh_kind_reads_the_manifest_when_no_values_are_given(
+    tmp_path: Path,
+) -> None:
+    tmp_path = _git_root(tmp_path)
+    manifest = tmp_path / "remote-instances" / "x" / "engine.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps(_SSH_ENGINE), encoding="utf-8")
+    spawner = _Spawner(pid=779)
+
+    def runner(_command: object, _timeout: float | None) -> CommandResult:
+        return CommandResult(
+            exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", runner)
+        forwards.open_forward(
+            "unused-for-ssh",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=instances.ENGINE_KIND_SSH,
+            engine=None,
+            spawner=spawner,
+            poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
+        )
+
+    assert spawner.argv is not None
+    assert "--host" in spawner.argv and "engine-x.example.invalid" in spawner.argv
+
+
+def test_open_forward_ssh_kind_refuses_invalid_engine_values(tmp_path: Path) -> None:
+    tmp_path = _git_root(tmp_path)
+
+    with pytest.raises(ForwardError, match="unusable"):
+        forwards.open_forward(
+            "unused-for-ssh",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=instances.ENGINE_KIND_SSH,
+            engine={**_SSH_ENGINE, "docker_addr": "var/run/docker.sock"},
+            spawner=_Spawner(),
+            poll_clock=lambda _seconds: None,
+        )
+
+
+def test_main_open_accepts_the_ssh_flag_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _git_root(tmp_path)
+    spawner = _Spawner(pid=780)
+
+    def runner(_command: object, _timeout: float | None) -> CommandResult:
+        return CommandResult(
+            exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+        )
+
+    monkeypatch.setattr(forwards, "_context_port_runner", runner)
+    monkeypatch.setattr(forwards, "_default_spawner", spawner)
+    monkeypatch.setattr(forwards, "_default_port_probe", lambda _port: True)
+    monkeypatch.chdir(root)
+
+    exit_code = forwards.main(
+        [
+            "open",
+            "--name",
+            "x",
+            "--host",
+            "engine-x.example.invalid",
+            "--port",
+            "2222",
+            "--user",
+            "dev-x",
+            "--docker-addr",
+            "/var/run/docker-x.sock",
+            "--context",
+            "general-dev-x",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "is open" in capsys.readouterr().out
+    record = forwards.read_record("x")
+    assert record is not None
+    assert record.engine_kind == instances.ENGINE_KIND_SSH
+    assert record.instance_id == _SSH_ENDPOINT
+
+
+def test_main_open_refuses_mixed_or_incomplete_flag_forms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(_git_root(tmp_path))
+
+    mixed = [
+        "open",
+        "--instance-id",
+        "i-abc",
+        "--name",
+        "x",
+        "--context",
+        "general-dev-x",
+    ]
+    assert forwards.main(mixed) == 1
+    assert "exactly one transport form" in capsys.readouterr().err
+
+    incomplete = [
+        "open",
+        "--name",
+        "x",
+        "--host",
+        "engine-x.example.invalid",
+        "--context",
+        "general-dev-x",
+    ]
+    assert forwards.main(incomplete) == 1
+    err = capsys.readouterr().err
+    assert "missing required flags" in err
+    for missing in ("port", "user", "docker-addr"):
+        assert missing in err
+
+
+def test_main_open_refuses_a_non_integer_ssh_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(_git_root(tmp_path))
+
+    exit_code = forwards.main(
+        [
+            "open",
+            "--name",
+            "x",
+            "--host",
+            "engine-x.example.invalid",
+            "--port",
+            "ssh",
+            "--user",
+            "dev-x",
+            "--docker-addr",
+            "/var/run/docker-x.sock",
+            "--context",
+            "general-dev-x",
+        ]
+    )
+
+    assert exit_code == 1
+    assert "--port" in capsys.readouterr().err
+
+
+def test_default_spawner_creates_the_log_parent_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The daemon's log directory springs into existence with the daemon.
+
+    A first-ever forward on a machine has no `~/.docker/certs/<name>/`
+    behind it yet; the production spawner must create it before opening the
+    log, or `make connect-start` ends in a bare FileNotFoundError instead
+    of a daemon. This is the one test that drives the real spawner: the
+    child is a trivial interpreter exit, never a transport.
+    """
+    log_file = tmp_path / "fresh" / "engine-x" / "forward.log"
+    assert not log_file.parent.exists()
+
+    process = forwards._default_spawner(["true"], log_file)
+    process.wait()
+
+    assert process.returncode == 0
+    assert log_file.parent.is_dir()

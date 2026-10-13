@@ -354,11 +354,17 @@ def test_the_resolved_parameter_prefix_reaches_the_container() -> None:
     environment that happens to share the project's folder name.
 
     Forwarding it through the generated override is what makes the container's
-    prefix the resolved one rather than a guess.
+    prefix the resolved one rather than a guess. The reference is guarded
+    because the dispatch prelude leaves `DEVCONTAINER_SSM_PREFIX` unset for
+    an ssh engine, where no Parameter Store prefix exists, and the remote
+    build path serves both kinds; the ssh container takes the empty value,
+    which its postCreate never reads (the seed volume wrote the payload
+    files its file-present branch checks first).
     """
     text = _CONTAINER_SH.read_text(encoding="utf-8")
-    assert '--arg ssmprefix "${DEVCONTAINER_SSM_PREFIX}"' in text, (
-        "the override generator must be given the resolved prefix"
+    assert '--arg ssmprefix "${DEVCONTAINER_SSM_PREFIX:-}"' in text, (
+        "the override generator must be given the resolved prefix, guarded "
+        "because the prelude leaves it unset for an ssh engine"
     )
     assert "DEVCONTAINER_SSM_PREFIX: $ssmprefix" in text, (
         "the override must set containerEnv.DEVCONTAINER_SSM_PREFIX, or the container "

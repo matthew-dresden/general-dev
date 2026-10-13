@@ -66,6 +66,14 @@ when it names one -- through the same lib.sh resolver every remote entry
 point uses, instead of ignoring the variable and forwarding for the
 resolver's default.
 
+And the transport connect-start opens is chosen by the resolved engine's
+own kind (the F1 fix): the recipe reads KIND through rd_engine_kind and
+routes on it, so an unset DEVCONTAINER_TRANSPORT follows the engine --
+`make connect-start INSTANCE=<ssh-engine>` needs no variable, which real
+E2E against a Windows ssh endpoint once refused -- and the variable
+survives only as a guard, refusing a value that contradicts the engine's
+kind.
+
 And the Makefile exports ENGINE to recipes when set (a plain make variable
 does not cross into a recipe's environment) and documents the option under
 OPTIONS.
@@ -307,21 +315,57 @@ def _fake_resolver_block(tmp_path: Path) -> str:
     )
 
 
-def _fake_resolver_bin(tmp_path: Path, block: str) -> str:
+def _fake_ssh_engine_block(tmp_path: Path) -> str:
+    """The address block an ssh engine's resolution prints, in the resolver's ssh form.
+
+    The shape is `_print_address_block`'s ssh branch: the KIND line an ssh
+    engine declares, the ENGINE_ values its engine.json manifest carries, and
+    no instance id anywhere -- the certs directory holds no id store, so a
+    run that wrongly routed to the ssm form would fail its own id guard
+    rather than open anything.
+    """
+    certs_dir = tmp_path / "certs"
+    certs_dir.mkdir()
+    return (
+        "INSTANCE=fake-ssh-engine\n"
+        "KIND=ssh\n"
+        f"DOCKER_CONTEXT={_RESOLVER_CONTEXT}\n"
+        f"CERTS_DIR={certs_dir}\n"
+        "ENGINE_HOST=fake-ssh-host\n"
+        "ENGINE_PORT=2222\n"
+        "ENGINE_USER=fake-ssh-user\n"
+        "ENGINE_DOCKER_ADDR=tcp://localhost:2375\n"
+    )
+
+
+def _fake_resolver_bin(tmp_path: Path, block: str, forwards_marker: Path | None = None) -> str:
     """A PATH directory whose python3 answers resolve-instance with `block`.
 
     Any other invocation is forwarded to the real interpreter, so nothing
     else on the machine's tooling is affected. The real interpreter is
-    resolved before the directory is prepended anywhere.
+    resolved before the directory is prepended anywhere. When
+    `forwards_marker` is given, `devcontainer_config.forwards` invocations
+    are recorded into it (one argv line each) and answered with success
+    instead of reaching the module for real -- the stand-in for a forward
+    that would otherwise need a real ssh endpoint.
     """
     real_python = shutil.which("python3")
     assert real_python is not None, "python3 must be installed to run this suite"
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
+    record_forwards = ""
+    if forwards_marker is not None:
+        record_forwards = (
+            'if [ "$1" = "-m" ] && [ "$2" = "devcontainer_config.forwards" ]; then\n'
+            '  printf \'%s\\n\' "$*" >> "' + str(forwards_marker) + '"\n'
+            "  exit 0\n"
+            "fi\n"
+        )
     fake = bin_dir / "python3"
     fake.write_text(
         "#!/bin/sh\n"
-        'if [ "$1" = "-m" ] && [ "$2" = "devcontainer_config.cli" ]'
+        + record_forwards
+        + 'if [ "$1" = "-m" ] && [ "$2" = "devcontainer_config.cli" ]'
         ' && [ "$3" = "resolve-instance" ]; then\n'
         "  cat <<'RD_TEST_BLOCK'\n"
         f"{block}"
@@ -333,6 +377,54 @@ def _fake_resolver_bin(tmp_path: Path, block: str) -> str:
     )
     fake.chmod(0o755)
     return str(bin_dir)
+
+
+_TRANSPORT_GUARD_VARS = (
+    "DEVCONTAINER_TRANSPORT",
+    "REMOTE_INSTANCE_ID",
+    "REMOTE_AWS_REGION",
+    "REMOTE_AWS_PROFILE",
+)
+
+
+def _run_connect_start_against_fake_engine(
+    tmp_path: Path, block: str, extra_env: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """`make connect-start` against a stand-in engine: fake resolver, recorded forwards.
+
+    The fake python3 answers resolve-instance with `block` and records every
+    `devcontainer_config.forwards` invocation into a marker file instead of
+    reaching the module, so the run proves the recipe's routing without any
+    ssh endpoint, AWS session or daemon. The environment is stripped of
+    every variable that could select or guard a transport on its own (the
+    transport guard, the AWS values and the recorded EC2 id), so only the
+    block's KIND and what `extra_env` adds can decide the run. Returns the
+    make result and the marker file.
+    """
+    marker = tmp_path / "forwards-invocations.txt"
+    marker.touch()
+    bin_dir = _fake_resolver_bin(tmp_path, block, forwards_marker=marker)
+    env = dict(os.environ)
+    for inherited in (
+        "MAKEFLAGS",
+        "MAKELEVEL",
+        "MFLAGS",
+        "ENGINE",
+        "INSTANCE",
+        *_TRANSPORT_GUARD_VARS,
+    ):
+        env.pop(inherited, None)
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    env.update(extra_env)
+    result = subprocess.run(
+        ["make", "connect-start"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=_timeout_seconds(),
+        env=env,
+    )
+    return result, marker
 
 
 def _run_lib_snippet(path_prepend: str, snippet: str) -> subprocess.CompletedProcess:
@@ -640,17 +732,19 @@ def test_connect_start_resolves_the_instance_it_is_asked_for() -> None:
     engine_at = recipe.index('[ "$${ENGINE}" != "local" ]')
     source_at = recipe.index(". $(RD_DIR)/lib.sh")
     resolve_at = recipe.index("rd_resolve_instance")
+    kind_at = recipe.index('kind="$$(rd_engine_kind)"')
     default_at = recipe.index('ctx="$(REMOTE_CONTEXT)"')
     resolved_at = recipe.index('--instance-id "$$REMOTE_INSTANCE_ID" --context "$$ctx"')
     assert instance_at < engine_at, (
         "INSTANCE wins the target selection; ENGINE is honored when it names "
         "an instance and INSTANCE is empty"
     )
-    assert source_at < resolve_at < default_at < resolved_at, (
-        "a named target must resolve through lib.sh -- which reads the "
-        "per-instance id store -- and the dispatch must forward that "
-        "instance's id and context; the parse-time REMOTE_CONTEXT stays the "
-        "unnamed-target default, resolved into ctx before the dispatch"
+    assert source_at < resolve_at < kind_at < default_at < resolved_at, (
+        "a named target must resolve through lib.sh -- which exports the "
+        "address block whose KIND line the dispatch reads, so the kind is "
+        "knowable only after resolution -- and the ssm route must forward "
+        "that instance's id and context; the parse-time REMOTE_CONTEXT stays "
+        "the unnamed-target default, resolved into ctx before the dispatch"
     )
 
 
@@ -710,3 +804,100 @@ def test_connect_refuses_instance_and_engine_naming_different_engines() -> None:
     assert "name different engines" in result.stderr
     assert "INSTANCE='one'" in result.stderr
     assert "ENGINE='two'" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# The F1 fix, behavioral: the engine's own kind drives connect-start's
+# dispatch. The stand-in engine answers from a heredoc and the forwards
+# invocation is recorded, never run, so nothing here reaches an ssh
+# endpoint, AWS or the network -- the same live-run discipline the fake
+# resolver tests above use, extended to the forward itself.
+# ---------------------------------------------------------------------------
+
+
+def test_connect_start_routes_an_ssh_engine_without_the_transport_variable(
+    tmp_path: Path,
+) -> None:
+    """`make connect-start INSTANCE=<ssh-engine>` opens the ssh form, no variable.
+
+    Real E2E against a Windows ssh endpoint refused exactly this run and
+    told the operator to add DEVCONTAINER_TRANSPORT=ssh -- a variable the
+    engine's own KIND should have made unnecessary. The stand-in resolver's
+    block declares KIND=ssh, so the recorded forwards invocation must be
+    that engine's ssh form -- `--name` with the manifest's own host values
+    -- never the ssm form.
+    """
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_ssh_engine_block(tmp_path),
+        {"INSTANCE": "fake-ssh-engine"},
+    )
+    assert result.returncode == 0, (
+        f"an ssh engine needs no transport variable; stderr={result.stderr[:400]!r}"
+    )
+    invocations = marker.read_text(encoding="utf-8").strip().splitlines()
+    assert len(invocations) == 1, f"exactly one forwards run expected; got {invocations!r}"
+    argv = invocations[0]
+    assert "-m devcontainer_config.forwards open" in argv
+    assert "--name fake-ssh-engine" in argv
+    assert "--host fake-ssh-host" in argv
+    assert "--port 2222" in argv
+    assert "--user fake-ssh-user" in argv
+    assert "--docker-addr tcp://localhost:2375" in argv
+    assert "--instance-id" not in argv, "the ssh route must never carry the ssm form's id"
+
+
+def test_connect_start_refuses_the_ssm_guard_against_an_ssh_engine(tmp_path: Path) -> None:
+    """The variable remains a guard: explicit ssm behind an ssh engine refuses by name.
+
+    The refusal names the engine, the contradicting value and both ways out
+    (unset the variable, or set it to ssh), and no forward opens behind it.
+    """
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_ssh_engine_block(tmp_path),
+        {"INSTANCE": "fake-ssh-engine", "DEVCONTAINER_TRANSPORT": "ssm"},
+    )
+    assert result.returncode != 0, "an ssm guard behind an ssh engine must fail the run"
+    assert "is an ssh engine" in result.stderr
+    assert "DEVCONTAINER_TRANSPORT=ssm" in result.stderr
+    assert "unset DEVCONTAINER_TRANSPORT" in result.stderr
+    assert "set it to ssh" in result.stderr
+    assert not marker.read_text(encoding="utf-8").strip(), "no forward may open behind the refusal"
+
+
+def test_connect_start_refuses_the_ssh_guard_against_an_ec2_engine(tmp_path: Path) -> None:
+    """The mirror guard: explicit ssh behind an EC2 engine refuses by name.
+
+    The stand-in block is the EC2 shape (no KIND line, so resolution's
+    default kind is ec2); the ssh value belongs to ssh engines, so the run
+    refuses before any guard or forward, naming the contradiction.
+    """
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_resolver_block(tmp_path),
+        {"INSTANCE": "fake-ec2", "DEVCONTAINER_TRANSPORT": "ssh"},
+    )
+    assert result.returncode != 0, "an ssh guard behind an EC2 engine must fail the run"
+    assert "is an EC2 engine" in result.stderr
+    assert "DEVCONTAINER_TRANSPORT=ssh" in result.stderr
+    assert "Unset DEVCONTAINER_TRANSPORT or set it to ssm" in result.stderr
+    assert not marker.read_text(encoding="utf-8").strip(), "no forward may open behind the refusal"
+
+
+def test_connect_start_still_needs_an_engine_for_the_ssh_guard(tmp_path: Path) -> None:
+    """No instance named, ssh guard set: the run refuses before anything resolves.
+
+    The ssh form forwards one resolved engine's values, so with no engine
+    named there is nothing to route to; the refusal keeps the exit-2 usage
+    shape it always had and no forward is recorded.
+    """
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path, _fake_ssh_engine_block(tmp_path), {"DEVCONTAINER_TRANSPORT": "ssh"}
+    )
+    assert result.returncode == 2, (
+        f"the usage refusal must keep its exit 2; stderr={result.stderr[:400]!r}"
+    )
+    assert "DEVCONTAINER_TRANSPORT=ssh needs the engine named" in result.stderr
+    assert "make connect-start INSTANCE=<name>" in result.stderr
+    assert not marker.read_text(encoding="utf-8").strip(), "no forward may open behind the refusal"

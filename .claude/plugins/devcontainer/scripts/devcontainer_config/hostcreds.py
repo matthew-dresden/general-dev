@@ -374,7 +374,7 @@ def _problems_manifest_message(path: Path, problems: Sequence[str]) -> str:
 def _invalid_name_problem(position: int, name: str) -> str:
     return (
         f"entry {position} (name {name!r}): the name must match "
-        f"[A-Z][A-Z0-9_]* -- a name becomes both a shell variable and a "
+        f"[A-Z][A-Z0-9_]*: a name becomes both a shell variable and a "
         f"<NAME>.env fragment filename, and the store directory is "
         f"case-insensitive on macOS, where differently-cased names would "
         f"collide as filenames"
@@ -383,7 +383,7 @@ def _invalid_name_problem(position: int, name: str) -> str:
 
 def _reserved_name_problem(name: str) -> str:
     return (
-        f"{name}: the name is reserved -- it is a shell or loader variable "
+        f"{name}: the name is reserved, since it is a shell or loader variable "
         f"(PATH, LD_PRELOAD, DYLD_INSERT_LIBRARIES) or one of the AWS "
         f"environment variables an aws-export fragment exports, and a "
         f"credential with this name would silently shadow the real one at "
@@ -415,7 +415,7 @@ def _non_string_label_problem(name: str, key: str) -> str:
 def _unsafe_label_problem(name: str, key: str) -> str:
     return (
         f"{name}: the '{key}' label must not contain a newline, carriage "
-        f"return or quote -- labels are written into fragment comment text "
+        f"return or quote, since labels are written into fragment comment text "
         f"and passed on argv, where a newline would escape the line the "
         f"label was written onto and a quote would end the quoting around it"
     )
@@ -438,7 +438,7 @@ def _missing_host_problem(name: str) -> str:
 
 def _invalid_host_problem(name: str, host: str) -> str:
     return (
-        f"{name}: 'host' must be a bare hostname, not {host!r} -- no "
+        f"{name}: 'host' must be a bare hostname, not {host!r}; no "
         f"scheme, no slash, no path, no port, no user part"
     )
 

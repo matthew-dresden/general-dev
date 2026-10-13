@@ -73,7 +73,52 @@ Deeper on each step:
 
 ## Quick start, remote
 
-The remote engine is a rootless Docker daemon on an EC2 instance. Nothing
+Two kinds of remote engine, one workflow shape each: any machine reachable
+over SSH that runs Docker (general SSH), or an EC2 instance this repository
+provisions (AWS EC2). Both clone the workspace into a volume on the engine,
+and both keep the container running after you disconnect.
+
+### General SSH
+
+Works against any endpoint where `ssh <user>@<host> docker version` can
+answer: a Linux daemon through its socket, or Windows through Docker
+Desktop's exposed TCP endpoint.
+
+**The make route, in the order they are run:**
+
+```sh
+make engine-init INSTANCE=<name> HOST=<host> USER=<user>
+                                         # declares the engine (engine.json);
+                                         # PORT= and DOCKER_ADDR= optional
+                                         # (defaults: 22 and the Linux docker
+                                         # socket; a Windows endpoint needs
+                                         # DOCKER_ADDR=tcp://localhost:2375)
+make engine-verify INSTANCE=<name>       # one-shot proof: ssh forward opens,
+                                         # docker handshake answers, forward closes
+make remote INSTANCE=<name>              # open the forward as a background daemon,
+                                         # point docker at the engine, return
+make build INSTANCE=<name>               # clone into a volume on the engine, build, run postCreate
+make exec INSTANCE=<name>                # a shell inside the container
+```
+
+No AWS involvement: configuration seeds into the workspace volume at build
+time, and credentials arrive by the hostcreds push over the same forward.
+Then VS Code → **Dev Containers: Attach to Running Container…**.
+
+**The skill route:** `gd-engine-ssh` drives the whole ssh-engine lifecycle,
+from `engine-init` through build, verifying each step.
+
+Deeper on each step:
+
+- The full path with platform guidance (Linux socket vs the Windows TCP
+  requirement): [environment-setup.md, "The ssh engine
+  path"](docs/environment-setup.md)
+- Engine architecture and the daily workflow:
+  [remote-docker README](.devcontainer/remote-docker/README.md)
+
+### AWS EC2
+
+The EC2 engine is a rootless Docker daemon on an EC2 instance. Nothing
 listens for inbound connections: the daemon binds its TLS port to loopback on
 the instance, and the only route to it is an SSM port forward, authenticated by
 IAM, carrying the docker API under mutual TLS. The certificate authenticates

@@ -1,0 +1,159 @@
+# Live Azure end-to-end verification for the azure engine kind.
+#
+# Runs the real lifecycle against a disposable instance in eastus: provision,
+# converge, publish, tunnel, daemon handshake, power cycle, teardown, and a
+# zero-residue check. Costs real money for the duration of the run (a cheap VM
+# plus relay listener-hours); it exists because the hermetic suite can fake az
+# but cannot fake Azure.
+#
+# Authentication is OIDC federation, not a stored client secret: an app
+# registration in the tenant trusts this repository, and the three identifiers
+# below are repository variables (not secrets). Configure once:
+#   1. Create an app registration; note its application (client) id.
+#   2. Add a federated credential on it for this repo:
+#      organization: matthew-dresden, repository: general-dev,
+#      entity-type: pull-request (or the environment/branch you dispatch from).
+#   3. Grant the app Owner (or Contributor + Role Administrator) on the
+#      subscription the engine deploys into.
+#   4. Set repository variables: AZURE_CLIENT_ID, AZURE_TENANT_ID,
+#      AZURE_SUBSCRIPTION_ID.
+# The deploying principal is also the relay sender and vault officer: the e2e
+# writes the app registration's OWN object id into the scaffolded module
+# inputs, so no human identity is involved.
+name: azure-engine-e2e
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: azure-engine-e2e
+  cancel-in-progress: false
+
+env:
+  LOCAL_DOCKER_CONTEXT: default
+
+jobs:
+  azure-engine-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Azure (OIDC federation)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq
+          sudo npm install -g @devcontainers/cli
+
+      - name: Record the deploying principal's object id
+        run: |
+          set -euo pipefail
+          oid=$(az ad signed-in-user show --query id -o tsv)
+          echo "PRINCIPAL_OBJECT_ID=$oid" >> "$GITHUB_ENV"
+
+      - name: Scaffold the disposable azure instance
+        run: |
+          set -euo pipefail
+          make instance-init INSTANCE=az-e2e CLOUD=azure LOCATION=eastus
+
+      - name: Add the deploying principal to the relay and vault grants
+        run: |
+          set -euo pipefail
+          file=remote-instances/az-e2e/terragrunt.hcl
+          python3 - "$file" "$PRINCIPAL_OBJECT_ID" <<'EOF'
+          import re
+          import sys
+
+          path, oid = sys.argv[1], sys.argv[2]
+          text = open(path).read()
+          grants = (
+              f"  relay_sender_object_ids = [\"{oid}\"]\n"
+              f"  keyvault_officer_object_ids = [\"{oid}\"]\n"
+          )
+          updated, count = re.subn(r"(  tags = \{)", grants + r"\1", text, count=1)
+          if count != 1:
+              sys.exit(f"could not anchor the grant inputs in {path}")
+          open(path, "w").write(updated)
+          EOF
+
+      - name: Converge (provision, certify, publish)
+        run: |
+          set -euo pipefail
+          make instance-deploy INSTANCE=az-e2e
+
+      - name: Verify certificates
+        run: |
+          set -euo pipefail
+          make cert-status
+
+      - name: Open the relay forward and prove the daemon answers
+        run: |
+          set -euo pipefail
+          make connect-start INSTANCE=az-e2e
+          ctx=$(docker context ls --format '{{.Name}}' | grep az-e2e)
+          docker --context "$ctx" version
+          docker --context "$ctx" info --format '{{.SecurityOptions}}' | grep -qi rootless
+
+      - name: Power-cycle the VM and re-prove the daemon
+        run: |
+          set -euo pipefail
+          make instance-stop INSTANCE=az-e2e
+          make instance-start INSTANCE=az-e2e
+          make cert-install INSTANCE=az-e2e
+          make connect-refresh INSTANCE=az-e2e
+          ctx=$(docker context ls --format '{{.Name}}' | grep az-e2e)
+          docker --context "$ctx" version
+
+      - name: Fleet status shows the azure engine
+        run: |
+          set -euo pipefail
+          make list-instances
+
+      - name: Tear everything down
+        if: always()
+        run: |
+          set -euo pipefail
+          make clean INSTANCE=az-e2e || true
+          make instance-destroy INSTANCE=az-e2e
+          make bucket-delete INSTANCE=az-e2e
+
+      - name: Prove zero residue
+        if: always()
+        run: |
+          set -euo pipefail
+          az group list --query "[?starts_with(name, 'az-e2e')].name" -o tsv | grep . && {
+            echo "ERROR: leftover az-e2e resource groups" >&2
+            exit 1
+          } || true
+          az storage account list --query "[?starts_with(name, 'tgstate')].name" -o tsv \
+            | grep -F "$(python3 - <<'EOF'
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, ".claude/plugins/devcontainer/scripts")
+          from devcontainer_config import state_store
+          print(state_store.compose(repo_root=Path.cwd(), instance="az-e2e"))
+          EOF
+          )" && {
+            echo "ERROR: leftover state storage account" >&2
+            exit 1
+          } || true
+          test ! -e "$HOME/.docker/certs/az-e2e" || {
+            echo "ERROR: leftover local certificate directory" >&2
+            exit 1
+          }
+          docker context ls --format '{{.Name}}' | grep az-e2e && {
+            echo "ERROR: leftover docker context" >&2
+            exit 1
+          } || true

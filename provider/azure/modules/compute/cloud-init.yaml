@@ -275,6 +275,8 @@ runcmd:
   # guards a running unit against idle hours; this enablement only pins
   # the unit under its own name, so the connect flow's one-line start
   # works without further configuration.
+  - install -m 0644 /opt/gd-relay/gd-relay.service /etc/systemd/system/gd-relay.service
+  - systemctl daemon-reload
   - systemctl enable gd-relay.service
   # Written last, and only here: this is the sole place in the script
   # where every step above -- rootless docker installed, the rootful

@@ -1462,79 +1462,74 @@ def test_main_verify_reports_a_failed_handshake_and_tears_everything_down(
 # ---------------------------------------------------------------------------
 # install-material: the azure twin of transport.install_material's own test
 # file's discipline (`tests/test_install_material.py`). The fake runner
-# answers `az vm run-command invoke` and `az vm run-command show`; the
-# script the invoke carries is read at call time, while the 0600 `--scripts
-# @file` still exists, so the content pins are the bytes production would
-# hand azure. The poll clock and sleep are injected, so the deadline tests
-# walk time without waiting on any of it.
+# answers the ONE `az vm run-command invoke` with the run command's own
+# JSON -- the invoke is the waiter, so its instance view is the only answer
+# there is to read. The script the invoke carries is read at call time,
+# while the 0600 `--scripts @file` still exists, so the content pins are
+# the bytes production would hand azure. The deadline is injected through
+# the environment and the runner seam's own timed-out outcome, the same
+# seams the listener-start tests use, so nothing here waits on anything.
 # ---------------------------------------------------------------------------
 
-_INSTALL_RUN_COMMAND_NAME = "run-azrelay-1"
 _RESOURCE_GROUP = "gd-rg"
 _VM_NAME = "gd-vm"
 
 
 class _InstallRunner:
-    """A CommandRunner double that answers the two run-command calls it recognizes.
+    """A CommandRunner double that answers the one synchronous invoke.
 
-    `states` is the sequence of `instanceView.executionState` values the
-    show polls answer with, one per poll; the invoke answer carries the
-    generated run-command name azure assigns, read back the way
-    production's own JSON answer is read.
+    The invoke's answer is the agent's status list: `value[].code` carries
+    the provisioning state (the `provisioning_state` argument) and
+    `value[].message` carries the script's stdout/stderr blocks -- the
+    stdout block ends with the `gd-install-ok` sentinel the script prints
+    as its own last line, the stderr block carries the `stderr` argument
+    when set. The script the invoke carries is read at call time, while
+    the `--scripts @file` still exists. Only the invoke is recognized, so
+    a stray second az call fails the test instead of passing silently.
     """
 
-    def __init__(self, states: Sequence[str], *, error: str = "") -> None:
+    def __init__(self, provisioning_state: str = "succeeded", *, stderr: str = "") -> None:
         self.commands: list[tuple[str, ...]] = []
         self.timeouts: list[float | None] = []
         self.script_text: str | None = None
         self.script_mode: int | None = None
-        # When set, the show polls answer with this raw stdout instead of
-        # the instance-view JSON the states would otherwise render.
-        self.raw_show_stdout: str | None = None
-        self._states = list(states)
-        self._error = error
+        # When set, the invoke answers with this raw stdout instead of the
+        # status-list JSON the state would otherwise render.
+        self.raw_invoke_stdout: str | None = None
+        self._state = provisioning_state
+        self._stderr = stderr
 
     def __call__(self, command: Sequence[str], timeout_seconds: float | None) -> CommandResult:
         command = tuple(command)
         self.commands.append(command)
         self.timeouts.append(timeout_seconds)
-        if "invoke" in command:
-            scripts_at = command.index("--scripts")
-            reference = Path(command[scripts_at + 1][len("@") :])
-            assert reference.is_file(), f"the script must be a regular file, not {reference}"
-            self.script_mode = stat.S_IMODE(reference.stat().st_mode)
-            self.script_text = reference.read_text(encoding="utf-8")
-            return CommandResult(
-                exit_code=0, stdout=json.dumps({"name": _INSTALL_RUN_COMMAND_NAME})
-            )
-        if "show" in command:
-            if self.raw_show_stdout is not None:
-                return CommandResult(exit_code=0, stdout=self.raw_show_stdout)
-            state = self._states.pop(0) if self._states else "Running"
-            view: dict[str, object] = {"executionState": state}
-            if self._error:
-                view["error"] = self._error
-            return CommandResult(exit_code=0, stdout=json.dumps({"instanceView": view}))
-        raise AssertionError(f"unexpected command: {command}")
+        if "invoke" not in command:
+            raise AssertionError(f"unexpected command: {command}")
+        scripts_at = command.index("--scripts")
+        reference = Path(command[scripts_at + 1][len("@") :])
+        assert reference.is_file(), f"the script must be a regular file, not {reference}"
+        self.script_mode = stat.S_IMODE(reference.stat().st_mode)
+        self.script_text = reference.read_text(encoding="utf-8")
+        if self.raw_invoke_stdout is not None:
+            return CommandResult(exit_code=0, stdout=self.raw_invoke_stdout)
+        message = (
+            "Enable succeeded: \n[stdout]\n"
+            "server-key.pem written\nserver-cert.pem written\nca.pem written\n"
+            "gd-install-ok\n"
+            f"[stderr]\n{self._stderr}"
+        )
+        statuses = [
+            {
+                "code": f"ProvisioningState/{self._state}",
+                "displayStatus": "Provisioning succeeded",
+                "level": "Info",
+                "message": message,
+            }
+        ]
+        return CommandResult(exit_code=0, stdout=json.dumps({"value": statuses}))
 
     def invoke_command(self) -> tuple[str, ...]:
-        return next(command for command in self.commands if "invoke" in command)
-
-    def show_commands(self) -> list[tuple[str, ...]]:
-        return [command for command in self.commands if "show" in command]
-
-
-class _SteppedClock:
-    """A monotonic clock advanced by the fake sleep, one step per poll."""
-
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def clock(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.now += seconds
+        return self.commands[0]
 
 
 def _write_install_address(instance: str, *, vault_uri: str | None = None) -> None:
@@ -1553,23 +1548,16 @@ def _write_install_address(instance: str, *, vault_uri: str | None = None) -> No
 def _install(
     runner: _InstallRunner,
     *,
-    clock: _SteppedClock | None = None,
     daemon_user: str = "dockerd",
 ) -> None:
     transport_azure = _import_transport_azure()
-    transport_azure.install_material(
-        runner,
-        instance=_NAME,
-        daemon_user=daemon_user,
-        **({"clock": clock.clock, "pace": clock.sleep} if clock is not None else {}),
-    )
+    transport_azure.install_material(runner, instance=_NAME, daemon_user=daemon_user)
 
 
-def test_install_invoke_argv_is_pinned(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_install_invoke_argv_is_pinned() -> None:
+    """The one synchronous invoke: --scripts @file, --output json, no --no-wait."""
     _write_install_address(_NAME)
-    runner = _InstallRunner(["Succeeded"])
+    runner = _InstallRunner()
 
     _install(runner)
 
@@ -1580,29 +1568,31 @@ def test_install_invoke_argv_is_pinned(
     assert "--name" in invoke and invoke[invoke.index("--name") + 1] == _VM_NAME
     assert "--command-id" in invoke
     assert invoke[invoke.index("--command-id") + 1] == "RunShellScript"
-    assert invoke[invoke.index("--scripts") + 1].startswith("@")
-    assert "--no-wait" in invoke
+    scripts_value = invoke[invoke.index("--scripts") + 1]
+    assert scripts_value.startswith("@"), "the script travels on a --scripts @file reference"
+    assert "--output" in invoke and invoke[invoke.index("--output") + 1] == "json"
+    assert "--no-wait" not in invoke, "the invoke is synchronous: az itself is the waiter"
     assert f"'{_NAMESPACE}'" not in " ".join(invoke)
 
 
-def test_install_polls_the_run_command_show_until_succeeded(
+def test_a_succeeded_invoke_answer_returns_after_exactly_one_runner_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """One invoke whose answer reports Succeeded: there is no second call.
+
+    The invoke is the waiter, so its own JSON is the whole conversation;
+    the old shape's follow-up `run-command show` reads are gone.
+    """
+    transport_azure = _import_transport_azure()
     _write_install_address(_NAME)
-    runner = _InstallRunner(["Running", "Running", "Succeeded"])
+    runner = _InstallRunner()
 
-    _install(runner)
+    _install(runner)  # must return without raising
 
-    shows = runner.show_commands()
-    assert len(shows) == 3
-    show = shows[0]
-    assert show[:4] == ("az", "vm", "run-command", "show")
-    assert "--run-command-name" in show
-    assert show[show.index("--run-command-name") + 1] == _INSTALL_RUN_COMMAND_NAME
-    assert show[show.index("--resource-group") + 1] == _RESOURCE_GROUP
-    assert show[show.index("--vm-name") + 1] == _VM_NAME
-    assert "--instance-view" in show
-    assert "--output" in show and show[show.index("--output") + 1] == "json"
+    assert len(runner.commands) == 1
+    assert runner.timeouts == [transport_azure._AZURE_MATERIAL_INSTALL_TIMEOUT_DEFAULT_SECONDS], (
+        "the single call is bounded by the default deadline"
+    )
 
 
 def test_the_script_pulls_from_the_vault_through_the_instance_identity(
@@ -1610,7 +1600,7 @@ def test_the_script_pulls_from_the_vault_through_the_instance_identity(
 ) -> None:
     """The instance pulls. The script names secret URLs, never a value."""
     _write_install_address(_NAME)
-    runner = _InstallRunner(["Succeeded"])
+    runner = _InstallRunner()
 
     _install(runner)
 
@@ -1633,7 +1623,7 @@ def test_the_script_never_briefly_world_readables_the_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_install_address(_NAME)
-    runner = _InstallRunner(["Succeeded"])
+    runner = _InstallRunner()
 
     _install(runner)
 
@@ -1653,7 +1643,7 @@ def test_the_script_starts_the_daemon_after_the_material_is_written(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_install_address(_NAME)
-    runner = _InstallRunner(["Succeeded"])
+    runner = _InstallRunner()
 
     _install(runner)
 
@@ -1674,58 +1664,42 @@ def test_the_script_is_handed_to_az_as_a_private_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_install_address(_NAME)
-    runner = _InstallRunner(["Succeeded"])
+    runner = _InstallRunner()
 
     _install(runner)
 
     assert runner.script_mode == 0o600, "the script carries no secret but is still private"
 
 
-def test_the_poll_budget_is_bounded_by_the_configured_deadline(
+class _BlockingRunner(_InstallRunner):
+    """An invoke runner that never answers within its budget.
+
+    The seam reports a deadline overrun as an outcome, the way
+    transport.subprocess_command_runner's timeout branch does; the budget
+    the call was given is still recorded for assertion.
+    """
+
+    def __call__(self, command: Sequence[str], timeout_seconds: float | None) -> CommandResult:
+        command = tuple(command)
+        self.commands.append(command)
+        self.timeouts.append(timeout_seconds)
+        return CommandResult(exit_code=-1, timed_out=True)
+
+
+def test_a_deadline_overrun_names_the_variable_that_extends_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An invoke outliving its budget fails naming the variable that widens it."""
     transport_azure = _import_transport_azure()
     _write_install_address(_NAME)
     monkeypatch.setenv(transport_azure.AZURE_MATERIAL_INSTALL_TIMEOUT_ENV_VAR, "41")
-    runner = _InstallRunner(["Succeeded"])
-
-    _install(runner)
-
-    assert runner.timeouts[0] == 41.0, "the invoke is bounded by the same budget"
-    assert all(timeout is not None and 0 < timeout <= 41.0 for timeout in runner.timeouts[1:]), (
-        "each poll is a small read bounded by the remaining deadline, "
-        f"not by a separate budget: {[timeout for timeout in runner.timeouts[1:]]}"
-    )
-
-
-def test_the_poll_paces_on_the_shared_interval(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    transport_azure = _import_transport_azure()
-    _write_install_address(_NAME)
-    runner = _InstallRunner(["Running", "Running", "Succeeded"])
-    clock = _SteppedClock()
-
-    _install(runner, clock=clock)
-
-    assert clock.now == 2 * transport_azure._RUN_COMMAND_POLL_SECONDS, (
-        "one poll interval per non-terminal poll, never more and never a fixed wait"
-    )
-
-
-def test_a_timeout_names_the_run_command_and_the_variable_that_extends_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    transport_azure = _import_transport_azure()
-    _write_install_address(_NAME)
-    runner = _InstallRunner(["Running"] * 50)
-    clock = _SteppedClock()
+    runner = _BlockingRunner()
 
     with pytest.raises(transport_azure.MaterialInstallError) as excinfo:
-        _install(runner, clock=clock)
+        _install(runner)
 
+    assert runner.timeouts == [41.0], "the single call is bounded by the configured budget"
     message = str(excinfo.value)
-    assert _INSTALL_RUN_COMMAND_NAME in message
     assert transport_azure.AZURE_MATERIAL_INSTALL_TIMEOUT_ENV_VAR in message
     assert _VM_NAME in message
 
@@ -1735,25 +1709,39 @@ def test_a_terminal_failure_carries_the_instance_view_error_and_the_remedy(
 ) -> None:
     transport_azure = _import_transport_azure()
     _write_install_address(_NAME)
-    runner = _InstallRunner(["Failed"], error="cannot find the vault: not authorized")
+    runner = _InstallRunner("failed", stderr="cannot find the vault: not authorized")
 
     with pytest.raises(transport_azure.MaterialInstallError) as excinfo:
         _install(runner)
 
     message = str(excinfo.value)
-    assert "Failed" in message
-    assert "not authorized" in message
+    assert "did not complete" in message
+    assert "cannot find the vault: not authorized" in message
     assert f"make cert-publish INSTANCE={_NAME}" in message
-    assert _INSTALL_RUN_COMMAND_NAME in message
+    assert f"make cert-install INSTANCE={_NAME}" in message
+    assert len(runner.commands) == 1, "a terminal answer ends the install, no follow-up call"
 
 
-def test_an_unreadable_poll_answer_fails_instead_of_polling_forever(
+def test_an_unparsable_invoke_answer_names_the_raw_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     transport_azure = _import_transport_azure()
     _write_install_address(_NAME)
-    runner = _InstallRunner(["Running"])
-    runner.raw_show_stdout = "not json"
+
+    runner = _InstallRunner()
+    runner.raw_invoke_stdout = "not json"
+
+    with pytest.raises(transport_azure.MaterialInstallError) as excinfo:
+        _install(runner)
+
+    message = str(excinfo.value)
+    assert "unparsable output" in message
+    assert "not json" in message, "the raw answer is surfaced so the shape can be diagnosed"
+
+    # An answer of the wrong shape -- a name-only body with no status
+    # list -- is refused the same way, never guessed at.
+    runner = _InstallRunner()
+    runner.raw_invoke_stdout = json.dumps({"name": "run-command-1"})
 
     with pytest.raises(transport_azure.MaterialInstallError) as excinfo:
         _install(runner)
@@ -1765,7 +1753,7 @@ def test_a_vault_uri_in_the_record_is_used_verbatim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_install_address(_NAME, vault_uri="https://gd-vault.vault.azure.net/")
-    runner = _InstallRunner(["Succeeded"])
+    runner = _InstallRunner()
 
     _install(runner)
 
@@ -1788,7 +1776,7 @@ def test_a_record_missing_an_install_key_names_the_deploy_remedy(
     }
     del record[missing_key]
     instances.write_engine_address(_repo_root(), _NAME, record)
-    runner = _InstallRunner(["Succeeded"])
+    runner = _InstallRunner()
 
     with pytest.raises(transport_azure.RelayConfigError) as excinfo:
         _install(runner)
@@ -1830,7 +1818,7 @@ def test_install_material_argv_through_the_cli(
     """The subcommand certificates run reaches `install_material` and reports success."""
     transport_azure = _import_transport_azure()
     _write_install_address(_NAME)
-    runner = _InstallRunner(["Succeeded"])
+    runner = _InstallRunner()
     monkeypatch.setattr(transport_azure.transport, "subprocess_command_runner", runner)
 
     exit_code = transport_azure.main(

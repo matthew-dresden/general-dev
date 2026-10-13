@@ -213,15 +213,21 @@ rdc_status() {
   printf '\n\033[1mProject\033[0m        %s\n' "$PROJECT_NAME"
   if [ "$context" = "$REMOTE_DOCKER_CONTEXT" ]; then
     # The parenthetical engine identifier is kind-aware: an EC2 instance's
-    # id, an SSH engine's endpoint. lib.sh's resolver deliberately leaves
-    # REMOTE_INSTANCE_ID unset for an ssh engine -- there is no EC2 id
-    # behind it -- so the EC2 form's bare reference would end a set -u run
-    # before the report printed.
-    if [ "$(rd_engine_kind)" = "ssh" ]; then
-      printf '\033[1mBackend\033[0m        remote (ssh engine), context %s (%s)\n' "$context" "${ENGINE_ENDPOINT:-endpoint unknown}"
-    else
-      printf '\033[1mBackend\033[0m        remote, context %s (%s)\n' "$context" "$REMOTE_INSTANCE_ID"
-    fi
+    # id, an SSH engine's endpoint, an azure engine's relay address. The
+    # resolver deliberately leaves REMOTE_INSTANCE_ID unset when no EC2 id
+    # is behind the kind -- ssh and azure alike -- so the EC2 form's bare
+    # reference would end a set -u run before the report printed.
+    case "$(rd_engine_kind)" in
+      ssh)
+        printf '\033[1mBackend\033[0m        remote (ssh engine), context %s (%s)\n' "$context" "${ENGINE_ENDPOINT:-endpoint unknown}"
+        ;;
+      azure)
+        printf '\033[1mBackend\033[0m        remote (azure engine), context %s\n' "$context"
+        ;;
+      *)
+        printf '\033[1mBackend\033[0m        remote, context %s (%s)\n' "$context" "${REMOTE_INSTANCE_ID:-id unknown}"
+        ;;
+    esac
   else
     printf '\033[1mBackend\033[0m        local, context %s\n' "$context"
   fi

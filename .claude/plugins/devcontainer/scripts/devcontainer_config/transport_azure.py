@@ -84,12 +84,14 @@ import base64
 import datetime
 import hashlib
 import json
+import os
 import secrets
 import signal
 import socket
 import ssl
 import struct
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -97,10 +99,11 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import NoReturn
 
-from devcontainer_config import instances, repo, transport
+from devcontainer_config import certs, instances, repo, transport
 from devcontainer_config.hostprobe import (
     DOCKER_HANDSHAKE_TIMEOUT_DEFAULT_SECONDS,
     DOCKER_HANDSHAKE_TIMEOUT_ENV_VAR,
+    CommandResult,
     CommandRunner,
     HostProbeError,
     read_positive_seconds,
@@ -152,6 +155,37 @@ _CLOSE_NORMAL = 1000
 _RELAY_NAMESPACE_KEY = "relay_namespace"
 _HYBRID_CONNECTION_KEY = "hybrid_connection"
 
+# The record keys the install-material surface below reads, and the one
+# optional key that names the vault's REST endpoint outright. A record
+# carrying `vault_uri` is answered from that value; one carrying only
+# `vault_name` has the URL composed; one carrying neither is refused.
+_VM_NAME_KEY = "vm_name"
+_RESOURCE_GROUP_KEY = "resource_group"
+_VAULT_URI_KEY = "vault_uri"
+
+# The azure IMDS and Key Vault REST constants the VM-side install script
+# fetches its material through. Both are platform-fixed shapes, named here
+# once so the script builder composes them rather than inlining literals
+# per line.
+_KEYVAULT_RESOURCE = "https://vault.azure.net"
+_IDENTITY_TOKEN_API_VERSION = "2018-02-01"
+_KEYVAULT_API_VERSION = "7.4"
+_IDENTITY_ENDPOINT = "http://169.254.169.254"
+
+# The deadline the VM has to pull its material and start its daemon in,
+# read through `read_positive_seconds` from the environment rather than a
+# literal, the same shape `transport`'s own MATERIAL_INSTALL_TIMEOUT takes.
+AZURE_MATERIAL_INSTALL_TIMEOUT_ENV_VAR = "AZURE_MATERIAL_INSTALL_TIMEOUT"
+_AZURE_MATERIAL_INSTALL_TIMEOUT_DEFAULT_SECONDS = 300.0
+
+# The run-command poll: one state read every _RUN_COMMAND_POLL_SECONDS,
+# bounded by the deadline above -- never a fixed wait outside the loop.
+_RUN_COMMAND_POLL_SECONDS = 5.0
+_RUN_COMMAND_SUCCESS_STATE = "Succeeded"
+_RUN_COMMAND_RUNNING_STATES = frozenset(
+    {"", "Pending", "Starting", "Running", "Updating", "UpdateInProgress"}
+)
+
 # One accept backlog, one pipe chunk: both plain stdlib defaults, named so
 # the bridge loop reads as the pipe it is.
 _ACCEPT_BACKLOG = 8
@@ -191,6 +225,16 @@ class RelayConfigError(RelayTransportError):
     `make instance-deploy` writes), a record missing its relay keys, an
     unusable `az` token answer, or a `--context` that does not name the
     instance's own docker context.
+    """
+
+
+class MaterialInstallError(RelayTransportError):
+    """The VM's TLS-material install did not reach `Succeeded`.
+
+    Raised for a run command that ended in a terminal failure state, one
+    that outlived `AZURE_MATERIAL_INSTALL_TIMEOUT`, or a poll answer this
+    module cannot read. The message carries the instance view's own error
+    or the recorded run-command name, whichever distinguishes the cause.
     """
 
 
@@ -490,6 +534,295 @@ def relay_endpoint(namespace: str, hybrid_connection: str, action: str) -> str:
     header instead.
     """
     return f"wss://{namespace}/$hc/{hybrid_connection}?sb-hc-action={action}"
+
+
+# ---------------------------------------------------------------------------
+# install-material: the azure twin of `transport.install_material`. The VM
+# pulls its published TLS material from its own Key Vault through its
+# managed identity and starts its rootless daemon; the run command names
+# secret URLs and never carries a value, so no private key rides the
+# command document -- the same pulls-not-pushes invariant the SSM path
+# documents for its own command history.
+# ---------------------------------------------------------------------------
+
+
+def _address_str(address: Mapping[str, object], key: str, *, instance: str) -> str:
+    """One string-valued record key, or the deploy remedy the record owes.
+
+    A record present but missing a key this surface needs fails fast here,
+    naming the same deploy remedy a missing record names: the operator's
+    next step is identical, and a half-written record should read as the
+    not-yet-deployed state it effectively is.
+
+    Raises:
+        RelayConfigError: the key is missing or is not a non-empty string.
+    """
+    value = address.get(key)
+    if not isinstance(value, str) or not value:
+        raise RelayConfigError(
+            f"ERROR: the engine address record for instance {instance!r} carries no "
+            f"usable {key!r}\n"
+            f"The install-material surface reads '{key}' from "
+            f"{instances.engine_address_path(instance)}.\n"
+            f"Redeploy to write it: make instance-deploy INSTANCE={instance}"
+        )
+    return value
+
+
+def vault_url(address: Mapping[str, object], *, instance: str) -> str:
+    """The vault's REST base URL, from the record's `vault_uri` or its `vault_name`.
+
+    Accepts either key: a record carrying `vault_uri` is answered from that
+    value verbatim (a trailing slash trimmed, so secret paths compose
+    cleanly); one carrying only `vault_name` has the standard
+    `https://<vault_name>.vault.azure.net` URL composed. A record carrying
+    neither is refused, as is a `vault_name` that is not a bare label --
+    the same bareness rule `relay_values` applies to the namespace, since a
+    scheme or path in either would compose a malformed URL here.
+
+    Raises:
+        RelayConfigError: neither key is usable, or `vault_name` carries a
+            scheme or path.
+    """
+    uri = address.get(_VAULT_URI_KEY)
+    if isinstance(uri, str) and uri:
+        return uri.rstrip("/")
+    vault_name = _address_str(address, instances.VAULT_NAME_KEY, instance=instance)
+    if "://" in vault_name or "/" in vault_name:
+        raise RelayConfigError(
+            f"ERROR: the engine address record for instance {instance!r} carries a "
+            f"malformed {instances.VAULT_NAME_KEY!r}\n"
+            f"{vault_name!r} is not a bare vault name; the record must name the vault "
+            "label, and the URL is composed from it.\n"
+            f"Redeploy to rewrite it: make instance-deploy INSTANCE={instance}"
+        )
+    return f"https://{vault_name}.vault.azure.net"
+
+
+def build_install_commands(instance: str, *, vault_url: str, daemon_user: str) -> tuple[str, ...]:
+    """The shell the VM runs to pull its published material and start its daemon.
+
+    Every secret name comes from `certs.AZURE_PUBLISHABLE`, the same mapping
+    `certs.azure_publication_set` derives the published names from, so what
+    the instance fetches cannot drift from what was published. The directory
+    head and the daemon restart tail are `transport`'s own shared lines, so
+    both kinds' scripts prepare the directory and start the daemon the same
+    way.
+
+    The instance pulls; nothing is pushed. These commands name the vault's
+    secret URLs and never carry a value, so the private key is absent from
+    the run-command document and from the run-command history azure retains
+    -- the token the script presents is its own managed identity's, fetched
+    from the instance metadata endpoint at run time. The Key Vault REST
+    answers are JSON, so each fetch extracts the body's `value` field with
+    python3 (present on the Ubuntu image the azure layer ships) and writes
+    it straight to its file; `umask 077` precedes the first fetch and each
+    file's mode is set explicitly after it.
+    """
+    lines = list(transport.tls_dir_prepare_lines(daemon_user))
+    lines.append(
+        f"token=\"$(curl -sf -H 'Metadata:true' --connect-timeout 2 "
+        f"'{_IDENTITY_ENDPOINT}/metadata/identity/oauth2/token"
+        f'?api-version={_IDENTITY_TOKEN_API_VERSION}&resource={_KEYVAULT_RESOURCE}"'
+        ' | python3 -c \'import json,sys; print(json.load(sys.stdin)["access_token"])\'")'
+    )
+    for filename, secret_name in certs.AZURE_PUBLISHABLE.items():
+        mode = "0600" if filename == certs.SERVER_KEY_FILENAME else "0644"
+        lines.append(
+            f'curl -sf -H "Authorization: Bearer $token" '
+            f'"{vault_url}/secrets/{secret_name}?api-version={_KEYVAULT_API_VERSION}"'
+            " | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)"
+            f'["value"])\' > "$dir/{filename}"'
+        )
+        lines.append(f'chmod {mode} "$dir/{filename}"')
+    lines.extend(transport.rootless_daemon_restart_lines())
+    return tuple(lines)
+
+
+def _material_install_timeout_seconds() -> float:
+    """The deadline for the VM to fetch its material and start its daemon.
+
+    Read through `read_positive_seconds` rather than hard-coded so a slow
+    instance can be accommodated without editing this file, the same shape
+    `transport._material_install_timeout_seconds` gives the SSM path.
+
+    Raises:
+        RelayTransportError: the variable is set to something that is not a
+            finite positive number of seconds.
+    """
+    try:
+        return read_positive_seconds(
+            AZURE_MATERIAL_INSTALL_TIMEOUT_ENV_VAR, _AZURE_MATERIAL_INSTALL_TIMEOUT_DEFAULT_SECONDS
+        )
+    except HostProbeError as exc:
+        raise RelayTransportError(
+            f"ERROR: {exc}\n"
+            "Set it to a positive number of seconds, or unset it to use the default of "
+            f"{_AZURE_MATERIAL_INSTALL_TIMEOUT_DEFAULT_SECONDS:g}."
+        ) from exc
+
+
+def _run_az(runner: CommandRunner, argv: Sequence[str], *, deadline: float) -> CommandResult:
+    """One `az` call through the runner seam, with the module's az diagnoses.
+
+    The binary is prefixed here, once, so every call site names only the
+    subcommand it means.
+
+    Raises:
+        RelayConfigError: `az` is not on PATH, or the call failed -- the
+            authentication cause names `az login`, the same remedy every
+            other az refusal in this module carries.
+    """
+    result = runner((_AZ_BINARY, *argv), deadline)
+    if result.binary_missing:
+        raise RelayConfigError(
+            f"ERROR: {_AZ_BINARY} is not on PATH\nInstall the Azure CLI, then retry."
+        )
+    if result.exit_code != 0:
+        raise RelayConfigError(
+            f"ERROR: {' '.join((_AZ_BINARY, *argv[:3]))} failed\n"
+            f"{result.stderr.strip()}\n"
+            "If the failure is an authentication one, run 'az login' to refresh the "
+            "credentials, then retry."
+        )
+    return result
+
+
+def _execution_state(stdout: str) -> tuple[str, str]:
+    """The `(executionState, failure detail)` pair the --instance-view JSON carries.
+
+    Raises:
+        MaterialInstallError: the output is not the instance-view shape this
+            poll reads, so the poll cannot tell running from terminal.
+    """
+    try:
+        payload = json.loads(stdout)
+        view = payload["instanceView"]
+        state = str(view["executionState"])
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise MaterialInstallError(
+            "ERROR: az vm run-command show produced unparsable output: "
+            f"{stdout.strip()!r}\n"
+            "Run the command manually and investigate why its output does not match the "
+            "expected shape."
+        ) from exc
+    detail = str(view.get("error") or "").strip() or str(view.get("output") or "").strip()
+    return state, detail
+
+
+def install_material(
+    runner: CommandRunner,
+    *,
+    instance: str,
+    daemon_user: str,
+    clock: Callable[[], float] = time.monotonic,
+    pace: Callable[[float], None] = time.sleep,
+) -> None:
+    """Have the VM pull its published TLS material from its vault and start its daemon.
+
+    The azure twin of `transport.install_material`: the script is issued
+    through one `az vm run-command invoke --no-wait` (the script travels on
+    a 0600 `--scripts @file`, removed before this function returns; its
+    name is az's own, read back from the invoke answer), then the run
+    command's instance view is polled -- one small read every
+    `_RUN_COMMAND_POLL_SECONDS`, bounded by the
+    `AZURE_MATERIAL_INSTALL_TIMEOUT` deadline -- until the execution state
+    is `Succeeded` or terminal.
+
+    Raises:
+        RelayConfigError: the instance's engine address record is missing,
+            malformed, or lacks the vault, resource-group or VM keys; or an
+            `az` call failed outright.
+        MaterialInstallError: the run command ended in a state other than
+            `Succeeded` (the message carries the instance view's own error),
+            outlived the deadline, or answered a poll in an unparsable shape.
+    """
+    address = load_relay_address(instance)
+    resource_group = _address_str(address, _RESOURCE_GROUP_KEY, instance=instance)
+    vm_name = _address_str(address, _VM_NAME_KEY, instance=instance)
+    url = vault_url(address, instance=instance)
+    commands = build_install_commands(instance, vault_url=url, daemon_user=daemon_user)
+    timeout_seconds = _material_install_timeout_seconds()
+
+    with tempfile.TemporaryDirectory(prefix="devcontainer-azure-install-") as tmp_dir:
+        script_path = Path(tmp_dir) / "install-material.sh"
+        descriptor = os.open(script_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(commands))
+            handle.write("\n")
+        started = _run_az(
+            runner,
+            (
+                "vm",
+                "run-command",
+                "invoke",
+                "--resource-group",
+                resource_group,
+                "--name",
+                vm_name,
+                "--command-id",
+                "RunShellScript",
+                "--scripts",
+                f"@{script_path}",
+                "--no-wait",
+            ),
+            deadline=timeout_seconds,
+        )
+    try:
+        run_command_name = str(json.loads(started.stdout)["name"])
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise MaterialInstallError(
+            "ERROR: az vm run-command invoke produced unparsable output: "
+            f"{started.stdout.strip()!r}\n"
+            "Run the command manually and investigate why its output does not match the "
+            "expected shape."
+        ) from exc
+
+    deadline = clock() + timeout_seconds
+    while True:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise MaterialInstallError(
+                f"ERROR: installing TLS material on {vm_name} did not finish in "
+                f"{timeout_seconds:g}s\n"
+                f"The run command is still recorded as {run_command_name}; inspect it with "
+                f"'az vm run-command show --run-command-name {run_command_name} "
+                f"--resource-group {resource_group} --vm-name {vm_name} --instance-view'.\n"
+                f"Raise {AZURE_MATERIAL_INSTALL_TIMEOUT_ENV_VAR} if this instance is "
+                "simply slow."
+            )
+        view = _run_az(
+            runner,
+            (
+                "vm",
+                "run-command",
+                "show",
+                "--run-command-name",
+                run_command_name,
+                "--resource-group",
+                resource_group,
+                "--vm-name",
+                vm_name,
+                "--instance-view",
+                "--output",
+                "json",
+            ),
+            deadline=remaining,
+        )
+        state, detail = _execution_state(view.stdout)
+        if state == _RUN_COMMAND_SUCCESS_STATE:
+            return
+        if state not in _RUN_COMMAND_RUNNING_STATES:
+            raise MaterialInstallError(
+                f"ERROR: installing TLS material on {vm_name} reported {state}\n"
+                f"{detail}\n"
+                f"Publish the material first if it is missing: "
+                f"make cert-publish INSTANCE={instance}\n"
+                f"Full output: 'az vm run-command show --run-command-name "
+                f"{run_command_name} --resource-group {resource_group} "
+                f"--vm-name {vm_name} --instance-view'."
+            )
+        pace(_RUN_COMMAND_POLL_SECONDS)
 
 
 # ---------------------------------------------------------------------------
@@ -1258,6 +1591,23 @@ def _run_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_install_material(args: argparse.Namespace) -> int:
+    """Handler for `install-material`: one run command pulls the material.
+
+    The instance pulls; nothing is pushed: the run command carries the
+    script that fetches the vault's secrets and never a value, so no TLS
+    private key rides the command document or azure's retained command
+    history.
+    """
+    install_material(
+        transport.subprocess_command_runner,
+        instance=args.instance,
+        daemon_user=args.daemon_user,
+    )
+    print(f"Installed TLS material on {args.instance} and started its daemon.")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="devcontainer_config.transport_azure",
@@ -1293,6 +1643,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     verify_parser.add_argument("--context", required=True, help="The docker context name.")
     verify_parser.set_defaults(handler=_run_verify)
+
+    install_material_parser = subparsers.add_parser(
+        "install-material",
+        help=(
+            "Have the azure VM pull its published TLS material from its Key Vault "
+            "and start its daemon, through one run command."
+        ),
+    )
+    install_material_parser.add_argument(
+        "--instance",
+        required=True,
+        help="The instance name (the remote-instances/<name> directory).",
+    )
+    install_material_parser.add_argument(
+        "--daemon-user", required=True, help="The VM's rootless daemon user (REMOTE_DAEMON_USER)."
+    )
+    install_material_parser.set_defaults(handler=_run_install_material)
 
     return parser
 

@@ -927,3 +927,57 @@ def test_module_help_lists_resolve_instance(
 
     assert exc_info.value.code == 0
     assert "resolve-instance" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# engine_vault_name (the azure Key Vault the address record names)
+# ---------------------------------------------------------------------------
+
+
+def test_engine_vault_name_reads_the_record_instances_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`engine_vault_name` is the read accessor on the record
+    `write_engine_address` writes: the same vault, from the same file."""
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+    vault_name = f"gd-vault-{uuid.uuid4().hex[:6]}"
+
+    with pytest.raises(instances.EngineAddressError):
+        instances.engine_vault_name(root, "sandbox")
+    instances.write_engine_address(root, "sandbox", {"vault_name": vault_name})
+
+    assert instances.engine_vault_name(root, "sandbox") == vault_name
+
+
+def test_engine_vault_name_missing_names_the_deploy_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record without a usable vault name fails fast naming the redeploy,
+    the same remedy a missing record names."""
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+    instances.write_engine_address(
+        root, "sandbox", {"relay_namespace": "gd.servicebus.windows.net"}
+    )
+
+    with pytest.raises(instances.EngineAddressError) as exc_info:
+        instances.engine_vault_name(root, "sandbox")
+
+    message = str(exc_info.value)
+    assert instances.VAULT_NAME_KEY in message
+    assert "make instance-deploy INSTANCE=sandbox" in message
+
+
+def test_engine_vault_name_rejects_a_non_string_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    instances = _import_instances()
+    monkeypatch.setenv(instances.DOCKER_CONFIG_ENV_VAR, str(tmp_path / "docker-config"))
+    root = generated_root(tmp_path)
+    instances.write_engine_address(root, "sandbox", {"vault_name": ["not", "a", "name"]})
+
+    with pytest.raises(instances.EngineAddressError):
+        instances.engine_vault_name(root, "sandbox")

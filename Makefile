@@ -304,10 +304,10 @@ help:
 	row "make engine-remove"    "host"   "Remove an ssh engine whole: forward, docker context, local state, registration. Needs CONFIRM=remove; refuses while a project container exists on the engine."; \
 	row "make cert-ca"          "host"   "Create this instance's certificate authority. Once per instance; refuses if one exists."; \
 	row "make cert-client"      "host"   "Issue the client certificate 'make connect-start' presents. Run after cert-ca, and again at renewal."; \
-	row "make cert-publish"     "remote" "Issue server material and publish it to Parameter Store. The daemon needs it to open its listener."; \
+	row "make cert-publish"     "remote" "Issue server material and publish it to the engine's store (Parameter Store, or Key Vault for azure). The daemon needs it to open its listener."; \
 	row "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."; \
 	row "make cert-status"      "host"   "Client and CA expiry per instance. EC2 engines only; no TLS material exists for ssh engines."; \
-	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."; \
+	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to the engine's store (Parameter Store, or Key Vault for azure). Remote builds do this when needed."; \
 	row "make connect-start"    "remote" "Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json, relay for azure engines); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
 	row "make connect-status"   "host"   "Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1"; \
 	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \

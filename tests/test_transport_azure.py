@@ -30,10 +30,12 @@ import base64
 import hashlib
 import importlib
 import inspect
+import json
 import os
 import selectors
 import signal
 import socket
+import stat
 import struct
 import threading
 import time
@@ -1278,3 +1280,393 @@ def test_main_verify_reports_a_failed_handshake_and_tears_everything_down(
     docker_value = create_commands[0][create_commands[0].index("--docker") + 1]
     port = int(docker_value.split("tcp://127.0.0.1:")[1].split(",")[0])
     _wait_until(lambda: not _port_accepts(port), _HANG_GUARD_SECONDS, "the acceptor closing")
+
+
+# ---------------------------------------------------------------------------
+# install-material: the azure twin of transport.install_material's own test
+# file's discipline (`tests/test_install_material.py`). The fake runner
+# answers `az vm run-command invoke` and `az vm run-command show`; the
+# script the invoke carries is read at call time, while the 0600 `--scripts
+# @file` still exists, so the content pins are the bytes production would
+# hand azure. The poll clock and sleep are injected, so the deadline tests
+# walk time without waiting on any of it.
+# ---------------------------------------------------------------------------
+
+_INSTALL_RUN_COMMAND_NAME = "run-azrelay-1"
+_RESOURCE_GROUP = "gd-rg"
+_VM_NAME = "gd-vm"
+
+
+class _InstallRunner:
+    """A CommandRunner double that answers the two run-command calls it recognizes.
+
+    `states` is the sequence of `instanceView.executionState` values the
+    show polls answer with, one per poll; the invoke answer carries the
+    generated run-command name azure assigns, read back the way
+    production's own JSON answer is read.
+    """
+
+    def __init__(self, states: Sequence[str], *, error: str = "") -> None:
+        self.commands: list[tuple[str, ...]] = []
+        self.timeouts: list[float | None] = []
+        self.script_text: str | None = None
+        self.script_mode: int | None = None
+        # When set, the show polls answer with this raw stdout instead of
+        # the instance-view JSON the states would otherwise render.
+        self.raw_show_stdout: str | None = None
+        self._states = list(states)
+        self._error = error
+
+    def __call__(self, command: Sequence[str], timeout_seconds: float | None) -> CommandResult:
+        command = tuple(command)
+        self.commands.append(command)
+        self.timeouts.append(timeout_seconds)
+        if "invoke" in command:
+            scripts_at = command.index("--scripts")
+            reference = Path(command[scripts_at + 1][len("@") :])
+            assert reference.is_file(), f"the script must be a regular file, not {reference}"
+            self.script_mode = stat.S_IMODE(reference.stat().st_mode)
+            self.script_text = reference.read_text(encoding="utf-8")
+            return CommandResult(
+                exit_code=0, stdout=json.dumps({"name": _INSTALL_RUN_COMMAND_NAME})
+            )
+        if "show" in command:
+            if self.raw_show_stdout is not None:
+                return CommandResult(exit_code=0, stdout=self.raw_show_stdout)
+            state = self._states.pop(0) if self._states else "Running"
+            view: dict[str, object] = {"executionState": state}
+            if self._error:
+                view["error"] = self._error
+            return CommandResult(exit_code=0, stdout=json.dumps({"instanceView": view}))
+        raise AssertionError(f"unexpected command: {command}")
+
+    def invoke_command(self) -> tuple[str, ...]:
+        return next(command for command in self.commands if "invoke" in command)
+
+    def show_commands(self) -> list[tuple[str, ...]]:
+        return [command for command in self.commands if "show" in command]
+
+
+class _SteppedClock:
+    """A monotonic clock advanced by the fake sleep, one step per poll."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _write_install_address(instance: str, *, vault_uri: str | None = None) -> None:
+    record: dict[str, object] = {
+        "relay_namespace": _NAMESPACE,
+        "hybrid_connection": _HYBRID_CONNECTION,
+        "resource_group": _RESOURCE_GROUP,
+        "vm_name": _VM_NAME,
+        "vault_name": "gd-vault",
+    }
+    if vault_uri is not None:
+        record["vault_uri"] = vault_uri
+    instances.write_engine_address(_repo_root(), instance, record)
+
+
+def _install(
+    runner: _InstallRunner,
+    *,
+    clock: _SteppedClock | None = None,
+    daemon_user: str = "dockerd",
+) -> None:
+    transport_azure = _import_transport_azure()
+    transport_azure.install_material(
+        runner,
+        instance=_NAME,
+        daemon_user=daemon_user,
+        **(
+            {"clock": clock.clock, "pace": clock.sleep}
+            if clock is not None
+            else {}
+        ),
+    )
+
+
+def test_install_invoke_argv_is_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_install_address(_NAME)
+    runner = _InstallRunner(["Succeeded"])
+
+    _install(runner)
+
+    invoke = runner.invoke_command()
+    assert invoke[:4] == ("az", "vm", "run-command", "invoke")
+    assert "--resource-group" in invoke
+    assert invoke[invoke.index("--resource-group") + 1] == _RESOURCE_GROUP
+    assert "--name" in invoke and invoke[invoke.index("--name") + 1] == _VM_NAME
+    assert "--command-id" in invoke
+    assert invoke[invoke.index("--command-id") + 1] == "RunShellScript"
+    assert invoke[invoke.index("--scripts") + 1].startswith("@")
+    assert "--no-wait" in invoke
+    assert f"'{_NAMESPACE}'" not in " ".join(invoke)
+
+
+def test_install_polls_the_run_command_show_until_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_install_address(_NAME)
+    runner = _InstallRunner(["Running", "Running", "Succeeded"])
+
+    _install(runner)
+
+    shows = runner.show_commands()
+    assert len(shows) == 3
+    show = shows[0]
+    assert show[:4] == ("az", "vm", "run-command", "show")
+    assert "--run-command-name" in show
+    assert show[show.index("--run-command-name") + 1] == _INSTALL_RUN_COMMAND_NAME
+    assert show[show.index("--resource-group") + 1] == _RESOURCE_GROUP
+    assert show[show.index("--vm-name") + 1] == _VM_NAME
+    assert "--instance-view" in show
+    assert "--output" in show and show[show.index("--output") + 1] == "json"
+
+
+def test_the_script_pulls_from_the_vault_through_the_instance_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The instance pulls. The script names secret URLs, never a value."""
+    _write_install_address(_NAME)
+    runner = _InstallRunner(["Succeeded"])
+
+    _install(runner)
+
+    script = runner.script_text
+    assert script is not None
+    assert "Metadata:true" in script
+    assert "api-version=2018-02-01" in script
+    assert "resource=https://vault.azure.net" in script
+    assert "access_token" in script
+    for secret_name in ("tls-server-key", "tls-server-cert", "tls-ca"):
+        assert (
+            f"https://gd-vault.vault.azure.net/secrets/{secret_name}?api-version=7.4"
+            in script
+        ), f"{secret_name} is published but never fetched"
+        assert '["value"]' in script, "the Key Vault answer is JSON; the value must be extracted"
+    assert "BEGIN" not in script
+    assert "PRIVATE KEY" not in script
+
+
+def test_the_script_never_briefly_world_readables_the_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_install_address(_NAME)
+    runner = _InstallRunner(["Succeeded"])
+
+    _install(runner)
+
+    script = runner.script_text
+    assert script is not None
+    umask_at = next(index for index, line in enumerate(script.splitlines()) if line == "umask 077")
+    first_fetch = next(
+        index for index, line in enumerate(script.splitlines()) if "secrets/tls-" in line
+    )
+    assert umask_at < first_fetch, "the umask must be set before anything is written"
+    assert f'chmod 0600 "$dir/{certs.SERVER_KEY_FILENAME}"' in script
+    assert f'chmod 0644 "$dir/{certs.SERVER_CERT_FILENAME}"' in script
+    assert f'chmod 0644 "$dir/{certs.CA_CERT_FILENAME}"' in script
+
+
+def test_the_script_starts_the_daemon_after_the_material_is_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_install_address(_NAME)
+    runner = _InstallRunner(["Succeeded"])
+
+    _install(runner)
+
+    script = runner.script_text
+    assert script is not None
+    lines = script.splitlines()
+    last_write = max(
+        index for index, line in enumerate(lines) if "chown" in line or "chmod" in line
+    )
+    start_at = next(index for index, line in enumerate(lines) if "restart docker.service" in line)
+    assert start_at > last_write, "the daemon must not start before its certificate exists"
+    assert any("is-active docker.service" in line for line in lines), (
+        "the step must confirm the daemon is running rather than trusting the start's exit code"
+    )
+
+
+def test_the_script_is_handed_to_az_as_a_private_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_install_address(_NAME)
+    runner = _InstallRunner(["Succeeded"])
+
+    _install(runner)
+
+    assert runner.script_mode == 0o600, "the script carries no secret but is still private"
+
+
+def test_the_poll_budget_is_bounded_by_the_configured_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_azure = _import_transport_azure()
+    _write_install_address(_NAME)
+    monkeypatch.setenv(transport_azure.AZURE_MATERIAL_INSTALL_TIMEOUT_ENV_VAR, "41")
+    runner = _InstallRunner(["Succeeded"])
+
+    _install(runner)
+
+    assert runner.timeouts[0] == 41.0, "the invoke is bounded by the same budget"
+    assert all(
+        timeout is not None and 0 < timeout <= 41.0 for timeout in runner.timeouts[1:]
+    ), (
+        "each poll is a small read bounded by the remaining deadline, "
+        f"not by a separate budget: {[timeout for timeout in runner.timeouts[1:]]}"
+    )
+
+
+def test_the_poll_paces_on_the_shared_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_azure = _import_transport_azure()
+    _write_install_address(_NAME)
+    runner = _InstallRunner(["Running", "Running", "Succeeded"])
+    clock = _SteppedClock()
+
+    _install(runner, clock=clock)
+
+    assert clock.now == 2 * transport_azure._RUN_COMMAND_POLL_SECONDS, (
+        "one poll interval per non-terminal poll, never more and never a fixed wait"
+    )
+
+
+def test_a_timeout_names_the_run_command_and_the_variable_that_extends_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_azure = _import_transport_azure()
+    _write_install_address(_NAME)
+    runner = _InstallRunner(["Running"] * 50)
+    clock = _SteppedClock()
+
+    with pytest.raises(transport_azure.MaterialInstallError) as excinfo:
+        _install(runner, clock=clock)
+
+    message = str(excinfo.value)
+    assert _INSTALL_RUN_COMMAND_NAME in message
+    assert transport_azure.AZURE_MATERIAL_INSTALL_TIMEOUT_ENV_VAR in message
+    assert _VM_NAME in message
+
+
+def test_a_terminal_failure_carries_the_instance_view_error_and_the_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_azure = _import_transport_azure()
+    _write_install_address(_NAME)
+    runner = _InstallRunner(["Failed"], error="cannot find the vault: not authorized")
+
+    with pytest.raises(transport_azure.MaterialInstallError) as excinfo:
+        _install(runner)
+
+    message = str(excinfo.value)
+    assert "Failed" in message
+    assert "not authorized" in message
+    assert f"make cert-publish INSTANCE={_NAME}" in message
+    assert _INSTALL_RUN_COMMAND_NAME in message
+
+
+def test_an_unreadable_poll_answer_fails_instead_of_polling_forever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_azure = _import_transport_azure()
+    _write_install_address(_NAME)
+    runner = _InstallRunner(["Running"])
+    runner.raw_show_stdout = "not json"
+
+    with pytest.raises(transport_azure.MaterialInstallError) as excinfo:
+        _install(runner)
+
+    assert "unparsable output" in str(excinfo.value)
+
+
+def test_a_vault_uri_in_the_record_is_used_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_install_address(_NAME, vault_uri="https://gd-vault.vault.azure.net/")
+    runner = _InstallRunner(["Succeeded"])
+
+    _install(runner)
+
+    script = runner.script_text
+    assert script is not None
+    assert "https://gd-vault.vault.azure.net/secrets/tls-server-key" in script
+
+
+@pytest.mark.parametrize("missing_key", ["vm_name", "resource_group", "vault_name"])
+def test_a_record_missing_an_install_key_names_the_deploy_remedy(
+    monkeypatch: pytest.MonkeyPatch, missing_key: str
+) -> None:
+    transport_azure = _import_transport_azure()
+    record: dict[str, object] = {
+        "relay_namespace": _NAMESPACE,
+        "hybrid_connection": _HYBRID_CONNECTION,
+        "resource_group": _RESOURCE_GROUP,
+        "vm_name": _VM_NAME,
+        "vault_name": "gd-vault",
+    }
+    del record[missing_key]
+    instances.write_engine_address(_repo_root(), _NAME, record)
+    runner = _InstallRunner(["Succeeded"])
+
+    with pytest.raises(transport_azure.RelayConfigError) as excinfo:
+        _install(runner)
+
+    message = str(excinfo.value)
+    assert missing_key in message
+    assert f"make instance-deploy INSTANCE={_NAME}" in message
+    assert runner.commands == [], "nothing may run against azure without a whole record"
+
+
+def test_a_vault_name_that_is_not_a_bare_label_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_azure = _import_transport_azure()
+    instances.write_engine_address(
+        _repo_root(),
+        _NAME,
+        {
+            "relay_namespace": _NAMESPACE,
+            "hybrid_connection": _HYBRID_CONNECTION,
+            "resource_group": _RESOURCE_GROUP,
+            "vm_name": _VM_NAME,
+            "vault_name": "https://elsewhere.vault.azure.net",
+        },
+    )
+
+    with pytest.raises(transport_azure.RelayConfigError) as excinfo:
+        _import_transport_azure().vault_url(
+            instances.engine_address(_repo_root(), _NAME), instance=_NAME
+        )
+
+    assert "bare vault name" in str(excinfo.value)
+
+
+def test_install_material_argv_through_the_cli(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The subcommand certificates run reaches `install_material` and reports success."""
+    transport_azure = _import_transport_azure()
+    _write_install_address(_NAME)
+    runner = _InstallRunner(["Succeeded"])
+    monkeypatch.setattr(transport_azure.transport, "subprocess_command_runner", runner)
+
+    exit_code = transport_azure.main(
+        ["install-material", "--instance", _NAME, "--daemon-user", "dockerd"]
+    )
+
+    assert exit_code == 0
+    assert runner.invoke_command(), "the subcommand must issue the run command"
+    assert "installed" in capsys.readouterr().out.lower()

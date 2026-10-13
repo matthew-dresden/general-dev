@@ -651,6 +651,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     skills_list_parser.set_defaults(handler=_run_skills_list)
 
+    secrets_vault_parser = subparsers.add_parser(
+        "secrets-vault",
+        help="Print the azure Key Vault name recorded for one instance's engine address.",
+        description=_SECRETS_VAULT_DESCRIPTION,
+    )
+    secrets_vault_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    secrets_vault_parser.set_defaults(handler=_run_secrets_vault)
+
     return parser
 
 
@@ -1574,6 +1582,24 @@ def _run_skills_list(args: argparse.Namespace) -> int:
     root = repo.find_root(Path.cwd())
     for message in skills_install.report(root, Path.home(), args.agent, args.scope):
         print(message)
+    return 0
+
+
+_SECRETS_VAULT_DESCRIPTION = """Print the azure Key Vault name one instance's address record has.
+
+The one reader of the record's vault name that the shell entry points
+consume: push-secrets.sh publishes the configuration payload there, and
+container.sh's staleness probe compares against it. The record is written
+by the deploy, so a missing record -- or one whose vault name has not been
+written yet -- fails naming `make instance-deploy` as the remedy, the same
+refusal every other accessor on that record raises.
+"""
+
+
+def _run_secrets_vault(args: argparse.Namespace) -> int:
+    """Print `instances.engine_vault_name`'s answer, one line, nothing else."""
+    root = repo.find_root(Path.cwd())
+    print(instances.engine_vault_name(root, args.name))
     return 0
 
 

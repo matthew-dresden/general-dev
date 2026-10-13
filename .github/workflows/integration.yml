@@ -200,10 +200,12 @@ jobs:
       # the successful removal stops the forward itself as its first
       # teardown step. Without CONFIRM=remove the removal must refuse
       # (non-zero); with it, the removal must complete; afterwards the
-      # instance must be gone from the listing. The listing assertion runs
-      # on the captured table for the same AWS-row reason as
-      # list-containers above (the summary line proves the table rendered;
-      # the row grep proves ci is gone).
+      # instance must be gone from the listing. The listing runs with its
+      # exit code tolerated for the same AWS-row reason as list-containers
+      # above; the assertion is its content: ci is this runner's only
+      # configured instance, so a correct removal empties the fleet and the
+      # listing prints its zero-instance note -- should another instance
+      # ever be configured here, a table with no ci row is the same verdict.
       - name: engine-remove gate and teardown
         shell: bash
         run: |
@@ -218,13 +220,15 @@ jobs:
           make engine-remove INSTANCE=ci CONFIRM=remove
           listing="$(make list-instances 2>&1 || true)"
           printf '%s\n' "$listing"
-          printf '%s\n' "$listing" | grep -Fq 'instance(s) listed' || {
-            echo "list-instances produced no table" >&2
-            exit 1
-          }
-          if printf '%s\n' "$listing" | grep -Eq '(^|[[:space:]])ci([[:space:]]|$)'; then
-            echo "ci is still listed after engine-remove" >&2
-            exit 1
+          if ! printf '%s\n' "$listing" | grep -Fq 'No instances configured under remote-instances/.'; then
+            printf '%s\n' "$listing" | grep -Fq 'instance(s) listed' || {
+              echo "list-instances produced neither the zero-instance note nor a table" >&2
+              exit 1
+            }
+            if printf '%s\n' "$listing" | grep -Eq '(^|[[:space:]])ci([[:space:]]|$)'; then
+              echo "ci is still listed after engine-remove" >&2
+              exit 1
+            fi
           fi
 
       # Step 5: the run-log tail.

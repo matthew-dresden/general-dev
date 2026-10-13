@@ -76,7 +76,12 @@ one single-line JSON object per instance (or for the one instance) and no
 summary line, for machine consumption. `instance-link` is the one handler
 with a check of its own: it refuses an id outside the `i-`-plus-lowercase-hex
 shape as a usage error before the store is written, because a typo'd id would
-misdirect every power and status operation at once.
+misdirect every power and status operation at once. `engine-remove` is the
+SSH engine kind's teardown handler over the same engine: it passes
+`forwards.stop_forward` explicitly (read from the `forwards` module at call
+time, the same call-time-read discipline), because stopping a daemon means
+signalling a process group, which is the one operation in the removal a
+runner-seamed fake cannot stand in for.
 
 `container-list` is the containers-side counterpart of `instance-list`, a
 thin handler over `devcontainer_config.containers` (the engine `make
@@ -117,7 +122,15 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 
-from devcontainer_config import containers, hostcreds, instance_ops, instances, repo, skills_install
+from devcontainer_config import (
+    containers,
+    forwards,
+    hostcreds,
+    instance_ops,
+    instances,
+    repo,
+    skills_install,
+)
 from devcontainer_config.githooks import (
     HOOK_NAMES,
     GitHooksError,
@@ -421,6 +434,40 @@ def _build_parser() -> argparse.ArgumentParser:
     instance_init_parser.add_argument("--ami", metavar="AMI_ID", help=_AMI_HELP)
     instance_init_parser.set_defaults(handler=_run_instance_init)
 
+    engine_init_parser = subparsers.add_parser(
+        "engine-init",
+        help="Scaffold remote-instances/<name>/engine.json for a new SSH engine; never connects.",
+        description=_ENGINE_INIT_DESCRIPTION,
+    )
+    engine_init_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    engine_init_parser.add_argument(
+        "--host", metavar="HOST", required=True, help=_ENGINE_INIT_HOST_HELP
+    )
+    engine_init_parser.add_argument(
+        "--user", metavar="USER", required=True, help=_ENGINE_INIT_USER_HELP
+    )
+    engine_init_parser.add_argument(
+        "--port",
+        type=int,
+        default=instances.DEFAULT_ENGINE_PORT,
+        help=_ENGINE_INIT_PORT_HELP,
+    )
+    engine_init_parser.add_argument(
+        "--docker-addr",
+        metavar="ADDR",
+        default=instances.DEFAULT_ENGINE_DOCKER_ADDR,
+        help=_ENGINE_INIT_DOCKER_ADDR_HELP,
+    )
+    engine_init_parser.set_defaults(handler=_run_engine_init)
+
+    engine_remove_parser = subparsers.add_parser(
+        "engine-remove",
+        help="Remove one SSH engine: forward, docker context, local state, registration.",
+        description=_ENGINE_REMOVE_DESCRIPTION,
+    )
+    engine_remove_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    engine_remove_parser.set_defaults(handler=_run_engine_remove)
+
     instance_list_parser = subparsers.add_parser(
         "instance-list",
         help="List every configured instance with its live state (spec Section 4.5).",
@@ -602,16 +649,29 @@ REMOTE_AWS_REGION, which has no default. Pass --ami to pin one by hand
 instead.
 """
 
+_ENGINE_INIT_DESCRIPTION = """Scaffold remote-instances/<name>/engine.json for a new SSH engine.
+
+Writes the one manifest a generic SSH endpoint with Docker requires: a
+host, a user, and optional port and docker-socket values. No AWS, no
+Terragrunt, no Parameter Store, no certificates -- the manifest is the
+whole declaration, validated before anything is written. Never connects:
+the transport that consumes it, `devcontainer_config.transport_ssh`, runs
+later, at connect time (`make connect-start INSTANCE=<name>`, which
+dispatches on the engine's own kind).
+"""
+
 _INSTANCE_LIST_DESCRIPTION = """List every configured instance with its live state.
 
 Prints one aligned row per instance -- EC2 power state, recorded id,
 Parameter Store material, client certificate, forwarded port and docker
-context -- then a summary line. A probe that could not answer prints a dash
-in its column; the first failure's reason is reported on stderr and the
-command exits 1, so one unreachable surface degrades its own row instead of
-suppressing the listing. With --json, prints exactly one single-line JSON
-object per instance (the same fields, lookup_error included) and no summary
-line, so scripts consume one object per line.
+context -- then a summary line. The probes are kind-aware: an SSH engine
+runs no EC2 probe at all and answers one engine reachability probe in
+their place, so its EC2-only columns print a dash. A probe that could not
+answer prints a dash in its column; the first failure's reason is reported
+on stderr and the command exits 1, so one unreachable surface degrades its
+own row instead of suppressing the listing. With --json, prints exactly
+one single-line JSON object per instance (the same fields, lookup_error
+included) and no summary line, so scripts consume one object per line.
 """
 
 _INSTANCE_STATUS_DESCRIPTION = """One instance's live state, in the columns instance-list renders.
@@ -676,11 +736,42 @@ _AMI_HELP = (
     "Pin this AMI id instead of resolving Canonical's current Ubuntu 24.04 arm64 image from SSM."
 )
 
+_ENGINE_INIT_HOST_HELP = "The SSH engine's host: a bare hostname or address, with no URL scheme."
+
+_ENGINE_INIT_USER_HELP = "The user the SSH engine is reached as."
+
+_ENGINE_INIT_PORT_HELP = f"The engine's SSH port (default: {instances.DEFAULT_ENGINE_PORT})."
+
+_ENGINE_INIT_DOCKER_ADDR_HELP = (
+    "The docker socket on the engine: an absolute Unix socket path or a "
+    "'tcp://<host>:<port>' URL "
+    f"(default: {instances.DEFAULT_ENGINE_DOCKER_ADDR}). Linux endpoints "
+    "usually serve an absolute Unix socket path; a Windows endpoint needs a "
+    "tcp destination, because Windows OpenSSH cannot forward to named pipes "
+    "or Unix sockets: enable Docker Desktop's 'Expose daemon on "
+    "tcp://localhost:2375 without TLS' and pass tcp://localhost:2375."
+)
+
 _INSTANCE_JSON_HELP = (
     "Print machine-readable output instead of the table: exactly one "
     "single-line JSON object per instance (instance-list) or for the one "
     "instance (instance-status), lookup_error included, and no summary line."
 )
+
+_ENGINE_REMOVE_DESCRIPTION = """Remove one SSH engine whole.
+
+Refuses anything it cannot remove truthfully: the instance must be an SSH
+engine (an EC2 instance is refused, naming make instance-destroy), and no
+container carrying this project's label may still exist on the engine's
+docker context (the remedy is `make clean ENGINE=<name>`, whose own
+unpushed-work guard still applies). Then, in order: the engine's forward is
+stopped, its docker context is removed (an absent one is reported as the
+desired state, never a failure), its certificate-material directory is
+deleted -- the forward record and log live there -- and
+remote-instances/<name>, the registration engine-init wrote, is removed.
+Every removal is attempted even after an earlier one failed; all failures
+are raised together at the end.
+"""
 
 _INSTANCE_ID_HELP = (
     "The EC2 instance id to record, shaped i- followed by lowercase hex "
@@ -717,16 +808,28 @@ def _tri_state(value: bool | None) -> str:
 
 
 def _instance_row_values(row: instance_ops.InstanceState, root: Path) -> tuple[str, ...]:
-    """One table row for `row`, every unanswerable probe rendered as a dash."""
+    """One table row for `row`, every unanswerable probe rendered as a dash.
+
+    The STATE column is kind-aware: an SSH engine row carries the
+    reachability probe's answer (`ok`/`unreachable`), the one liveness
+    question its kind has, while an EC2 row carries the EC2 power state.
+    The EC2-only probes an ssh engine never ran (`ec2_state`,
+    `params_present`) stay None there, which renders as the same dash an
+    unanswerable probe gets.
+    """
     if row.context_exists is True:
         context = instances.docker_context(root, row.name)
     elif row.context_exists is False:
         context = "absent"
     else:
         context = "-"
+    if row.engine_reachable is not None:
+        state_column = "ok" if row.engine_reachable else "unreachable"
+    else:
+        state_column = row.ec2_state or "-"
     return (
         row.name,
-        row.ec2_state or "-",
+        state_column,
         row.recorded_id or "-",
         _tri_state(row.params_present),
         _tri_state(row.certs_present),
@@ -780,6 +883,30 @@ def _run_instance_init(args: argparse.Namespace) -> int:
     root = repo.find_root(Path.cwd())
     result = instance_ops.scaffold(
         root, args.name, region=args.region, ami=args.ami, runner=instance_ops.subprocess_runner
+    )
+    for message in result.messages:
+        print(message)
+    return 0
+
+
+def _run_engine_init(args: argparse.Namespace) -> int:
+    """Scaffold the one manifest a new SSH engine requires; print the guidance verbatim.
+
+    The engine-kind counterpart of `_run_instance_init`, over
+    `instance_ops.scaffold_engine`: field-level refusals reach this handler
+    only as `ScaffoldError`s (the engine wraps them), which `main` converts
+    into exit 1; there is no failure this handler reports as anything but
+    that exception.
+    """
+    root = repo.find_root(Path.cwd())
+    result = instance_ops.scaffold_engine(
+        root,
+        args.name,
+        host=args.host,
+        port=args.port,
+        user=args.user,
+        docker_addr=args.docker_addr,
+        runner=instance_ops.subprocess_runner,
     )
     for message in result.messages:
         print(message)
@@ -938,6 +1065,28 @@ def _run_instance_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_engine_remove(args: argparse.Namespace) -> int:
+    """Remove one SSH engine whole, printing each removal message verbatim.
+
+    The engine-kind counterpart of `_run_instance_cleanup`, over
+    `instance_ops.engine_remove`. `stop_forward` is passed explicitly --
+    read from the `forwards` module at call time, the same seam discipline
+    as the runner, because stopping a daemon means signalling a process
+    group, which no runner-shaped fake can stand in for. Every refusal and
+    every aggregated removal failure reaches this handler only as an
+    `EngineRemoveError`, which `main` converts into exit 1.
+    """
+    root = repo.find_root(Path.cwd())
+    for message in instance_ops.engine_remove(
+        root,
+        args.name,
+        runner=instance_ops.subprocess_runner,
+        stop_forward=forwards.stop_forward,
+    ):
+        print(message)
+    return 0
+
+
 def _run_lint_secrets(args: argparse.Namespace) -> int:
     """Scan staged content or a commit range under the current repository root.
 
@@ -1005,11 +1154,34 @@ def _run_hooks_pre_push(args: argparse.Namespace) -> int:
 def _print_address_block(root: Path, name: str) -> None:
     """The statically derivable half of `name`'s Section 9 addressing block, one line each.
 
+    The block is kind-specific, keyed on `instances.read_kind`: an EC2
+    instance prints exactly the six rows it always printed (Terragrunt
+    directory, state key, docker context, parameter prefix, certificate
+    directory; every line the existing consumers pin), while an SSH
+    engine prints `ENGINE_`-prefixed lines from its manifest instead of the
+    Terragrunt/state/Parameter Store rows that do not exist for it. The
+    `ENGINE_` prefix is what lets the shell export loop consume the block
+    unchanged: it exports every `KEY=value` line generically, so the new
+    keys need no shell change.
+
     `forwarded_port` is deliberately excluded: it needs a real docker
     context (AC-FUNC-009 names only "the statically derivable half"), and
     this entry point's own suite runs with no docker, no AWS and no network
     (AC-TEST-004).
     """
+    kind = instances.read_kind(root, name)
+    if kind == instances.ENGINE_KIND_SSH:
+        values = instances.engine_manifest(root, name)
+        print(f"INSTANCE={name}")
+        print(f"KIND={kind}")
+        print(f"DOCKER_CONTEXT={instances.docker_context(root, name)}")
+        print(f"CERTS_DIR={instances.certs_dir(name)}")
+        print(f"ENGINE_HOST={values['host']}")
+        print(f"ENGINE_PORT={values['port']}")
+        print(f"ENGINE_USER={values['user']}")
+        print(f"ENGINE_DOCKER_ADDR={values['docker_addr']}")
+        print(f"ENGINE_ENDPOINT={instances.engine_endpoint(root, name)}")
+        return
     print(f"INSTANCE={name}")
     print(f"TERRAGRUNT_DIR={instances.terragrunt_dir(root, name)}")
     print(f"STATE_KEY={instances.state_key(name)}")

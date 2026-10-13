@@ -1186,3 +1186,440 @@ def test_cleanup_docker_failure_does_not_abort_ssm_or_certs(tmp_path: Path) -> N
     ) in runner.calls
     assert not cert_directory.exists()
     assert "remove docker context" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# state / list_state: the ssh engine kind
+# ---------------------------------------------------------------------------
+
+
+def _write_engine_manifest(
+    root: Path,
+    name: str,
+    *,
+    host: str,
+    user: str,
+    port: int,
+) -> Path:
+    """A valid engine.json under `remote-instances/<name>/`, from generated values."""
+    instances = _import_instances()
+    manifest = instances.engine_manifest_path(root, name)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "kind": instances.ENGINE_KIND_SSH,
+                "host": host,
+                "user": user,
+                "port": port,
+                "docker_addr": "/var/run/docker.sock",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def _engine_host() -> str:
+    """A host-shaped value unique per call, under the reserved example.invalid domain."""
+    return f"engine-{uuid.uuid4().hex[:8]}.example.invalid"
+
+
+def _engine_user() -> str:
+    """A user name unique per call."""
+    return f"dev-{uuid.uuid4().hex[:8]}"
+
+
+def _engine_port() -> int:
+    """A valid non-default port number unique per call."""
+    return 20000 + uuid.uuid4().int % 20000
+
+
+def test_state_for_an_ssh_engine_probes_reachability_and_skips_the_ec2_probes(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    host, user, port = _engine_host(), _engine_user(), _engine_port()
+    _write_engine_manifest(root, name, host=host, user=user, port=port)
+    runner = _FakeRunner()
+    runner.queue(_ok("27.0.3\n"))  # the reach probe: docker answers through ssh
+    runner.queue(_err("no such context: anything"))  # the context inspect
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.engine_reachable is True
+    assert snapshot.ec2_state is None
+    assert snapshot.params_present is None
+    assert snapshot.recorded_id is None
+    assert snapshot.certs_present is False
+    assert snapshot.context_exists is False
+    assert snapshot.lookup_error is None
+    # The reach probe is the ssh one-shot the module documents; no aws call
+    # of any kind runs for an ssh engine.
+    assert runner.calls[0] == (
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-p",
+        str(port),
+        f"{user}@{host}",
+        "docker",
+        "version",
+        "--format",
+        "{{.Server.Version}}",
+    )
+    assert all(call[0] != "aws" for call in runner.calls)
+
+
+def test_state_reports_an_unreachable_engine_as_an_answer_not_an_error(
+    tmp_path: Path,
+) -> None:
+    """`engine_reachable` is False and no lookup_error: unreachable is the
+    probe's answer, and a listing reporting it must still exit zero."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    _write_engine_manifest(
+        root, name, host=_engine_host(), user=_engine_user(), port=_engine_port()
+    )
+    runner = _FakeRunner()
+    runner.queue(_err("Connection refused"))  # the reach probe failed
+    runner.queue(_err("no such context: anything"))
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.engine_reachable is False
+    assert snapshot.lookup_error is None
+
+
+def test_state_ssh_probe_honors_a_configured_connect_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    _write_engine_manifest(
+        root, name, host=_engine_host(), user=_engine_user(), port=_engine_port()
+    )
+    monkeypatch.setenv(ops.ENGINE_PROBE_CONNECT_TIMEOUT_ENV_VAR, "2.5")
+    runner = _FakeRunner()
+    runner.queue(_ok("27.0.3\n"))
+    runner.queue(_err("no such context: anything"))
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.engine_reachable is True
+    assert runner.calls[0][4] == "ConnectTimeout=2.5"
+
+
+def test_state_invalid_probe_timeout_is_a_lookup_error_and_skips_the_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timeout value the configuration reader refuses is a configuration
+    failure, not an unreachable engine: the probe never runs, the answer is
+    None, and the reason names the variable."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    _write_engine_manifest(
+        root, name, host=_engine_host(), user=_engine_user(), port=_engine_port()
+    )
+    monkeypatch.setenv(ops.ENGINE_PROBE_CONNECT_TIMEOUT_ENV_VAR, "not-a-number")
+    runner = _FakeRunner()
+    runner.queue(_err("no such context: anything"))  # the context inspect only
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.engine_reachable is None
+    assert snapshot.lookup_error is not None
+    assert ops.ENGINE_PROBE_CONNECT_TIMEOUT_ENV_VAR in snapshot.lookup_error
+    assert all(call[0] != "ssh" for call in runner.calls)
+
+
+def test_state_for_a_corrupt_manifest_keeps_the_ssh_kind_and_records_the_reason(
+    tmp_path: Path,
+) -> None:
+    """A manifest that parses as JSON but breaks a field rule is a probe
+    failure, never a kind flip: no EC2 probe may run against a directory
+    that declares (however brokenly) an engine."""
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    manifest = root / "remote-instances" / name / instances.ENGINE_MANIFEST_FILENAME
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"kind": "ssh", "host": ""}', encoding="utf-8")
+    runner = _FakeRunner()
+    runner.queue(_err("no such context: anything"))  # the context inspect only
+
+    snapshot = ops.state(root, name, runner=runner)
+
+    assert snapshot.engine_reachable is None
+    assert snapshot.ec2_state is None
+    assert snapshot.params_present is None
+    assert snapshot.lookup_error is not None
+    assert "host" in snapshot.lookup_error
+    assert all(call[0] != "aws" and call[0] != "ssh" for call in runner.calls)
+
+
+# ---------------------------------------------------------------------------
+# engine_remove (the ssh engine teardown)
+# ---------------------------------------------------------------------------
+
+
+def _seed_engine(root: Path, name: str, *, host: str, user: str, port: int) -> None:
+    """The registration an engine-init writes: the directory and its manifest."""
+    manifest = _write_engine_manifest(root, name, host=host, user=user, port=port)
+    assert manifest.is_file()
+
+
+def _engine_ps_argv(root: Path, context: str) -> tuple[str, ...]:
+    """The container probe engine_remove issues, through the shared label."""
+    containers_module = importlib.import_module("devcontainer_config.containers")
+    return (
+        "docker",
+        "--context",
+        context,
+        "ps",
+        "-a",
+        "--filter",
+        containers_module.project_label(root),
+        "--format",
+        "{{.Names}}",
+    )
+
+
+class _RecordingStopper:
+    """The injected forward stopper: records the name, answers success."""
+
+    def __init__(self, timeline: list[object] | None = None) -> None:
+        self.calls: list[str] = []
+        self._timeline = timeline
+        self.error: Exception | None = None
+
+    def __call__(self, name: str) -> str:
+        self.calls.append(name)
+        if self._timeline is not None:
+            self._timeline.append(("stop-forward", name))
+        if self.error is not None:
+            raise self.error
+        return f"stopped forward for {name!r} (pid 424242)"
+
+
+class _TimelineRunner(_FakeRunner):
+    """A `_FakeRunner` that mirrors every argv into a shared timeline, so a
+    test can assert the interleaving of runner-issued commands with the
+    injected forward stopper."""
+
+    def __init__(self, timeline: list[object]) -> None:
+        super().__init__()
+        self._timeline = timeline
+
+    def __call__(
+        self, argv: Sequence[str], stdin: str | None, *, env: Mapping[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        self._timeline.append(tuple(argv))
+        return super().__call__(argv, stdin, env=env)
+
+
+def test_engine_remove_refuses_an_ec2_instance_naming_instance_destroy(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("ec2")
+    _seed_instance_dir(root, name)
+    runner = _FakeRunner()
+    stopper = _RecordingStopper()
+
+    with pytest.raises(ops.EngineRemoveError) as exc_info:
+        ops.engine_remove(root, name, runner=runner, stop_forward=stopper)
+
+    message = str(exc_info.value)
+    assert "make instance-destroy" in message
+    assert f"INSTANCE={name}" in message
+    assert runner.calls == [], "a refusal runs no command"
+    assert stopper.calls == []
+    assert (root / "remote-instances" / name).is_dir()
+
+
+def test_engine_remove_refuses_while_a_project_container_exists(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    _seed_engine(root, name, host=_engine_host(), user=_engine_user(), port=_engine_port())
+    runner = _FakeRunner()
+    runner.queue(_ok("the-project-devcontainer\n"))  # the container probe
+    stopper = _RecordingStopper()
+
+    with pytest.raises(ops.EngineRemoveError) as exc_info:
+        ops.engine_remove(root, name, runner=runner, stop_forward=stopper)
+
+    message = str(exc_info.value)
+    assert "the-project-devcontainer" in message
+    assert f"make clean ENGINE={name}" in message
+    assert "CONFIRM=remove" in message
+    assert len(runner.calls) == 1, "a refusal stops at the container probe"
+    assert stopper.calls == []
+    assert instances.engine_manifest_path(root, name).is_file()
+
+
+def test_engine_remove_refuses_when_the_container_probe_cannot_answer(
+    tmp_path: Path,
+) -> None:
+    """A probe that cannot answer is a refusal, never a pass: removing an
+    engine whose containers could not be counted could strand them."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    _seed_engine(root, name, host=_engine_host(), user=_engine_user(), port=_engine_port())
+    runner = _FakeRunner()
+    runner.queue(_err("Cannot connect to the Docker daemon"))  # the container probe
+    stopper = _RecordingStopper()
+
+    with pytest.raises(ops.EngineRemoveError) as exc_info:
+        ops.engine_remove(root, name, runner=runner, stop_forward=stopper)
+
+    message = str(exc_info.value)
+    assert "could not check the containers" in message
+    assert f"make connect-start INSTANCE={name}" in message
+    assert stopper.calls == []
+
+
+def test_engine_remove_stops_the_forward_then_removes_everything_in_order(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    _seed_engine(root, name, host=_engine_host(), user=_engine_user(), port=_engine_port())
+    context = instances.docker_context(root, name)
+    cert_directory = instances.certs_dir(name)
+    cert_directory.mkdir(parents=True)
+    (cert_directory / ops.INSTANCE_ID_FILENAME).write_text("i-stale\n", encoding="utf-8")
+    (cert_directory / "forward.json").write_text("{}\n", encoding="utf-8")
+    (cert_directory / "forward.log").write_text("log\n", encoding="utf-8")
+    timeline: list[object] = []
+    runner = _TimelineRunner(timeline)
+    runner.queue(_ok(""))  # the container probe: no containers
+    runner.queue(_ok(""))  # docker context inspect: present
+    runner.queue(_ok(""))  # docker context rm -f
+    stopper = _RecordingStopper(timeline)
+
+    messages = ops.engine_remove(root, name, runner=runner, stop_forward=stopper)
+
+    assert stopper.calls == [name]
+    # Order: the container probe, then the forward stop, then the context
+    # removal -- nothing is removed before the forward is down. The
+    # timeline carries raw argv tuples from the runner and ("stop-forward",
+    # name) markers from the stopper, so the interleaving is direct.
+    assert timeline[:2] == [
+        _engine_ps_argv(root, context),
+        ("stop-forward", name),
+    ]
+    assert runner.calls[1:] == [
+        _context_inspect_argv(context),
+        ("docker", "context", "rm", "-f", context),
+    ]
+    assert not cert_directory.exists(), "the forward record and id die with the directory"
+    assert not (root / "remote-instances" / name).exists(), "the registration is removed"
+    joined = "\n".join(messages)
+    assert "removed docker context" in joined
+    assert "removed certificate directory" in joined
+    assert "removed engine registration" in joined
+
+
+def test_engine_remove_tolerates_an_absent_docker_context(tmp_path: Path) -> None:
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    _seed_engine(root, name, host=_engine_host(), user=_engine_user(), port=_engine_port())
+    context = instances.docker_context(root, name)
+    runner = _FakeRunner()
+    runner.queue(_ok(""))  # the container probe
+    runner.queue(_err(f"no such context: {context}"))  # the context inspect
+    stopper = _RecordingStopper()
+
+    messages = ops.engine_remove(root, name, runner=runner, stop_forward=stopper)
+
+    joined = "\n".join(messages)
+    assert f"docker context {context!r} is absent" in joined
+    assert all(call[1:3] != ("context", "rm") for call in runner.calls)
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_engine_remove_reports_an_absent_registration_and_certs_as_nothing_to_remove(
+    tmp_path: Path,
+) -> None:
+    """An engine whose forward never ran and whose context was never created
+    still removes cleanly: absence is the desired state, reported as such."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    _seed_engine(root, name, host=_engine_host(), user=_engine_user(), port=_engine_port())
+    instances = _import_instances()
+    context = instances.docker_context(root, name)
+    runner = _FakeRunner()
+    runner.queue(_ok(""))  # the container probe
+    runner.queue(_err(f"no such context: {context}"))
+    stopper = _RecordingStopper()
+
+    messages = ops.engine_remove(root, name, runner=runner, stop_forward=stopper)
+
+    joined = "\n".join(messages)
+    assert "no certificate directory" in joined
+    assert "nothing to remove" in joined
+
+
+def test_engine_remove_aggregates_failures_and_still_attempts_every_removal(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    forwards = importlib.import_module("devcontainer_config.forwards")
+    root = _git_root(tmp_path)
+    name = _instance_name("engine")
+    _seed_engine(root, name, host=_engine_host(), user=_engine_user(), port=_engine_port())
+    context = instances.docker_context(root, name)
+    cert_directory = instances.certs_dir(name)
+    cert_directory.mkdir(parents=True)
+    runner = _FakeRunner()
+    runner.queue(_ok(""))  # the container probe
+    runner.queue(_err("Cannot connect to the Docker daemon"))  # context inspect
+    stopper = _RecordingStopper()
+    stopper.error = forwards.ForwardError("the process group refused to stop")
+
+    with pytest.raises(ops.EngineRemoveError) as exc_info:
+        ops.engine_remove(root, name, runner=runner, stop_forward=stopper)
+
+    message = str(exc_info.value)
+    assert f"stop forward for {name!r}" in message
+    assert f"inspect docker context {context}" in message
+    assert "did not complete" in message
+    # A failed context removal never hides the filesystem removals: both
+    # were attempted and both succeeded.
+    assert not cert_directory.exists()
+    assert not (root / "remote-instances" / name).exists()
+
+
+def test_engine_remove_rejects_an_invalid_name_before_anything_runs(
+    tmp_path: Path,
+) -> None:
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    runner = _FakeRunner()
+    stopper = _RecordingStopper()
+
+    for bad_name in ("../escape", "a/b", ""):
+        with pytest.raises(ops.EngineRemoveError):
+            ops.engine_remove(root, bad_name, runner=runner, stop_forward=stopper)
+
+    assert runner.calls == []
+    assert stopper.calls == []

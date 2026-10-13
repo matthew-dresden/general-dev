@@ -311,6 +311,7 @@ _ENUMERATION_WORD_TO_COUNT = {
     "four": 4,
     "five": 5,
     "six": 6,
+    "seven": 7,
 }
 
 # AC-DOC-003's negative clause: no claim that DEVCONTAINER_TRANSPORT changes
@@ -535,13 +536,13 @@ def test_transport_table_documents_devcontainer_transport() -> None:
         f"row: {names!r}."
     )
     section = _transport_section_text_normalized()
-    assert "`ssh`" in section, (
-        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not state `ssh` as "
+    assert "`ssm`" in section, (
+        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not state `ssm` as "
         "DEVCONTAINER_TRANSPORT's default."
     )
-    assert "`ssm`" in section, (
-        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not name `ssm` as an "
-        "accepted DEVCONTAINER_TRANSPORT value."
+    assert "`ssh`" in section, (
+        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not state `ssh` as "
+        "DEVCONTAINER_TRANSPORT's other accepted value, the ssh engine transport."
     )
     assert "resolve_transport" in section, (
         f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section does not name "
@@ -987,15 +988,15 @@ _NEITHER_LANDED_TRUE_STATEMENT_TEXT = (
 # Proves `makefile_reads_variable` alone (independent of resolve_transport)
 # also triggers the stale-phrase forbid, closing the round-2 finding that
 # the parameter was dead at its only real call site (code_review).
-_MAKEFILE_ONLY_STALE_TEXT = "make connect-start ... resolve_transport has not landed ... no effect at all"
+_MAKEFILE_ONLY_STALE_TEXT = (
+    "make connect-start ... resolve_transport has not landed ... no effect at all"
+)
 
 # Proves the mirror-image check (`_connect_recipe_mentions_without_landed_caveat`)
 # fires: a mention of the Makefile's `connect` recipe reading/dispatching the
 # variable with no landed-state caveat nearby, exactly the shape of text a
 # probe against the round-2 guard confirmed it accepted (test_review, round 2).
-_MAKEFILE_RECIPE_UNCAVEATED_TEXT = (
-    "make connect-start recipe reads DEVCONTAINER_TRANSPORT and dispatches it, resolve_transport only"
-)
+_MAKEFILE_RECIPE_UNCAVEATED_TEXT = "make connect-start recipe reads DEVCONTAINER_TRANSPORT and dispatches it, resolve_transport only"
 
 # Round 3 fix (code_review/test_review REVIEW_FAIL): proves the mirror
 # branch of the mirror check, `_connect_recipe_mentions_with_landed_caveat`,
@@ -1343,32 +1344,42 @@ def test_transport_section_names_no_removed_script() -> None:
         )
 
 
-def test_transport_section_documents_ssm_as_the_only_value_and_fails_fast() -> None:
-    """One accepted value, it is the default, and anything else exits non-zero.
+def test_transport_section_documents_the_kind_dispatch_and_fails_fast() -> None:
+    """Unset dispatches on engine kind, unrecognized values exit non-zero.
 
-    This replaces a guard written while two transports existed, which pinned
-    that the SSH branch was scoped to "unset or the literal `ssh`" so the
-    section could not describe a silent fallback. After the cutover the risk
-    inverts: the danger is documentation that still presents `ssh` as
-    selectable, or that goes quiet about what happens to a caller who exports
-    it out of habit. Both are pinned here.
+    This replaces two guards written for earlier dispatch shapes: while two
+    transports existed, one pinned that the SSH branch was scoped to "unset
+    or the literal `ssh`", and after the ssh engine landed, another pinned
+    `ssm` as the default -- which made `make connect-start INSTANCE=<ssh-
+    engine>` without the variable refuse (the F1 defect real E2E against a
+    Windows ssh endpoint found). The engine's own kind is now what unset
+    selects, `ssm` is never the blanket default, and the section must still
+    say what happens to a caller who exports a bad value out of habit. All
+    three are pinned here.
     """
     section = _transport_section_text_normalized()
     assert "non-zero" in section, (
         f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section must state that an "
         "unrecognized value exits non-zero rather than falling back."
     )
-    assert re.search(r"`ssm`[^.]*default|default[^.]*`ssm`", section), (
-        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section must say `ssm` is the default."
+    assert re.search(r"[Uu]nset[^.]{0,120}kind", section), (
+        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section must say an unset "
+        "DEVCONTAINER_TRANSPORT dispatches on the engine's kind."
+    )
+    assert not re.search(r"`ssm`[^.]*the default|the default[^.]*`ssm`", section), (
+        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section must not present `ssm` "
+        "as the blanket default: an unset selector dispatches on the engine's kind, "
+        "so presenting `ssm` as what unset selects would push the variable onto "
+        "every ssh-engine invocation again."
     )
     assert not re.search(r"unset or the literal `ssh`", section), (
         f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section still scopes a branch to the "
-        "`ssh` value, which is no longer accepted."
+        "literal `ssh` selector, which selects nothing on its own now."
     )
     assert "ssh" in section.lower(), (
-        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section should still mention the old "
-        "value, so a caller who exports it out of habit learns what happens rather than "
-        "meeting an unexplained error."
+        f"{_DOC_RELATIVE_PATH}'s '{_TRANSPORT_HEADING}' section should still mention the "
+        "ssh transport, so a caller who exports the guard out of habit learns what it "
+        "guards rather than meeting an unexplained error."
     )
 
 

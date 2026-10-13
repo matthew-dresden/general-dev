@@ -60,6 +60,19 @@ if [ -n "$(INSTANCE)" ] && [ "$(ALL)" = "1" ]; then \
 fi
 endef
 
+# Refusal for the resolver-loop targets that accept ALL=1 in place of
+# INSTANCE. ALL=1 acts on every configured instance, discovered at run time
+# through the engine's own discovery, which never consults ENGINE; ENGINE
+# pins exactly one. A fleet loop under ENGINE would therefore silently
+# ignore one of the two selections the caller made, so the run refuses with
+# the reason and exits 2, matching the usage guards' convention.
+define ENGINE_FLEET_REFUSAL
+if [ -n "$${ENGINE:-}" ] && [ "$(ALL)" = "1" ]; then \
+	printf '\033[0;31m[ERROR]\033[0m ENGINE=%s is set: ALL=1 acts on every configured instance and ENGINE pins exactly one; run it with INSTANCE=<name> only, or ALL=1 without ENGINE\n' "$${ENGINE}" >&2; \
+	exit 2; \
+fi
+endef
+
 # Refusal for the three targets that switch the machine-wide docker context
 # (local, remote, disconnect). ENGINE, when set, exists so a run never has
 # to: every docker call it makes is aimed at the engine it names without
@@ -73,6 +86,34 @@ if [ -n "$${ENGINE:-}" ]; then \
 	printf '\033[0;31m[ERROR]\033[0m ENGINE=%s is set: make $(1) switches the machine-wide docker context, which ENGINE exists to avoid; run it without ENGINE\n' "$${ENGINE}" >&2; \
 	exit 2; \
 fi
+endef
+
+# The kind refusals. rd_engine_kind/rd_require_engine_kind (lib.sh) are the
+# one predicate and the one refusal; these three constants are the per-family
+# remedies the refusals name, declared once so every target of a family
+# states the same guidance and none of them restates the predicate. They are
+# comma-free on purpose: they ride $(call ...) arguments, which split on
+# commas.
+EC2_KIND_REMEDY := an ssh engine has no EC2 lifecycle to plan or deploy and no power state to stop or start; reach it with make engine-verify INSTANCE=<name> or remove it with make engine-remove INSTANCE=<name> CONFIRM=remove and connect with make connect-start INSTANCE=<name>
+BUCKET_KIND_REMEDY := state buckets belong to the EC2 fleet; an ssh engine has no state bucket and no engine-* equivalent for this target
+CERT_KIND_REMEDY := no TLS material exists for ssh engines; nothing to report for one
+
+# The fleet-wide kind guard, for the surfaces that address no single
+# instance but only reach EC2 state (bucket-list, bucket-delete ALL=1,
+# cert-status): every configured instance must be the EC2 kind before the
+# surface runs. The refusal fires on the first ssh engine and names it --
+# fail-fast fleet semantics, never a silent skip -- so a fleet mixing kinds
+# is refused here on purpose and the help rows say to mix fleets
+# deliberately. $(1) is the remedy line rd_require_engine_kind prints.
+define FLEET_EC2_KIND_GUARD
+. $(RD_DIR)/lib.sh; \
+names=$$($(DISCOVER_INSTANCE_NAMES)) || exit 1; \
+while IFS= read -r name; do \
+	[ -n "$$name" ] || continue; \
+	unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
+	INSTANCE="$$name" rd_resolve_instance; \
+	rd_require_engine_kind ec2 "$(1)"; \
+done <<< "$$names"
 endef
 
 # The instance names `instances.discover` reports, one per line, sorted --
@@ -197,6 +238,7 @@ PRIVATE_FILES_AND_MANIFEST ?= $(PRIVATE_FILES) .devcontainer/hostcreds.map.json
         lint lint-md lint-sh lint-dispatch lint-json lint-private lint-nested lint-workspace lint-secrets lint-spell spell-fix format hooks-install hooks-uninstall hooks-run hooks-run-push \
         proxy-start proxy-stop proxy-restart proxy-status build-no-cache rebuild-no-cache local remote reopen init up vscode-server \
         keybindings validate test cert-status list-instances instance-init instance-plan instance-deploy instance-status instance-stop instance-start instance-destroy instance-link \
+        engine-init engine-verify engine-remove \
         connect-status connect-stop connect-refresh connect-list bucket-list bucket-delete \
         skills-install skills-remove skills-list
 
@@ -247,7 +289,7 @@ help:
 	row "make local"            "host"   "Point docker and VS Code at the local engine ($(LOCAL_CONTEXT)). Nothing remote is stopped."; \
 	row "make disconnect"       "host"   "What 'make local' calls. Only changes where new commands and windows point."; \
 	note "INSTANCES" "one remote engine per project under remote-instances/; instance names are project names (e.g. acme)"; \
-	row "make list-instances"   "host"   "List every instance with live status: EC2 state, id, params, certs, forward, context."; \
+	row "make list-instances"   "host"   "List every instance with live status: EC2 state, id, params, certs, forward, context; ssh engines answer reachability instead."; \
 	row "make list-containers"  "host"   "Every container this project owns, local engine plus every instance's, with per-engine reachability."; \
 	row "make instance-init"    "host"   "Scaffold <project>'s directory; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= for the AMI/AZ lookup only; the deployment region is REMOTE_AWS_REGION]"; \
 	row "make instance-deploy"  "remote" "Converge: provision, link id, trust chain if missing, push secrets. Refuses instance replacement without CONFIRM=replace. INSTANCE= | ALL=1"; \
@@ -257,20 +299,23 @@ help:
 	row "make instance-start"   "remote" "Start it again and wait for its SSM agent to report ready. INSTANCE=<instance-name> | ALL=1"; \
 	row "make instance-destroy" "remote" "Destroy + cleanup params, certs, context, id. CONFIRM=destroy only for ALL=1. INSTANCE=<instance-name> | ALL=1"; \
 	row "make instance-link"    "host"   "Save the instance's EC2 id for other targets. Deploy does this automatically; run it only after re-provisioning outside make. INSTANCE_ID=<id>"; \
+	row "make engine-init"      "host"   "Scaffold an ssh engine manifest (engine.json). INSTANCE=<name> HOST=<host> USER=<user> [PORT=22] [DOCKER_ADDR=/var/run/docker.sock; a Windows engine needs tcp://localhost:2375]"; \
+	row "make engine-verify"    "host"   "One-shot ssh engine reachability proof: opens the forward, handshakes docker through its context, closes the forward. The ssh engine's connect-start."; \
+	row "make engine-remove"    "host"   "Remove an ssh engine whole: forward, docker context, local state, registration. Needs CONFIRM=remove; refuses while a project container exists on the engine."; \
 	row "make cert-ca"          "host"   "Create this instance's certificate authority. Once per instance; refuses if one exists."; \
 	row "make cert-client"      "host"   "Issue the client certificate 'make connect-start' presents. Run after cert-ca, and again at renewal."; \
 	row "make cert-publish"     "remote" "Issue server material and publish it to Parameter Store. The daemon needs it to open its listener."; \
 	row "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."; \
-	row "make cert-status"      "host"   "Client and CA expiry per instance."; \
+	row "make cert-status"      "host"   "Client and CA expiry per instance. EC2 engines only; no TLS material exists for ssh engines."; \
 	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."; \
-	row "make connect-start"    "remote" "Open the SSM forward as a background daemon; returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
+	row "make connect-start"    "remote" "Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json engines); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
 	row "make connect-status"   "host"   "Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1"; \
 	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \
 	row "make connect-refresh"  "host"   "Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1"; \
 	row "make connect-list"     "host"   "Every instance's forward: pid, port, listening or not."; \
-	row "make bucket-list"      "host"   "Every state bucket this fleet's naming template matches: name, configured or orphaned. REMOTE_AWS_REGION required."; \
-	row "make bucket-delete"    "host"   "Purge + delete state buckets: INSTANCE=<name>, or ALL=1 CONFIRM=delete for every one in REMOTE_AWS_REGION. REMOTE_AWS_REGION required."; \
-	row "make remote"           "host"   "Point them at the EC2 engine ($(REMOTE_CONTEXT)): ensures the SSM forward in the background, then switches docker. INSTANCE=<name> targets that instance."; \
+	row "make bucket-list"      "host"   "Every state bucket this fleet's naming template matches: name, configured or orphaned. REMOTE_AWS_REGION required. EC2 engines only; refuses if any ssh engine is configured."; \
+	row "make bucket-delete"    "host"   "Purge + delete state buckets: INSTANCE=<name>, or ALL=1 CONFIRM=delete for every one in REMOTE_AWS_REGION. REMOTE_AWS_REGION required. EC2 engines only; a mixed fleet is refused."; \
+	row "make remote"           "host"   "Point them at the remote engine ($(REMOTE_CONTEXT)): ensures the engine's forward in the background, then switches docker. INSTANCE=<name> targets that instance."; \
 	note "BUILD" "every target blocks until the container is up and exits non-zero if anything fails"; \
 	row "make build"            "both"   "Create the container for the active backend. Refuses if one already exists."; \
 	row "make rebuild"          "both"   "clean, then build. Prerequisites are checked before anything is destroyed."; \
@@ -327,7 +372,7 @@ help:
 	@printf '\n  %s\n' "Every target checks what it needs and fails with the command that installs it."
 	@printf '\n'
 
-# Opens the SSM port forward as a detached daemon and returns once the
+# Opens an engine's forward as a detached daemon and returns once the
 # connection is confirmed. The instance it opens one for: INSTANCE when
 # given, else ENGINE when it names an instance, else none -- the resolver's
 # default, addressed through the parse-time config values exactly as before.
@@ -338,53 +383,101 @@ help:
 # otherwise: the variable was accepted and ignored, and the forward for
 # whatever instance the resolver defaulted to opened regardless of what was
 # asked for. INSTANCE and ENGINE naming different engines is refused by the
-# resolver's own guard before anything opens. The daemon is managed by
-# devcontainer_config.forwards (spawn, readiness poll, record); this recipe
-# only resolves WHICH instance and hands the resolved values over. The
-# lifecycle companions: connect-start (this target), connect-status,
-# connect-stop, connect-refresh and connect-list.
+# resolver's own guard before anything opens. The transport is then chosen
+# by the engine's own kind, read through rd_engine_kind off the resolved
+# address block's KIND line: an SSH engine (engine.json, KIND=ssh) opens
+# through devcontainer_config.transport_ssh with the engine's own values and
+# no AWS requirement at all, while an EC2 instance opens the SSM forward
+# through devcontainer_config.forwards' ssm form -- the AWS guards live
+# inside that branch only, so an ssh engine is never asked for a region, a
+# profile or an instance id. DEVCONTAINER_TRANSPORT is a guard on that
+# dispatch, never the selector: unset, the kind alone decides, so an
+# operator naming an ssh engine never sets a variable; set, the value must
+# agree with the kind (ssm behind an ec2 engine, ssh behind an ssh engine)
+# or the run is refused naming the conflict, and any other value is refused
+# by name. The daemon is managed by devcontainer_config.forwards (spawn,
+# readiness poll, record); this recipe only resolves WHICH instance and
+# hands the resolved values over. The lifecycle companions: connect-start
+# (this target), connect-status, connect-stop, connect-refresh and
+# connect-list. lib.sh is sourced once, unconditionally, before the
+# dispatch: the kind checks below read the kind through rd_engine_kind, the
+# one predicate, and the ssh branch can only run for a resolved engine
+# anyway.
 connect-start:
 	@set -euo pipefail; \
 	$(PROXY_ENV) \
-	transport="$${DEVCONTAINER_TRANSPORT:-ssm}"; \
+	. $(RD_DIR)/lib.sh; \
+	transport="$${DEVCONTAINER_TRANSPORT:-}"; \
 	target=""; \
 	if [ -n "$(INSTANCE)" ]; then target="$(INSTANCE)"; \
 	elif [ -n "$${ENGINE:-}" ] && [ "$${ENGINE}" != "local" ]; then target="$${ENGINE}"; fi; \
 	if [ -n "$$target" ]; then \
-		. $(RD_DIR)/lib.sh; \
 		INSTANCE="$$target" rd_resolve_instance; \
+		kind="$$(rd_engine_kind)"; \
 		ctx="$$(rd_engine_context)"; \
-		[ -n "$$ctx" ] || ctx="$${DOCKER_CONTEXT:-}"; \
-		if [ -z "$${REMOTE_INSTANCE_ID:-}" ]; then \
-			printf '\033[0;31m[ERROR]\033[0m no EC2 instance id is recorded for instance %s\n' "$$target" >&2; \
-			printf '        Link it first: make instance-link INSTANCE=%s\n' "$$target" >&2; \
-			exit 1; \
-		fi; \
+		[ -n "$$ctx" ] || ctx="$${REMOTE_DOCKER_CONTEXT:-}"; \
 	else \
-		[ -n "$${REMOTE_INSTANCE_ID:-}" ] || { \
-			printf '\033[0;31m[ERROR]\033[0m no instance is selected and no default id is recorded\n' >&2; \
-			printf '        Name one: make connect-start INSTANCE=<instance-name>\n' >&2; \
-			exit 1; \
-		}; \
+		kind=""; \
 		ctx="$(REMOTE_CONTEXT)"; \
 	fi; \
-	[ -n "$${REMOTE_AWS_REGION:-}" ] || { \
-		printf '\033[0;31m[ERROR]\033[0m REMOTE_AWS_REGION is required and has no default: the forward opens an SSM session in it\n' >&2; \
-		printf '        Set it with: export REMOTE_AWS_REGION=<region>\n' >&2; \
-		exit 2; \
-	}; \
-	[ -n "$${REMOTE_AWS_PROFILE:-}" ] || { \
-		printf '\033[0;31m[ERROR]\033[0m REMOTE_AWS_PROFILE is required and has no default: the SSM session resolves credentials through it\n' >&2; \
-		printf '        Set it with: export REMOTE_AWS_PROFILE=<sso-profile>, after: aws sso login --profile <sso-profile>\n' >&2; \
-		exit 2; \
-	}; \
 	case "$$transport" in \
-		ssm) PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
-			--instance-id "$$REMOTE_INSTANCE_ID" --context "$$ctx" \
-			--profile "$$REMOTE_AWS_PROFILE" --region "$$REMOTE_AWS_REGION" ;; \
+		ssh|ssm|"") ;; \
 		*) printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT="%s" is not recognized.\n' "$$transport" >&2; \
-		   printf '        Accepted value: ssm. The ssh transport was removed at cutover.\n' >&2; \
+		   printf '        Accepted values: ssm (the EC2 SSM forward) and ssh (the SSH engine forward).\n' >&2; \
 		   exit 1 ;; \
+	esac; \
+	route="ssm"; \
+	if [ -n "$$target" ]; then \
+		if [ "$$kind" = "ssh" ]; then \
+			route="ssh"; \
+			if [ "$$transport" = "ssm" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is an ssh engine; DEVCONTAINER_TRANSPORT=ssm selects the ssm transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to ssh.\n" >&2; \
+				exit 1; \
+			fi; \
+		elif [ "$$transport" = "ssh" ]; then \
+			printf '\033[0;31m[ERROR]\033[0m instance %s is an EC2 engine; DEVCONTAINER_TRANSPORT=ssh selects the ssh transport, which only reaches ssh engines\n' "$$target" >&2; \
+			printf '        Unset DEVCONTAINER_TRANSPORT or set it to ssm.\n' >&2; \
+			exit 1; \
+		fi; \
+	elif [ "$$transport" = "ssh" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT=ssh needs the engine named\n' >&2; \
+		printf '        The ssh form forwards the values of one resolved engine; run:\n' >&2; \
+		printf '        make connect-start INSTANCE=<name>\n' >&2; \
+		exit 2; \
+	fi; \
+	case "$$route" in \
+		ssh) \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
+				--name "$$target" --host "$$ENGINE_HOST" --port "$$ENGINE_PORT" \
+				--user "$$ENGINE_USER" --docker-addr "$$ENGINE_DOCKER_ADDR" --context "$$ctx" ;; \
+		ssm) \
+			if [ -n "$$target" ]; then \
+				[ -n "$${REMOTE_INSTANCE_ID:-}" ] || { \
+					printf '\033[0;31m[ERROR]\033[0m no EC2 instance id is recorded for instance %s\n' "$$target" >&2; \
+					printf '        Link it first: make instance-link INSTANCE=%s\n' "$$target" >&2; \
+					exit 1; \
+				}; \
+			else \
+				[ -n "$${REMOTE_INSTANCE_ID:-}" ] || { \
+					printf '\033[0;31m[ERROR]\033[0m no instance is selected and no default id is recorded\n' >&2; \
+					printf '        Name one: make connect-start INSTANCE=<instance-name>\n' >&2; \
+					exit 1; \
+				}; \
+			fi; \
+			[ -n "$${REMOTE_AWS_REGION:-}" ] || { \
+				printf '\033[0;31m[ERROR]\033[0m REMOTE_AWS_REGION is required and has no default: the forward opens an SSM session in it\n' >&2; \
+				printf '        Set it with: export REMOTE_AWS_REGION=<region>\n' >&2; \
+				exit 2; \
+			}; \
+			[ -n "$${REMOTE_AWS_PROFILE:-}" ] || { \
+				printf '\033[0;31m[ERROR]\033[0m REMOTE_AWS_PROFILE is required and has no default: the SSM session resolves credentials through it\n' >&2; \
+				printf '        Set it with: export REMOTE_AWS_PROFILE=<sso-profile>, after: aws sso login --profile <sso-profile>\n' >&2; \
+				exit 2; \
+			}; \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
+				--instance-id "$$REMOTE_INSTANCE_ID" --context "$$ctx" \
+				--profile "$$REMOTE_AWS_PROFILE" --region "$$REMOTE_AWS_REGION" ;; \
 	esac
 
 # The forward daemon's lifecycle, one instance at a time or every configured
@@ -398,6 +491,7 @@ connect-start:
 # forward state and is the one no-argument member.
 connect-status:
 	@$(call INSTANCE_OR_ALL_GUARD,connect-status)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; no forwards to report.\n'; exit 0; }; \
@@ -407,6 +501,7 @@ connect-status:
 
 connect-stop:
 	@$(call INSTANCE_OR_ALL_GUARD,connect-stop)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; no forwards to stop.\n'; exit 0; }; \
@@ -416,6 +511,7 @@ connect-stop:
 
 connect-refresh:
 	@$(call INSTANCE_OR_ALL_GUARD,connect-refresh)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; no forwards to refresh.\n'; exit 0; }; \
@@ -440,18 +536,24 @@ connect-list:
 # these.
 bucket-list:
 	@$(REMOTE_AWS_REGION_GUARD) \
+	$(call FLEET_EC2_KIND_GUARD,$(BUCKET_KIND_REMEDY)); \
 	PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket list
 
 bucket-delete:
 	@$(call INSTANCE_OR_ALL_GUARD,bucket-delete)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@if [ "$(ALL)" = "1" ] && [ "$(CONFIRM)" != "delete" ]; then \
 		printf '\033[0;31m[ERROR]\033[0m ALL=1 deletes every state bucket this fleet names in REMOTE_AWS_REGION; confirm it: make bucket-delete ALL=1 CONFIRM=delete\n' >&2; \
 		exit 1; \
 	fi; \
 	$(REMOTE_AWS_REGION_GUARD) \
 	if [ "$(ALL)" = "1" ]; then \
+		$(call FLEET_EC2_KIND_GUARD,$(BUCKET_KIND_REMEDY)); \
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket delete-all; \
 	else \
+		. $(RD_DIR)/lib.sh; \
+		INSTANCE="$(INSTANCE)" rd_resolve_instance; \
+		rd_require_engine_kind ec2 "$(BUCKET_KIND_REMEDY)"; \
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.state_bucket delete "$(INSTANCE)"; \
 	fi
 
@@ -632,6 +734,7 @@ instance-init:
 # instance whose surface could not be reached.
 instance-status:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-status)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; nothing to report.\n'; exit 0; }; \
@@ -641,38 +744,57 @@ instance-status:
 
 # Dry run: init (bootstrapping the instance's state bucket on the very first
 # run, see TERRAGRUNT_INIT_HELPER), then plan. Never applies anything.
+# EC2-only by kind: Terragrunt reaches an EC2 instance's deployment and
+# nothing else, so each instance is resolved and kind-checked before any
+# Terragrunt runs, and an ssh engine is refused naming the engine-* surface.
 instance-plan:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-plan)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
+	. $(RD_DIR)/lib.sh; \
 	$(TERRAGRUNT_INIT_HELPER); \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; nothing to plan.\n'; exit 0; }; \
 	while IFS= read -r name; do \
 		printf '\033[0;36m[PLAN]\033[0m %s\n' "$$name"; \
+		unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
+		INSTANCE="$$name" rd_resolve_instance; \
+		rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"; \
 		tg_init "$$name"; \
 		terragrunt plan || exit 1; \
 	done <<< "$$names"
 
 # Power: stop or start, waiting for the target state (and, on start, for the
 # SSM agent) before reporting done. Abort-on-fail so a half-powered fleet
-# never looks converged.
+# never looks converged. EC2-only by kind: an ssh engine has no power state,
+# and the refusal fires per instance before any aws call.
 instance-stop:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-stop)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
+	. $(RD_DIR)/lib.sh; \
 	$(REMOTE_AWS_REGION_GUARD) \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; nothing to stop.\n'; exit 0; }; \
 	while IFS= read -r name; do \
+		unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
+		INSTANCE="$$name" rd_resolve_instance; \
+		rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"; \
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-stop "$$name" --region "$$REMOTE_AWS_REGION" || exit 1; \
 	done <<< "$$names"
 
 instance-start:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-start)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
+	. $(RD_DIR)/lib.sh; \
 	$(REMOTE_AWS_REGION_GUARD) \
 	if [ "$(ALL)" = "1" ]; then names=$$($(DISCOVER_INSTANCE_NAMES)); else names="$(INSTANCE)"; fi; \
 	[ -n "$$names" ] || { printf 'No instances configured under remote-instances/; nothing to start.\n'; exit 0; }; \
 	while IFS= read -r name; do \
+		unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
+		INSTANCE="$$name" rd_resolve_instance; \
+		rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"; \
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-start "$$name" --region "$$REMOTE_AWS_REGION" || exit 1; \
 		make --no-print-directory cert-install INSTANCE="$$name" || exit 1; \
 	done <<< "$$names"
@@ -689,7 +811,57 @@ instance-link:
 		printf '\033[0;31m[ERROR]\033[0m INSTANCE_ID is required, e.g.: make instance-link INSTANCE=<name> INSTANCE_ID=i-0123456789abcdefg\n' >&2; \
 		exit 2; \
 	fi
+	@set -euo pipefail; \
+	. $(RD_DIR)/lib.sh; \
+	INSTANCE="$(INSTANCE)" rd_resolve_instance; \
+	rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"
 	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-link "$(INSTANCE)" --instance-id "$(INSTANCE_ID)"
+
+# The SSH engine's own lifecycle. engine-init scaffolds the manifest
+# (devcontainer_config.cli engine-init; the usage guard covers INSTANCE and
+# the recipe covers HOST/USER, both required, with PORT and DOCKER_ADDR
+# defaulted by the cli from the manifest constants). engine-verify is the
+# ssh-only reachability check -- the EC2 analog is connect-start -- as ONE
+# shot: resolve, refuse the wrong kind naming the analog, then drive
+# devcontainer_config.transport_ssh verify, which opens the forward,
+# handshakes docker through the resulting context and stops the forward,
+# leaving the docker context created and no daemon running. engine-remove
+# tears the engine whole down through devcontainer_config.cli engine-remove
+# (devcontainer_config.instance_ops.engine_remove), behind its own
+# CONFIRM=remove gate and the kind refusal.
+engine-init:
+	@$(call INSTANCE_USAGE_GUARD,engine-init)
+	@if [ -z "$(HOST)" ] || [ -z "$(USER)" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m HOST and USER are required, e.g.: make engine-init INSTANCE=<name> HOST=<host> USER=<user>\n' >&2; \
+		printf '        PORT= (default 22) and DOCKER_ADDR= (default /var/run/docker.sock) are optional.\n' >&2; \
+		printf '        Linux engines usually serve the default socket; a Windows engine cannot forward to one -- expose Docker Desktop on tcp://localhost:2375 and pass DOCKER_ADDR=tcp://localhost:2375.\n' >&2; \
+		exit 2; \
+	fi
+	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli engine-init "$(INSTANCE)" --host "$(HOST)" --user "$(USER)" $(if $(PORT),--port $(PORT),) $(if $(DOCKER_ADDR),--docker-addr $(DOCKER_ADDR),)
+
+engine-verify:
+	@$(call INSTANCE_USAGE_GUARD,engine-verify)
+	@set -euo pipefail; \
+	. $(RD_DIR)/lib.sh; \
+	INSTANCE="$(INSTANCE)" rd_resolve_instance; \
+	rd_require_engine_kind ssh "this is the ssh engine reachability check; the EC2 analog is: make connect-start INSTANCE=$(INSTANCE)"; \
+	ctx="$$(rd_engine_context)"; \
+	[ -n "$$ctx" ] || ctx="$${REMOTE_DOCKER_CONTEXT:-}"; \
+	PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.transport_ssh verify \
+		--name "$$INSTANCE" --host "$$ENGINE_HOST" --port "$$ENGINE_PORT" \
+		--user "$$ENGINE_USER" --docker-addr "$$ENGINE_DOCKER_ADDR" --context "$$ctx"
+
+engine-remove:
+	@$(call INSTANCE_USAGE_GUARD,engine-remove)
+	@if [ "$(CONFIRM)" != "remove" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m engine-remove deletes the engine registration, its docker context, its forward and its local state; confirm it: make engine-remove INSTANCE=<name> CONFIRM=remove\n' >&2; \
+		exit 1; \
+	fi
+	@set -euo pipefail; \
+	. $(RD_DIR)/lib.sh; \
+	INSTANCE="$(INSTANCE)" rd_resolve_instance; \
+	rd_require_engine_kind ssh "an EC2 instance is removed by its own target, which also tears down everything engine-remove would: make instance-destroy INSTANCE=$(INSTANCE)"; \
+	PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli engine-remove "$(INSTANCE)"
 
 # Converge one instance, or every configured instance with ALL=1, aborting
 # on the first failure named. Per instance, in order: init, validate, a plan
@@ -707,7 +879,9 @@ instance-link:
 # which blocks on `make remote` and so is printed rather than run.
 instance-deploy:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-deploy)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
+	. $(RD_DIR)/lib.sh; \
 	command -v jq > /dev/null 2>&1 || { \
 		printf '\033[0;31m[ERROR]\033[0m jq is not installed; the converge step reads instance status with it.\n' >&2; \
 		printf '        Install it: brew install jq (macOS) or sudo apt-get install -y jq (Linux)\n' >&2; \
@@ -735,6 +909,9 @@ instance-deploy:
 	( \
 		set -euo pipefail; \
 		printf '\033[0;36m[DEPLOY]\033[0m %s\n' "$$name"; \
+		unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
+		INSTANCE="$$name" rd_resolve_instance; \
+		rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"; \
 		tg_init "$$name"; \
 		plan_file="$${PWD}/tfplan.deploy"; \
 		trap 'rm -f "$$plan_file"' EXIT; \
@@ -798,7 +975,9 @@ instance-deploy:
 # Terragrunt does not know about.
 instance-destroy:
 	@$(call INSTANCE_OR_ALL_GUARD,instance-destroy)
+	@$(call ENGINE_FLEET_REFUSAL)
 	@set -euo pipefail; \
+	. $(RD_DIR)/lib.sh; \
 	$(REMOTE_AWS_REGION_GUARD) \
 	if [ "$(ALL)" = "1" ]; then \
 		if [ "$(CONFIRM)" != "destroy" ]; then \
@@ -813,6 +992,9 @@ instance-destroy:
 	$(TERRAGRUNT_INIT_HELPER); \
 	while IFS= read -r name; do \
 	( \
+		unset RD_INSTANCE_RESOLVED RD_RESOLVE_DIAGNOSIS; \
+		INSTANCE="$$name" rd_resolve_instance; \
+		rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"; \
 		printf '\033[0;36m[DESTROY]\033[0m %s: the EC2 instance and its volumes are deleted\n' "$$name"; \
 		printf '  stopping any open forward first\n'; \
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards stop "$$name" || exit 1; \
@@ -881,9 +1063,12 @@ push-secrets:
 # spec Section 4.1.2 (E6-F1-S1-T2): client and CA expiry per instance, the
 # inspection half of the `certs` module. Exit 0 when every certificate is
 # outside the warning window (including a RENEW row for one still valid but
-# inside it), exit 1 when any has expired.
+# inside it), exit 1 when any has expired. EC2-only by kind, fleet-wide: no
+# TLS material exists for an ssh engine, so a fleet mixing kinds is refused
+# naming the first ssh engine rather than rendering silence for it.
 cert-status:
-	@PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.certs status
+	@$(call FLEET_EC2_KIND_GUARD,$(CERT_KIND_REMEDY)); \
+	PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.certs status
 
 # spec Section 4.5: the issuing half. Separate targets, not one idempotent
 # "ensure": each underlying operation refuses to overwrite existing material,
@@ -906,6 +1091,9 @@ cert-publish:
 # polling at the same cadence instance_ops uses for power transitions.
 cert-install:
 	@set -euo pipefail; \
+	. $(RD_DIR)/lib.sh; \
+	INSTANCE="$(INSTANCE)" rd_resolve_instance; \
+	rd_require_engine_kind ec2 "$(CERT_KIND_REMEDY)"; \
 	id=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli instance-status "$(INSTANCE)" --json | python3 -c "import json,sys; print(json.loads(sys.stdin.read())['recorded_id'] or '')"); \
 	[ -n "$$id" ] || { printf '\033[0;31m[ERROR]\033[0m no EC2 instance id is recorded for instance '%s'. Link it first: make instance-link INSTANCE=<name>\n' "$(INSTANCE)" >&2; exit 2; }; \
 	ok=0; \

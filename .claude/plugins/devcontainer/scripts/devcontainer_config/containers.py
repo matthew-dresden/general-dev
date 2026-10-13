@@ -72,6 +72,19 @@ class EngineContainers:
 Runner = Callable[[Sequence[str], str | None], subprocess.CompletedProcess[str]]
 
 
+def project_label(root: Path) -> str:
+    """The `--filter` value matching this project's containers on any engine.
+
+    `label=<key>=<workspace name>`, composed from the label devcontainer.json
+    stamps (`_PROJECT_LABEL`) and the workspace name `repo.workspace_name`
+    derives. One composition site: `list_containers` probes with it and
+    `instance_ops.engine_remove` refuses to remove an engine that still
+    holds a match, so the listing and the refusal can never disagree about
+    what "this project's container" means.
+    """
+    return f"label={_PROJECT_LABEL}={repo.workspace_name(root)}"
+
+
 def _engines(root: Path, local_context: str) -> list[tuple[str, str]]:
     """`(engine, context)` pairs: the local engine first, then every instance's.
 
@@ -102,7 +115,7 @@ def list_containers(
         )
     if runner is None:
         runner = subprocess_runner
-    label = f"label={_PROJECT_LABEL}={repo.workspace_name(root)}"
+    label = project_label(root)
     rows: list[EngineContainers] = []
     for engine, context in _engines(root, local_context):
         result = runner(

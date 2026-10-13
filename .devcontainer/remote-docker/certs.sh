@@ -36,6 +36,11 @@ rd_load_config
 # Resolved, not derived: this script writes certificate material, and
 # addressing the wrong instance issues a certificate the daemon will reject.
 rd_resolve_instance
+# One refusal for all four issuing subcommands: no TLS material exists for
+# ssh engines, so there is nothing here to create, publish, install or
+# rotate for one. The expiry report (make cert-status) carries its own
+# refusal at its target, which reaches this script for none of its rows.
+rd_require_engine_kind ec2 "no TLS material exists for ssh engines; nothing to issue, publish or install for one. The engine's own surface: make engine-verify INSTANCE=${INSTANCE}"
 
 REPO_ROOT="$(cd "${RD_DIR}/../.." && pwd)"
 SCRIPTS_DIR="${REPO_ROOT}/.claude/plugins/devcontainer/scripts"

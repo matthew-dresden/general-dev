@@ -2,6 +2,11 @@
 
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+# The one remote transform of the configuration payload, shared with
+# push-secrets.sh's Parameter Store publish: sourcing it here is what lets
+# the SSH engine's volume seed apply the exact rules the EC2 path publishes,
+# rather than a second copy of them.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config-payload.sh"
 
 rd_load_config
 
@@ -207,7 +212,16 @@ rdc_status() {
   context="$(docker context show 2>/dev/null || echo unknown)"
   printf '\n\033[1mProject\033[0m        %s\n' "$PROJECT_NAME"
   if [ "$context" = "$REMOTE_DOCKER_CONTEXT" ]; then
-    printf '\033[1mBackend\033[0m        remote, context %s (%s)\n' "$context" "$REMOTE_INSTANCE_ID"
+    # The parenthetical engine identifier is kind-aware: an EC2 instance's
+    # id, an SSH engine's endpoint. lib.sh's resolver deliberately leaves
+    # REMOTE_INSTANCE_ID unset for an ssh engine -- there is no EC2 id
+    # behind it -- so the EC2 form's bare reference would end a set -u run
+    # before the report printed.
+    if [ "$(rd_engine_kind)" = "ssh" ]; then
+      printf '\033[1mBackend\033[0m        remote (ssh engine), context %s (%s)\n' "$context" "${ENGINE_ENDPOINT:-endpoint unknown}"
+    else
+      printf '\033[1mBackend\033[0m        remote, context %s (%s)\n' "$context" "$REMOTE_INSTANCE_ID"
+    fi
   else
     printf '\033[1mBackend\033[0m        local, context %s\n' "$context"
   fi
@@ -260,7 +274,13 @@ rdc_validate_requested_name() {
     "" \
     "Pick a name matching that shape, or drop NAME to keep the generated" \
     "<${PROJECT_NAME}>-<devcontainerId> name."
-  if rd_docker inspect "$NAME" > /dev/null 2>&1; then
+  # The collision probe is plain docker, quiet, never rd_docker: an unused
+  # name -- the normal, expected answer here -- is docker exiting non-zero,
+  # and rd_docker's translator would report that as a failure and end the
+  # whole run before the build this check guards ever started. The dispatch
+  # prelude exports DOCKER_CONTEXT under ENGINE, so this probes the engine
+  # the run addresses, the same way rdc_require_container's named branch does.
+  if docker inspect -f '{{.Id}}' "$NAME" 2> /dev/null; then
     rd_fail "A container named '${NAME}' already exists on this engine" \
       "Two containers cannot share a name, and renaming this one onto it would" \
       "leave the other one unaddressable." \
@@ -477,6 +497,15 @@ rdc_build_prereqs() {
 rdc_ensure_secrets_current() {
   [ "${SKIP_SECRETS_CHECK:-0}" != "1" ] || { rd_log "SKIP_SECRETS_CHECK=1, leaving Parameter Store untouched"; return 0; }
   rd_require_remote_config
+  # An SSH engine has no Parameter Store behind it, so there is nothing to
+  # compare against and nothing to publish: the build below seeds the
+  # transformed payload straight into the workspace volume (rdc_seed_volume),
+  # fresh on every rebuild, which is the freshness guarantee this function
+  # exists to give the EC2 path a different way.
+  if [ "$(rd_engine_kind)" = "ssh" ]; then
+    rd_log "SSH engine: config seeds into the workspace volume at build time (fresh on every rebuild), no Parameter Store check"
+    return 0
+  fi
   rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
 
   local local_env published
@@ -526,6 +555,55 @@ rdc_git_credentials() {
     | awk '{ key = $0; if (!sub(/=.*/, "", key)) next; value = $0; sub(/^[^=]*=/, "", value); if (key == "username") u = value; else if (key == "password") p = value } END { if (u && p) printf "%s\n%s\n", u, p }'
 }
 
+# Write the transformed configuration payload into a freshly cloned volume
+# (SSH engines only; the EC2 path must not do this, because its container
+# bootstraps from Parameter Store at postCreate and a seeded copy would sit
+# stale beside it). The payload is the shared transform's output, written to
+# a 0700 temp directory on this machine, then carried into the volume by a
+# second `sh -s` heredoc: the values ride the heredoc body (docker's own
+# stdin stream, the same channel the clone's git credential travels), never
+# a docker argument, which on a remote engine sits in the process table of
+# a machine the operator may not be the only user of. The whole run is a
+# subshell so its EXIT trap cannot displace the override-config trap
+# rdc_build_remote arms immediately after rdc_seed_volume returns. On any
+# failure the partially configured volume is removed, so a retry starts
+# clean, the same discipline the clone failure below applies.
+rdc_seed_config_payload() {
+  local volume="$1"
+  (
+    local payload_dir esc_env esc_map esc_workspace
+    payload_dir="$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/rdc-payload.XXXXXX")"
+    trap 'rm -rf "$payload_dir"' EXIT
+    write_config_payload "$payload_dir"
+    rd_log "seeding the config payload into ${volume}"
+    # Values are escaped for the heredoc below: it is expanded before the seed container's sh parses it, so a raw single quote in any of them would terminate the quoting around it and run as shell inside the seed container.
+    esc_env="$(rdc_sh_escape "$(cat "${payload_dir}/shell.env")")"
+    esc_map="$(rdc_sh_escape "$(cat "${payload_dir}/.devcontainer/aws-profile-map.json")")"
+    esc_workspace="$(rdc_sh_escape "$CONTAINER_WORKSPACE")"
+    docker run --rm -i -v "${volume}:/workspaces" "$CLONE_IMAGE" sh -s <<PAYLOAD || {
+set -e
+umask 077
+printf '%s\n' '${esc_env}' > '${esc_workspace}/shell.env'
+mkdir -p '${esc_workspace}/.devcontainer'
+printf '%s\n' '${esc_map}' > '${esc_workspace}/.devcontainer/aws-profile-map.json'
+chown ${CONTAINER_UID_GID} '${esc_workspace}/shell.env' '${esc_workspace}/.devcontainer/aws-profile-map.json'
+PAYLOAD
+      docker volume rm "$volume" > /dev/null 2>&1 || true
+      rd_fail "Writing the config payload into volume '${volume}' failed" \
+        "The clone itself succeeded, so this is not a git or credential problem;" \
+        "docker's own message is in the output above. On this engine it is one of two things:" \
+        "" \
+        "  the engine cannot pull ${CLONE_IMAGE}" \
+        "      check egress from the engine: ${RD_BOLD}docker pull ${CLONE_IMAGE}${RD_RESET}" \
+        "" \
+        "  the write into '${CONTAINER_WORKSPACE}' itself failed" \
+        "      check the volume's free space on the engine: ${RD_BOLD}docker system df${RD_RESET}" \
+        "" \
+        "The partially configured volume was removed, so a retry starts clean."
+    }
+  )
+}
+
 rdc_seed_volume() {
   local volume="$1" branch="$2" url="$3" host creds git_user git_secret
   if docker volume inspect "$volume" > /dev/null 2>&1; then
@@ -573,6 +651,14 @@ SEED
       "" \
       "The partially created volume was removed, so a retry starts clean."
   }
+  # The EC2 path stops here: its container fetches the payload from
+  # Parameter Store at postCreate. An SSH engine has no Parameter Store, so
+  # its configuration channel is the volume itself: the transformed
+  # payload rides in right after the clone, in the same seeded checkout the
+  # postcreate wrapper's file-present branch will find and source.
+  if [ "$(rd_engine_kind)" = "ssh" ]; then
+    rdc_seed_config_payload "$volume"
+  fi
   rd_ok "checkout seeded at ${CONTAINER_WORKSPACE}"
 }
 
@@ -1012,9 +1098,50 @@ rdc_up() {
   backend="$(rdc_backend)"
 
   if ! docker info > /dev/null 2>&1; then
-    if [ "$backend" = "remote" ]; then
-      rd_log "remote engine is not answering, refreshing the port forward"
-      PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" python3 -m devcontainer_config.transport connect \
+    if [ "$backend" = "remote" ] && [ "$(rd_engine_kind)" = "ssh" ]; then
+      # The ssh failure remedy names a refresh, not a credential refresh:
+      # an ssh engine opens no AWS session, and refresh re-runs the recorded
+      # command, so it can never open a different tunnel than the one that
+      # dropped. A Unix-socket docker_addr additionally carries the Windows
+      # guidance: Windows OpenSSH cannot forward to one, and the failure
+      # must say what to set instead rather than leaving a bare timeout.
+      local ssh_addr_guidance=()
+      case "${ENGINE_DOCKER_ADDR:-}" in
+        /*)
+          ssh_addr_guidance+=(
+            ""
+            "The manifest's docker_addr is a Unix socket path, and a Windows SSH"
+            "endpoint cannot forward to one: Windows OpenSSH supports neither"
+            "named pipes nor Unix sockets as forward destinations."
+            ""
+            "On a Windows endpoint, enable Docker Desktop's \"Expose daemon on"
+            "tcp://localhost:2375 without TLS\" and set docker_addr to"
+            "tcp://localhost:2375 in the engine manifest."
+          )
+          ;;
+      esac
+      rd_log "remote engine is not answering, opening the ssh forward"
+      PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" \
+        python3 -m devcontainer_config.forwards open \
+        --name "$INSTANCE" --host "$ENGINE_HOST" --port "$ENGINE_PORT" \
+        --user "$ENGINE_USER" --docker-addr "$ENGINE_DOCKER_ADDR" \
+        --context "$REMOTE_DOCKER_CONTEXT" > /dev/null \
+        || rd_fail "The ssh forward could not be opened, so the remote engine stays unreachable" \
+          "The reason is in the output above." \
+          "" \
+          "Reopen it from the forward's own recorded command:" \
+          "  ${RD_BOLD}make connect-refresh INSTANCE=${INSTANCE}${RD_RESET}, then ${RD_BOLD}make up${RD_RESET}" \
+          ${ssh_addr_guidance[@]+"${ssh_addr_guidance[@]}"}
+      rd_ok "ssh forward open"
+    elif [ "$backend" = "remote" ]; then
+      # The daemonized opener, not a foreground `transport connect`: connect
+      # idles until interrupted, so an up against a dead forward blocked
+      # forever, and its exit 0 after a Ctrl-C read as success against a
+      # forward that had just closed. `forwards open` is idempotent, returns
+      # once the docker context answers through the forward, and carries its
+      # own diagnosis on failure, the same invocation connect-start runs.
+      rd_log "remote engine is not answering, opening the ssm port forward"
+      PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" python3 -m devcontainer_config.forwards open \
         --instance-id "$REMOTE_INSTANCE_ID" --context "$REMOTE_DOCKER_CONTEXT" \
         --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null \
         || rd_fail "The port forward could not be refreshed, so the remote engine stays unreachable" \
@@ -1024,7 +1151,7 @@ rdc_up() {
           "  ${RD_BOLD}aws sso login --profile ${REMOTE_AWS_PROFILE}${RD_RESET}, then ${RD_BOLD}make up${RD_RESET}" \
           "" \
           "If the instance is stopped, start it, then ${RD_BOLD}make connect${RD_RESET}."
-      rd_ok "port forward refreshed"
+      rd_ok "ssm port forward open"
     else
       local diagnosis
       diagnosis="$(rd_engine_diagnosis "$(docker context show)")"
@@ -1107,13 +1234,18 @@ rdc_build_remote() {
   # falls back to /devcontainer/$(basename "$(pwd)"), the workspace folder
   # name, and an instance whose name differs from the project folder reads a
   # different environment's secrets entirely. Observed: instance 'sandbox'
-  # bootstrapped from /devcontainer/general-dev/shell.env.
+  # bootstrapped from /devcontainer/general-dev/shell.env. The reference is
+  # guarded because the dispatch prelude leaves DEVCONTAINER_SSM_PREFIX
+  # unset for an ssh engine, where there is no prefix to resolve, and this
+  # remote path builds for both kinds: the ssh container takes the empty
+  # value, which its postCreate never reads, because the seed volume wrote
+  # the payload files its file-present branch checks first.
   RDC_OVERRIDE_CONFIG="$(mktemp "${TMPDIR:-/tmp}/devcontainer-override.XXXXXX")"
   trap 'rm -f "$RDC_OVERRIDE_CONFIG"' EXIT
   rdc_read_configuration \
     | jq --arg mount "source=${volume},target=${CONTAINER_WORKSPACES_ROOT},type=volume" \
       --arg configdir "${REPO_ROOT}/.devcontainer" \
-      --arg ssmprefix "${DEVCONTAINER_SSM_PREFIX}" \
+      --arg ssmprefix "${DEVCONTAINER_SSM_PREFIX:-}" \
       '.configuration
        | del(.configFilePath)
        | .workspaceMount = $mount
@@ -1276,8 +1408,19 @@ if command -v docker > /dev/null 2>&1; then
   # an export that would have re-aimed every plain docker call at the
   # resolved instance's engine even when the active context named another.
   if rd_resolve_instance_quiet; then
-    DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
-    export DEVCONTAINER_SSM_PREFIX
+    if [ "$(rd_engine_kind)" = "ssh" ]; then
+      # An ssh engine has no Parameter Store behind it, so its resolved block
+      # carries no PARAMETER_PREFIX and the assignment below would
+      # dereference an unset variable under set -u, ending every command
+      # before its dispatch (`make status ENGINE=<ssh engine>` died exactly
+      # there). Clear the variable entirely, the way the resolver clears
+      # REMOTE_INSTANCE_ID for an unlinked instance: no EC2 value may
+      # survive, from this run or a leaked one, for an ssh engine.
+      unset DEVCONTAINER_SSM_PREFIX
+    else
+      DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
+      export DEVCONTAINER_SSM_PREFIX
+    fi
   fi
 
   # Re-assert the ENGINE pin. The resolver's export loop now translates its

@@ -643,15 +643,17 @@ daemon's API version, which must be at least 1.44 for mTLS on a TCP
 listener with a rootless daemon, and whether it reports
 running rootless.
 
-**One build path, and a selector kept for the next one.** `make connect-start`
-reads `DEVCONTAINER_TRANSPORT` from the environment
-(`docs/environment-files.md`) and dispatches on it. There is one accepted
-value, `ssm`, which is also the default; any other value, including a
-leftover `ssh`, exits non-zero naming the variable, the
-offending value and the accepted value. The selector is kept rather than
-removed because it is the seam a future transport is added at, and because a
-caller who exports a stale value is told so instead of being
-silently redirected. Unset, or the explicit value `ssm`, runs
+**Two transports, one kind dispatch.** `make connect-start`
+resolves the instance, reads the engine's kind off the address block
+resolution exports (`docs/environment-files.md`) and opens the matching
+transport: an `ssh` engine (an `engine.json` manifest) runs the ssh form,
+an `ec2` instance the ssm form. `DEVCONTAINER_TRANSPORT` is a guard on
+that dispatch, never the selector: unset, the kind alone decides, which
+is why an operator naming an ssh engine sets no variable; set, the value
+must agree with the kind (`ssm` behind an ec2 instance, `ssh` behind an
+ssh engine) or the run exits non-zero naming the conflict, and any other
+value exits non-zero naming the variable, the offending value and the
+accepted values. An EC2 instance, or no instance named at all, runs
 
 ```sh
 PYTHONPATH=.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.forwards \
@@ -663,7 +665,7 @@ substituted from `config.env` and the instance's per-instance id store,
 the `instance-id` file under
 `<certs-root>/<instance>/`, written by `make instance-link` and recorded
 automatically by `make instance-deploy` at apply time, and that the
-`Makefile`'s own `connect` target issues for that value;
+`Makefile`'s own `connect` target issues behind its ssm route;
 `transport.resolve_transport` reads the identical
 `DEVCONTAINER_TRANSPORT` inside the transport's own connect handler too,
 refusing before touching AWS or docker at all unless it is `ssm`. This
@@ -688,9 +690,9 @@ tunnel) and `make connect-list`. `--certs-root`
 defaults to `certs.DEFAULT_CERTS_ROOT`, the same `<certs-root>` root
 `make cert-status` and the certificate material above use, and only
 needs overriding for a test fixture or an alternate checkout layout.
-The transport installs no SSH configuration block, spawns no `ssh` process,
-and names no `AWS-StartSSHSession` document; it requires no key on the
-instance, and the instance is provisioned without one. The `--context`
+The ssm transport installs no SSH configuration block, spawns no `ssh`
+process, and names no `AWS-StartSSHSession` document; it requires no key on
+the instance, and the instance is provisioned without one. The `--context`
 value (and the `REMOTE_DOCKER_CONTEXT` the Makefile derives it from,
 `config.env`, operator-overridable) must carry the `<repo-slug>-` prefix
 `instances.docker_context_prefix` derives from `repo.repo_slug`
@@ -698,6 +700,29 @@ value (and the `REMOTE_DOCKER_CONTEXT` the Makefile derives it from,
 `transport.instance_from_context_name` raises `InvalidContextNameError` on
 any context name that does not start with it, since that prefix is the
 single place the bare instance name is recovered for certificate lookup.
+
+**The ssh transport, for an SSH engine.** The value `ssh` runs the same
+`forwards open` lifecycle with the ssh flag form
+(`--name/--host/--port/--user/--docker-addr/--context`), reaching a
+generic SSH engine (one declared by a
+`remote-instances/<name>/engine.json` manifest; `python3 -m
+devcontainer_config.cli engine-init` scaffolds one) through
+`devcontainer_config.transport_ssh`: a managed `ssh -N -L` local forward
+(`BatchMode` and `ExitOnForwardFailure` set, the operator's own identity
+and agent, no key flag and no remote command) to the engine's docker
+address, a plain `tcp://127.0.0.1:<port>` context with no certificate
+material, readiness being the local port accepting a connection bounded by
+`SSH_FORWARD_TIMEOUT`, and the same `Connected:` announcement and teardown
+discipline as the ssm transport. The destination differs by platform: a
+Linux endpoint typically serves an absolute Unix socket path, while a
+Windows endpoint requires a tcp destination (Windows OpenSSH cannot
+forward to named pipes or Unix sockets), normally Docker Desktop's
+`tcp://localhost:2375` ("Expose daemon on tcp://localhost:2375 without
+TLS"). A forward failure whose destination is a socket path states that
+guidance explicitly, and `engine-init --docker-addr`'s help states it at
+scaffold time. No AWS value is required: an SSH engine opens no session,
+so the region, profile and instance-id guards apply to the ssm branch
+alone.
 
 **The SAN requirement, and its symptom.** TLS validates the name the
 *client* dials the daemon with, and the client dials `127.0.0.1` through
@@ -769,6 +794,17 @@ aws-profile-map.json                           /devcontainer/<project>/…      
   `${DEVCONTAINER_SSM_PREFIX:-/devcontainer/<workspace-basename>}/shell.env`
   (SecureString) and `…/aws-profile-map.json` (String), written with 0600 /
   default perms. Any failure is fatal with a message naming the remedy.
+- SSH-engine mode: an instance declared by
+  `remote-instances/<name>/engine.json` has no Parameter Store behind it, so
+  the container path never touches AWS. The build seeds the same transformed
+  payload straight into the workspace volume (`container.sh`, right after
+  the clone), so the wrapper finds `shell.env` on disk and skips the
+  Parameter Store bootstrap entirely; the payload is fresh on every rebuild.
+  `make push-secrets` against such an instance refreshes the two files in
+  the running container over stdin, so a config change needs no rebuild.
+  Both channels render through one shared transform
+  (`.devcontainer/remote-docker/config-payload.sh`), so the EC2 publish and
+  the SSH seed are byte-identical flavors.
 - The pushed `shell.env` is the local one transformed for remote: proxy
   disabled and removed (no laptop tinyproxy on EC2), `BASH_ENV` pointed at the
   remote workspace path, stale PATH prepends dropped.

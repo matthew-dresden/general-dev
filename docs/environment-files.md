@@ -524,6 +524,8 @@ to state the guard; leave it unset instead.
 | `DEVCONTAINER_TRANSPORT` | (unset) | guard on `make connect-start`'s transport dispatch; the Makefile's `connect-start` recipe dispatches on the resolved engine's kind first -- `ssh` (the `devcontainer_config.transport_ssh` forward to an SSH engine), `relay` (the `devcontainer_config.transport_azure` relay forward to an azure engine) or `ssm` (the SSM forward to an EC2 instance, which `transport.py`'s `resolve_transport` also gates for the module's own `connect` subcommand) -- and the variable, when set, must agree with the kind or the run is refused naming the conflict; any other value is rejected by name |
 | `AZURE_MATERIAL_INSTALL_TIMEOUT` | `300` | `transport_azure.py`, read by `install_material` for the azure VM's vault fetch and daemon start |
 | `AZURE_AGENT_READY_TIMEOUT` | `300` | `transport_azure.py`, read by `wait_agent_ready` for the bounded power-plus-VM-agent poll that `make cert-install` (azure) and `make instance-start` (azure) drive |
+| `AZURE_LISTENER_START_TIMEOUT` | `240` | `transport_azure.py`, read by `start_listener` for the synchronous `az vm run-command invoke` that starts the VM-side relay listener before a forward opens |
+| `GD_RELAY_IDLE_TIMEOUT_SECONDS` | `900` on the VM | VM-side: read by the relay listener unit on the azure VM (`gd-relay-listener.py`'s `parse_idle_timeout`), never by anything on this laptop; it is the idle self-stop deadline after which the listener stops its own unit, because azure bills listener-hours while a hybrid connection has a connected listener. `0` disables the self-stop entirely |
 
 `DOCKER_TLS_PORT` is the port the rootless docker daemon on the instance
 listens on, `127.0.0.1`-only, behind a security group with zero ingress
@@ -570,23 +572,37 @@ before raising. The ssh child's own teardown reuses
 `transport.stop_forward`, so the grace period that function grants the
 child before escalating to a kill is still bounded by
 `SSM_FORWARD_TIMEOUT`, exactly as for the ssm transport's own child. The
-azure transport's two bounds follow the same rule:
+azure transport's three bounds follow the same rule:
 `AZURE_MATERIAL_INSTALL_TIMEOUT` bounds how long the VM may take to pull
 its published material and start its daemon, and
 `AZURE_AGENT_READY_TIMEOUT` bounds the readiness poll that waits for a
 freshly started azure VM to report `PowerState/running` with its VM agent
 `Ready` before an install or a start reports done -- the azure counterpart
-of the EC2 path's running-then-SSM-Online wait, read through the same
-shared positive-seconds reader, both naming the variable and its offending
-value when set to something unusable. All
-nine variables, `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`,
+of the EC2 path's running-then-SSM-Online wait -- while
+`AZURE_LISTENER_START_TIMEOUT` bounds the connect-time start of the
+VM-side listener itself: the VM dials out to the relay, its listener unit
+stops when idle so the relay accrues listener-hours only while work is
+happening, and a forward's reopen therefore runs one synchronous
+run-command that starts the unit and waits for it to report active before
+binding the local port, because a listener not yet running answers a
+docker call with a 404 no-listener refusal. All three are read through the
+same shared positive-seconds reader, each naming the variable and its
+offending value when set to something unusable.
+`GD_RELAY_IDLE_TIMEOUT_SECONDS` is the idle self-stop deadline itself, and
+it is a VM-side variable: the listener unit on the azure VM reads it
+(`0` disables the self-stop entirely), and nothing in this repository's
+host-side code ever does. All
+eleven variables, `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`,
 `MATERIAL_INSTALL_TIMEOUT`, `PORT_PROBE_TIMEOUT`,
 `DOCKER_HANDSHAKE_TIMEOUT`, `DEVCONTAINER_TRANSPORT`,
-`SSH_FORWARD_TIMEOUT`, `AZURE_MATERIAL_INSTALL_TIMEOUT` and
-`AZURE_AGENT_READY_TIMEOUT`, are optional.
+`SSH_FORWARD_TIMEOUT`, `AZURE_MATERIAL_INSTALL_TIMEOUT`,
+`AZURE_AGENT_READY_TIMEOUT`, `AZURE_LISTENER_START_TIMEOUT` and
+`GD_RELAY_IDLE_TIMEOUT_SECONDS`, are optional.
 `DOCKER_TLS_PORT`, `SSM_FORWARD_TIMEOUT`, `MATERIAL_INSTALL_TIMEOUT`,
-`PORT_PROBE_TIMEOUT` and `DOCKER_HANDSHAKE_TIMEOUT` are read by code in this
-repository today: each default above applies
+`PORT_PROBE_TIMEOUT`, `DOCKER_HANDSHAKE_TIMEOUT`, `SSH_FORWARD_TIMEOUT`,
+`AZURE_MATERIAL_INSTALL_TIMEOUT`, `AZURE_AGENT_READY_TIMEOUT` and
+`AZURE_LISTENER_START_TIMEOUT` are read by code on this laptop today: each
+default above applies
 whenever the variable is unset, and each reader rejects a non-numeric or
 non-positive value naming the variable and its value rather than
 silently falling back to the default. `DEVCONTAINER_TRANSPORT`'s readers apply the same fail-fast rule to every
@@ -607,6 +623,28 @@ account, and a committed suffix. The instance name is derived, never typed,
 so the bucket cannot disagree with the directory it belongs to;
 `tests/test_state_bucket_name.py` pins the composition and the committed
 suffix the same way `root.hcl` declares them.
+
+### State store name components
+
+The azure kind's state store — one storage account per instance, in one
+dedicated `rg-<instance>-state` resource group — composes its name from
+`remote-instances/root-azure.hcl`'s own two declarations, the name template
+and the committed suffix, the same declaration shape the bucket above uses.
+Azure's law for a storage account name is narrower than an instance name: 3
+to 24 lowercase alphanumeric characters, globally unique, so
+`devcontainer_config.state_store` sanitizes the instance component
+(lowercased, stripped to alphanumerics, capped) and makes the composition
+collision-proof with a deterministic digest of the four components — the
+instance name, the location, the subscription, the suffix — rather than a
+random value, so a fresh clone composes the same name and finds the account
+an earlier bootstrap provisioned instead of minting an orphaned second one.
+Because Terragrunt's configuration language has no hash function to
+re-derive that digest, the composed names travel to the backend through one
+side-car, `remote-instances/<instance>/.state-store.json`, written before
+any Terragrunt command runs and read by `root-azure.hcl`'s remote_state
+block: one naming authority, one handoff file.
+`tests/test_state_store.py` pins the composition, the sanitization and the
+24-character law the way the root declares them.
 
 ### Repository slug derivation
 
@@ -668,7 +706,14 @@ back from the environment. For an EC2 instance the block carries
 state-key and Parameter Store rows do not exist, and the block instead
 carries `KIND=ssh` plus the manifest's validated values as `ENGINE_HOST`,
 `ENGINE_PORT`, `ENGINE_USER` and `ENGINE_DOCKER_ADDR`, and the composed
-`ENGINE_ENDPOINT`. The `ENGINE_` prefix is what lets the shell layer's
+`ENGINE_ENDPOINT`. For an azure engine the state-key and Parameter Store
+rows do not exist either — its deployment state lives behind the shared
+azure layer and its relay carries no SSM material, so those two
+derivations name nothing the kind addresses — and the block is
+`INSTANCE`, `KIND=azure`, `TERRAGRUNT_DIR`, `DOCKER_CONTEXT` and
+`CERTS_DIR`: the Terragrunt, context and certificate rows the EC2 block
+carries, without the two that name nothing this kind addresses. The
+`ENGINE_` prefix is what lets the shell layer's
 export loop consume every line generically, and `KIND` is what
 `lib.sh`'s `rd_engine_kind` reads to tell the kinds apart downstream
 (`connect-start`'s dispatch, the kind refusals, the ssh delivery in
@@ -737,6 +782,21 @@ reads it, so the id travels with the instance it names instead of in a
 variable set by hand. `make instance-destroy` removes the whole
 certificate directory, id file included, so a retired instance cannot
 leave a stale id behind to misdirect a power or status operation.
+
+The azure kind's sibling record lives in that same directory beside it:
+`engine-address.json` (`$DOCKER_CONFIG/certs/<name>/engine-address.json`,
+or `~/.docker/certs/<name>/engine-address.json` when `DOCKER_CONFIG` is
+unset), the relay address record the deploy writes once the relay's
+hybrid connection and its local forward endpoint are known — read from the
+Terragrunt outputs at apply time, never composed by hand. It carries the
+values the azure surfaces address the engine through: the relay namespace,
+the hybrid connection, the VM's name and resource id, the resource group,
+the Key Vault's name and URI, and the location. `make instance-deploy` is
+its single writer (an apply that produces no usable output for a key
+refuses rather than recording a partial record), the relay transport and
+the vault-reading surfaces are its readers, and `make instance-destroy`
+removes it with the rest of the certificate directory, so a retired azure
+engine leaves no address a later run could dial by mistake.
 
 ### What did not change
 

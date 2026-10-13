@@ -1,8 +1,10 @@
-# remote-docker. EC2 remote Docker engine for devcontainers
+# remote-docker. Remote Docker engines for devcontainers (EC2 and azure)
 
 Laptop-side tooling that connects VS Code Dev Containers to a Docker engine
-running on an EC2 instance, over an AWS SSM port forward secured with mTLS.
-Devcontainers run **on the instance**, with source code cloned into named
+running on a remote instance — an EC2 instance over an AWS SSM port forward,
+or an Azure virtual machine over an Azure Relay hybrid connection, each
+secured with mTLS. Devcontainers run **on the instance**, with source code
+cloned into named
 Docker volumes there, so containers keep running and lose nothing when the
 laptop disconnects, sleeps, or shuts down.
 
@@ -33,6 +35,12 @@ flowchart LR
   and the daemon's TLS listener is bound to loopback on the instance, so the
   port forward is the only way to reach it. There is no SSH layer, no key pair
   and no interactive path to the host at all.
+  The azure kind carries the same doctrine in that cloud's vocabulary: its
+  network security group's rule list is empty, its VM has no public IP, and
+  the transport is an Azure Relay hybrid connection whose listener is a unit
+  on the VM dialing *outward* to the relay service — the laptop's forward is
+  the sender half, authorized by Entra, and the mTLS docker API rides it to
+  the same loopback listener.
 - **Survives disconnects:** `shutdownAction: "none"` in devcontainer.json keeps
   containers running when VS Code detaches; `live-restore` keeps them running
   across dockerd restarts; source lives in Docker volumes on the instance.
@@ -42,7 +50,10 @@ flowchart LR
   SSH engine (a `remote-instances/<name>/engine.json` manifest) runs with
   zero AWS: the same transform is seeded into the workspace volume at build
   time and refreshable in the running container with `make push-secrets`,
-  and Parameter Store is never involved.
+  and Parameter Store is never involved. An azure engine's copies publish to
+  the instance's own Key Vault instead, and the container fetches them with
+  the VM's managed identity — no stored credential anywhere on the azure
+  path.
 
 ### Questions this design answers
 
@@ -91,6 +102,8 @@ half is `make cert-publish` + `make cert-install`. See
 - [session-manager-plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
 - docker CLI (a local engine is not required)
 - git
+- azure CLI (`brew install azure-cli`), needed only for azure engines and
+  logged in with `az login` before one is provisioned or connected to
 - Client certificate material for the instance, issued by `make cert-status`'s
   module (`~/.docker/certs/<instance>/`)
 
@@ -534,6 +547,22 @@ screen. Do not redirect either stream here.
   different uncommitted changes. Check both before assuming work is lost, `docker exec -u vscode <container> git -C /workspaces/<project> status`.
 - **`docker version` hangs / SSH fails:** AWS SSO session expired, run
   `aws sso login --profile default`. Then re-run `make connect`.
+- **An azure connect fails with 401:** the sender's Entra token expired (it
+  lives roughly an hour). Run `az login`, then
+  `make connect-refresh INSTANCE=<name>`.
+- **The azure relay answers 404, no listener:** the VM-side listener stops
+  itself when idle, because azure bills listener-hours while a connected
+  listener exists. `make connect-start INSTANCE=<name>` starts it first
+  (through one `az vm run-command invoke`) and then opens the forward; run
+  that rather than retrying the call that surfaced the 404.
+- **The azure listener refuses to start:** read why with the same channel
+  the start used: `az vm run-command invoke -g <resource-group> --vm-name
+  <vm-name> --command-id RunShellScript --scripts "journalctl -u gd-relay
+  -n 50 --no-pager"`, then take the action its output names.
+- **Every azure probe dashes / the VM is deallocated:**
+  `make instance-start INSTANCE=<name>` starts the VM and waits until its
+  agent reports ready, then `make remote INSTANCE=<name>` re-opens the
+  forward.
 - **Instance not Online in SSM:** check instance state and
   `aws ssm describe-instance-information` in us-east-1.
 - **postCreate fails with "shell.env not found … SSM bootstrap failed":**

@@ -675,9 +675,9 @@ def test_scaffold_azure_writes_the_azure_contract(tmp_path: Path) -> None:
     assert "The directory name IS this instance's identity" in text
     assert f"#   make instance-deploy INSTANCE={name}" in text
     assert 'include "root" {' in text
-    assert 'path = find_in_parent_folders("root.hcl")' in text
+    assert 'path = find_in_parent_folders("root-azure.hcl")' in text
     assert (
-        'path = "${dirname(find_in_parent_folders("root.hcl"))}'
+        'path = "${dirname(find_in_parent_folders("root-azure.hcl"))}'
         '/_envcommon/remote-azure.hcl"' in text
     )
     assert f'instance_name = "{name}"' in text
@@ -1897,8 +1897,8 @@ def _write_azure_scaffold(root: Path, name: str, location: str = "westeurope") -
     hcl = directory / "terragrunt.hcl"
     hcl.write_text(
         'include "envcommon" {\n'
-        '  path = "${dirname(find_in_parent_folders("root.hcl"))}'
-        '/_envcommon/remote-azure.hcl\"\n'
+        '  path = "${dirname(find_in_parent_folders("root-azure.hcl"))}'
+        '/_envcommon/remote-azure.hcl"\n'
         "}\n"
         "\n"
         "inputs = {\n"

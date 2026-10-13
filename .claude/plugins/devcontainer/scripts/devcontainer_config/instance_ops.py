@@ -628,8 +628,11 @@ def _render_azure_terragrunt_hcl(
     """The per-instance terragrunt.hcl text for the azure kind.
 
     The same three parts as the EC2 template, honoring
-    `remote-instances/README.md`'s conventions: the root include, the
-    envcommon include (targeting `_envcommon/remote-azure.hcl`, the file
+    `remote-instances/README.md`'s conventions: the root include (targeting
+    `root-azure.hcl`, the azure root whose backend and provider block this
+    kind runs under -- the s3 root.hcl is a different cloud's backend and
+    is never included by an azure instance), the envcommon include
+    (targeting `_envcommon/remote-azure.hcl`, the file
     `instances.read_kind` keys the azure kind on), and an `inputs` block
     carrying only what differs for this one deployment. The header keeps
     the EC2 template's conventions -- the directory name is the instance's
@@ -649,11 +652,12 @@ def _render_azure_terragrunt_hcl(
         f"#   make instance-deploy INSTANCE={name}",
         "",
         'include "root" {',
-        '  path = find_in_parent_folders("root.hcl")',
+        '  path = find_in_parent_folders("root-azure.hcl")',
         "}",
         "",
         'include "envcommon" {',
-        '  path = "${dirname(find_in_parent_folders("root.hcl"))}/_envcommon/remote-azure.hcl"',
+        '  path = "${dirname(find_in_parent_folders("root-azure.hcl"))}'
+        '/_envcommon/remote-azure.hcl"',
         "}",
         "",
         "inputs = {",

@@ -55,11 +55,30 @@ as the interpreter's own `KeyboardInterrupt`; SIGTERM is trapped into the
 same clean stop, so the daemon lifecycle's process-group signal tears the
 daemon down to exit 0 with the acceptor and every open pipe closed.
 
+Before binding the local port, `connect` ensures the VM-side listener is
+running: one synchronous `az vm run-command invoke` runs `systemctl start
+gd-relay; systemctl is-active --quiet gd-relay` on the VM (the resource
+group and VM name come from the same address record). This exists because
+the listener is the thing that self-stops when idle -- azure bills a
+hybrid connection while a listener is connected, so the VM-side unit
+stops itself after `GD_RELAY_IDLE_TIMEOUT_SECONDS` with no open bridge --
+which means a forward reopened after an idle gap reaches a listener that
+is not running. The invoke is synchronous by design: `az` waits for the
+VM agent to run the script, which on a freshly started VM can take tens of
+seconds, and the connect flow is deliberately serialized behind it rather
+than letting the first docker call die on a 404 no-listener answer; the
+wait is bounded by `AZURE_LISTENER_START_TIMEOUT` (default 240 seconds,
+read through `hostprobe.read_positive_seconds`), never unbounded. A
+failed or timed-out start names the journalctl run command that shows why
+the unit is not active.
+
 `verify` is the one-shot reachability proof: the same flow through the
 context activation, then one relay sender opened by one real docker
 version call through the bound acceptor, the verdict line, and every
 socket torn down on every path out -- never a listener or daemon left
-behind.
+behind. It does not start the listener: a 404 no-listener refusal there
+is diagnosed with the `make connect-start` remedy, which is the command
+that starts it.
 
 Nothing here waits on time. The daemon's liveness is the blocking
 `accept()` in its own thread; the bridging reads block on real sockets
@@ -177,6 +196,18 @@ _IDENTITY_ENDPOINT = "http://169.254.169.254"
 # literal, the same shape `transport`'s own MATERIAL_INSTALL_TIMEOUT takes.
 AZURE_MATERIAL_INSTALL_TIMEOUT_ENV_VAR = "AZURE_MATERIAL_INSTALL_TIMEOUT"
 _AZURE_MATERIAL_INSTALL_TIMEOUT_DEFAULT_SECONDS = 300.0
+
+# The connect-time listener start: the run-command script is the start plus
+# the activity assert (the assert is what makes the script's own exit
+# non-zero when the unit is not active after the start), and the invoke is
+# synchronous -- az waits for the VM agent -- so the whole start is bounded
+# by one deadline read through `read_positive_seconds`, the same shape
+# every other bounded wait in this module keeps. On a freshly started VM
+# the run command can take tens of seconds (the VM agent boots with the
+# instance); 240 covers a cold agent without hanging a misconfigured one.
+AZURE_LISTENER_START_TIMEOUT_ENV_VAR = "AZURE_LISTENER_START_TIMEOUT"
+_AZURE_LISTENER_START_TIMEOUT_DEFAULT_SECONDS = 240.0
+_LISTENER_START_SCRIPT = "systemctl start gd-relay; systemctl is-active --quiet gd-relay"
 
 # The run-command poll: one state read every _RUN_COMMAND_POLL_SECONDS,
 # bounded by the deadline above -- never a fixed wait outside the loop.
@@ -826,6 +857,125 @@ def install_material(
                 f"--vm-name {vm_name} --instance-view'."
             )
         pace(_RUN_COMMAND_POLL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# The connect-time listener start: one synchronous run command that makes
+# the VM-side unit active before the local port is bound. The listener
+# self-stops when idle (the VM-side billing guard), so a forward reopened
+# after an idle gap must start it again, and the start must finish before
+# the daemon can accept its first connection -- hence synchronous, and
+# bounded.
+# ---------------------------------------------------------------------------
+
+
+def listener_start_timeout_seconds() -> float:
+    """`AZURE_LISTENER_START_TIMEOUT`, read through the shared hostprobe reader.
+
+    Raises:
+        RelayTransportError: the variable is set to something that is not a
+            finite positive number of seconds.
+    """
+    try:
+        return read_positive_seconds(
+            AZURE_LISTENER_START_TIMEOUT_ENV_VAR, _AZURE_LISTENER_START_TIMEOUT_DEFAULT_SECONDS
+        )
+    except HostProbeError as exc:
+        raise RelayTransportError(
+            f"ERROR: {exc}\n"
+            "Set it to a positive number of seconds, or unset it to use the default of "
+            f"{_AZURE_LISTENER_START_TIMEOUT_DEFAULT_SECONDS:g}."
+        ) from exc
+
+
+def build_listener_start_argv(resource_group: str, vm_name: str) -> list[str]:
+    """The synchronous run-command invoke that starts the VM-side listener.
+
+    No `--no-wait`: the connect flow cannot bind its local port until the
+    unit answers `is-active`, so the call is deliberately the waiting form,
+    bounded by the deadline the caller passes rather than left unbounded.
+    The `--scripts` value is `_LISTENER_START_SCRIPT`, whose trailing
+    `systemctl is-active --quiet` is what makes the script itself fail when
+    the unit is not active after the start.
+    """
+    return [
+        "vm",
+        "run-command",
+        "invoke",
+        "--resource-group",
+        resource_group,
+        "--name",
+        vm_name,
+        "--command-id",
+        "RunShellScript",
+        "--scripts",
+        _LISTENER_START_SCRIPT,
+        "--output",
+        "none",
+    ]
+
+
+def _listener_journalctl_remedy(resource_group: str, vm_name: str) -> str:
+    """The one command that shows why the VM-side unit is not active."""
+    return (
+        "az vm run-command invoke "
+        f"--resource-group {resource_group} --name {vm_name} "
+        '--command-id RunShellScript --scripts "journalctl -u gd-relay -n 50"'
+    )
+
+
+def start_listener(runner: CommandRunner, *, instance: str) -> None:
+    """Have the VM start its `gd-relay` unit and prove it came up active.
+
+    The resource group and VM name come from the instance's relay address
+    record -- the record `make instance-deploy` writes -- and the invoke
+    runs synchronously through the injected runner seam, bounded by
+    `AZURE_LISTENER_START_TIMEOUT`.
+
+    Raises:
+        RelayConfigError: the address record is missing, malformed, or
+            lacks the resource-group or VM keys, or `az` is not on PATH.
+        RelayTransportError: the configured deadline is not a positive
+            number of seconds; the invoke outlived it; or the invoke
+            failed or the unit answered non-active (the message names the
+            journalctl run command that shows the unit's own log, and
+            `make instance-start` first when the VM may simply be
+            deallocated).
+    """
+    address = load_relay_address(instance)
+    resource_group = _address_str(address, _RESOURCE_GROUP_KEY, instance=instance)
+    vm_name = _address_str(address, _VM_NAME_KEY, instance=instance)
+    timeout_seconds = listener_start_timeout_seconds()
+    # The binary is prefixed here rather than routing through `_run_az`:
+    # this call site carries its own diagnoses (the journalctl remedy, the
+    # timeout variable), not the generic az-failure one.
+    result = runner(
+        (_AZ_BINARY, *build_listener_start_argv(resource_group, vm_name)), timeout_seconds
+    )
+    if result.binary_missing:
+        raise RelayConfigError(
+            f"ERROR: {_AZ_BINARY} is not on PATH\nInstall the Azure CLI, then retry."
+        )
+    if result.timed_out:
+        raise RelayTransportError(
+            f"ERROR: starting the gd-relay listener on {vm_name} did not finish in "
+            f"{timeout_seconds:g}s\n"
+            f"The run command is synchronous, so the VM agent answered nothing within the "
+            f"deadline.\n"
+            f"Raise {AZURE_LISTENER_START_TIMEOUT_ENV_VAR} if this instance is simply slow; "
+            "if the VM is deallocated, start it first: make instance-start "
+            f"INSTANCE={instance}\n"
+            f"Then check the unit's own log: {_listener_journalctl_remedy(resource_group, vm_name)}"
+        )
+    if result.exit_code != 0:
+        raise RelayTransportError(
+            f"ERROR: the gd-relay listener on {vm_name} did not come up active\n"
+            f"{result.stderr.strip() or result.stdout.strip()}\n"
+            "The start run command failed or its activity assert answered non-active.\n"
+            f"If the VM is deallocated, start it first: make instance-start "
+            f"INSTANCE={instance}\n"
+            f"Then check the unit's own log: {_listener_journalctl_remedy(resource_group, vm_name)}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1623,14 +1773,17 @@ def _sender_opener(
 def _run_connect(args: argparse.Namespace) -> int:
     """Handler for `connect`: the azure relay daemon's entry point.
 
-    Runs the shared setup, activates the context, binds the loopback
+    Runs the shared setup, ensures the VM-side listener is running (it
+    self-stops when idle, so a forward reopened after a gap reaches a unit
+    that is not active), activates the context, binds the loopback
     acceptor, prints the `Connected:` marker `devcontainer_config.forwards`
-    polls for -- only after the acceptor is bound and the context is
-    usable, never before -- and serves until SIGINT/SIGTERM. Every socket
-    this handler opened is closed on the way out, including on any failure
-    after the acceptor exists.
+    polls for -- only after the listener start succeeded, the acceptor is
+    bound and the context is usable, never before -- and serves until
+    SIGINT/SIGTERM. Every socket this handler opened is closed on the way
+    out, including on any failure after the acceptor exists.
     """
     namespace, hybrid_connection, local_port, runner = _common_setup(args.name, args.context)
+    start_listener(runner, instance=args.name)
     _use_context(runner, args.context)
     acceptor = _bind_acceptor(local_port)
     try:

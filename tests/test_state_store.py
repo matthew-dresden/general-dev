@@ -8,16 +8,18 @@ every probe outcome that is neither "exists" nor "missing" is raised with
 the command and its raw output, so no failure is ever caught and retried.
 
 These tests pin that contract: the account name is composed from
-`remote-instances/root.hcl`'s own template and suffix (parsed through the
-same functions production uses), sanitized into azure's lowercase
+`remote-instances/root-azure.hcl`'s own template and suffix (parsed through
+the same functions production uses), sanitized into azure's lowercase
 alphanumeric law with a deterministic digest over the instance, location,
 subscription and suffix; the subscription is resolved from the ambient
 login with no profile; every ensure step probes before it creates and is
-idempotent; and the delete flows purge then delete, reporting an already-
-absent store without touching anything. `_FakeRunner` is the queued Runner
-double in the `instance_ops` shape this module consumes; every generated
-identifier is built at test time and no test touches azure, the network or
-a real file outside `tmp_path`.
+idempotent, and ends by writing the `.state-store.json` side-car the azure
+root's remote_state reads; and the delete flows purge then delete,
+reporting an already-absent store without touching anything and removing
+the side-car with the store. `_FakeRunner` is the queued Runner double in
+the `instance_ops` shape this module consumes; every generated identifier
+is built at test time and no test touches azure, the network or a real
+file outside `tmp_path`.
 """
 
 from __future__ import annotations
@@ -37,14 +39,14 @@ from devcontainer_config.state_store import StateStoreError
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-# The committed suffix this suite's root.hcl fixture carries: the value the
-# slice reports for root.hcl's azure locals, used verbatim so the fixture
-# composes exactly what production will.
+# The committed suffix this suite's root-azure.hcl fixture carries: the
+# value the slice reports for the azure root's locals, used verbatim so the
+# fixture composes exactly what production will.
 SUFFIX = "gb9cho"
 
 # The template is composed from concatenated pieces so no source line
 # exceeds the lint limit; the pieces join into the same single line
-# `remote-instances/root.hcl` declares.
+# `remote-instances/root-azure.hcl` declares.
 _TEMPLATE = "tgstate${local.instance_name}${local.state_store_suffix}"
 
 ROOT_HCL = f"""\
@@ -113,20 +115,25 @@ def _expected_name(instance: str, location: str, subscription: str) -> str:
 
 
 def _root_with_root_hcl(tmp_path: Path) -> Path:
-    """A scratch repository root carrying this repository's root.hcl shape."""
+    """A scratch repository root carrying this repository's azure root shape."""
     instances_dir = tmp_path / "remote-instances"
     instances_dir.mkdir()
-    (instances_dir / "root.hcl").write_text(ROOT_HCL, encoding="utf-8")
+    (instances_dir / "root-azure.hcl").write_text(ROOT_HCL, encoding="utf-8")
     return tmp_path
 
 
 def _seed_azure_instance(root: Path, name: str, location: str = "westeurope") -> None:
-    """A scaffolded azure instance directory: the include and the location."""
+    """A scaffolded azure instance directory: the include and the location.
+
+    The include text is the azure scaffold's, in miniature: the envcommon
+    include's dirname base names `root-azure.hcl`, the root the scaffold's
+    own include targets.
+    """
     directory = root / "remote-instances" / name
     directory.mkdir(parents=True)
     (directory / "terragrunt.hcl").write_text(
         'include "envcommon" {\n'
-        '  path = "${dirname(find_in_parent_folders("root.hcl"))}'
+        '  path = "${dirname(find_in_parent_folders("root-azure.hcl"))}'
         '/_envcommon/remote-azure.hcl"\n'
         "}\n"
         "\n"
@@ -303,11 +310,13 @@ def test_storage_account_name_refuses_an_invalid_instance_before_any_az_call(
     assert runner.calls == []
 
 
-def test_storage_account_name_raises_when_root_hcl_is_missing(tmp_path: Path) -> None:
+def test_storage_account_name_raises_when_the_azure_root_is_missing(
+    tmp_path: Path,
+) -> None:
     runner = _FakeRunner()
     runner.queue(_ok(f"{_subscription()}\n"))
 
-    with pytest.raises(StateStoreError, match="root.hcl"):
+    with pytest.raises(StateStoreError, match="root-azure.hcl"):
         state_store.storage_account_name(tmp_path, _instance_name(), runner)
 
 
@@ -467,10 +476,11 @@ def test_ensure_creates_group_account_and_container_when_all_missing(
 
     messages = state_store.ensure(root, instance, runner)
 
-    assert len(messages) == 3
+    assert len(messages) == 4
     assert "created resource group" in messages[0]
     assert "created storage account" in messages[1]
     assert "created blob container tfstate" in messages[2]
+    assert ".state-store.json" in messages[3]
     rg = state_store.state_resource_group(instance)
     name = state_store.storage_account_name(root, instance, _FakeRunner()) if False else None
     del name
@@ -492,6 +502,60 @@ def test_ensure_creates_group_account_and_container_when_all_missing(
     assert create_container[create_container.index("--name") + 1] == "tfstate"
 
 
+def test_ensure_writes_the_sidecar_the_azure_root_reads(tmp_path: Path) -> None:
+    """The side-car names the group and account exactly as they were ensured."""
+    root = _root_with_root_hcl(tmp_path)
+    instance = _instance_name()
+    _seed_azure_instance(root, instance)
+    subscription = _subscription()
+    runner = _FakeRunner()
+    runner.queue(_ok(f"{subscription}\n"))
+    runner.queue(_ok())  # group exists
+    runner.queue(_ok("Succeeded\n"))  # account exists and succeeded
+    runner.queue(_ok())  # container exists
+
+    state_store.ensure(root, instance, runner)
+
+    sidecar = root / "remote-instances" / instance / ".state-store.json"
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload == {
+        "resource_group": state_store.state_resource_group(instance),
+        "storage_account_name": _expected_name(instance, "westeurope", subscription),
+    }
+
+
+def test_ensure_replaces_a_stale_sidecar(tmp_path: Path) -> None:
+    """A previous side-car is overwritten, never appended to: one replace, in place."""
+    root = _root_with_root_hcl(tmp_path)
+    instance = _instance_name()
+    _seed_azure_instance(root, instance)
+    sidecar = root / "remote-instances" / instance / ".state-store.json"
+    sidecar.write_text('{"resource_group": "stale", "storage_account_name": "stale"}\n')
+    runner = _FakeRunner()
+    runner.queue(_ok(f"{_subscription()}\n"))
+    runner.queue(_ok())  # group exists
+    runner.queue(_ok("Succeeded\n"))  # account exists
+    runner.queue(_ok())  # container exists
+
+    state_store.ensure(root, instance, runner)
+
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert payload["resource_group"] != "stale"
+    assert "stale" not in sidecar.read_text(encoding="utf-8")
+
+
+def test_ensure_refuses_an_ensure_without_an_instance_directory(tmp_path: Path) -> None:
+    """No scaffold, no store: the failure names the init that writes one, before any az call."""
+    root = _root_with_root_hcl(tmp_path)
+    instance = _instance_name()
+    runner = _FakeRunner()
+
+    with pytest.raises(StateStoreError, match="make instance-init"):
+        state_store.ensure(root, instance, runner)
+
+    assert runner.calls == [], "a missing scaffold must fail before the subscription lookup"
+
+
 def test_ensure_is_idempotent_when_everything_exists(tmp_path: Path) -> None:
     root = _root_with_root_hcl(tmp_path)
     instance = _instance_name()
@@ -504,10 +568,14 @@ def test_ensure_is_idempotent_when_everything_exists(tmp_path: Path) -> None:
 
     messages = state_store.ensure(root, instance, runner)
 
-    assert len(messages) == 3
+    assert len(messages) == 4
     assert "already exists" in messages[0]
     assert "already exists" in messages[1]
     assert "already exists" in messages[2]
+    assert ".state-store.json" in messages[3], (
+        "the side-car is rewritten even when the store already exists: it is the "
+        "handoff terragrunt reads, and it must name the store that was just probed"
+    )
     assert all("create" not in call[1] or call[1] == "show" for call in runner.calls[1:]), (
         "an existing store must create nothing: every call after the lookups is a probe"
     )
@@ -706,6 +774,42 @@ def test_delete_store_refuses_an_invalid_name_before_any_az_call(tmp_path: Path)
     assert runner.calls == []
 
 
+def test_delete_store_removes_the_sidecar_with_the_store(tmp_path: Path) -> None:
+    root = _root_with_root_hcl(tmp_path)
+    instance = _instance_name()
+    _seed_azure_instance(root, instance)
+    subscription = _subscription()
+    sidecar = root / "remote-instances" / instance / ".state-store.json"
+    sidecar.write_text('{"resource_group": "rg", "storage_account_name": "acc"}\n')
+    runner = _FakeRunner()
+    runner.queue(_ok(f"{subscription}\n"))  # the name's subscription lookup
+    runner.queue(_ok("Succeeded\n"))  # the account probe
+    runner.queue(_ok())  # the container listing: empty
+    runner.queue(_ok())  # the account delete
+    runner.queue(_err("(ResourceGroupNotFound) missing", returncode=3))  # the group probe
+
+    message = state_store.delete_store(root, instance, runner)
+
+    assert "deleted" in message
+    assert f"removed {sidecar}" in message
+    assert not sidecar.exists()
+
+
+def test_delete_store_reports_no_sidecar_removal_when_none_exists(tmp_path: Path) -> None:
+    """An absent side-car is the desired end state and gets no removal mention."""
+    root = _root_with_root_hcl(tmp_path)
+    instance = _instance_name()
+    _seed_azure_instance(root, instance)
+    runner = _FakeRunner()
+    runner.queue(_ok(f"{_subscription()}\n"))  # the name's subscription lookup
+    runner.queue(_err("(ResourceNotFound) was not found", returncode=3))  # absent account
+
+    message = state_store.delete_store(root, instance, runner)
+
+    assert "already absent" in message
+    assert "removed" not in message
+
+
 def test_delete_matching_stores_uses_each_listing_s_own_group(tmp_path: Path) -> None:
     root = _root_with_root_hcl(tmp_path)
     azure_instance = _instance_name()
@@ -824,7 +928,7 @@ def test_main_list_and_delete_run_end_to_end(
     )
     azure_instance = _instance_name()
     (root / "remote-instances").mkdir(exist_ok=True)
-    (root / "remote-instances" / "root.hcl").write_text(ROOT_HCL, encoding="utf-8")
+    (root / "remote-instances" / "root-azure.hcl").write_text(ROOT_HCL, encoding="utf-8")
     _seed_azure_instance(root, azure_instance)
     subscription = _subscription()
     account = _expected_name(azure_instance, "westeurope", subscription)

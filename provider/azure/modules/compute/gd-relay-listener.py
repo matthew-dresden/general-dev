@@ -27,6 +27,19 @@ stdlib-only (Ubuntu 24.04's system python3, no pip) is the constraint the
 azure layer installs under. One line per state change goes to stdout, where
 systemd captures it.
 
+The idle self-stop is the billing guard. Azure bills a hybrid connection
+while a listener is connected, so a unit left running with no rendezvous
+bridge open accrues listener-hours for nothing. When no rendezvous socket
+has been open for `GD_RELAY_IDLE_TIMEOUT_SECONDS` (default 900; 0 disables
+the self-stop entirely), the listener stops its own unit -- `systemctl stop
+gd-relay` -- and exits 0, which systemd's `Restart=on-failure` does not
+restart. A bridging socket counts as active even when it is quiet: the
+relay accrues listener-hours while the control channel is connected, and a
+quiet bridge's pipe is exactly what a connected-but-working forward looks
+like. The idle check never busy-loops: it rides a monotonic deadline
+checked inside the control channel's read loop, which is bounded by a read
+timeout rather than left blocking forever when a timeout is configured.
+
 No secret is ever taken from argv: the three configuration values are
 resource names, and the credential comes from IMDS, never from the command
 line.
@@ -43,12 +56,14 @@ import secrets
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from typing import NoReturn
 
 RELAY_RESOURCE = "https://relay.azure.net"
 IMDS_TOKEN_URL = (
@@ -57,6 +72,25 @@ IMDS_TOKEN_URL = (
 )
 IMDS_METADATA_HEADER = "Metadata"
 DEFAULT_TARGET = "127.0.0.1:2376"
+
+# The idle self-stop (the billing guard): after this many seconds with no
+# open rendezvous bridge, the listener stops its own unit and exits 0. The
+# default covers a workday coffee break, not an overnight left-open forward;
+# 0 disables the self-stop entirely, for an operator who prefers the unit to
+# run until it is stopped by hand.
+IDLE_TIMEOUT_ENV_VAR = "GD_RELAY_IDLE_TIMEOUT_SECONDS"
+DEFAULT_IDLE_TIMEOUT_SECONDS = 900.0
+
+# The longest one control-channel read may block while the idle deadline is
+# being watched. The idle check rides these read timeouts, so the deadline
+# is noticed within this window of expiring instead of the read blocking
+# forever; every wake is one monotonic comparison, never a poll loop of its
+# own.
+IDLE_CHECK_MAX_SECONDS = 60.0
+
+# The unit this script runs under; stopping it is the self-stop. Named once
+# because the systemd unit name and the unit file's own name must agree.
+UNIT_STOP_COMMAND = ("systemctl", "stop", "gd-relay")
 
 # IMDS answers in well under a second on a healthy instance; the timeout
 # exists so a wedged metadata endpoint fails the attempt and enters the
@@ -161,6 +195,17 @@ class RelayWebSocket:
         except BaseException:
             self._socket.close()
             raise
+
+    def set_read_timeout(self, timeout_seconds: float | None) -> None:
+        """Bound (or unbound) this socket's read waits after the handshake.
+
+        The handshake returns the socket fully blocking; the control
+        channel's owner tightens it when it needs the read loop to wake for
+        the idle check, and passes `None` to leave it blocking forever. The
+        buffer survives a timed-out read, so a frame that arrives across a
+        wake continues where it left off.
+        """
+        self._socket.settimeout(timeout_seconds)
 
     def _read_exact(self, count: int) -> bytes:
         while len(self._buffer) < count:
@@ -333,23 +378,138 @@ def bridge_to_target(websocket: RelayWebSocket, target_host: str, target_port: i
                 pass
 
 
+class BridgeTracker:
+    """The open rendezvous bridges, and when one was last open.
+
+    Idle means no OPEN rendezvous socket: a bridging socket, even a quiet
+    one, counts as active, because its pipe is a live forward and the
+    listener-hours it rides are being earned. Every register and unregister
+    moves `last_active` to now, so the idle window is measured from the last
+    bridge event, never from process start; a bridge that stays open for
+    hours keeps the count above zero the whole time, which is what keeps a
+    working forward from being torn down under it.
+
+    One tracker serves every control channel the reconnect loop holds, so a
+    bridge that outlives the control channel that spawned it still counts:
+    the tracker is created once in `main` and passed down.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._open_count = 0
+        self._last_active = time.monotonic()
+
+    def opened(self) -> None:
+        """Record one more open rendezvous, and the instant it opened."""
+        with self._lock:
+            self._open_count += 1
+            self._last_active = time.monotonic()
+
+    def closed(self) -> None:
+        """Record one rendezvous gone, and the instant it closed."""
+        with self._lock:
+            self._open_count -= 1
+            self._last_active = time.monotonic()
+
+    def idle_seconds(self, now: float) -> float:
+        """How long nothing has been open, at monotonic `now`; 0.0 while any is."""
+        with self._lock:
+            if self._open_count:
+                return 0.0
+            return now - self._last_active
+
+
+def parse_idle_timeout(raw: str | None) -> float:
+    """The idle self-stop deadline, from `GD_RELAY_IDLE_TIMEOUT_SECONDS`.
+
+    Unset means the default; "0" disables the self-stop outright; anything
+    else must be a finite positive number of seconds. A malformed value is
+    a startup failure naming the variable, never a guessed fallback: a
+    silently ignored typo would leave the operator believing a deadline is
+    being enforced when none is.
+
+    Raises:
+        SystemExit: the value is set and is neither "0" nor a finite
+            positive number.
+    """
+    if raw is None:
+        return DEFAULT_IDLE_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        raise SystemExit(
+            f"[gd-relay] {IDLE_TIMEOUT_ENV_VAR}={raw!r} is not a number; "
+            "set it to a positive number of seconds, or 0 to disable the idle self-stop"
+        ) from None
+    if value < 0 or value != value or value in (float("inf"), float("-inf")):
+        raise SystemExit(
+            f"[gd-relay] {IDLE_TIMEOUT_ENV_VAR}={raw!r} is not a usable timeout; "
+            "set it to a positive number of seconds, or 0 to disable the idle self-stop"
+        )
+    return value
+
+
+def stop_unit_and_exit(idle_seconds: float, timeout_seconds: float) -> NoReturn:
+    """The idle self-stop: stop this unit through systemd, then exit 0.
+
+    Exit 0 is the point: `Restart=on-failure` restarts a failed unit, so a
+    non-zero exit here would turn the billing guard into a restart loop.
+    The stop is issued without `check`, because a stop that cannot be
+    delivered still ends the same way -- this process exiting takes the
+    unit down with it.
+    """
+    log(
+        f"idle for {idle_seconds:.0f}s (limit {timeout_seconds:.0f}s) with no open "
+        "rendezvous bridge; stopping the unit to stop the listener-hours"
+    )
+    subprocess.run(list(UNIT_STOP_COMMAND), check=False)
+    raise SystemExit(0)
+
+
 def serve_control_channel(
-    namespace: str, hybrid_connection: str, target_host: str, target_port: int
+    namespace: str,
+    hybrid_connection: str,
+    target_host: str,
+    target_port: int,
+    *,
+    tracker: BridgeTracker,
+    idle_timeout_seconds: float,
 ) -> None:
     """Hold the control channel, bridging every accept frame, until it drops.
 
     Returns only when the control channel itself is lost, leaving the
-    caller's reconnect loop to re-establish it with a fresh token.
+    caller's reconnect loop to re-establish it with a fresh token -- unless
+    the idle self-stop fires first, in which case it ends the process.
+
+    While an idle deadline is configured (a positive
+    `idle_timeout_seconds`), the control channel's reads are bounded by a
+    slice no longer than `IDLE_CHECK_MAX_SECONDS`, so the read loop wakes
+    regularly and compares one monotonic deadline: no open rendezvous for
+    the whole idle window means `stop_unit_and_exit`. A timed-out read that
+    does not end in a self-stop just continues the loop -- the frame
+    buffer inside the websocket keeps whatever arrived early, so no byte is
+    lost to a wake. With the self-stop disabled (`idle_timeout_seconds`
+    0), the read stays fully blocking, exactly as it would without the
+    guard.
     """
     websocket = RelayWebSocket(
         control_url(namespace, hybrid_connection),
         fetch_identity_token(),
         timeout_seconds=30.0,
     )
+    if idle_timeout_seconds > 0:
+        websocket.set_read_timeout(min(idle_timeout_seconds, IDLE_CHECK_MAX_SECONDS))
     log(f"control channel established for {namespace}/{hybrid_connection}")
     try:
         while True:
-            message = websocket.recv_message()
+            try:
+                message = websocket.recv_message()
+            except TimeoutError:
+                now = time.monotonic()
+                idle_for = tracker.idle_seconds(now)
+                if idle_timeout_seconds > 0 and idle_for >= idle_timeout_seconds:
+                    stop_unit_and_exit(idle_for, idle_timeout_seconds)
+                continue
             if message is None:
                 log("control channel closed by the service")
                 return
@@ -367,6 +527,11 @@ def serve_control_channel(
             def run_bridge(accept_address: str = address) -> None:
                 rendezvous: RelayWebSocket | None = None
                 try:
+                    # Counted from before the dial to after the close: the
+                    # rendezvous counts as open the whole time it exists,
+                    # so the idle deadline can never fire underneath a
+                    # bridge that is being established or wound down.
+                    tracker.opened()
                     # Dialed AS-IS: no auth header, no extra headers. The
                     # service authenticates the couple through the control
                     # channel, and the accept address is single-use.
@@ -377,6 +542,7 @@ def serve_control_channel(
                 finally:
                     if rendezvous is not None:
                         rendezvous.close()
+                    tracker.closed()
 
             threading.Thread(target=run_bridge, daemon=True).start()
     finally:
@@ -398,6 +564,10 @@ def main(argv: list[str] | None = None) -> int:
     The env defaults are what the systemd unit's EnvironmentFile supplies
     (GD_RELAY_NAMESPACE / GD_RELAY_HYBRID_CONNECTION / GD_RELAY_TARGET), so
     the unit carries no secret and no resource name on its own ExecStart.
+    The idle self-stop deadline comes from GD_RELAY_IDLE_TIMEOUT_SECONDS
+    (see `parse_idle_timeout`), and one `BridgeTracker` serves every
+    control channel and bridge the process ever holds, so the idle
+    measurement spans reconnects.
     """
     parser = argparse.ArgumentParser(description="Azure Relay listener for the docker API.")
     parser.add_argument(
@@ -424,10 +594,19 @@ def main(argv: list[str] | None = None) -> int:
             "(or set GD_RELAY_NAMESPACE and GD_RELAY_HYBRID_CONNECTION)"
         )
     target_host, target_port = parse_target(args.target)
+    idle_timeout_seconds = parse_idle_timeout(os.environ.get(IDLE_TIMEOUT_ENV_VAR))
+    tracker = BridgeTracker()
     backoff = RECONNECT_BACKOFF_INITIAL_SECONDS
     while True:
         try:
-            serve_control_channel(args.namespace, args.hybrid_connection, target_host, target_port)
+            serve_control_channel(
+                args.namespace,
+                args.hybrid_connection,
+                target_host,
+                target_port,
+                tracker=tracker,
+                idle_timeout_seconds=idle_timeout_seconds,
+            )
             backoff = RECONNECT_BACKOFF_INITIAL_SECONDS
         except (RelayHandshakeError, ConnectionError, OSError, ValueError, RuntimeError) as exc:
             log(f"control channel dropped: {type(exc).__name__}: {exc}")

@@ -215,6 +215,98 @@ def test_listener_logs_state_changes_to_stdout() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The idle self-stop: the billing guard.
+# ---------------------------------------------------------------------------
+
+
+def test_listener_idle_self_stop_env_surface() -> None:
+    """The deadline comes from the environment: default 900, 0 disables the guard."""
+    text = _listener_text()
+    assert 'IDLE_TIMEOUT_ENV_VAR = "GD_RELAY_IDLE_TIMEOUT_SECONDS"' in text
+    assert "DEFAULT_IDLE_TIMEOUT_SECONDS = 900.0" in text
+    parse = re.search(r"def parse_idle_timeout\(.*?\n(.*?)\n\ndef ", text, re.DOTALL)
+    assert parse is not None, "no parse_idle_timeout function found"
+    body = parse.group(1)
+    assert "return DEFAULT_IDLE_TIMEOUT_SECONDS" in body, "unset means the default"
+    assert "return value" in body, "0 parses through and disables the self-stop"
+    assert "SystemExit" in body, (
+        "a malformed value must fail the startup naming the variable, never a guessed fallback"
+    )
+
+
+def test_listener_self_stop_runs_systemctl_and_exits_zero() -> None:
+    """The self-stop stops its own unit, then exits 0 so Restart=on-failure lets it stay down.
+
+    Exit 0 is load-bearing: a non-zero exit would turn the billing guard
+    into a restart loop, because the unit restarts on failure.
+    """
+    text = _listener_text()
+    assert 'UNIT_STOP_COMMAND = ("systemctl", "stop", "gd-relay")' in text
+    stop = re.search(r"def stop_unit_and_exit\(.*?\n(.*?)\n\ndef ", text, re.DOTALL)
+    assert stop is not None, "no stop_unit_and_exit function found"
+    body = stop.group(1)
+    assert "subprocess.run(list(UNIT_STOP_COMMAND), check=False)" in body, (
+        "the stop goes through systemd; a failed delivery still ends the same way, "
+        "with this process exiting"
+    )
+    assert "SystemExit(0)" in body
+    assert "check=True" not in body
+
+
+def test_listener_tracks_open_rendezvous_bridges() -> None:
+    """Idle means no OPEN rendezvous socket: a bridging socket, even quiet, counts as active."""
+    text = _listener_text()
+    tracker = re.search(r"class BridgeTracker:.*?\n(.*?)\n\ndef ", text, re.DOTALL)
+    assert tracker is not None, "no BridgeTracker class found"
+    body = tracker.group(1)
+    assert "def opened" in body and "def closed" in body
+    assert "def idle_seconds" in body
+    assert "if self._open_count:" in body, (
+        "any open bridge answers zero idle time, however quiet it is"
+    )
+    # The bridge thread registers before the dial and unregisters in its
+    # finally, so the deadline can never fire underneath a live bridge.
+    serve = re.search(r"def run_bridge\(.*?\n(.*?)\n\n\s+threading.Thread", text, re.DOTALL)
+    assert serve is not None, "no run_bridge closure found"
+    bridge_body = serve.group(1)
+    assert "tracker.opened()" in bridge_body
+    assert "tracker.closed()" in bridge_body
+    assert bridge_body.index("tracker.opened()") < bridge_body.index(
+        "RelayWebSocket(accept_address"
+    ), "the rendezvous counts as open from before the dial"
+
+
+def test_listener_idle_check_rides_the_control_read_loop_without_busy_waiting() -> None:
+    """The deadline is checked on bounded read wakes, never on a sleep loop."""
+    text = _listener_text()
+    assert "IDLE_CHECK_MAX_SECONDS = 60.0" in text
+    serve = re.search(r"def serve_control_channel\(.*?\n(.*?)\n\ndef ", text, re.DOTALL)
+    assert serve is not None
+    body = serve.group(1)
+    assert (
+        "websocket.set_read_timeout(min(idle_timeout_seconds, IDLE_CHECK_MAX_SECONDS))" in body
+    ), "the read is bounded by one slice, so the deadline is noticed within it"
+    assert "except TimeoutError:" in body
+    assert "tracker.idle_seconds(now)" in body
+    assert "stop_unit_and_exit(idle_for, idle_timeout_seconds)" in body
+    # The deadline comparison and its timeout are the wake's only work:
+    # there is no sleep in the serve loop at all.
+    assert "time.sleep" not in body
+
+
+def test_listener_main_wires_the_tracker_and_the_idle_deadline() -> None:
+    """One tracker serves every control channel, so the idle measurement spans reconnects."""
+    text = _listener_text()
+    main = re.search(r"def main\(.*?\n(.*?)\n\nif __name__", text, re.DOTALL)
+    assert main is not None, "no main function found"
+    body = main.group(1)
+    assert "parse_idle_timeout(os.environ.get(IDLE_TIMEOUT_ENV_VAR))" in body
+    assert "tracker = BridgeTracker()" in body
+    assert "idle_timeout_seconds=idle_timeout_seconds" in body
+    assert "tracker=tracker" in body
+
+
+# ---------------------------------------------------------------------------
 # The systemd unit and its documented environment.
 # ---------------------------------------------------------------------------
 

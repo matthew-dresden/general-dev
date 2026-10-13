@@ -201,18 +201,29 @@ def _repo_prose_files() -> list[Path]:
     Same selection as
     `find . -name '*.md' $(LINT_EXCLUDES) -not -path './.agents/skills/*'
     -not -name 'CLAUDE.md' -not -path './tests/*'
-    -not -path '*/.terragrunt-cache/*'`: every markdown file under the
-    checkout, minus the four `LINT_EXCLUDES` trees (`.git`, `devbench`,
-    `node_modules`, `repos`), the prose gate's own three excludes (the
-    `.agents/skills` roster, any `CLAUDE.md`, and `tests/`), and any
-    `.terragrunt-cache` directory at any depth -- generated copies of the
-    repo's docs that terragrunt refreshes on its own schedule, which the
-    make-side find excludes for the same reason.
+    -not -path '*/.terragrunt-cache/*' -not -path './.pytest_cache/*'
+    -not -path './.venv/*'`:
+    every markdown file under the checkout, minus the four `LINT_EXCLUDES`
+    trees (`.git`, `devbench`, `node_modules`, `repos`), the prose gate's
+    own three excludes (the `.agents/skills` roster, any `CLAUDE.md`, and
+    `tests/`), and the generated caches -- `.terragrunt-cache` copies of
+    the repo's docs that terragrunt refreshes on its own schedule, and
+    `.pytest_cache` whose README pytest itself writes at session start
+    (the CI run creates it before this test executes). The make-side find
+    excludes both for the same reason.
     Returned relative to the repository root, the shape make hands the
     checker.
     """
     root = find_root(Path(__file__).resolve().parent)
-    excluded_top_dirs = {".git", "devbench", "node_modules", "repos", "tests"}
+    excluded_top_dirs = {
+        ".git",
+        "devbench",
+        "node_modules",
+        "repos",
+        "tests",
+        ".pytest_cache",
+        ".venv",
+    }
     files: list[Path] = []
     for path in sorted(root.rglob("*.md")):
         relative = path.relative_to(root)

@@ -267,7 +267,7 @@ SPELL_FILES ?= $(MD_FILES)
 # their own voice, tests/ carries fixtures, and .terragrunt-cache holds
 # generated copies of the repo's docs that terragrunt refreshes on its own
 # schedule -- restyling a cache copy would be undone by the next init.
-PROSE_FILES ?= $(shell find . -name '*.md' $(LINT_EXCLUDES) -not -path './.agents/skills/*' -not -name 'CLAUDE.md' -not -path './tests/*' -not -path '*/.terragrunt-cache/*')
+PROSE_FILES ?= $(shell find . -name '*.md' $(LINT_EXCLUDES) -not -path './.agents/skills/*' -not -name 'CLAUDE.md' -not -path './tests/*' -not -path '*/.terragrunt-cache/*' -not -path './.pytest_cache/*' -not -path './.venv/*')
 PRIVATE_FILES ?= shell.env devcontainer-environment-variables.json .devcontainer/aws-profile-map.json
 # The hostcreds manifest is private like the PRIVATE_FILES entries (make init
 # creates it from its committed example; lint-private refuses to let it be

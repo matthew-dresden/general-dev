@@ -1,0 +1,17 @@
+[Unit]
+Description=Azure Relay listener for this engine's docker API
+Documentation=file:///opt/gd-relay/gd-relay.env.example
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# The three values are resource names, never secrets: the credential comes
+# from the instance identity endpoint at runtime, so the unit carries
+# nothing sensitive and /etc/default/gd-relay is world-readable.
+EnvironmentFile=/etc/default/gd-relay
+ExecStart=/usr/bin/python3 /opt/gd-relay/gd-relay-listener.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1072,6 +1072,193 @@ def test_main_open_refuses_a_non_integer_ssh_port(
     assert "--port" in capsys.readouterr().err
 
 
+# ---------------------------------------------------------------------------
+# The relay kind: the child argv, the record's relay pair, and the open
+# dispatch that accepts the bare --name/--context form. The relay transport
+# reads the engine address record itself, so these tests only prove the
+# lifecycle wires the right command and fails fast on a missing record.
+# ---------------------------------------------------------------------------
+
+_RELAY_NAMESPACE = "gd-x.servicebus.windows.net"
+_RELAY_HYBRID_CONNECTION = "gd-x"
+_RELAY_PAIR = f"relay://{_RELAY_NAMESPACE}/{_RELAY_HYBRID_CONNECTION}"
+
+
+def _write_relay_address(instance: str) -> None:
+    instances.write_engine_address(
+        None,
+        instance,
+        {
+            "relay_namespace": _RELAY_NAMESPACE,
+            "hybrid_connection": _RELAY_HYBRID_CONNECTION,
+            "vault_name": "gd-vault",
+        },
+    )
+
+
+def test_kind_relay_constant_is_the_string_the_make_dispatch_routes_on() -> None:
+    assert forwards.KIND_RELAY == "relay"
+
+
+def test_child_argv_relay_form_builds_the_transport_azure_connect_command() -> None:
+    argv = forwards.child_argv("x", "general-dev-x", "", "", kind=forwards.KIND_RELAY)
+
+    assert argv[1:3] == ("-u", "-m")
+    assert argv[3:5] == ("devcontainer_config.transport_azure", "connect")
+    assert argv[5:] == ("--name", "x", "--context", "general-dev-x")
+    assert "--instance-id" not in argv, "the relay route must never carry the ssm form's id"
+
+
+def test_open_forward_relay_kind_records_the_relay_pair_and_engine_kind(
+    tmp_path: Path,
+) -> None:
+    tmp_path = _git_root(tmp_path)
+    _write_relay_address("x")
+    spawner = _Spawner(pid=781)
+
+    def runner(_command: object, _timeout: float | None) -> CommandResult:
+        return CommandResult(
+            exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+        )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(forwards, "_context_port_runner", runner)
+        message = forwards.open_forward(
+            "unused-for-relay",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=forwards.KIND_RELAY,
+            spawner=spawner,
+            poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
+        )
+
+    assert _RELAY_PAIR in message
+    record = forwards.read_record("x")
+    assert record is not None
+    assert record.engine_kind == forwards.KIND_RELAY
+    assert record.instance_id == _RELAY_PAIR
+    assert spawner.argv is not None
+    assert spawner.argv[3:5] == ("devcontainer_config.transport_azure", "connect")
+    assert "--name" in spawner.argv and "x" in spawner.argv
+    assert "--host" not in spawner.argv, "the relay form carries no ssh engine values"
+
+
+def test_open_forward_relay_kind_fails_fast_without_the_address_record(
+    tmp_path: Path,
+) -> None:
+    tmp_path = _git_root(tmp_path)
+    spawner = _Spawner(pid=782)
+
+    with pytest.raises(ForwardError) as exc_info:
+        forwards.open_forward(
+            "unused-for-relay",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=forwards.KIND_RELAY,
+            spawner=spawner,
+            poll_clock=lambda _seconds: None,
+            port_probe=lambda _port: True,
+        )
+
+    assert "unusable" in str(exc_info.value)
+    assert "make instance-deploy INSTANCE=x" in str(exc_info.value), (
+        "a missing record names the deploy that writes it, before anything is spawned"
+    )
+    assert spawner.argv is None, "the failure must precede the spawn"
+
+
+def test_parse_open_flags_identifies_the_relay_form_by_name_without_host() -> None:
+    values, kind = forwards._parse_open_flags(["--name", "x", "--context", "general-dev-x"])
+    assert kind == forwards.KIND_RELAY
+    assert values == {"name": "x", "context": "general-dev-x"}
+
+
+def test_parse_open_flags_keeps_the_ssh_form_when_host_is_present() -> None:
+    _, kind = forwards._parse_open_flags(
+        [
+            "--name",
+            "x",
+            "--host",
+            "engine-x.example.invalid",
+            "--port",
+            "2222",
+            "--user",
+            "dev-x",
+            "--docker-addr",
+            "/var/run/docker-x.sock",
+            "--context",
+            "general-dev-x",
+        ]
+    )
+    assert kind == instances.ENGINE_KIND_SSH
+
+
+def test_parse_open_flags_refuses_relay_form_carrying_another_forms_flags() -> None:
+    with pytest.raises(ForwardError, match="the relay form takes only"):
+        forwards._parse_open_flags(["--name", "x", "--context", "general-dev-x", "--port", "22"])
+
+
+def test_parse_open_flags_refuses_mixed_or_unidentified_forms() -> None:
+    with pytest.raises(ForwardError, match="exactly one transport form"):
+        forwards._parse_open_flags(
+            ["--instance-id", "i-abc", "--name", "x", "--context", "general-dev-x"]
+        )
+    with pytest.raises(ForwardError, match="exactly one transport form"):
+        forwards._parse_open_flags(["--context", "general-dev-x"])
+
+
+def test_parse_open_flags_refuses_an_incomplete_relay_form() -> None:
+    with pytest.raises(ForwardError) as exc_info:
+        forwards._parse_open_flags(["--name", "x"])
+    assert "missing required flags" in str(exc_info.value)
+    assert "context" in str(exc_info.value)
+
+
+def test_main_open_accepts_the_relay_flag_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _git_root(tmp_path)
+    _write_relay_address("x")
+    spawner = _Spawner(pid=783)
+
+    def runner(_command: object, _timeout: float | None) -> CommandResult:
+        return CommandResult(
+            exit_code=0, stdout=json.dumps({"docker": {"Host": "tcp://127.0.0.1:51368"}})
+        )
+
+    monkeypatch.setattr(forwards, "_context_port_runner", runner)
+    monkeypatch.setattr(forwards, "_default_spawner", spawner)
+    monkeypatch.setattr(forwards, "_default_port_probe", lambda _port: True)
+    monkeypatch.chdir(root)
+
+    exit_code = forwards.main(["open", "--name", "x", "--context", "general-dev-x"])
+
+    assert exit_code == 0
+    assert "is open" in capsys.readouterr().out
+    record = forwards.read_record("x")
+    assert record is not None
+    assert record.engine_kind == forwards.KIND_RELAY
+    assert record.instance_id == _RELAY_PAIR
+
+
+def test_main_open_relay_form_fails_fast_without_the_address_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(_git_root(tmp_path))
+
+    exit_code = forwards.main(["open", "--name", "x", "--context", "general-dev-x"])
+
+    assert exit_code == 1
+    stderr = capsys.readouterr().err
+    assert "unusable" in stderr
+    assert "make instance-deploy INSTANCE=x" in stderr
+
+
 def test_default_spawner_creates_the_log_parent_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

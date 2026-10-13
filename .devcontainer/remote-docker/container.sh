@@ -1133,6 +1133,26 @@ rdc_up() {
           "  ${RD_BOLD}make connect-refresh INSTANCE=${INSTANCE}${RD_RESET}, then ${RD_BOLD}make up${RD_RESET}" \
           ${ssh_addr_guidance[@]+"${ssh_addr_guidance[@]}"}
       rd_ok "ssh forward open"
+    elif [ "$backend" = "remote" ] && [ "$(rd_engine_kind)" = "azure" ]; then
+      # The azure engine's route, mirroring the ssh branch's shape: the
+      # daemonized forwards opener with the resolver's values, and nothing
+      # else -- the transport reads the relay address record itself, so
+      # no env guard exists on this route. The refusal names the same
+      # authentication remedy the relay transport's own 401 diagnosis
+      # names, then the recorded-command refresh both tunnels share.
+      rd_log "remote engine is not answering, opening the azure relay forward"
+      PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" \
+        python3 -m devcontainer_config.forwards open \
+        --name "$INSTANCE" --context "$REMOTE_DOCKER_CONTEXT" > /dev/null \
+        || rd_fail "The azure relay forward could not be opened, so the remote engine stays unreachable" \
+          "The reason is in the output above." \
+          "" \
+          "If it is an authentication failure:" \
+          "  ${RD_BOLD}az login${RD_RESET}, then ${RD_BOLD}make connect-refresh INSTANCE=${INSTANCE}${RD_RESET}" \
+          "" \
+          "Otherwise reopen it from the forward's own recorded command:" \
+          "  ${RD_BOLD}make connect-refresh INSTANCE=${INSTANCE}${RD_RESET}, then ${RD_BOLD}make up${RD_RESET}"
+      rd_ok "azure relay forward open"
     elif [ "$backend" = "remote" ]; then
       # The daemonized opener, not a foreground `transport connect`: connect
       # idles until interrupted, so an up against a dead forward blocked

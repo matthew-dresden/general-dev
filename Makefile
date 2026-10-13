@@ -308,7 +308,7 @@ help:
 	row "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."; \
 	row "make cert-status"      "host"   "Client and CA expiry per instance. EC2 engines only; no TLS material exists for ssh engines."; \
 	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to Parameter Store. Remote builds do this when needed."; \
-	row "make connect-start"    "remote" "Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json engines); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
+	row "make connect-start"    "remote" "Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json, relay for azure engines); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
 	row "make connect-status"   "host"   "Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1"; \
 	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \
 	row "make connect-refresh"  "host"   "Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1"; \
@@ -402,7 +402,10 @@ help:
 # connect-list. lib.sh is sourced once, unconditionally, before the
 # dispatch: the kind checks below read the kind through rd_engine_kind, the
 # one predicate, and the ssh branch can only run for a resolved engine
-# anyway.
+# anyway. The azure kind (KIND=azure) routes to the relay form, which
+# carries only the name and the context: the transport reads the relay
+# address record the deploy wrote, so the relay branch needs no env guards
+# at all -- engine-address.json is the config.
 connect-start:
 	@set -euo pipefail; \
 	$(PROXY_ENV) \
@@ -421,9 +424,9 @@ connect-start:
 		ctx="$(REMOTE_CONTEXT)"; \
 	fi; \
 	case "$$transport" in \
-		ssh|ssm|"") ;; \
+		ssh|ssm|relay|"") ;; \
 		*) printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT="%s" is not recognized.\n' "$$transport" >&2; \
-		   printf '        Accepted values: ssm (the EC2 SSM forward) and ssh (the SSH engine forward).\n' >&2; \
+		   printf '        Accepted values: ssm (the EC2 SSM forward), ssh (the SSH engine forward), and relay (the azure relay forward).\n' >&2; \
 		   exit 1 ;; \
 	esac; \
 	route="ssm"; \
@@ -435,8 +438,29 @@ connect-start:
 				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to ssh.\n" >&2; \
 				exit 1; \
 			fi; \
+			if [ "$$transport" = "relay" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is an ssh engine; DEVCONTAINER_TRANSPORT=relay selects the azure relay transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to ssh.\n" >&2; \
+				exit 1; \
+			fi; \
+		elif [ "$$kind" = "azure" ]; then \
+			route="relay"; \
+			if [ "$$transport" = "ssm" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is an azure engine; DEVCONTAINER_TRANSPORT=ssm selects the ssm transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to relay.\n" >&2; \
+				exit 1; \
+			fi; \
+			if [ "$$transport" = "ssh" ]; then \
+				printf '\033[0;31m[ERROR]\033[0m instance %s is an azure engine; DEVCONTAINER_TRANSPORT=ssh selects the ssh transport, which cannot reach it\n' "$$target" >&2; \
+				printf "        The engine's own kind selects the transport here: unset DEVCONTAINER_TRANSPORT or set it to relay.\n" >&2; \
+				exit 1; \
+			fi; \
 		elif [ "$$transport" = "ssh" ]; then \
 			printf '\033[0;31m[ERROR]\033[0m instance %s is an EC2 engine; DEVCONTAINER_TRANSPORT=ssh selects the ssh transport, which only reaches ssh engines\n' "$$target" >&2; \
+			printf '        Unset DEVCONTAINER_TRANSPORT or set it to ssm.\n' >&2; \
+			exit 1; \
+		elif [ "$$transport" = "relay" ]; then \
+			printf '\033[0;31m[ERROR]\033[0m instance %s is an EC2 engine; DEVCONTAINER_TRANSPORT=relay selects the azure relay transport, which only reaches azure engines\n' "$$target" >&2; \
 			printf '        Unset DEVCONTAINER_TRANSPORT or set it to ssm.\n' >&2; \
 			exit 1; \
 		fi; \
@@ -445,8 +469,16 @@ connect-start:
 		printf '        The ssh form forwards the values of one resolved engine; run:\n' >&2; \
 		printf '        make connect-start INSTANCE=<name>\n' >&2; \
 		exit 2; \
+	elif [ "$$transport" = "relay" ]; then \
+		printf '\033[0;31m[ERROR]\033[0m DEVCONTAINER_TRANSPORT=relay needs the engine named\n' >&2; \
+		printf '        The relay form forwards one resolved azure engine; run:\n' >&2; \
+		printf '        make connect-start INSTANCE=<name>\n' >&2; \
+		exit 2; \
 	fi; \
 	case "$$route" in \
+		relay) \
+			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
+				--name "$$target" --context "$$ctx" ;; \
 		ssh) \
 			PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.forwards open \
 				--name "$$target" --host "$$ENGINE_HOST" --port "$$ENGINE_PORT" \

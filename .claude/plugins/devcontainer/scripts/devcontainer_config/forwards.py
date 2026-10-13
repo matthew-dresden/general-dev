@@ -16,13 +16,16 @@ instance scattered.
 
 The transport is chosen by kind, and the record remembers which: the `ssm`
 kind (the default) spawns `devcontainer_config.transport connect` against
-an EC2 instance id, and the `ssh` kind spawns
+an EC2 instance id, the `ssh` kind spawns
 `devcontainer_config.transport_ssh connect` against an SSH engine's
-manifest values (`instances.engine_manifest`). Both print the same
-readiness marker, so the open path cannot tell the difference and does not
-need to; `ForwardRecord.engine_kind` and the record's engine identifier
-(the EC2 id, or the `ssh://` endpoint) carry the distinction for status,
-stop and refresh.
+manifest values (`instances.engine_manifest`), and the `relay` kind spawns
+`devcontainer_config.transport_azure connect` against the instance's relay
+address record (`instances.engine_address`), which the transport reads
+itself -- the relay form needs no values beyond the name and the context.
+All three print the same readiness marker, so the open path cannot tell
+the difference and does not need to; `ForwardRecord.engine_kind` and the
+record's engine identifier (the EC2 id, the `ssh://` endpoint, or the
+`relay://` pair) carry the distinction for status, stop and refresh.
 
 `make connect-start` is the open operation. The rest of the lifecycle
 reads and mutates that record: `status` reports
@@ -62,20 +65,24 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from devcontainer_config import instances, repo, transport, transport_ssh
+from devcontainer_config import instances, repo, transport, transport_azure, transport_ssh
 from devcontainer_config.hostprobe import CommandResult, CommandRunner, read_positive_seconds
 
 # The transport commands this module spawns and manages. The child composes
-# its own aws/docker calls; this module only decides when and whether it ran.
+# its own aws/docker/az calls; this module only decides when and whether it
+# ran.
 _TRANSPORT_MODULE = "devcontainer_config.transport"
 _TRANSPORT_SSH_MODULE = "devcontainer_config.transport_ssh"
+_TRANSPORT_AZURE_MODULE = "devcontainer_config.transport_azure"
 _TRANSPORT_COMMAND = "connect"
 
 # The ssm transport kind, the default, and what every record written
 # before the field existed reads back as. The ssh kind is
 # `instances.ENGINE_KIND_SSH` (the same "ssh" string the engine manifest and
-# the resolved address block use).
+# the resolved address block use), and the relay kind is the azure engine's
+# transport, keyed by the same engine kind at the make entry point.
 KIND_SSM = "ssm"
+KIND_RELAY = "relay"
 
 # The line the transport prints only after the docker context answered a
 # TLS handshake through the freshly opened tunnel: the readiness marker
@@ -163,9 +170,11 @@ class ForwardRecord:
     """One running (or last-run) forward daemon, as recorded at open time.
 
     `instance_id` is the engine identifier: the EC2 instance id for an ssm
-    forward, or the `ssh://<user>@<host>:<port>` endpoint string for an ssh
-    forward. `engine_kind` says which: "ssm" (the default, and what every
-    record written before the field existed reads back as) or "ssh".
+    forward, the `ssh://<user>@<host>:<port>` endpoint string for an ssh
+    forward, or the `relay://<namespace>/<hybrid-connection>` pair for a
+    relay forward. `engine_kind` says which: "ssm" (the default, and what
+    every record written before the field existed reads back as), "ssh", or
+    "relay".
     """
 
     pid: int
@@ -248,14 +257,18 @@ def child_argv(
 
     `kind` selects the transport: the default `KIND_SSM` spawns
     `devcontainer_config.transport connect` against the EC2 `instance_id`
-    exactly as before, while `instances.ENGINE_KIND_SSH` spawns
+    exactly as before, `instances.ENGINE_KIND_SSH` spawns
     `devcontainer_config.transport_ssh connect` against the SSH engine
     values in `engine` (a validated manifest dict, from
-    `instances.engine_manifest` or the caller). For the ssh form, the first
-    positional slot carries the INSTANCE NAME (the `--name` value) rather
-    than an EC2 id, and `profile`/`region` are unused (an ssh engine opens
-    no AWS session), but stay positional so every caller passes the same
-    five leading arguments for either kind.
+    `instances.engine_manifest` or the caller), and `KIND_RELAY` spawns
+    `devcontainer_config.transport_azure connect` against the instance's
+    relay address record, which the transport reads itself -- so the relay
+    vector carries only the name and the context, and `engine` stays
+    `None`. For the ssh and relay forms, the first positional slot carries
+    the INSTANCE NAME (the `--name` value) rather than an EC2 id, and
+    `profile`/`region` are unused (neither an ssh engine nor an azure relay
+    opens an AWS session), but stay positional so every caller passes the
+    same five leading arguments for any kind.
     """
     if kind == instances.ENGINE_KIND_SSH:
         if engine is None:
@@ -279,6 +292,18 @@ def child_argv(
             str(engine["user"]),
             "--docker-addr",
             str(engine["docker_addr"]),
+            "--context",
+            context,
+        )
+    if kind == KIND_RELAY:
+        return (
+            python or sys.executable,
+            "-u",
+            "-m",
+            _TRANSPORT_AZURE_MODULE,
+            _TRANSPORT_COMMAND,
+            "--name",
+            instance_id,
             "--context",
             context,
         )
@@ -581,17 +606,18 @@ def open_forward(
     """Open one forward daemon and confirm it before returning.
 
     Spawns the transport's connect command detached (the ssm transport for
-    the default kind, the ssh transport for an SSH engine), polls for its
-    "Connected:" announcement (printed only after the docker context
-    answered a handshake through the tunnel), verifies the forwarded port
-    the context now carries actually accepts a connection, records the
-    daemon -- pid, full command, log, and that port -- and returns a message
-    naming what is open. The daemon log is emptied before the child starts,
-    so the readiness poll can only ever see this attempt's own lines: a
-    previous daemon's marker, left in the log by a stop that does not touch
-    the log, can never satisfy a new open. Idempotent: a forward whose
-    daemon is alive and whose port answers is left untouched and reported;
-    a stale record (daemon dead) is replaced by the new daemon and noted.
+    the default kind, the ssh transport for an SSH engine, the azure relay
+    transport for the relay kind), polls for its "Connected:" announcement
+    (printed only after the docker context was created or updated behind
+    the tunnel), verifies the forwarded port the context now carries
+    actually accepts a connection, records the daemon -- pid, full command,
+    log, and that port -- and returns a message naming what is open. The
+    daemon log is emptied before the child starts, so the readiness poll
+    can only ever see this attempt's own lines: a previous daemon's marker,
+    left in the log by a stop that does not touch the log, can never
+    satisfy a new open. Idempotent: a forward whose daemon is alive and
+    whose port answers is left untouched and reported; a stale record
+    (daemon dead) is replaced by the new daemon and noted.
 
     For `kind == instances.ENGINE_KIND_SSH`, `engine` carries the SSH
     engine's values; when it is `None`, the manifest is read from `root`
@@ -599,6 +625,11 @@ def open_forward(
     through `instances.validate_engine_values` before any daemon is
     spawned, and the record's engine identifier is the
     `ssh://<user>@<host>:<port>` endpoint string rather than the EC2 id.
+    For `kind == KIND_RELAY`, no engine values are needed: the address
+    record is read here once for the record's engine identifier (the
+    `relay://` pair) and to fail fast on a missing record, before any
+    daemon is spawned -- the transport reads the same record again itself,
+    the file being the one config the relay kind carries.
 
     Returns:
         A message naming what is open and where its log is.
@@ -640,6 +671,19 @@ def open_forward(
         # independently drifting f-string copy here.
         identifier = transport_ssh.engine_endpoint(validated)
         argv = list(child_argv(instance, context, "", "", kind=kind, engine=validated))
+    elif kind == KIND_RELAY:
+        # The record is read once here to fail fast (a missing record is
+        # exactly what the transport's own remedy names, and the daemon
+        # would only die on it a spawn later) and to carry the `relay://`
+        # pair as the record's engine identifier; the transport re-reads
+        # the same file itself when it runs.
+        try:
+            address = instances.engine_address(root, instance)
+            namespace, hybrid_connection = transport_azure.relay_values(address, instance=instance)
+        except (instances.InstancesError, transport_azure.RelayTransportError) as exc:
+            raise ForwardError(f"the relay address record is unusable: {exc}") from exc
+        identifier = f"relay://{namespace}/{hybrid_connection}"
+        argv = list(child_argv(instance, context, "", "", kind=kind))
     else:
         identifier = instance_id
         argv = list(child_argv(instance_id, context, profile, region))
@@ -943,8 +987,8 @@ def _usage() -> str:
     return (
         "usage: devcontainer_config.forwards open --instance-id ID --context CTX "
         "--profile P --region R | open --name NAME --host HOST --port PORT --user USER "
-        "--docker-addr ADDR --context CTX | status INSTANCE | stop INSTANCE | "
-        "refresh INSTANCE | list"
+        "--docker-addr ADDR --context CTX | open --name NAME --context CTX | "
+        "status INSTANCE | stop INSTANCE | refresh INSTANCE | list"
     )
 
 
@@ -954,26 +998,32 @@ def _require_args(rest: Sequence[str], count: int, what: str) -> list[str]:
     return list(rest)
 
 
-# The open command's two flag forms, one per transport kind. `--context` is
-# the one flag both share; the ssm form names the EC2 id and the AWS
-# session, the ssh form names the SSH engine's values.
+# The open command's three flag forms, one per transport kind. `--context`
+# is the one flag all three share; the ssm form names the EC2 id and the
+# AWS session, the ssh form names the SSH engine's values, and the relay
+# form names only the instance -- the transport reads the relay address
+# record itself.
 _SSM_OPEN_FLAGS = ("--instance-id", "--context", "--profile", "--region")
 _SSH_OPEN_FLAGS = ("--name", "--host", "--port", "--user", "--docker-addr", "--context")
+_RELAY_OPEN_FLAGS = ("--name", "--context")
 
 
 def _parse_open_flags(rest: Sequence[str]) -> tuple[dict[str, str], str]:
-    """`rest` parsed per kind: the ssm form or the ssh form, and which it was.
+    """`rest` parsed per kind: the ssm, ssh or relay form, and which it was.
 
-    The kind is decided by which form's identifying flag is present:
-    `--instance-id` selects the ssm form, `--name` the ssh form, and mixing
-    the two, or supplying neither, is refused before anything is
-    spawned. Missing flags of the chosen form are refused the same way.
+    The kind is decided by the form's identifying flags: `--instance-id`
+    selects the ssm form; `--name` with `--host` selects the ssh form;
+    `--name` without `--host` selects the relay form. Mixing forms -- the
+    ssm id beside either named form, or ssh/relay-only flags inside the
+    relay form -- is refused naming the forms, as is supplying no
+    identifying flag at all. Missing flags of the chosen form are refused
+    the same way.
 
     Raises:
         ForwardError: a flag is unknown, the forms are mixed, or the chosen
             form is missing required flags.
     """
-    known = {*_SSM_OPEN_FLAGS, *_SSH_OPEN_FLAGS}
+    known = {*_SSM_OPEN_FLAGS, *_SSH_OPEN_FLAGS, *_RELAY_OPEN_FLAGS}
     values: dict[str, str] = {}
     index = 0
     while index < len(rest):
@@ -986,17 +1036,45 @@ def _parse_open_flags(rest: Sequence[str]) -> tuple[dict[str, str], str]:
         index += 2
     has_instance_id = "instance-id" in values
     has_name = "name" in values
-    if has_instance_id == has_name:
+    has_host = "host" in values
+    if has_instance_id and (has_name or has_host):
         raise ForwardError(
             "open takes exactly one transport form: the ssm form "
-            f"({'/'.join(_SSM_OPEN_FLAGS)}) or the ssh form "
-            f"({'/'.join(_SSH_OPEN_FLAGS)})"
+            f"({'/'.join(_SSM_OPEN_FLAGS)}), the ssh form "
+            f"({'/'.join(_SSH_OPEN_FLAGS)}), or the relay form "
+            f"({'/'.join(_RELAY_OPEN_FLAGS)})"
         )
-    flags = _SSM_OPEN_FLAGS if has_instance_id else _SSH_OPEN_FLAGS
+    if has_instance_id:
+        flags: tuple[str, ...] = _SSM_OPEN_FLAGS
+        kind = KIND_SSM
+    elif has_name and has_host:
+        flags = _SSH_OPEN_FLAGS
+        kind = instances.ENGINE_KIND_SSH
+    elif has_name:
+        # The relay form: `--name` + `--context`, nothing else. Any other
+        # flag inside it is another form's value slipping in, and the
+        # refusal names which, so the operator can see the form they
+        # actually wanted.
+        unexpected = sorted(f"--{key}" for key in values if key not in ("name", "context"))
+        if unexpected:
+            raise ForwardError(
+                "the relay form takes only "
+                + "/".join(_RELAY_OPEN_FLAGS)
+                + f"; got {' '.join(unexpected)}"
+            )
+        flags = _RELAY_OPEN_FLAGS
+        kind = KIND_RELAY
+    else:
+        raise ForwardError(
+            "open takes exactly one transport form: the ssm form "
+            f"({'/'.join(_SSM_OPEN_FLAGS)}), the ssh form "
+            f"({'/'.join(_SSH_OPEN_FLAGS)}), or the relay form "
+            f"({'/'.join(_RELAY_OPEN_FLAGS)})"
+        )
     missing = sorted({flag[2:] for flag in flags} - set(values))
     if missing:
         raise ForwardError(f"open is missing required flags: {missing}")
-    return values, (KIND_SSM if has_instance_id else instances.ENGINE_KIND_SSH)
+    return values, kind
 
 
 def _positive_port(raw: str) -> int:
@@ -1031,6 +1109,9 @@ def _run_open(rest: Sequence[str]) -> int:
                 engine=engine,
             )
         )
+        return 0
+    if kind == KIND_RELAY:
+        print(open_forward(values["name"], values["context"], "", "", root, kind=kind))
         return 0
     print(
         open_forward(

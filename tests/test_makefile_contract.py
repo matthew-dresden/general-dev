@@ -661,8 +661,42 @@ def test_connect_start_recipe_rejects_an_unrecognized_transport() -> None:
     assert "ERROR" in result.stderr
     assert "DEVCONTAINER_TRANSPORT" in result.stderr
     assert "bogus-transport" in result.stderr
-    assert "ssh" in result.stderr
-    assert "ssm" in result.stderr
+    for accepted in ("ssh", "ssm", "relay"):
+        assert accepted in result.stderr, (
+            f"the accepted-values refusal must name {accepted}, which the dispatch routes"
+        )
+
+
+def test_connect_recipe_dispatches_the_azure_engine_to_the_relay_route() -> None:
+    """The azure kind routes to the relay form, which carries only name and context.
+
+    The relay branch is the one route with no env guards at all: the relay
+    address record the deploy wrote IS the config, and the transport reads
+    it itself. The azure contradiction refusals name both contradicting
+    values symmetrically, the way the ssh refusals do.
+    """
+    text = _makefile_text()
+    recipe = _connect_recipe_body(text)
+    assert 'elif [ "$$kind" = "azure" ]; then' in recipe, (
+        "the kind dispatch must carry the azure branch"
+    )
+    assert 'route="relay"' in recipe
+    route_case_at = recipe.index('case "$$route"')
+    relay_at = recipe.index("relay)", route_case_at)
+    relay_branch = recipe[relay_at : recipe.index(";;", relay_at)]
+    assert "--name" in relay_branch and "--context" in relay_branch
+    for forbidden in ("--instance-id", "--host", "--profile", "--region", "--docker-addr"):
+        assert forbidden not in relay_branch, (
+            f"the relay route must never carry {forbidden}: the address record is the config"
+        )
+    for guard in ("REMOTE_AWS_REGION is required", "REMOTE_AWS_PROFILE is required"):
+        assert guard not in relay_branch, "the relay branch opens no AWS session"
+    # The azure contradiction refusals, symmetric with the ssh ones.
+    assert "DEVCONTAINER_TRANSPORT=ssm" in recipe and "is an azure engine" in recipe
+    assert "DEVCONTAINER_TRANSPORT=ssh" in recipe and "set it to relay" in recipe
+    # The mirror guards: relay behind an ssh or an EC2 engine is refused.
+    assert "DEVCONTAINER_TRANSPORT=relay selects the azure relay transport" in recipe
+    assert "DEVCONTAINER_TRANSPORT=relay needs the engine named" in recipe
 
 
 def test_shell_env_example_documents_the_transport_selector() -> None:

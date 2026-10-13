@@ -82,10 +82,6 @@ __pycache__/
 # Terragrunt download and module caches under per-instance directories.
 remote-instances/*/.terragrunt-cache/
 
-# Per-instance scaffolds are local-only; promote deliberately by moving the directory into tracked scope.
-remote-instances/*/.terraform.lock.hcl
-remote-instances/az-e2e/
-
 # Provider lock files under the module trees: the aws tree ships none and the
 # azure tree keeps the same posture -- the lock records MY machine's init, not
 # a declared dependency of the module.
@@ -95,3 +91,6 @@ provider/*/.terraform.lock.hcl
 # workspace (see Makefile UV_PROJECT_ENVIRONMENT); ignored in case a bare
 # `uv run` creates one anyway.
 .venv/
+
+# Per-instance scaffolds are local-only; promote deliberately by moving the directory into tracked scope.
+remote-instances/*/.terraform.lock.hcl

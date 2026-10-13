@@ -1000,8 +1000,8 @@ def _seed_azure_scaffold(root: Path, name: str, location: str) -> Path:
     hcl = directory / "terragrunt.hcl"
     hcl.write_text(
         'include "envcommon" {\n'
-        '  path = "${dirname(find_in_parent_folders("root.hcl"))}'
-        '/_envcommon/remote-azure.hcl\"\n'
+        '  path = "${dirname(find_in_parent_folders("root-azure.hcl"))}'
+        '/_envcommon/remote-azure.hcl"\n'
         "}\n"
         "\n"
         "inputs = {\n"

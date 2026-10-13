@@ -96,8 +96,10 @@ def _issue_client_material(instance: str) -> None:
 def _write_engine_address(instance: str) -> None:
     """The relay address record the deploy writes, with the other slices' keys present.
 
-    The extra keys (`vm_resource_id`, `vault_name`, `resource_group`) are
-    part of the record contract this slice must tolerate.
+    The extra keys (`vm_resource_id`, `vault_name`, `resource_group`,
+    `vm_name`) are part of the record contract this slice must tolerate --
+    and the listener start reads `resource_group` and `vm_name` out of the
+    same record.
     """
     instances.write_engine_address(
         _repo_root(),
@@ -110,6 +112,7 @@ def _write_engine_address(instance: str) -> None:
             ),
             "vault_name": "gd-vault",
             "resource_group": "gd-rg",
+            "vm_name": "gd-vm",
         },
     )
 
@@ -1001,8 +1004,28 @@ def test_serve_until_stopped_swallows_a_keyboard_interrupt(monkeypatch: pytest.M
 # ---------------------------------------------------------------------------
 
 
+def _listener_start_command() -> tuple[str, ...]:
+    """The exact az argv the connect flow's listener start issues."""
+    return (
+        "az",
+        "vm",
+        "run-command",
+        "invoke",
+        "--resource-group",
+        "gd-rg",
+        "--name",
+        "gd-vm",
+        "--command-id",
+        "RunShellScript",
+        "--scripts",
+        "systemctl start gd-relay; systemctl is-active --quiet gd-relay",
+        "--output",
+        "none",
+    )
+
+
 def _connect_runner(context: str, *, recorded_port: int | None = None) -> RecordingRunner:
-    """The docker answers the connect flow needs, recorded for assertion."""
+    """The docker and az answers the connect flow needs, recorded for assertion."""
 
     def answer(command: tuple[str, ...]) -> CommandResult:
         if command == _context_inspect_command(context):
@@ -1014,6 +1037,8 @@ def _connect_runner(context: str, *, recorded_port: int | None = None) -> Record
         if command[:3] == ("docker", "context", "update"):
             return _ok()
         if command == ("docker", "context", "use", context):
+            return _ok()
+        if command == _listener_start_command():
             return _ok()
         raise AssertionError(f"unexpected command: {command}")
 
@@ -1076,8 +1101,19 @@ def test_main_connect_full_flow_prints_the_marker_and_wires_the_context(
     assert commands.index(create_commands[0]) < use_index, (
         "the context must be created before it is activated"
     )
-    # The az token was never fetched: no connection arrived, so no sender opened.
-    assert not any(command[0] == "az" for command in commands)
+    # The listener start ran, before the context was touched: it is the
+    # connect flow's first side effect after setup.
+    start_index = commands.index(_listener_start_command())
+    assert start_index < use_index, (
+        "the VM-side listener must be running before the local port is bound"
+    )
+    # The az token was never fetched: no connection arrived, so no sender
+    # opened -- the listener start is the only az call the flow makes.
+    az_commands = [c for c in commands if c[0] == "az"]
+    assert az_commands == [_listener_start_command()]
+    assert not any(command[:2] == ("az", "account") for command in commands), (
+        "no sender means no token fetch, even though the listener start dialed az"
+    )
 
 
 def test_main_connect_reuses_the_port_the_context_records(
@@ -1191,6 +1227,147 @@ def test_main_connect_closes_the_acceptor_when_the_daemon_stops(
     assert "Connected:" in capsys.readouterr().out
     port = port_holder[0]
     _wait_until(lambda: not _port_accepts(port), _HANG_GUARD_SECONDS, "the acceptor closing")
+
+
+# ---------------------------------------------------------------------------
+# The connect-time listener start: the argv, the ordering, the diagnoses.
+# ---------------------------------------------------------------------------
+
+
+def test_the_listener_start_argv_is_pinned() -> None:
+    """The synchronous run command: start, then the is-active assert, no --no-wait."""
+    transport_azure = _import_transport_azure()
+    argv = transport_azure.build_listener_start_argv("gd-rg", "gd-vm")
+    assert argv == [
+        "vm",
+        "run-command",
+        "invoke",
+        "--resource-group",
+        "gd-rg",
+        "--name",
+        "gd-vm",
+        "--command-id",
+        "RunShellScript",
+        "--scripts",
+        "systemctl start gd-relay; systemctl is-active --quiet gd-relay",
+        "--output",
+        "none",
+    ]
+    assert "--no-wait" not in argv, "the invoke is synchronous: az waits"
+
+
+def test_the_listener_start_reads_its_deadline_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_azure = _import_transport_azure()
+    assert transport_azure.listener_start_timeout_seconds() == 240.0
+    monkeypatch.setenv("AZURE_LISTENER_START_TIMEOUT", "31.5")
+    assert transport_azure.listener_start_timeout_seconds() == 31.5
+    monkeypatch.setenv("AZURE_LISTENER_START_TIMEOUT", "0")
+    with pytest.raises(Exception, match="AZURE_LISTENER_START_TIMEOUT"):
+        transport_azure.listener_start_timeout_seconds()
+
+
+def test_start_listener_diagnoses_a_failed_invoke(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed or non-active start names the journalctl run command that shows why."""
+    transport_azure = _import_transport_azure()
+    _write_engine_address(_NAME)
+
+    def failed(command: tuple[str, ...]) -> CommandResult:
+        if command == _listener_start_command():
+            return CommandResult(exit_code=1, stderr="run-command exit 1 inside the VM")
+        raise AssertionError(f"unexpected command: {command}")
+
+    runner = RecordingRunner(failed)
+    monkeypatch.setattr(transport_azure.transport, "subprocess_command_runner", runner)
+
+    with pytest.raises(transport_azure.RelayTransportError) as exc_info:
+        transport_azure.start_listener(
+            transport_azure.transport.subprocess_command_runner, instance=_NAME
+        )
+
+    message = str(exc_info.value)
+    assert "gd-relay listener on gd-vm did not come up active" in message
+    assert "journalctl -u gd-relay -n 50" in message, "the remedy shows the unit's own log"
+    assert "--resource-group gd-rg" in message
+    assert f"make instance-start INSTANCE={_NAME}" in message
+
+
+def test_start_listener_diagnoses_a_timed_out_invoke(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A start that outlives its deadline names the variable that extends it."""
+    transport_azure = _import_transport_azure()
+    _write_engine_address(_NAME)
+
+    def slow(command: tuple[str, ...]) -> CommandResult:
+        assert command == _listener_start_command()
+        return CommandResult(exit_code=-1, timed_out=True)
+
+    runner = RecordingRunner(slow)
+    monkeypatch.setattr(transport_azure.transport, "subprocess_command_runner", runner)
+
+    with pytest.raises(transport_azure.RelayTransportError) as exc_info:
+        transport_azure.start_listener(
+            transport_azure.transport.subprocess_command_runner, instance=_NAME
+        )
+
+    message = str(exc_info.value)
+    assert "did not finish in" in message
+    assert "AZURE_LISTENER_START_TIMEOUT" in message
+    assert "journalctl -u gd-relay -n 50" in message
+
+
+def test_start_listener_refuses_a_record_without_the_addressing_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record missing vm_name or resource_group names the deploy that writes them."""
+    transport_azure = _import_transport_azure()
+    instances.write_engine_address(
+        _repo_root(),
+        _NAME,
+        {
+            "relay_namespace": _NAMESPACE,
+            "hybrid_connection": _HYBRID_CONNECTION,
+        },
+    )
+    runner = RecordingRunner(lambda command: (_ for _ in ()).throw(AssertionError(command)))
+    monkeypatch.setattr(transport_azure.transport, "subprocess_command_runner", runner)
+
+    with pytest.raises(transport_azure.RelayTransportError, match="make instance-deploy"):
+        transport_azure.start_listener(
+            transport_azure.transport.subprocess_command_runner, instance=_NAME
+        )
+
+
+def test_main_connect_fails_before_binding_when_the_listener_start_fails(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failed listener start ends the connect: no context use, no acceptor, no marker."""
+    transport_azure = _import_transport_azure()
+    _issue_client_material(_NAME)
+    _write_engine_address(_NAME)
+
+    def answer(command: tuple[str, ...]) -> CommandResult:
+        if command == _context_inspect_command(_CONTEXT):
+            return _no_such_context_result(_CONTEXT)
+        if command[:3] == ("docker", "context", "create"):
+            return _ok()
+        if command == _listener_start_command():
+            return CommandResult(exit_code=1, stderr="is-active answered non-active")
+        raise AssertionError(f"unexpected command: {command}")
+
+    runner = RecordingRunner(answer)
+    monkeypatch.setattr(transport_azure.transport, "subprocess_command_runner", runner)
+
+    exit_code = transport_azure.main(_connect_argv(_CONTEXT))
+
+    assert exit_code == 1
+    assert "Connected:" not in capsys.readouterr().out
+    assert not any(c[:3] == ("docker", "context", "use") for c in runner.commands), (
+        "a failed listener start ends the connect before the context is activated "
+        "and the port bound: the daemon would serve a listener that is not up"
+    )
 
 
 def _port_accepts(port: int) -> bool:
@@ -1384,11 +1561,7 @@ def _install(
         runner,
         instance=_NAME,
         daemon_user=daemon_user,
-        **(
-            {"clock": clock.clock, "pace": clock.sleep}
-            if clock is not None
-            else {}
-        ),
+        **({"clock": clock.clock, "pace": clock.sleep} if clock is not None else {}),
     )
 
 
@@ -1449,8 +1622,7 @@ def test_the_script_pulls_from_the_vault_through_the_instance_identity(
     assert "access_token" in script
     for secret_name in ("tls-server-key", "tls-server-cert", "tls-ca"):
         assert (
-            f"https://gd-vault.vault.azure.net/secrets/{secret_name}?api-version=7.4"
-            in script
+            f"https://gd-vault.vault.azure.net/secrets/{secret_name}?api-version=7.4" in script
         ), f"{secret_name} is published but never fetched"
         assert '["value"]' in script, "the Key Vault answer is JSON; the value must be extracted"
     assert "BEGIN" not in script
@@ -1520,9 +1692,7 @@ def test_the_poll_budget_is_bounded_by_the_configured_deadline(
     _install(runner)
 
     assert runner.timeouts[0] == 41.0, "the invoke is bounded by the same budget"
-    assert all(
-        timeout is not None and 0 < timeout <= 41.0 for timeout in runner.timeouts[1:]
-    ), (
+    assert all(timeout is not None and 0 < timeout <= 41.0 for timeout in runner.timeouts[1:]), (
         "each poll is a small read bounded by the remaining deadline, "
         f"not by a separate budget: {[timeout for timeout in runner.timeouts[1:]]}"
     )

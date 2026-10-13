@@ -1,0 +1,287 @@
+#cloud-config
+# Rendered by templatefile() from provider/azure/modules/compute/main.tf.
+# The azure twin of provider/aws/modules/compute/user-data.yaml: turns a
+# bare Ubuntu 24.04 host into the rootless docker engine the program talks
+# to, reachable only through a loopback mTLS listener, and installs the
+# relay listener unit that carries the docker API out over the azure Relay
+# hybrid connection. Every value that varies by deployment -- the daemon
+# user, its data-root, the TLS listener's address and port, the docker
+# package repository's base URL and channel, the relay namespace and
+# hybrid connection names, and the base64 payloads of the listener script
+# and its systemd unit -- arrives here as a Terraform variable interpolated
+# at render time.
+#
+# Paths rooted at /etc/apparmor.d, /etc/systemd/system, /opt/gd-relay and
+# /home/<user> below are OS-level and package conventions Docker, apparmor
+# and systemd read from a fixed, well-known location on every host, the
+# same way /etc/docker/daemon.json itself is not a candidate for
+# externalization; see the aws twin's user-data.yaml for the same
+# reasoning. The same reasoning covers the remaining literals below, none
+# of which a caller has a reason to vary deployment to deployment: the
+# DOCKERDATA filesystem label and the "-i 8192" mkfs inode ratio are this
+# template's own internal convention for locating and sizing the data disk
+# it creates and never appear outside this file; the fstab mount options
+# (defaults,noatime,nofail) are the standard, non-account-specific options
+# for a mounted data disk; and /etc/general-dev-provisioned is an internal
+# readiness-marker path this template alone reads and writes.
+#
+# This template reaches three separate outbound destinations, all over the
+# instance's own outbound path (the instance is never reachable from
+# outside except through the relay hybrid connection): the Ubuntu package
+# archives, pulled by the package_update/packages cloud-config keys before
+# runcmd executes; var.docker_repo_base_url (download.docker.com by
+# default), for the apt signing key and the docker-ce/containerd packages;
+# and the azure Relay service, reached later by the listener unit's
+# outbound control channel -- nothing this template installs dials out on
+# its own at provision time.
+#
+# Deliberately absent: no `usermod -aG docker`, and no AWS surface of any
+# kind (no SSM agent, no AWS CLI, no unzip for its archive -- none of it
+# exists on azure, and the identity-based pulls run through curl against
+# the instance metadata endpoint instead). Group membership on a rootful
+# daemon is equivalent to host root (Section 1.5); this template never
+# leaves a rootful daemon enabled to join a group on in the first place --
+# see the explicit disable of docker.service/docker.socket below.
+
+package_update: true
+
+# iptables is a hard prerequisite of dockerd-rootless-setuptool.sh, not an
+# optional convenience: rootless docker manages its own bridge NAT and
+# published-port DNAT through it, and the installer aborts with an
+# actionable diagnostic under the `set -e` below if it is absent.
+# Installing it here (rather than passing the installer's own
+# --skip-iptables, which would suppress that abort and permanently disable
+# iptables management in the generated docker.service) keeps the failure at
+# provisioning time and visible instead of a silently networking-broken
+# daemon later.
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - uidmap
+  - dbus-user-session
+  - iptables
+
+write_files:
+  # AppArmor unprivileged-user-namespace relaxation (Section 8.1, silent
+  # failure 2 of 3): Ubuntu 24.04 restricts unprivileged user namespace
+  # creation by default. Without this profile, rootlesskit -- the
+  # component rootless docker uses to build the container's user
+  # namespace -- is denied by AppArmor, so the daemon starts cleanly and
+  # every container creation then fails.
+  - path: /etc/apparmor.d/rootlesskit
+    permissions: "0644"
+    content: |
+      abi <abi/4.0>,
+      include <tunables/global>
+
+      /usr/bin/rootlesskit flags=(unconfined) {
+        userns,
+        include if exists <local/rootlesskit>
+      }
+
+  # The relay listener's script, embedded as base64 by the compute module
+  # (filebase64 runs in terraform, not in this template) and written with
+  # cloud-init's own b64 decoder. World-readable on purpose: the script
+  # carries resource names and no credential -- the token comes from the
+  # instance identity endpoint at runtime.
+  - path: /opt/gd-relay/gd-relay-listener.py
+    permissions: "0644"
+    encoding: b64
+    content: ${relay_listener_b64}
+
+  # The listener's systemd unit, embedded the same way. It is installed
+  # into /etc/systemd/system by runcmd below and enabled there, never
+  # started by provisioning.
+  - path: /opt/gd-relay/gd-relay.service
+    permissions: "0644"
+    encoding: b64
+    content: ${relay_unit_b64}
+
+  # The listener's environment file, plain text on purpose (no b64): three
+  # resource names, never secrets -- the unit's own comment documents that
+  # the credential is the VM's managed-identity token.
+  - path: /etc/default/gd-relay
+    permissions: "0644"
+    content: |
+      GD_RELAY_NAMESPACE=${relay_namespace}
+      GD_RELAY_HYBRID_CONNECTION=${hybrid_connection}
+      GD_RELAY_TARGET=127.0.0.1:${tls_listen_port}
+
+runcmd:
+  # cloud-init's cc_runcmd concatenates every runcmd entry below into one
+  # /bin/sh script and runs it as a single process; the script carries no
+  # `set -e` of its own, so this has to be the first entry for the option
+  # to cover the whole script, including the D1 control a few lines down.
+  # Once set, it stays in effect through every entry that follows.
+  - set -e
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL ${docker_repo_base_url}/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - |
+    . /etc/os-release
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] ${docker_repo_base_url} $VERSION_CODENAME ${docker_repo_channel}" > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce docker-ce-cli docker-ce-rootless-extras containerd.io
+  # docker-ce's own postinst enables and would start the rootful daemon;
+  # D1 (Section 13) rejects a rootful daemon outright, so it is disabled
+  # immediately and never started. Only the rootless daemon configured
+  # below ever runs on this host.
+  - systemctl disable --now docker.service docker.socket
+  # D1 post-condition: `disable --now` exiting 0 is not by itself proof the
+  # rootful daemon is gone, so this asserts the state it is required to
+  # leave behind. If either unit is still active or still enabled, the host
+  # would otherwise be left running the root-equivalent daemon D1 forbids
+  # with no non-zero exit and no diagnostic to show for it.
+  - |
+    if systemctl is-active --quiet docker.service || systemctl is-active --quiet docker.socket || systemctl is-enabled --quiet docker.service || systemctl is-enabled --quiet docker.socket; then
+      echo "FATAL: docker.service/docker.socket (rootful) still active or enabled after 'disable --now' - D1 requires the rootful daemon never run" | tee /dev/console
+      exit 1
+    fi
+  # No SSH anywhere, by doctrine: the instance has no public IP, the
+  # network security group admits no inbound traffic, and every operational
+  # path (the docker API over the relay, certificate and secret delivery,
+  # provisioning diagnostics) runs through run commands and the identity,
+  # so sshd is dead weight. Disabling, not purging: the azure VM agent
+  # (walinuxagent) tolerates an absent server, but disabling keeps the
+  # package intact for platform diagnostics while removing the listener.
+  # The `|| true` covers images that ship neither unit name; the D1 `set
+  # -e` discipline is not traded away for it, because a failed disable of
+  # an existing unit is exactly the case the next assert catches.
+  - systemctl disable --now ssh sshd 2>/dev/null || true
+  - id -u ${daemon_user} > /dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin ${daemon_user}
+  # Silent failure 1 of 3 (Section 8.1): without lingering, systemd tears
+  # down the daemon user's user manager, and the rootless daemon with it,
+  # the moment nobody is logged in as that user -- which for a dedicated
+  # daemon user with no interactive login is immediately after boot.
+  # `systemctl start` on the user manager unit blocks until it is active
+  # (no readiness polling needed), so /run/user/<uid> and its D-Bus socket
+  # exist before any later step tries to reach them.
+  - |
+    set -e
+    DAEMON_UID=$(id -u ${daemon_user})
+    loginctl enable-linger ${daemon_user}
+    systemctl start "user@$DAEMON_UID.service"
+  - apparmor_parser -r /etc/apparmor.d/rootlesskit
+  # Silent failure 3 of 3 (Section 8.1): without cgroup v2 controller
+  # delegation, systemd never hands the daemon user's own systemd --user
+  # instance control of the cpu, cpuset, io, memory and pids controllers,
+  # so rootless docker starts and creates containers cleanly, and every
+  # --cpus, --memory or --pids-limit flag a caller later passes is then
+  # silently unenforceable. Ubuntu 24.04 already delegates cpu, memory and
+  # pids to a user slice by default; cpuset and io are not delegated
+  # without this drop-in. The delegation takes effect only once the user
+  # manager unit is (re)started, which the restart below does explicitly.
+  - |
+    set -e
+    DAEMON_UID=$(id -u ${daemon_user})
+    install -d -m 0755 /etc/systemd/system/user@$DAEMON_UID.service.d
+    cat > /etc/systemd/system/user@$DAEMON_UID.service.d/delegate.conf <<'EOF_DELEGATE'
+    [Service]
+    Delegate=cpu cpuset io memory pids
+    EOF_DELEGATE
+    systemctl daemon-reload
+    systemctl restart "user@$DAEMON_UID.service"
+  - install -d -m 0700 -o ${daemon_user} -g ${daemon_user} /home/${daemon_user}/tls
+  - install -d -m 0755 -o ${daemon_user} -g ${daemon_user} ${data_root}
+%{ if create_data_volume }
+  # The data disk is located by scanning, not by trusting a device literal:
+  # azure presents attached data disks at /dev/sd* names whose letters are
+  # allocation-order dependent, and the LUN is not a device name. Exactly
+  # one empty (unformatted) disk is expected -- the one this deployment
+  # created -- so a count that is not one is a provisioning failure naming
+  # what was found, not a guess about which disk to erase.
+  - |
+    set -e
+    if ! blkid -L DOCKERDATA > /dev/null 2>&1; then
+      CANDIDATES=""
+      for dev in $(lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print $1}'); do
+        if [ -z "$(lsblk -n -o FSTYPE "/dev/$dev" | tr -d '[:space:]')" ]; then
+          CANDIDATES="$CANDIDATES /dev/$dev"
+        fi
+      done
+      set -- $CANDIDATES
+      if [ "$#" -ne 1 ]; then
+        echo "FATAL: expected exactly 1 empty data disk, found $#:$CANDIDATES" | tee /dev/console
+        exit 1
+      fi
+      mkfs.ext4 -i 8192 -L DOCKERDATA "$1"
+    fi
+    grep -q "LABEL=DOCKERDATA" /etc/fstab || echo "LABEL=DOCKERDATA ${data_root} ext4 defaults,noatime,nofail 0 2" >> /etc/fstab
+    mount -a
+  - |
+    if ! mountpoint -q ${data_root}; then
+      echo "FATAL: ${data_root} is not a mountpoint - data disk missing or failed to mount" | tee /dev/console
+      exit 1
+    fi
+    chown ${daemon_user}:${daemon_user} ${data_root}
+%{ endif }
+  # Rootless install runs via `runuser -u`, which execs the command
+  # directly rather than through the daemon user's login shell, so the
+  # account's /usr/sbin/nologin shell (deliberately unchanged, so the
+  # account remains unusable for interactive login) is never consulted.
+  # HOME, XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS are passed
+  # explicitly on the command line rather than exported beforehand,
+  # because `runuser -u` does not propagate the caller's environment by
+  # default and the user manager the daemon needs is reachable only
+  # through the runtime directory and bus address computed here. The
+  # setup tool starts the user service it generates, so the entry right
+  # after stops it again: the daemon is enabled, never started, by
+  # provisioning.
+  - |
+    set -e
+    DAEMON_UID=$(id -u ${daemon_user})
+    runuser -u ${daemon_user} -- env HOME=/home/${daemon_user} XDG_RUNTIME_DIR=/run/user/$DAEMON_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$DAEMON_UID/bus PATH=/usr/bin:/usr/sbin:/bin:/sbin dockerd-rootless-setuptool.sh install
+    runuser -u ${daemon_user} -- env HOME=/home/${daemon_user} XDG_RUNTIME_DIR=/run/user/$DAEMON_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$DAEMON_UID/bus systemctl --user stop docker.service
+  # The TLS listener is bound to loopback only (var.docker_tls_listen_address
+  # is validated to be exactly 127.0.0.1), reachable through the relay
+  # listener's bridge and nothing else; the unix socket alongside it is the
+  # local Docker CLI's own default. Certificate material at
+  # /home/<user>/tls/{ca,server-cert,server-key}.pem is not written by this
+  # template -- this step installs the paths the daemon reads, not their
+  # content; the cert-publish and install-material flow hands the
+  # certificate to the instance through its vault.
+  - |
+    set -e
+    install -d -m 0755 -o ${daemon_user} -g ${daemon_user} /home/${daemon_user}/.config/docker
+    cat > /home/${daemon_user}/.config/docker/daemon.json <<DAEMON_JSON
+    {
+      "data-root": "${data_root}",
+      "hosts": ["unix:///run/user/$(id -u ${daemon_user})/docker.sock", "tcp://${tls_listen_address}:${tls_listen_port}"],
+      "tls": true,
+      "tlsverify": true,
+      "tlscacert": "/home/${daemon_user}/tls/ca.pem",
+      "tlscert": "/home/${daemon_user}/tls/server-cert.pem",
+      "tlskey": "/home/${daemon_user}/tls/server-key.pem"
+    }
+    DAEMON_JSON
+    chown ${daemon_user}:${daemon_user} /home/${daemon_user}/.config/docker/daemon.json
+  # The daemon is enabled, not started: its first start reads the TLS
+  # paths above, which this template never populates -- the
+  # install-material flow delivers that certificate and issues
+  # `systemctl --user start docker` once it has. Forcing a start here
+  # would make cloud-init depend on material this template does not
+  # deliver, aborting the remainder of this script under `set -e` and
+  # leaving the daemon enablement itself undone.
+  - |
+    set -e
+    DAEMON_UID=$(id -u ${daemon_user})
+    runuser -u ${daemon_user} -- env HOME=/home/${daemon_user} XDG_RUNTIME_DIR=/run/user/$DAEMON_UID DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$DAEMON_UID/bus systemctl --user enable docker.service
+  # The relay listener is installed and enabled, not started: the unit is
+  # started on demand by the connect flow's run command, because azure
+  # bills listener-hours while a hybrid connection has a connected
+  # listener, and a listener enabled at boot with nothing to forward would
+  # accrue them from first boot. The self-stop in the listener script
+  # guards a running unit against idle hours; this enablement only pins
+  # the unit under its own name, so the connect flow's one-line start
+  # works without further configuration.
+  - systemctl enable gd-relay.service
+  # Written last, and only here: this is the sole place in the script
+  # where every step above -- rootless docker installed, the rootful
+  # daemon disabled and verified gone, sshd disabled, linger/AppArmor/
+  # cgroup delegation applied, the data disk formatted and mounted,
+  # docker.service enabled, and the relay listener unit installed and
+  # enabled -- has already succeeded under `set -e`. A consumer polling
+  # this path for readiness must never see it before the module's actual
+  # work is done.
+  - date -u +"%Y-%m-%dT%H:%M:%SZ" > /etc/general-dev-provisioned

@@ -11,13 +11,13 @@ probe failure that is not "the account is missing" is raised with the
 command and its raw output, so nothing is hidden.
 
 The storage account's name is never duplicated here:
-`remote-instances/root.hcl` is the single declaration of both the name
-template and the committed suffix, and this module parses that file with the
-same interpolation grammar Terragrunt itself resolves (`${local.NAME}`
-tokens), composing the name from the instance name (sanitized), the
-location its scaffold pins, the ambient azure subscription and the
-committed suffix. The sanitization exists because azure's own law is
-narrower than an instance name: a storage account name is 3-24 lowercase
+`remote-instances/root-azure.hcl` is the single declaration of both the
+name template and the committed suffix, and this module parses that file
+with the same interpolation grammar Terragrunt itself resolves
+(`${local.NAME}` tokens), composing the name from the instance name
+(sanitized), the location its scaffold pins, the ambient azure subscription
+and the committed suffix. The sanitization exists because azure's own law
+is narrower than an instance name: a storage account name is 3-24 lowercase
 alphanumeric characters, globally unique, so the instance component is
 lowercased, stripped to alphanumerics, capped, and made collision-proof by
 a deterministic digest of the four composition components -- the digest,
@@ -28,6 +28,24 @@ account an earlier bootstrap provisioned. One storage account per instance
 instance deployment's own resource group cleanly and instance-destroy's
 terragrunt destroy can never touch it -- the same standing-outside-the-
 lifecycle property the S3 bucket has.
+
+The azure root is a separate file (`root-azure.hcl`), not the s3 `root.hcl`
+extended: the azurerm backend shares no shape with the s3 one, and the two
+roots keep each cloud's backend byte-honest. This module parses only the
+azure root; `state_bucket` parses only the s3 one.
+
+Because the composed names cannot be recomputed in HCL (terragrunt's
+configuration language has no sha256 to re-derive the digest), `ensure`
+hands them to Terragrunt through one side-car file:
+`remote-instances/<instance>/.state-store.json`, written atomically after
+the group, account and container are ensured, carrying exactly the two
+backend names the azure root's `remote_state` block reads. One naming
+authority -- this module's composition -- and one dumb-but-honest handoff;
+the root fails with a plain file-not-found when the side-car is absent,
+which is the not-yet-bootstrapped state, and the remedy is the same
+deploy/init flow that runs `ensure` first. `delete_store` removes the
+side-car with the store, so a deleted instance's directory carries no
+pointer to an account that no longer exists.
 
 The subscription is resolved from the ambient azure login (`az account
 show`), the same no-profile discipline `state_bucket` applies to the AWS
@@ -43,9 +61,11 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -56,14 +76,26 @@ from devcontainer_config.instance_ops import Runner, subprocess_runner
 # below starts with it.
 AZ_EXECUTABLE = "az"
 
-# The `${local.NAME}` token grammar root.hcl's template uses, the same
+# The azure root file this module parses -- the single declaration of the
+# storage account name template and the committed suffix. One constant, so
+# the filename changes in exactly one place.
+ROOT_AZURE_HCL_FILENAME = "root-azure.hcl"
+
+# The side-car file `ensure` writes and the azure root's remote_state block
+# reads: the two backend names (resource group, storage account) composed
+# here, handed to Terragrunt as one small JSON object beside the instance's
+# terragrunt.hcl. The per-instance scaffold's `.gitignore` entry already
+# covers it.
+STATE_STORE_SIDECAR_FILENAME = ".state-store.json"
+
+# The `${local.NAME}` token grammar the azure root's template uses, the same
 # interpolation Terragrunt resolves at run time.
 _INTERPOLATION_TOKEN = re.compile(r"\$\{local\.([A-Za-z0-9_]+)\}")
 
-# The two declarations this module reads out of root.hcl: the name template
-# and the committed suffix. Both are matched as full-line assignments so a
-# commented-out or renamed declaration reads as missing rather than
-# half-parsed.
+# The two declarations this module reads out of the azure root: the name
+# template and the committed suffix. Both are matched as full-line
+# assignments so a commented-out or renamed declaration reads as missing
+# rather than half-parsed.
 _TEMPLATE_PATTERN = re.compile(r'^\s*state_storage_name_template\s*=\s*"([^"]*)"', re.MULTILINE)
 _SUFFIX_PATTERN = re.compile(r'^\s*state_store_suffix\s*=\s*"([^"]*)"', re.MULTILINE)
 
@@ -113,7 +145,7 @@ class StateStoreError(RuntimeError):
     """The store probe could not decide, or the name could not be composed.
 
     Raised for every outcome the caller must see rather than act on: an
-    unreadable root.hcl, a missing template or suffix declaration, a name
+    unreadable root-azure.hcl, a missing template or suffix declaration, a name
     template referencing an unsupplied component, an az call that failed
     for any reason other than a missing resource, or a subscription lookup
     that answered nothing usable. Every message names the offending file,
@@ -123,11 +155,11 @@ class StateStoreError(RuntimeError):
 
 
 def declared_template(root_hcl_text: str) -> str:
-    """The raw `state_storage_name_template` interpolation string in root.hcl."""
+    """The raw `state_storage_name_template` interpolation string in the azure root."""
     match = _TEMPLATE_PATTERN.search(root_hcl_text)
     if match is None:
         raise StateStoreError(
-            "no state_storage_name_template declaration found in remote-instances/root.hcl; "
+            "no state_storage_name_template declaration found in remote-instances/root-azure.hcl; "
             "the storage account name template is the declaration this module composes from"
         )
     return match.group(1)
@@ -143,7 +175,7 @@ def declared_suffix(root_hcl_text: str) -> str:
     match = _SUFFIX_PATTERN.search(root_hcl_text)
     if match is None or not match.group(1):
         raise StateStoreError(
-            "no committed state_store_suffix found in remote-instances/root.hcl; a missing "
+            "no committed state_store_suffix found in remote-instances/root-azure.hcl; a missing "
             "suffix means a fresh bootstrap would mint a new account instead of finding the "
             "existing one"
         )
@@ -170,7 +202,7 @@ def state_digest(instance_name: str, location: str, subscription_id: str, suffix
 def compose_from_root_hcl(
     root_hcl_text: str, instance_name: str, location: str, subscription_id: str
 ) -> str:
-    """The storage account name root.hcl's template composes to for these components.
+    """The storage account name the azure root's template composes to for these components.
 
     Substitutes every `${local.NAME}` token in the declared template: the
     instance component (sanitized per azure's lowercase-alphanumeric law,
@@ -184,7 +216,7 @@ def compose_from_root_hcl(
     template when its fixed parts alone cannot fit the law.
 
     Raises:
-        StateStoreError: root.hcl is missing a declaration, the template
+        StateStoreError: the azure root is missing a declaration, the template
             references an unknown component, or the composed name cannot be
             made charset- and length-legal.
     """
@@ -197,11 +229,11 @@ def compose_from_root_hcl(
     budget = STORAGE_ACCOUNT_NAME_MAX - fixed_length - len(suffix) - DIGEST_LENGTH
     if budget < 1:
         raise StateStoreError(
-            f"remote-instances/root.hcl's state_storage_name_template {template!r} carries "
+            f"remote-instances/root-azure.hcl's state_storage_name_template {template!r} carries "
             f"{fixed_length} fixed characters plus the {len(suffix)}-character suffix, leaving "
             f"no room for the instance component inside azure's "
             f"{STORAGE_ACCOUNT_NAME_MAX}-character name law.\n"
-            "Shorten the template's fixed parts or the suffix in root.hcl."
+            "Shorten the template's fixed parts or the suffix in root-azure.hcl."
         )
     sanitized = sanitize_instance(instance_name)[: min(SANITIZED_INSTANCE_MAX, budget)]
     values = {
@@ -213,7 +245,7 @@ def compose_from_root_hcl(
         name = match.group(1)
         if name not in values:
             raise StateStoreError(
-                f"remote-instances/root.hcl's state_storage_name_template references "
+                f"remote-instances/root-azure.hcl's state_storage_name_template references "
                 f"local.{name}, which is not one of the composed components "
                 f"{sorted(values)}"
             )
@@ -228,13 +260,13 @@ def compose_from_root_hcl(
             f"the composed storage account name {name!r} breaks azure's law of "
             f"{STORAGE_ACCOUNT_NAME_MIN}-{STORAGE_ACCOUNT_NAME_MAX} lowercase alphanumeric "
             "characters.\n"
-            "Fix the template or suffix in remote-instances/root.hcl."
+            "Fix the template or suffix in remote-instances/root-azure.hcl."
         )
     return name
 
 
 def subscription_id(runner: Runner) -> str:
-    """The ambient azure login's subscription id, the component root.hcl digests.
+    """The ambient azure login's subscription id, the component the azure root digests.
 
     No subscription is named on the command: the CLI resolves the ambient
     login the way every other az call on this host does, so the subscription
@@ -265,14 +297,14 @@ def _probe_text(runner: Runner, argv: Sequence[str], what: str) -> str:
     return value
 
 
-def root_hcl_path(root: Path) -> Path:
-    """The `remote-instances/root.hcl` this repository's instances include."""
-    return root / instances.INSTANCES_DIR_NAME / "root.hcl"
+def root_azure_hcl_path(root: Path) -> Path:
+    """The `remote-instances/root-azure.hcl` this repository's azure instances include."""
+    return root / instances.INSTANCES_DIR_NAME / ROOT_AZURE_HCL_FILENAME
 
 
 def _root_hcl_text(root: Path, why: str) -> str:
-    """root.hcl's text, raised as a `StateStoreError` when unreadable."""
-    path = root_hcl_path(root)
+    """The azure root's text, raised as a `StateStoreError` when unreadable."""
+    path = root_azure_hcl_path(root)
     try:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -299,16 +331,16 @@ def _instance_location(root: Path, instance: str) -> str:
 
 
 def storage_account_name(root: Path, instance: str, runner: Runner) -> str:
-    """The state storage account name root.hcl composes for `instance`.
+    """The state storage account name the azure root composes for `instance`.
 
-    Reads `remote-instances/root.hcl` from the repository root, resolves the
-    subscription through the ambient login, reads the location the instance's
-    scaffold pins, and composes the name from root.hcl's own template and
-    suffix.
+    Reads `remote-instances/root-azure.hcl` from the repository root,
+    resolves the subscription through the ambient login, reads the location
+    the instance's scaffold pins, and composes the name from the azure
+    root's own template and suffix.
 
     Raises:
         StateStoreError: `instance` fails `instances.validate_name`,
-            root.hcl is missing or unreadable, its declarations are missing,
+            the azure root is missing or unreadable, its declarations are missing,
             the scaffold carries no location, or the subscription lookup
             failed.
     """
@@ -556,22 +588,94 @@ def _ensure_container(runner: Runner, name: str) -> str:
     return f"created blob container {STATE_CONTAINER_NAME} in {name}"
 
 
+def sidecar_path(root: Path, instance: str) -> Path:
+    """`remote-instances/<instance>/.state-store.json`, the Terragrunt handoff file.
+
+    The azure root's `remote_state` block reads the two backend names from
+    exactly this path (`${get_terragrunt_dir()}/.state-store.json`), so a
+    rename here would strand every deployment's init until the root is
+    updated in the same change. The instance's name is validated first,
+    exactly like every other derivation that turns it into a path.
+
+    Raises:
+        StateStoreError: `instance` fails `instances.validate_name`.
+    """
+    _validated_instance(instance)
+    return instances.terragrunt_dir(root, instance) / STATE_STORE_SIDECAR_FILENAME
+
+
+def _write_sidecar(root: Path, instance: str, *, resource_group: str, storage_account: str) -> str:
+    """Write the side-car atomically, and return the message saying so.
+
+    The payload is the two backend names and nothing else -- the azure
+    root's remote_state reads exactly these two keys. The write is the
+    same temp-file-then-`os.replace` shape `instances.write_engine_address`
+    uses, so a reader (the terragrunt run that follows this module in
+    tg_init) can never observe a half-written file; a failed write removes
+    its temp file before propagating.
+
+    Raises:
+        StateStoreError: the instance's directory does not exist, or the
+            write failed for any other reason.
+    """
+    path = sidecar_path(root, instance)
+    payload = {"resource_group": resource_group, "storage_account_name": storage_account}
+    if not path.parent.is_dir():
+        raise StateStoreError(
+            f"ERROR: no instance directory at {path.parent}\n"
+            "The side-car the azure root's remote_state reads is written beside the "
+            "instance's terragrunt.hcl, which does not exist yet.\n"
+            f"Scaffold it first: make instance-init INSTANCE={instance}"
+        )
+    descriptor, temp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temp_name, path)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+    return f"wrote {path} (the backend names the azure root's remote_state reads)"
+
+
+def _remove_sidecar(root: Path, instance: str) -> bool:
+    """Remove the side-car when present; True exactly when a file was removed."""
+    path = sidecar_path(root, instance)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def ensure(root: Path, instance: str, runner: Runner) -> tuple[str, ...]:
-    """Provision `instance`'s state store: the group, the account, the container.
+    """Provision `instance`'s state store: the group, the account, the container, the side-car.
 
     Every step probes before it creates (missing means create, existing
     means skip, any other answer raises), so the operation is idempotent:
     a second run reports what already exists and creates nothing. The
     container is created with `--auth-mode login`, so the caller's Entra
     identity authorizes every later state read and write and no account
-    key is ever involved.
+    key is ever involved. The final step rewrites the side-car
+    (`.state-store.json`) with the two backend names composed here --
+    never appended-to, always replaced -- because it is the handoff the
+    azure root's `remote_state` block reads, and a store that was ensured
+    must leave the names it was ensured under exactly where Terragrunt
+    will find them. Rewriting on every run is what keeps the file honest
+    after a suffix or template change: the next ensure points terragrunt
+    at the newly composed store.
 
     Returns:
         One message per step, in the order the steps ran.
 
     Raises:
-        StateStoreError: the name or location could not be composed, or
-            any probe or create failed with its raw output.
+        StateStoreError: the name or location could not be composed, any
+            probe or create failed with its raw output, or the side-car
+            could not be written.
     """
     _validated_instance(instance)
     name = storage_account_name(root, instance, runner)
@@ -581,12 +685,13 @@ def ensure(root: Path, instance: str, runner: Runner) -> tuple[str, ...]:
         _ensure_resource_group(runner, group, location),
         _ensure_storage_account(runner, name, group, location),
         _ensure_container(runner, name),
+        _write_sidecar(root, instance, resource_group=group, storage_account=name),
     ]
     return tuple(messages)
 
 
 def storage_name_pattern(root: Path) -> re.Pattern[str]:
-    """The fullmatch pattern for this fleet's state account names, from root.hcl.
+    """The fullmatch pattern for this fleet's state account names, from the azure root.
 
     Composed from the committed template itself -- literal parts escaped,
     the instance component replaced by the sanitized-plus-digest character
@@ -604,7 +709,7 @@ def storage_name_pattern(root: Path) -> re.Pattern[str]:
     budget = STORAGE_ACCOUNT_NAME_MAX - fixed_length - len(suffix) - DIGEST_LENGTH
     if budget < 1:
         raise StateStoreError(
-            f"remote-instances/root.hcl's state_storage_name_template {template!r} cannot "
+            f"remote-instances/root-azure.hcl's state_storage_name_template {template!r} cannot "
             f"fit azure's {STORAGE_ACCOUNT_NAME_MAX}-character name law; the fleet pattern "
             "is composed from it"
         )
@@ -624,7 +729,7 @@ def storage_name_pattern(root: Path) -> re.Pattern[str]:
                 pieces.append(component_patterns[name])
             except KeyError as exc:
                 raise StateStoreError(
-                    f"remote-instances/root.hcl's state_storage_name_template references "
+                    f"remote-instances/root-azure.hcl's state_storage_name_template references "
                     f"local.{name}, which is not one of the composed components "
                     f"{sorted(component_patterns) + ['state_store_suffix']}"
                 ) from exc
@@ -663,7 +768,7 @@ def list_stores(root: Path, runner: Runner) -> tuple[StoreListing, ...]:
     name, so the output is stable.
 
     Raises:
-        StateStoreError: root.hcl is missing its declarations, an azure
+        StateStoreError: the azure root is missing its declarations, an azure
             instance's scaffold carries no location, or the az call failed
             or answered unusable JSON.
     """
@@ -922,13 +1027,25 @@ def delete_account(account: str, resource_group: str, runner: Runner) -> str:
 def delete_store(root: Path, instance: str, runner: Runner) -> str:
     """Delete the state storage account composed for `instance`, then its group.
 
+    The side-car (`ensure`'s handoff file) is removed with the store: an
+    account that is gone must not leave a pointer to itself beside a
+    terragrunt.hcl the next init could follow.
+
+    Returns:
+        The delete message, with the side-car's removal appended when a
+        side-car existed to remove. An absent side-car is the desired end
+        state and is reported by neither message.
+
     Raises:
-        StateStoreError: the instance name is invalid, root.hcl is missing
-            its declarations, or the delete failed.
+        StateStoreError: the instance name is invalid, the azure root is
+            missing its declarations, or the delete failed.
     """
     _validated_instance(instance)
     account = storage_account_name(root, instance, runner)
-    return delete_account(account, state_resource_group(instance), runner)
+    message = delete_account(account, state_resource_group(instance), runner)
+    if _remove_sidecar(root, instance):
+        message += f"; removed {sidecar_path(root, instance)}"
+    return message
 
 
 def delete_matching_stores(root: Path, runner: Runner) -> tuple[str, ...]:

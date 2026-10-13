@@ -21,6 +21,23 @@ set -euo pipefail
 : "${DEVCONTAINER_KEYVAULT_RESOURCE:=https://vault.azure.net}"
 : "${DEVCONTAINER_KEYVAULT_API_VERSION:=7.4}"
 
+# The gcp bootstrap's platform constants, overridable the same way. The
+# metadata endpoint is the fixed link-local address every gcp VM answers
+# on; the Secret Manager endpoint is the REST surface the two
+# configuration secrets are read from; the metadata header is the flavor
+# header every gcp metadata request must carry.
+: "${DEVCONTAINER_GCP_METADATA_ENDPOINT:=http://metadata.google.internal}"
+: "${DEVCONTAINER_GCP_METADATA_TOKEN_PATH:=/computeMetadata/v1/instance/service-accounts/default/token}"
+: "${DEVCONTAINER_SECRET_MANAGER_ENDPOINT:=https://secretmanager.googleapis.com/v1}"
+: "${DEVCONTAINER_GCP_METADATA_FLAVOR:=Google}"
+
+# The gcp bootstrap's per-instance addressing, injected by the build's
+# containerEnv the same way DEVCONTAINER_VAULT_NAME is for azure: the
+# project the secrets live in and the prefix they are named under. Both
+# default to empty so a non-gcp container never dereferences them.
+: "${DEVCONTAINER_GCP_PROJECT:=}"
+: "${DEVCONTAINER_SECRETS_PREFIX:=}"
+
 WORK_DIR="$(pwd)"
 SHELL_ENV="${WORK_DIR}/shell.env"
 PROFILE_MAP="${WORK_DIR}/.devcontainer/aws-profile-map.json"
@@ -108,6 +125,60 @@ bootstrap_secrets_from_key_vault() {
   log_success "Bootstrapped shell.env and aws-profile-map.json from Key Vault"
 }
 
+# The gcp twin of azure_imds_token: an OAuth access token for the VM's
+# default service account, fetched from the metadata server the VM answers
+# on. The flavor header is what makes the metadata server answer at all,
+# the token rides the JSON body, and python3 -- already the container's own
+# tool -- extracts it.
+gcp_metadata_token() {
+  curl -sf --connect-timeout "${DEVCONTAINER_IMDS_TIMEOUT_SECONDS}" \
+    -H "Metadata-Flavor: ${DEVCONTAINER_GCP_METADATA_FLAVOR}" \
+    "${DEVCONTAINER_GCP_METADATA_ENDPOINT}${DEVCONTAINER_GCP_METADATA_TOKEN_PATH}" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
+}
+
+fetch_secret_manager_secret() {
+  local token="$1" secret="$2" destination="$3"
+  # The bearer header reaches curl through stdin (`-H @-`, curl >= 7.55;
+  # the container image ships a modern curl), never as an argv word: a
+  # `-H "Authorization: Bearer ${token}"` sits in the process table for
+  # the whole fetch, readable by anything that can list processes.
+  printf 'Authorization: Bearer %s\n' "${token}" \
+    | curl -sf --connect-timeout "${DEVCONTAINER_IMDS_TIMEOUT_SECONDS}" \
+      -H @- \
+      "${DEVCONTAINER_SECRET_MANAGER_ENDPOINT}/projects/${DEVCONTAINER_GCP_PROJECT}/secrets/${secret}/versions/latest:access" \
+      | python3 -c 'import base64,json,sys; sys.stdout.buffer.write(base64.b64decode(json.load(sys.stdin)["payload"]["data"]))' \
+      > "${destination}" \
+    || fail_bootstrap "could not fetch ${secret} from Secret Manager in project '${DEVCONTAINER_GCP_PROJECT}' (was 'make push-secrets' run for this project?)"
+  [ -s "${destination}" ] || fail_bootstrap "fetched ${secret} is empty"
+}
+
+bootstrap_secrets_from_secret_manager() {
+  log_info "shell.env not found, bootstrapping from Secret Manager (project ${DEVCONTAINER_GCP_PROJECT}, prefix ${DEVCONTAINER_SECRETS_PREFIX})"
+
+  [ -n "${DEVCONTAINER_GCP_PROJECT}" ] \
+    || fail_bootstrap "DEVCONTAINER_GCP_PROJECT is not set; the build's containerEnv must carry the instance's project"
+  [ -n "${DEVCONTAINER_SECRETS_PREFIX}" ] \
+    || fail_bootstrap "DEVCONTAINER_SECRETS_PREFIX is not set; the build's containerEnv must carry the instance's secrets prefix"
+  command -v curl > /dev/null 2>&1 || fail_bootstrap "curl is not installed"
+  command -v python3 > /dev/null 2>&1 || fail_bootstrap "python3 is not installed"
+
+  local token
+  token="$(gcp_metadata_token)" \
+    || fail_bootstrap "the metadata server did not yield an access token, not on a service-account host"
+  [ -n "${token}" ] || fail_bootstrap "the metadata server returned an empty access token"
+
+  local previous_umask
+  previous_umask="$(umask)"
+  umask "${DEVCONTAINER_SECRET_UMASK}"
+  fetch_secret_manager_secret "${token}" "${DEVCONTAINER_SECRETS_PREFIX}-shell-env" "${SHELL_ENV}"
+  [ -f "${PROFILE_MAP}" ] \
+    || fetch_secret_manager_secret "${token}" "${DEVCONTAINER_SECRETS_PREFIX}-profile-map" "${PROFILE_MAP}"
+  umask "${previous_umask}"
+
+  log_success "Bootstrapped shell.env and aws-profile-map.json from Secret Manager"
+}
+
 bootstrap_secrets() {
   if [ -f "${SHELL_ENV}" ]; then
     log_info "Using existing shell.env"
@@ -119,6 +190,14 @@ bootstrap_secrets() {
   # before the aws arm -- whose IMDS variables stay untouched -- can run.
   if [ "${DEVCONTAINER_ENGINE_KIND}" = "azure" ]; then
     bootstrap_secrets_from_key_vault
+    return 0
+  fi
+  # The gcp engine's secrets live in Secret Manager in the instance's own
+  # project, named under the prefix the build's containerEnv carries; its
+  # VM answers the metadata server instead of aws IMDSv2, so this mode is
+  # selected beside the azure one, before the aws arm can run.
+  if [ "${DEVCONTAINER_ENGINE_KIND}" = "gcp" ]; then
+    bootstrap_secrets_from_secret_manager
     return 0
   fi
   log_info "shell.env not found, bootstrapping from Parameter Store (${DEVCONTAINER_SSM_PREFIX})"

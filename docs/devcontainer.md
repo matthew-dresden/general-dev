@@ -451,6 +451,10 @@ aws-profile-map.json                           /devcontainer/<project>/…      
   - The build injects `DEVCONTAINER_ENGINE_KIND=azure` and the instance's vault name (read from its relay address record) into the container's environment.
   - The postcreate wrapper, seeing the azure kind, exchanges an identity token from the instance metadata endpoint for the two secrets (`shell-env`, `profile-map`) over the vault's REST endpoint.
   - The VM identity carries Key Vault Secrets User on that vault (read only, never an Officer role), so the container's bootstrap can never rewrite what the laptop publishes; a build on an azure engine with no vault named is refused before anything runs.
+- Gcp-engine mode: the same shape against the gcp surface. The instance's two configuration files live in Secret Manager in the project the engine address record names, as `<prefix>-shell-env` and `<prefix>-profile-map` under the record's secrets prefix.
+  - The build injects `DEVCONTAINER_ENGINE_KIND=gcp`, the project (`DEVCONTAINER_GCP_PROJECT`) and the prefix (`DEVCONTAINER_SECRETS_PREFIX`), both read from the address record the deploy wrote.
+  - The postcreate wrapper, seeing the gcp kind, exchanges a metadata-server token for the VM's default service account, then reads the two secrets over Secret Manager's REST endpoint and decodes their base64 payloads, with the same umask and remedy discipline the other modes apply.
+  - The VM's default service account carries read access to its own project's secrets, so the container's bootstrap can never rewrite what the laptop publishes; a build on a gcp engine with no project or prefix resolved is refused before anything runs.
 - The pushed `shell.env` is the local one transformed for remote: proxy disabled and removed (no laptop tinyproxy on EC2), `BASH_ENV` pointed at the remote workspace path, stale PATH prepends dropped.
 - The instance role can only **read** `/devcontainer/*` parameters; writes happen from the laptop with SSO credentials.
 

@@ -82,6 +82,17 @@ case "$command" in
         --instance "$INSTANCE" \
         --daemon-user "$REMOTE_DAEMON_USER"
       rd_ok "'${INSTANCE}' installed its TLS material and started its daemon."
+    elif [ "$(rd_engine_kind)" = "gcp" ]; then
+      # A gcp engine has no run-command channel: the material is applied
+      # by the VM's own startup script at the next boot, and the make
+      # target owns that flow -- the drift compare, the reboot when the
+      # applied material has drifted, and the bounded wait for the VM to
+      # report the new checksum. This script has nothing to run for one.
+      rd_fail "installing TLS material on instance '${INSTANCE}' is boot-applied" \
+        "a gcp VM applies its material from its own startup script at the next boot;" \
+        "the make target compares the published checksum against the VM's, reboots" \
+        "only on drift, and waits for the VM to confirm the apply:" \
+        "  ${RD_BOLD}make cert-install INSTANCE=${INSTANCE}${RD_RESET}"
     else
       rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
       rd_check_aws_auth
@@ -102,6 +113,17 @@ case "$command" in
       # SSM path does. The az CLI is ambiently logged in, so no region and
       # no profile ride the call.
       rd_require_cmd az "Install: brew install azure-cli"
+      run_certs publish
+      rd_ok "TLS material published for '${INSTANCE}'. The daemon can now open its listener."
+    elif [ "$(rd_engine_kind)" = "gcp" ]; then
+      # The gcp engine's store is Secret Manager in the project the engine
+      # address record names, under the prefix the record recorded: the
+      # module reads the kind, resolves both, writes the three TLS secrets
+      # plus the checksum secret the boot-applied install is decided by,
+      # and refuses to publish the CA private key exactly as the other
+      # paths do. gcloud is ambiently logged in, so no project flag rides
+      # the call beyond the one the record names.
+      rd_require_cmd gcloud "Install: brew install google-cloud-sdk"
       run_certs publish
       rd_ok "TLS material published for '${INSTANCE}'. The daemon can now open its listener."
     else

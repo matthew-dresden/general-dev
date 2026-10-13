@@ -2368,9 +2368,7 @@ def test_publish_to_key_vault_writes_exactly_the_azure_set(
     certs = issued_material.certs
     runner = _KeyVaultRecordingRunner()
 
-    written = certs.publish_to_key_vault(
-        issued_material.paths, _key_vault_client(certs, runner)
-    )
+    written = certs.publish_to_key_vault(issued_material.paths, _key_vault_client(certs, runner))
 
     assert written == certs.azure_publication_set(issued_material.paths.instance)
     assert set(runner.stored()) == set(written)
@@ -2478,8 +2476,8 @@ def _azure_repo_root(tmp_path: Path, instance: str) -> Path:
     instance_dir = tmp_path / "remote-instances" / instance
     instance_dir.mkdir(parents=True)
     instance_dir.joinpath("terragrunt.hcl").write_text(
-        'include "remote" {\n  path = "${dirname(find_in_parent_folders(\'root.hcl\"))}'
-        "/_envcommon/remote-azure.hcl\"\n}\n",
+        'include "remote" {\n  path = "${dirname(find_in_parent_folders(\'root.hcl"))}'
+        '/_envcommon/remote-azure.hcl"\n}\n',
         encoding="utf-8",
     )
     instances.write_engine_address(
@@ -2547,9 +2545,7 @@ def test_publish_routes_an_azure_instance_to_its_key_vault(
     monkeypatch.setattr(certs, "subprocess_runner", runner)
     certs_root = Path(str(issued_material.paths.root))
 
-    exit_code = certs.main(
-        ["publish", "--instance", instance, "--root", str(certs_root)]
-    )
+    exit_code = certs.main(["publish", "--instance", instance, "--root", str(certs_root)])
 
     assert exit_code == 0
     assert set(runner.stored()) == set(certs.azure_publication_set(instance))
@@ -2569,7 +2565,454 @@ def test_publish_reports_a_missing_address_record_with_its_deploy_remedy(
     instance_dir = tmp_path / "remote-instances" / instance
     instance_dir.mkdir(parents=True)
     instance_dir.joinpath("terragrunt.hcl").write_text(
-        "include {\n  path = find_in_parent_folders(\"_envcommon/remote-azure.hcl\")\n}\n",
+        'include {\n  path = find_in_parent_folders("_envcommon/remote-azure.hcl")\n}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(certs.repo, "find_root", lambda _cwd: tmp_path)
+
+    exit_code = certs.main(
+        ["publish", "--instance", instance, "--root", str(issued_material.paths.root)]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "no engine address record" in captured.err
+    assert "make instance-deploy" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# The Secret Manager publication client (the gcp engine kind's store): the
+# gcp twin of the two clients above. Every test drives a recording Runner
+# double over a real `certs.SecretManagerClient`, so the argv/`--data-file`
+# split these tests assert is the one production actually takes, and the
+# read-back `publish_to_secret_manager` performs is exercised rather than
+# stubbed.
+# ---------------------------------------------------------------------------
+
+
+class _SecretManagerRecordingRunner:
+    """A `certs.Runner` double: an in-memory Secret Manager project.
+
+    `secrets describe` answers whether the id is stored; a `secrets create`
+    or `secrets versions add` reads the value from the `--data-file` the
+    client wrote -- recording the file's mode at the moment of the call,
+    since the client removes its temporary directory before returning -- and
+    stores it; a `versions access latest` serves it back exactly as gcloud
+    prints it: raw, with no trailing newline added (verified live, NUL
+    included). `tamper` stands in for the store returning something other
+    than what was written, applied on the way in so only the read-back
+    disagrees.
+    """
+
+    def __init__(
+        self,
+        failure: subprocess.CompletedProcess[str] | None = None,
+        tamper: object | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.file_modes: list[int] = []
+        self._stored: dict[str, str] = {}
+        self._failure = failure
+        self._tamper = tamper
+
+    def __call__(self, argv: Sequence[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+        argv = tuple(argv)
+        self.calls.append(argv)
+        if self._failure is not None:
+            return self._failure
+        if "secrets" in argv and "describe" in argv:
+            name = argv[argv.index("describe") + 1]
+            if name in self._stored:
+                return subprocess.CompletedProcess(args=[], returncode=0, stdout=name, stderr="")
+            missing = f"ERROR: (gcloud.secrets.describe) [{name}] not found: 404."
+            return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=missing)
+        if "secrets" in argv and "create" in argv:
+            name = argv[argv.index("create") + 1]
+            assert name not in self._stored, f"create of {name} that already exists"
+            assert stdin is None, "gcloud reads the value from --data-file, never stdin"
+            return self._store_from_data_file(name, argv)
+        if "secrets" in argv and "add" in argv:
+            name = argv[argv.index("add") + 1]
+            assert name in self._stored, f"versions add of {name} that was never created"
+            assert stdin is None, "gcloud reads the value from --data-file, never stdin"
+            return self._store_from_data_file(name, argv)
+        if "versions" in argv and "access" in argv:
+            name = argv[argv.index("--secret") + 1]
+            assert name in self._stored, f"read of {name} before it was written"
+            return subprocess.CompletedProcess(
+                args=[], returncode=0, stdout=self._stored[name], stderr=""
+            )
+        raise AssertionError(f"unexpected operation: {argv}")
+
+    def _store_from_data_file(
+        self, name: str, argv: tuple[str, ...]
+    ) -> subprocess.CompletedProcess[str]:
+        data_file_argument = next(a for a in argv if a.startswith("--data-file="))
+        reference = Path(data_file_argument.removeprefix("--data-file="))
+        assert reference.is_file(), (
+            f"the --data-file document must be a regular file, not {reference}"
+        )
+        self.file_modes.append(stat.S_IMODE(reference.stat().st_mode))
+        value = reference.read_text(encoding="utf-8")
+        if self._tamper is not None:
+            value = self._tamper(name, value)
+        self._stored[name] = value
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=name, stderr="")
+
+    def stored(self) -> dict[str, str]:
+        return dict(self._stored)
+
+
+def _secret_manager_client(certs: ModuleType, runner: _SecretManagerRecordingRunner) -> object:
+    return certs.SecretManagerClient(runner, project_id="gd-test-project")
+
+
+def test_secret_manager_create_argv_carries_the_file_never_a_value() -> None:
+    """The first publish's `secrets create` shape, and the value in no argument."""
+    certs = _import_certs()
+    runner = _SecretManagerRecordingRunner()
+
+    _secret_manager_client(certs, runner).write_secret("gd-x-tls-ca", "cert-bytes")
+
+    assert len(runner.calls) == 2, "the existence probe runs before the create"
+    describe = runner.calls[0]
+    assert describe[:3] == (certs.GCLOUD_EXECUTABLE, "secrets", "describe")
+    create = runner.calls[1]
+    assert create[:3] == (certs.GCLOUD_EXECUTABLE, "secrets", "create")
+    assert "--project" in create and create[create.index("--project") + 1] == "gd-test-project"
+    assert any(argument.startswith("--data-file=") for argument in create)
+    joined = " ".join(create)
+    assert "cert-bytes" not in joined, "the value itself reached argv"
+
+
+def test_secret_manager_version_add_answer_an_existing_secret() -> None:
+    """The re-publish is `versions add`, decided by the probe, never an error."""
+    certs = _import_certs()
+    runner = _SecretManagerRecordingRunner()
+    client = _secret_manager_client(certs, runner)
+    client.write_secret("gd-x-tls-ca", "first")
+    client.write_secret("gd-x-tls-ca", "second")
+
+    assert client.read_secret("gd-x-tls-ca") == "second"
+    assert runner.calls[3][:4] == (certs.GCLOUD_EXECUTABLE, "secrets", "versions", "add")
+
+
+def test_secret_manager_write_document_is_private_and_removed() -> None:
+    """The `--data-file` document is a 0600 regular file for the call's duration."""
+    certs = _import_certs()
+    runner = _SecretManagerRecordingRunner()
+
+    _secret_manager_client(certs, runner).write_secret("gd-x-tls-ca", "cert-bytes")
+
+    assert runner.file_modes == [0o600], (
+        "the --data-file document holds TLS material and must not be readable by "
+        f"other users: {[oct(mode) for mode in runner.file_modes]}"
+    )
+
+
+def test_secret_manager_read_is_raw_not_tsv() -> None:
+    """`versions access latest` prints the stored bytes raw; no trimming here."""
+    certs = _import_certs()
+    runner = _SecretManagerRecordingRunner()
+    value = "line1\nline2\twith-tab\\backslash"
+    runner._stored["gd-x-tls-ca"] = value
+
+    assert _secret_manager_client(certs, runner).read_secret("gd-x-tls-ca") == value
+
+
+def test_secret_manager_read_refuses_an_empty_answer() -> None:
+    certs = _import_certs()
+    runner = _SecretManagerRecordingRunner()
+    runner._stored["gd-x-tls-ca"] = ""
+    # An empty stored value makes the fake answer an empty stdout, exactly
+    # the malformed state a read of an unwritten secret would show.
+
+    with pytest.raises(certs.SecretManagerError, match="returned nothing"):
+        _secret_manager_client(certs, runner).read_secret("gd-x-tls-ca")
+
+
+def test_secret_manager_error_family_names_the_remedies() -> None:
+    certs = _import_certs()
+    cases = (
+        (
+            subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="ERROR: ... PERMISSION_DENIED ... 403"
+            ),
+            certs.SecretManagerUnauthorizedError,
+        ),
+        (
+            subprocess.CompletedProcess(
+                args=[],
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "ERROR: (gcloud.auth.login) Your credentials have expired. "
+                    "Please run gcloud auth login"
+                ),
+            ),
+            certs.SecretManagerUnavailableError,
+        ),
+        (
+            subprocess.CompletedProcess(
+                args=[], returncode=7, stdout="", stderr="something entirely unexpected"
+            ),
+            certs.SecretManagerUnclassifiedError,
+        ),
+    )
+    for failure, expected in cases:
+        runner = _SecretManagerRecordingRunner(failure=failure)
+        with pytest.raises(expected):
+            certs.SecretManagerClient(runner, project_id="gd-test-project").read_secret(
+                "gd-x-tls-ca"
+            )
+
+
+def test_secret_manager_missing_binary_raises_the_unavailable_error() -> None:
+    class _NoBinary:
+        def __call__(
+            self, argv: Sequence[str], stdin: str | None
+        ) -> subprocess.CompletedProcess[str]:
+            raise FileNotFoundError("gcloud")
+
+    certs = _import_certs()
+    with pytest.raises(certs.SecretManagerUnavailableError):
+        certs.SecretManagerClient(_NoBinary(), project_id="gd-test-project").read_secret(
+            "gd-x-tls-ca"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The gcp publication set, the material checksum, and the publication path.
+# ---------------------------------------------------------------------------
+
+
+def test_gcp_publication_set_is_four_ids_including_the_checksum() -> None:
+    certs = _import_certs()
+    instance = f"gcp-{uuid.uuid4().hex[:8]}"
+    prefix = importlib.import_module("devcontainer_config.instances").sanitize_gcp_name(instance)
+
+    assert certs.gcp_publication_set(instance) == (
+        f"{prefix}-{certs.GCP_SERVER_KEY_SECRET}",
+        f"{prefix}-{certs.GCP_SERVER_CERT_SECRET}",
+        f"{prefix}-{certs.GCP_CA_SECRET}",
+        f"{prefix}-{certs.GCP_CHECKSUM_SECRET}",
+    )
+
+
+def test_gcp_publication_set_never_offers_the_ca_private_key() -> None:
+    certs = _import_certs()
+    instance = f"gcp-{uuid.uuid4().hex[:8]}"
+
+    for spelling in ("ca-key.pem", "ca/ca-key.pem", f"subdir/{certs.CA_KEY_FILENAME}"):
+        with pytest.raises(certs.CertsError, match="never leaves the laptop"):
+            certs.gcp_publication_set(instance, [spelling])
+
+    with pytest.raises(certs.CertsError, match="not part of the publication set"):
+        certs.gcp_publication_set(instance, ["shell-env"])
+
+
+def test_gcp_material_checksum_is_the_sha256_of_the_three_bodies() -> None:
+    certs = _import_certs()
+    contents = {"server-key.pem": "KEY", "server-cert.pem": "CERT", "ca.pem": "CA"}
+
+    assert certs.gcp_material_checksum(contents) == hashlib.sha256(b"KEYCERTCA").hexdigest()
+    assert certs.gcp_material_checksum(contents) == certs.gcp_material_checksum(
+        dict(reversed(list(contents.items())))
+    ), "the order is fixed by the publication set, not by the caller's dict"
+
+
+def test_publish_to_secret_manager_writes_exactly_the_gcp_set_with_the_checksum(
+    issued_material: _IssuedMaterial,
+) -> None:
+    certs = issued_material.certs
+    runner = _SecretManagerRecordingRunner()
+    instance = issued_material.paths.instance
+    prefix = importlib.import_module("devcontainer_config.instances").sanitize_gcp_name(instance)
+
+    written = certs.publish_to_secret_manager(
+        issued_material.paths,
+        _secret_manager_client(certs, runner),
+        prefix=prefix,
+    )
+
+    assert written == certs.gcp_publication_set(instance)
+    stored = runner.stored()
+    assert set(stored) == set(written)
+    assert stored[f"{prefix}-tls-checksum"] == certs.gcp_material_checksum(
+        {
+            certs.SERVER_KEY_FILENAME: stored[f"{prefix}-{certs.GCP_SERVER_KEY_SECRET}"],
+            certs.SERVER_CERT_FILENAME: stored[f"{prefix}-{certs.GCP_SERVER_CERT_SECRET}"],
+            certs.CA_CERT_FILENAME: stored[f"{prefix}-{certs.GCP_CA_SECRET}"],
+        }
+    )
+
+
+def test_publish_to_secret_manager_publishes_the_server_pair_that_verifies(
+    issued_material: _IssuedMaterial, tmp_path: Path
+) -> None:
+    """The store ends up holding the key/certificate pair, verified against the CA."""
+    certs = issued_material.certs
+    runner = _SecretManagerRecordingRunner()
+    prefix = importlib.import_module("devcontainer_config.instances").sanitize_gcp_name(
+        issued_material.paths.instance
+    )
+    certs.publish_to_secret_manager(
+        issued_material.paths, _secret_manager_client(certs, runner), prefix=prefix
+    )
+    stored = runner.stored()
+
+    cert_path = tmp_path / "sm-cert.pem"
+    key_path = tmp_path / "sm-key.pem"
+    ca_path = tmp_path / "sm-ca.pem"
+    cert_path.write_text(stored[f"{prefix}-{certs.GCP_SERVER_CERT_SECRET}"], encoding="utf-8")
+    key_path.write_text(stored[f"{prefix}-{certs.GCP_SERVER_KEY_SECRET}"], encoding="utf-8")
+    ca_path.write_text(stored[f"{prefix}-{certs.GCP_CA_SECRET}"], encoding="utf-8")
+    assert _verifies_against_ca(cert_path, ca_path)
+    public_key = subprocess.run(
+        ["openssl", "x509", "-in", str(cert_path), "-pubkey", "-noout"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    key_public = subprocess.run(
+        ["openssl", "pkey", "-in", str(key_path), "-pubout"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert public_key == key_public
+
+
+def test_publish_to_secret_manager_fails_when_a_secret_does_not_read_back(
+    issued_material: _IssuedMaterial,
+) -> None:
+    certs = issued_material.certs
+    runner = _SecretManagerRecordingRunner(tamper=lambda name, value: value + "corrupted")
+    prefix = importlib.import_module("devcontainer_config.instances").sanitize_gcp_name(
+        issued_material.paths.instance
+    )
+
+    with pytest.raises(certs.CertsError, match="does not read back as it was written"):
+        certs.publish_to_secret_manager(
+            issued_material.paths, _secret_manager_client(certs, runner), prefix=prefix
+        )
+
+
+def test_publish_to_secret_manager_requires_the_sanitized_prefix(
+    issued_material: _IssuedMaterial,
+) -> None:
+    """A prefix the instance does not sanitize to would publish material the
+    VM's startup script would never fetch: refused by name."""
+    certs = issued_material.certs
+    runner = _SecretManagerRecordingRunner()
+
+    with pytest.raises(certs.CertsError, match="does not match instance"):
+        certs.publish_to_secret_manager(
+            issued_material.paths,
+            _secret_manager_client(certs, runner),
+            prefix="some-other-prefix",
+        )
+
+    assert runner.calls == [], "a refused prefix must write nothing"
+
+
+def test_publish_to_secret_manager_requires_an_existing_ca(tmp_path: Path) -> None:
+    certs = _import_certs()
+    paths = certs.CertPaths(instance=f"gcp-{uuid.uuid4().hex[:8]}", root=tmp_path)
+    runner = _SecretManagerRecordingRunner()
+
+    with pytest.raises(certs.CertsError, match="no certificate authority"):
+        certs.publish_to_secret_manager(
+            paths, _secret_manager_client(certs, runner), prefix=paths.instance
+        )
+
+
+# ---------------------------------------------------------------------------
+# The gcp kind selection: publish and publication-set route by the record.
+# ---------------------------------------------------------------------------
+
+
+def _gcp_repo_root(tmp_path: Path, instance: str) -> Path:
+    """A repository root whose `instance` directory declares the gcp kind,
+    with the engine address record a deploy writes for one."""
+    instances = importlib.import_module("devcontainer_config.instances")
+    instance_dir = tmp_path / "remote-instances" / instance
+    instance_dir.mkdir(parents=True)
+    instance_dir.joinpath("terragrunt.hcl").write_text(
+        'include {\n  path = find_in_parent_folders("_envcommon/remote-gcp.hcl")\n}\n',
+        encoding="utf-8",
+    )
+    instances.write_engine_address(
+        tmp_path,
+        instance,
+        {
+            "instance_name": instance,
+            "zone": "us-east1-b",
+            "project_id": "gd-test-project",
+            "region": "us-east1",
+            "secrets_prefix": instance,
+            "state_bucket": f"gdstate-{instance}-deadbeef",
+        },
+    )
+    return tmp_path
+
+
+def test_publication_set_prints_the_gcp_marked_set_for_a_gcp_instance(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    _key_vault_docker_config: Path,
+) -> None:
+    certs = _import_certs()
+    instance = f"gcp-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(certs.repo, "find_root", lambda _cwd: _gcp_repo_root(tmp_path, instance))
+
+    assert certs.main(["publication-set", "--instance", instance]) == 0
+
+    out = capsys.readouterr().out.splitlines()
+    assert out == [
+        f"{secret_id} {certs.GCP_SECRET_MANAGER_MARK}"
+        for secret_id in certs.gcp_publication_set(instance)
+    ]
+
+
+def test_publish_routes_a_gcp_instance_to_secret_manager(
+    issued_material: _IssuedMaterial,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    _key_vault_docker_config: Path,
+) -> None:
+    """The gcp kind publishes through SecretManagerClient against the record's
+    project and prefix -- the same Runner seam the shell entry point uses."""
+    certs = issued_material.certs
+    instance = issued_material.paths.instance
+    monkeypatch.setattr(certs.repo, "find_root", lambda _cwd: _gcp_repo_root(tmp_path, instance))
+    runner = _SecretManagerRecordingRunner()
+    monkeypatch.setattr(certs, "subprocess_runner", runner)
+    certs_root = Path(str(issued_material.paths.root))
+
+    exit_code = certs.main(["publish", "--instance", instance, "--root", str(certs_root)])
+
+    assert exit_code == 0
+    assert set(runner.stored()) == set(certs.gcp_publication_set(instance))
+    out = capsys.readouterr().out.splitlines()
+    assert out == [f"published {secret_id}" for secret_id in certs.gcp_publication_set(instance)]
+
+
+def test_publish_reports_a_missing_gcp_record_with_its_deploy_remedy(
+    issued_material: _IssuedMaterial,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    _key_vault_docker_config: Path,
+) -> None:
+    certs = issued_material.certs
+    instance = issued_material.paths.instance
+    instance_dir = tmp_path / "remote-instances" / instance
+    instance_dir.mkdir(parents=True)
+    instance_dir.joinpath("terragrunt.hcl").write_text(
+        'include {\n  path = find_in_parent_folders("_envcommon/remote-gcp.hcl")\n}\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(certs.repo, "find_root", lambda _cwd: tmp_path)

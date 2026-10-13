@@ -132,6 +132,7 @@ from devcontainer_config import (
     skills_install,
     transport,
     transport_azure,
+    transport_gcp,
 )
 from devcontainer_config.githooks import (
     HOOK_NAMES,
@@ -685,6 +686,30 @@ def _build_parser() -> argparse.ArgumentParser:
     gcp_zone_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
     gcp_zone_parser.set_defaults(handler=_run_gcp_zone)
 
+    gcp_project_parser = subparsers.add_parser(
+        "gcp-project-id",
+        help="Print the gcp project id one instance's address record names.",
+        description=_GCP_PROJECT_DESCRIPTION,
+    )
+    gcp_project_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    gcp_project_parser.set_defaults(handler=_run_gcp_project_id)
+
+    gcp_secrets_prefix_parser = subparsers.add_parser(
+        "gcp-secrets-prefix",
+        help="Print the Secret Manager prefix one instance's address record names.",
+        description=_GCP_SECRETS_PREFIX_DESCRIPTION,
+    )
+    gcp_secrets_prefix_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    gcp_secrets_prefix_parser.set_defaults(handler=_run_gcp_secrets_prefix)
+
+    gcp_applied_checksum_parser = subparsers.add_parser(
+        "gcp-applied-checksum",
+        help="Wait until one gcp instance's VM has applied the published TLS material.",
+        description=_GCP_APPLIED_CHECKSUM_DESCRIPTION,
+    )
+    gcp_applied_checksum_parser.add_argument("name", metavar="NAME", help=_INSTANCE_NAME_HELP)
+    gcp_applied_checksum_parser.set_defaults(handler=_run_gcp_applied_checksum)
+
     return parser
 
 
@@ -750,13 +775,14 @@ _INSTANCE_LINK_DESCRIPTION = (
 
 _INSTANCE_CLEANUP_DESCRIPTION = """Tear down one instance's out-of-band state.
 
-Deletes every SSM parameter under the instance's prefix, removes its docker
-context, and deletes its certificate-material directory (the recorded
-instance-id file included). Every operation is attempted even after an
-earlier one failed; all failures are raised together at the end. The
-remote-state bucket is deliberately out of scope: each instance's bucket is
-derived in root.hcl from its own name, so its lifecycle is a
-Terragrunt/backend concern.
+Deletes every SSM parameter under an EC2 instance's prefix, or the six
+Secret Manager secrets a gcp instance's publish and payload paths wrote;
+then removes its docker context, and deletes its certificate-material
+directory (the recorded instance-id file and the engine address record
+included). Every operation is attempted even after an earlier one failed;
+all failures are raised together at the end. The remote-state store is
+deliberately out of scope: each instance's store is derived from its own
+name in its cloud root, so its lifecycle is a Terragrunt/backend concern.
 """
 
 # The region default every aws-touching instance subcommand applies, the same
@@ -897,7 +923,9 @@ def _instance_row_values(row: instance_ops.InstanceState, root: Path) -> tuple[s
     The STATE column is kind-aware: an SSH engine row carries the
     reachability probe's answer (`ok`/`unreachable`), the one liveness
     question its kind has; an azure row carries the VM power state its
-    instance view reported; and an EC2 row carries the EC2 power state.
+    instance view reported; a gcp row carries the VM status its instance
+    describe reported (RUNNING, TERMINATED and classmates); and an EC2 row
+    carries the EC2 power state.
     The kind-only probes a row never ran (`ec2_state` on azure, and the
     reverse) stay None there, which renders as the same dash an
     unanswerable probe gets.
@@ -912,6 +940,8 @@ def _instance_row_values(row: instance_ops.InstanceState, root: Path) -> tuple[s
         state_column = "ok" if row.engine_reachable else "unreachable"
     elif row.azure_state is not None:
         state_column = row.azure_state
+    elif row.gcp_state is not None:
+        state_column = row.gcp_state
     else:
         state_column = row.ec2_state or "-"
     return (
@@ -1672,6 +1702,74 @@ def _run_gcp_zone(args: argparse.Namespace) -> int:
     return 0
 
 
+_GCP_PROJECT_DESCRIPTION = """Print the gcp project id one instance's address record names.
+
+The one reader of the record's project id that the shell entry points
+consume: the certificate publication, the state-store bootstrap and the
+staleness probe all pass it to gcloud's `--project` flag, so the store they
+address and the store the deploy recorded can never diverge. The record is
+written by the deploy, so a missing record -- or one whose project id has
+not been written yet -- fails naming `make instance-deploy` as the remedy,
+the same refusal every other accessor on that record raises.
+"""
+
+
+def _run_gcp_project_id(args: argparse.Namespace) -> int:
+    """Print `instances.gcp_project_id`'s answer, one line, nothing else."""
+    root = repo.find_root(Path.cwd())
+    print(instances.gcp_project_id(root, args.name))
+    return 0
+
+
+_GCP_SECRETS_PREFIX_DESCRIPTION = """Print the Secret Manager prefix one instance's record names.
+
+The one reader of the record's secrets prefix that the shell entry
+points consume: push-secrets.sh composes the `<prefix>-shell-env` and
+`<prefix>-profile-map` ids from it, the same prefix the certificate
+publication and the VM's startup script fetch under. The prefix is the
+sanitized instance name the deploy minted, and the accessor refuses a
+value that does not round-trip through the sanitizer unchanged, naming
+the deploy that rewrites the record.
+"""
+
+
+def _run_gcp_secrets_prefix(args: argparse.Namespace) -> int:
+    """Print `instances.gcp_secrets_prefix`'s answer, one line, nothing else."""
+    root = repo.find_root(Path.cwd())
+    print(instances.gcp_secrets_prefix(root, args.name))
+    return 0
+
+
+_GCP_APPLIED_CHECKSUM_DESCRIPTION = """Wait for one gcp VM to apply the published TLS material.
+
+The bounded apply wait `make cert-install` runs after rebooting a gcp VM:
+GCP has no run-command channel, so the material is applied by the VM's own
+startup script at the next boot -- it fetches the secrets, applies them on
+drift, restarts the daemon and rewrites the `general-dev/tls-checksum`
+guest attribute -- and this poll ends only when the attribute says the
+applied material is the published one. The engine address record names the
+VM and the secrets prefix, and the poll itself is
+`transport_gcp.wait_applied_checksum` -- the one home of the comparison --
+bounded by GCP_MATERIAL_APPLY_TIMEOUT.
+"""
+
+
+def _run_gcp_applied_checksum(args: argparse.Namespace) -> int:
+    """Poll the record's VM until its applied checksum matches the published one.
+
+    The record is read through `instances.engine_address` (a missing or
+    half-written record fails naming the deploy that rewrites it), and the
+    poll runs through `transport_gcp.wait_applied_checksum` on the
+    production runner. Everything it waits for is an answer the platform
+    or the VM gives, so this handler prints only the confirmed outcome.
+    """
+    root = repo.find_root(Path.cwd())
+    record = instances.engine_address(root, args.name)
+    transport_gcp.wait_applied_checksum(record, instance_ops.subprocess_runner, instance=args.name)
+    print(f"{args.name}: the VM's applied TLS material matches the published checksum.")
+    return 0
+
+
 _AZURE_WAIT_AGENT_DESCRIPTION = """Wait for one azure instance's VM to become drivable.
 
 The bounded readiness poll `make cert-install` runs before the install arm
@@ -1739,6 +1837,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         hostcreds.HostCredsError,
         skills_install.SkillsInstallError,
         transport_azure.RelayTransportError,
+        transport_gcp.GCPTransportError,
     ) as exc:
         print(str(exc), file=sys.stderr)
         exit_code = 1

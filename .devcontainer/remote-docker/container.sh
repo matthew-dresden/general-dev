@@ -517,23 +517,11 @@ rdc_ensure_secrets_current() {
     rd_log "SSH engine: config seeds into the workspace volume at build time (fresh on every rebuild), no Parameter Store check"
     return 0
   fi
-  if [ "$(rd_engine_kind)" = "gcp" ]; then
-    # A gcp engine's published-config channel is its own cloud's, not
-    # Parameter Store: this probe's stores are per kind, and the gcp one
-    # lands with the gcp provider slice. Refusing names that, instead of
-    # letting the EC2 branch below run an aws call the kind has no use for.
-    rd_fail "The config-freshness check does not reach gcp engines yet" \
-      "This probe compares shell.env against the copy in the engine's own store --" \
-      "Parameter Store for EC2, Key Vault for azure -- and the gcp store lands with" \
-      "the gcp provider slice." \
-      "" \
-      "Skip the check deliberately:  ${RD_BOLD}make build SKIP_SECRETS_CHECK=1${RD_RESET}"
-  fi
 
-  local local_env published store_label vault
+  local local_env published store_label vault prefix project scripts_dir
   local_env="${REPO_ROOT}/shell.env"
   [ -f "$local_env" ] || rd_fail "shell.env not found at ${local_env}" \
-    "postCreate bootstraps the container from the copy of this file in Parameter Store," \
+    "postCreate bootstraps the container from the copy of this file in the engine's store," \
     "so there is nothing to compare against and nothing to publish." \
     "" \
     "Create it from the committed example:" \
@@ -541,13 +529,14 @@ rdc_ensure_secrets_current() {
     "" \
     "What each value does: docs/environment-files.md"
 
-  # The published timestamp answers the same question for both remaining
-  # kinds -- "when was this project's shell.env last published?" -- from its
-  # own store: Key Vault carries it on the secret's attributes.updated, and
-  # Parameter Store on the parameter's LastModifiedDate. Everything after
-  # the store-specific read (the epoch comparison, the stale-and-missing
-  # verdict, the re-publish) is shared, so the two kinds can never disagree
-  # about what "current" means.
+  # The published timestamp answers the same question for all three kinds
+  # -- "when was this project's shell.env last published?" -- from its own
+  # store: Key Vault carries it on the secret's attributes.updated,
+  # Parameter Store on the parameter's LastModifiedDate, and Secret Manager
+  # on the secret's createTime. Everything after the store-specific read
+  # (the epoch comparison, the stale-and-missing verdict, the re-publish)
+  # is shared, so the three kinds can never disagree about what "current"
+  # means.
   if [ "$(rd_engine_kind)" = "azure" ]; then
     rd_require_cmd az "Install: brew install azure-cli"
     store_label="Key Vault"
@@ -562,6 +551,25 @@ rdc_ensure_secrets_current() {
       || rd_fail "The shell-env secret in Key Vault '${vault}' could not be read" \
         "If az reported an authentication failure, sign in and retry:" \
         "  ${RD_BOLD}az login${RD_RESET}, then ${RD_BOLD}make build${RD_RESET}"
+  elif [ "$(rd_engine_kind)" = "gcp" ]; then
+    rd_require_cmd gcloud "Install: brew install google-cloud-sdk"
+    store_label="Secret Manager"
+    scripts_dir="${RD_DIR}/../../.claude/plugins/devcontainer/scripts"
+    prefix="$(PYTHONPATH="$scripts_dir" python3 -m devcontainer_config.cli gcp-secrets-prefix "$INSTANCE")" \
+      || rd_fail "The Secret Manager prefix for instance '${INSTANCE}' could not be read" \
+        "The engine address record names it, and the deploy writes that record." \
+        "" \
+        "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+    project="$(PYTHONPATH="$scripts_dir" python3 -m devcontainer_config.cli gcp-project-id "$INSTANCE")" \
+      || rd_fail "The gcp project for instance '${INSTANCE}' could not be read" \
+        "The engine address record names it, and the deploy writes that record." \
+        "" \
+        "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+    published="$(gcloud secrets describe "${prefix}-shell-env" --project "$project" \
+      --format="value(createTime)")" \
+      || rd_fail "The ${prefix}-shell-env secret in project '${project}' could not be read" \
+        "If gcloud reported an authentication failure, sign in and retry:" \
+        "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make build${RD_RESET}"
   else
     rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
     store_label="Parameter Store"
@@ -575,7 +583,7 @@ rdc_ensure_secrets_current() {
     && python3 - "$local_env" "$published" <<'PY'
 import datetime, os, sys
 local_mtime = os.path.getmtime(sys.argv[1])
-published = datetime.datetime.fromisoformat(sys.argv[2]).timestamp()
+published = datetime.datetime.fromisoformat(sys.argv[2].replace("Z", "+00:00")).timestamp()
 sys.exit(0 if published >= local_mtime else 1)
 PY
   then
@@ -1339,8 +1347,10 @@ rdc_build_remote() {
   #
   # The azure kind injects its own pair instead -- the engine kind, and the
   # vault the postCreate bootstrap fetches the payload from -- selected by
-  # the same resolved kind the prelude exported, so the ec2 injection below
-  # it is the byte-identical line it has always been.
+  # the same resolved kind the prelude exported; the gcp kind injects its
+  # own trio -- the kind, the project the secrets live in, and the prefix
+  # they are named under -- so the ec2 injection below them is the
+  # byte-identical line it has always been.
   local env_patch
   if [ "$(rd_engine_kind)" = "azure" ]; then
     [ -n "${DEVCONTAINER_VAULT_NAME:-}" ] || rd_fail \
@@ -1349,6 +1359,13 @@ rdc_build_remote() {
       "" \
       "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
     env_patch='| .containerEnv = ((.containerEnv // {}) + {DEVCONTAINER_ENGINE_KIND: $enginetype, DEVCONTAINER_VAULT_NAME: $vaultname})'
+  elif [ "$(rd_engine_kind)" = "gcp" ]; then
+    [ -n "${DEVCONTAINER_GCP_PROJECT:-}" ] && [ -n "${DEVCONTAINER_SECRETS_PREFIX:-}" ] || rd_fail \
+      "The gcp project and secrets prefix for instance '${INSTANCE}' were not resolved" \
+      "The dispatch prelude reads both from the engine address record the deploy wrote." \
+      "" \
+      "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+    env_patch='| .containerEnv = ((.containerEnv // {}) + {DEVCONTAINER_ENGINE_KIND: $enginetype, DEVCONTAINER_GCP_PROJECT: $gcpproject, DEVCONTAINER_SECRETS_PREFIX: $secretsprefix})'
   else
     env_patch='| .containerEnv = ((.containerEnv // {}) + {DEVCONTAINER_SSM_PREFIX: $ssmprefix})'
   fi
@@ -1360,6 +1377,8 @@ rdc_build_remote() {
       --arg ssmprefix "${DEVCONTAINER_SSM_PREFIX:-}" \
       --arg enginetype "$(rd_engine_kind)" \
       --arg vaultname "${DEVCONTAINER_VAULT_NAME:-}" \
+      --arg gcpproject "${DEVCONTAINER_GCP_PROJECT:-}" \
+      --arg secretsprefix "${DEVCONTAINER_SECRETS_PREFIX:-}" \
       '.configuration
        | del(.configFilePath)
        | .workspaceMount = $mount
@@ -1549,6 +1568,32 @@ if command -v docker > /dev/null 2>&1; then
           "" \
           "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
       export DEVCONTAINER_VAULT_NAME
+    elif [ "$(rd_engine_kind)" = "gcp" ]; then
+      # A gcp engine has no Parameter Store behind it either: clear any EC2
+      # value the same way, then set the gcp trio the build override and
+      # the container's postCreate bootstrap read -- the engine kind, the
+      # project the secrets live in, and the prefix they are named under.
+      # Both values come from the engine address record the deploy wrote,
+      # through the same `gcp-project-id`/`gcp-secrets-prefix` readers
+      # push-secrets.sh resolves them with, so a missing or key-less
+      # record fails here -- before any command runs -- naming that deploy.
+      unset DEVCONTAINER_SSM_PREFIX
+      DEVCONTAINER_ENGINE_KIND=gcp
+      export DEVCONTAINER_ENGINE_KIND
+      DEVCONTAINER_GCP_PROJECT="$(PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" \
+        python3 -m devcontainer_config.cli gcp-project-id "$INSTANCE")" \
+        || rd_fail "The gcp project for instance '${INSTANCE}' could not be read" \
+          "The engine address record names it, and the deploy writes that record; the reader's own message is above." \
+          "" \
+          "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+      export DEVCONTAINER_GCP_PROJECT
+      DEVCONTAINER_SECRETS_PREFIX="$(PYTHONPATH="${RD_DIR}/../../.claude/plugins/devcontainer/scripts" \
+        python3 -m devcontainer_config.cli gcp-secrets-prefix "$INSTANCE")" \
+        || rd_fail "The Secret Manager prefix for instance '${INSTANCE}' could not be read" \
+          "The engine address record names it, and the deploy writes that record; the reader's own message is above." \
+          "" \
+          "Deploy first:  ${RD_BOLD}make instance-deploy INSTANCE=${INSTANCE}${RD_RESET}"
+      export DEVCONTAINER_SECRETS_PREFIX
     else
       DEVCONTAINER_SSM_PREFIX="${PARAMETER_PREFIX%/}"
       export DEVCONTAINER_SSM_PREFIX

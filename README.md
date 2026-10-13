@@ -2,13 +2,13 @@
 
 A reusable devcontainer platform: one repository that creates and manages
 one to many separate development containers, whether on this laptop's
-Docker engine, on remote EC2 engines, on SSH engines, or on any mix of
-them at once. The projects you work on are cloned inside the workspace as
-plain nested repositories.
+Docker engine, on remote EC2 engines, on SSH engines, on Azure engines, or
+on any mix of them at once. The projects you work on are cloned inside the
+workspace as plain nested repositories.
 
 What that buys you, and why you would use it:
 
-- **Many containers, three kinds of engine.**
+- **Many containers, four kinds of engine.**
   A container per clone, per branch under review, or per project.
   - Name one at creation: `make build NAME=x`.
   - List them across every engine at once: `make list-containers`.
@@ -21,6 +21,9 @@ What that buys you, and why you would use it:
   - **EC2 engine.** Reached through an SSM port forward carrying the docker
     API under mutual TLS. No key pair and no host access, by design.
   - **SSH engine.** Reached through a managed ssh local forward.
+  - **Azure engine.** Reached through an Azure Relay hybrid connection the
+    VM dials out to; no inbound ports, no public IP, and no SSH anywhere,
+    by design.
   - On every path, `make exec` opens a shell in a container: the only shell
     this workspace offers.
 - **Every operation is automated.**
@@ -77,10 +80,11 @@ Deeper on each step:
 
 ## Quick start, remote
 
-Two kinds of remote engine, one workflow shape each: any machine reachable
-over SSH that runs Docker (general SSH), or an EC2 instance this repository
-provisions (AWS EC2). Both clone the workspace into a volume on the engine,
-and both keep the container running after you disconnect.
+Three kinds of remote engine, one workflow shape each: any machine reachable
+over SSH that runs Docker (general SSH), an EC2 instance this repository
+provisions (AWS EC2), or an Azure virtual machine this repository provisions
+(Azure). All three clone the workspace into a volume on the engine, and all
+three keep the container running after you disconnect.
 
 ### General SSH
 
@@ -168,6 +172,71 @@ Deeper on each step:
 - Provisioning an instance by hand (IAM, network, user data):
   [docs/ec2-requirements.md](docs/ec2-requirements.md)
 
+### Azure
+
+The azure engine is a rootless Docker daemon on an Azure virtual machine.
+Nothing listens for inbound connections: the daemon binds its TLS port to
+loopback on the VM, and the only route to it is an Azure Relay hybrid
+connection the VM dials out to. Entra ID authorizes the laptop's sender half
+of that connection; mutual TLS then authenticates the docker client at the
+daemon. No public IP, no inbound rule, and no SSH anywhere, by design. The
+VM's relay listener stops itself after fifteen idle minutes, so the relay
+accrues listener time only while you are working.
+
+**Prerequisites (laptop):** azure CLI (`brew install azure-cli`, logged in
+with `az login`), docker CLI, git; for `build`/`rebuild` additionally
+`npm install -g @devcontainers/cli` and `jq`, the same build prerequisites
+the EC2 path has. Missing tools fail fast with the install command.
+
+**The make route, in the order they are run:**
+
+```sh
+make instance-init INSTANCE=<project> CLOUD=azure LOCATION=<location>
+                                          # scaffold remote-instances/<project>/terragrunt.hcl
+                                          # ([VM_SIZE=] optional); then edit its inputs and
+                                          # add your Entra object id to relay_sender_object_ids
+                                          # and keyvault_officer_object_ids, see below
+make instance-deploy INSTANCE=<project>  # converge: provisions the resource group, vnet and
+                                          # subnet, the VM, its Key Vault, the relay namespace
+                                          # and hybrid connection, and the state storage;
+                                          # records the relay address; prints the follow-on chain
+make remote INSTANCE=<project>           # open the relay forward as a background daemon,
+                                          # point docker at the engine, return
+make build INSTANCE=<project>            # clone into a volume on the engine, build, run postCreate
+make exec INSTANCE=<project>             # a shell inside the container
+```
+
+`make instance-init` writes the one file a new azure instance needs and
+never deploys; the two object-id lists are the one edit the scaffold cannot
+do for you, because they name *you*: `relay_sender_object_ids` grants your
+Entra identity the Relay Sender role on the namespace (the right to open the
+sender half of the hybrid connection the forward rides), and
+`keyvault_officer_object_ids` grants the Key Vault Secrets Officer role on
+the vault (the right to publish the instance's TLS material and secrets into
+it). The deploy carries both in as role assignments on the first run, so
+without them it provisions fine and the connect and the credential push
+afterwards have no grant to stand on. `make instance-deploy` applies the
+file, is safe to re-run, and prints the follow-on chain above when it
+finishes. Then VS Code → **Dev Containers: Attach to Running Container…**.
+The same step is the way back after any disconnect; the container never
+stopped (`shutdownAction: "none"`).
+
+**The skill route:** `gd-env-setup-azure` performs the same provisioning and
+certificate steps and verifies each one before continuing, `gd-cert-lifecycle`
+owns certificate renewal afterward, and `gd-instance-list` validates which
+engine is active. The full roster: [docs/skills.md](docs/skills.md).
+
+Deeper on each step:
+
+- Provisioning an instance by hand (network, identity, relay, host
+  configuration): [docs/azure-requirements.md](docs/azure-requirements.md)
+- The Terraform module and its full input surface:
+  [provider/azure/README.md](provider/azure/README.md)
+- Instance architecture and the state model:
+  [remote-instances/README.md](remote-instances/README.md)
+- The full ordered runbook: [environment-setup.md, "The Azure engine
+  path"](docs/environment-setup.md)
+
 ## Daily use
 
 | | |
@@ -234,14 +303,21 @@ make clones under clones visible: the Definition section of
   container: fragment modes, the startup block, silent shell startup, and
   git and aws reachability for whichever sources the manifest names.
 - One remote engine per project under `remote-instances/`: the `make help`
-  INSTANCES group scaffolds, converges, powers and retires the EC2 kind
-  (`make list-instances` shows every instance's live state). The third
-  engine kind, SSH, is any machine reachable over SSH that runs Docker: a
-  Linux daemon through its socket or a TCP endpoint, or Windows through
-  Docker Desktop's exposed TCP endpoint. An SSH engine, declared by a
+  INSTANCES group scaffolds, converges, powers and retires the EC2 kind and
+  the azure kind (`CLOUD=azure` at scaffold time selects it; `make
+  list-instances` shows every instance's live state). The third engine
+  kind, SSH, is any machine reachable over SSH that runs Docker: a Linux
+  daemon through its socket or a TCP endpoint, or Windows through Docker
+  Desktop's exposed TCP endpoint. An SSH engine, declared by a
   `remote-instances/<name>/engine.json` manifest with no AWS behind it, is
   scaffolded, verified and removed with `make engine-init`,
-  `make engine-verify` and `make engine-remove`.
+  `make engine-verify` and `make engine-remove`. The fourth engine kind,
+  azure, is an Azure virtual machine reached through an Azure Relay hybrid
+  connection the VM dials out to — no public IP, no inbound rule, no SSH —
+  scaffolded, converged, powered and retired with the same `instance-*`
+  targets, `make instance-init … CLOUD=azure LOCATION=<location>`,
+  `make instance-deploy`, `make instance-stop`/`instance-start` and
+  `make instance-destroy`.
 - Claude Code starts on the classic renderer and never offers the flicker-free
   fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen`
   still opts in for the current container.
@@ -267,7 +343,9 @@ make clones under clones visible: the Definition section of
   and the AWS SSO session, all named in the gitignored hostcreds manifest,
   plus the fragments `make push-creds` writes inside the container. Parameter
   Store (`/devcontainer/<project>/…`) holds the credential-free `shell.env`
-  and profile map. None of it is ever in git.
+  and profile map for an EC2 engine; an azure engine's copies publish to the
+  instance's own Key Vault instead, one vault per instance. None of it is
+  ever in git.
 
 ## Layout
 
@@ -275,8 +353,9 @@ make clones under clones visible: the Definition section of
 |---|---|
 | `.devcontainer/` | Devcontainer definition (image + features), postcreate setup, shared shell functions |
 | `.devcontainer/hostcreds.map.json` (+ committed `.example`) | Hostcreds manifest, gitignored: every credential this machine pushes into the container, named with its source |
-| `.devcontainer/remote-docker/` | Remote EC2 engine: transport, certificate and secret entry points, instance config, see its [README](.devcontainer/remote-docker/README.md) |
-| `remote-instances/` | One remote engine per project: a Terragrunt deployment (`terragrunt.hcl`) per EC2 engine, scaffolded by `make instance-init`, or an SSH engine declared by an `engine.json` manifest, scaffolded by `make engine-init`; see its [README](remote-instances/README.md) |
+| `.devcontainer/remote-docker/` | Remote engines, EC2 and azure: the transports (SSM forward, relay forward), certificate and secret entry points, instance config, see its [README](.devcontainer/remote-docker/README.md) |
+| `remote-instances/` | One remote engine per project: a Terragrunt deployment (`terragrunt.hcl`) per EC2 or azure engine — the azure one including `root-azure.hcl` and the `_envcommon/remote-azure.hcl` layer — scaffolded by `make instance-init`, or an SSH engine declared by an `engine.json` manifest, scaffolded by `make engine-init`; see its [README](remote-instances/README.md) |
+| `provider/azure/` | The azure Terraform module those deployments consume: network, platform unit (security group, identity, Key Vault, relay) and VM, see its [README](provider/azure/README.md) |
 | `.devcontainer/nix-family-os/`, `wsl-family-os/` | Host-side proxy (tinyproxy) helpers for local mode |
 | `repos/` | Where project repositories are cloned. Only its `.gitkeep` is tracked |
 | `.agents/skills/` | Canonical agent-agnostic skills home (roster prefixed `gd-`); wired into an agent on this Mac by the `skills-*` make targets |
@@ -284,6 +363,7 @@ make clones under clones visible: the Definition section of
 | `docs/devcontainer.md` | Deep dive: setup flow, secrets, nested repositories, the devcontainer file contract |
 | `docs/environment-setup.md` | Ordered runbook: fresh machine to verified container, one verification per step |
 | `docs/environment-files.md` | Every private configuration value and what it does |
-| `docs/ec2-requirements.md` | Provisioning an instance by hand: network, IAM, host configuration |
+| `docs/ec2-requirements.md` | Provisioning an EC2 instance by hand: network, IAM, host configuration |
+| `docs/azure-requirements.md` | Provisioning an azure instance by hand: network, identity and relay, host configuration |
 | `docs/skills.md` | The skill roster: families, flows, coverage guarantee, and installing it for an agent |
 | `CLAUDE.md` | Engineering standards for AI-assisted work in this repo |

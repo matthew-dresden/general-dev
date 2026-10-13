@@ -21,9 +21,9 @@ members.
 
 | Family | Members | Drives |
 |---|---|---|
-| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-doctor` | `make init`, `make local` (and its `make disconnect`), `make remote`, `make connect-start`; the Section 4.2.1 check contract |
+| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-setup-azure`, `gd-env-doctor` | `make init`, `make local` (and its `make disconnect`), `make remote`, `make connect-start`; the Section 4.2.1 check contract |
 | project- | `gd-project-onboard` | `make init`, `make keybindings` |
-| instance- | `gd-instance-create`, `gd-instance-fleet`, `gd-instance-list`, `gd-instance-destroy`, `gd-engine-ssh` | `make instance-init`, `make instance-plan`, `make instance-deploy`, `make instance-link`, `make list-instances`, `make instance-status`, `make instance-stop`, `make instance-start`, `make instance-destroy`; the ssh engine kind's lifecycle: `make engine-init`, `make engine-verify`, `make engine-remove` |
+| instance- | `gd-instance-create`, `gd-instance-fleet`, `gd-instance-list`, `gd-instance-destroy`, `gd-engine-ssh` | `make instance-init` (both kinds: the EC2 default, or `CLOUD=azure LOCATION=<location>`), `make instance-plan`, `make instance-deploy`, `make instance-link`, `make list-instances`, `make instance-status`, `make instance-stop`, `make instance-start`, `make instance-destroy`; the ssh engine kind's lifecycle: `make engine-init`, `make engine-verify`, `make engine-remove` |
 | container- | `gd-container-local`, `gd-container-remote`, `gd-container-verify`, `gd-container-lifecycle` | `make build`, `make start`, `make restart`, `make reopen`, `make status`, `make check`, `make clean`, `make rebuild`, `make rename`, `make list-containers`; `NAME=` names at creation, `ALL=1` takes the fleet forms |
 | creds- | `gd-creds-setup`, `gd-creds-rotate`, `gd-creds-doctor` | `make creds-init`, `make push-creds`, `make verify-container` |
 | cert- | `gd-cert-lifecycle` | `make cert-ca`, `make cert-client`, `make cert-publish`, `make cert-install`, `make cert-status` |

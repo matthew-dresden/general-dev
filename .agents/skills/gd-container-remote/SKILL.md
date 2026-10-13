@@ -1,6 +1,6 @@
 ---
 name: gd-container-remote
-description: Drives the remote backend's container by opening the SSM port forward as a background daemon with make connect-start, manages that daemon's lifecycle (status, stop, refresh, list) without touching the instance, points docker and VS Code at the instance with make remote, then builds, starts or reopens through the same state diagnosis as the local skill, against the cloned checkout in the instance's volume; destroys nothing.
+description: Drives the remote backend's container by opening the engine's forward as a background daemon with make connect-start (the SSM, ssh or azure relay forward, picked by the engine's kind), manages that daemon's lifecycle (status, stop, refresh, list) without touching the instance, points docker and VS Code at the instance with make remote, then builds, starts or reopens through the same state diagnosis as the local skill, against the cloned checkout in the instance's volume; destroys nothing.
 ---
 
 # gd-container-remote
@@ -8,9 +8,15 @@ description: Drives the remote backend's container by opening the SSM port forwa
 This skill is the remote-backend counterpart of `gd-container-local`: same
 four actions (`make build`, `make start`, `make restart`, `make reopen`),
 same never-destroys-anything boundary, one added stage: the container
-lives on a remote EC2 engine reached through an SSM port forward under
-mutual TLS, so the forward and the context switch come first and every
-later step runs against the instance's docker context. The container is a
+lives on a remote engine reached through a forward under
+mutual TLS — the SSM port forward on an EC2 instance, the azure relay
+forward on an azure engine (whose VM-side listener `make connect-start`
+starts on demand before opening the forward), the managed ssh forward on an
+engine declared by an `engine.json` manifest — so the forward and the
+context switch come first and every
+later step runs against the instance's docker context. The engine's own
+kind picks the transport, so this skill carries no per-kind branching of
+its own. The container is a
 fresh clone from origin in a volume, not a bind mount of this working tree,
 which is why the unpushed-work guard (`make check`) matters here and is
 carried forward rather than re-implemented.
@@ -30,7 +36,7 @@ section).
 | Step | What this skill runs | Notes |
 |---|---|---|
 | Validate the instance | Invoke `gd-instance-list INSTANCE=<name>` first | Its thirteen-check verdict is this skill's precondition; a failure there is reported unchanged and stops this skill. |
-| Open the forward | `make connect-start INSTANCE=<name>` | Opens the forward as a background daemon and returns once docker answers through it; idempotent; an already-open forward reports and exits 0. |
+| Open the forward | `make connect-start INSTANCE=<name>` | Opens the forward as a background daemon and returns once docker answers through it; idempotent; an already-open forward reports and exits 0. The engine's kind selects the transport: on an azure engine the same target starts the VM-side relay listener first, so a cold start there can take tens of seconds by design. |
 | Forward status | `make connect-status INSTANCE=<name>` / `ALL=1` | pid, port, listening per instance; a report is always a success, never an error. |
 | Close the forward | `make connect-stop INSTANCE=<name>` / `ALL=1` | Stops the daemon, verifies the port closed; the instance itself keeps running. |
 | Forward roster | `make connect-list` | Every configured instance's forward state. |
@@ -41,7 +47,7 @@ section).
 
 | Check | Prevents | Failure message | Remedy |
 |---|---|---|---|
-| the forward answers before any docker call | a build failing mid-flight on a dead tunnel instead of at the gate | `docker version` over the forwarded port does not answer within `DOCKER_HANDSHAKE_TIMEOUT` | Re-run `make connect-refresh INSTANCE=<name>` (an expired SSO session or a dropped tunnel is the usual cause), then re-probe before continuing; a forward that still does not answer is reported, never retried silently. |
+| the forward answers before any docker call | a build failing mid-flight on a dead tunnel instead of at the gate | `docker version` over the forwarded port does not answer within `DOCKER_HANDSHAKE_TIMEOUT` | Re-run `make connect-refresh INSTANCE=<name>` (an expired SSO or Entra session or a dropped forward is the usual cause; azure adds `az login` before the refresh), then re-probe before continuing; a forward that still does not answer is reported, never retried silently. On azure, a 404 naming the hybrid connection means the VM-side listener is not running: `make connect-start INSTANCE=<name>` starts it, so run that instead. |
 | no unpushed work would be stranded by a rebuild | a rebuild re-cloning from origin and discarding container-only commits | `make check` reports uncommitted or unpushed work in the volume | State `make check`'s own remedy (push from inside the container), wait for the operator, then re-run `make check`; rebuilding is refused until it is clean. |
 
 ## Failure semantics

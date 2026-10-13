@@ -491,7 +491,7 @@ def test_the_security_unit_carries_the_platform_role_grants() -> None:
         '"Key Vault Secrets Officer"',
         "for_each = toset(var.relay_sender_object_ids)",
         "for_each = toset(var.keyvault_officer_object_ids)",
-        "enable_rbac_authorization = true",
+        "rbac_authorization_enabled = true",
         "requires_client_authorization = true",
     ):
         assert fragment in text, f"the platform unit is missing: {fragment!r}"

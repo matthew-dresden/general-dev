@@ -981,3 +981,81 @@ def test_engine_vault_name_rejects_a_non_string_vault(
 
     with pytest.raises(instances.EngineAddressError):
         instances.engine_vault_name(root, "sandbox")
+
+
+# ---------------------------------------------------------------------------
+# azure_instance_location (the scaffold's location input)
+# ---------------------------------------------------------------------------
+
+
+def _seed_azure_scaffold(root: Path, name: str, location: str) -> Path:
+    """The per-instance terragrunt.hcl the azure scaffold writes, in miniature.
+
+    The include text is what `read_kind` keys the azure kind on, and the
+    `location = "..."` line is what the reader under test matches -- the
+    scaffold owns the line's exact shape, so the fixture writes that shape.
+    """
+    directory = root / "remote-instances" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    hcl = directory / "terragrunt.hcl"
+    hcl.write_text(
+        'include "envcommon" {\n'
+        '  path = "${dirname(find_in_parent_folders("root.hcl"))}'
+        '/_envcommon/remote-azure.hcl\"\n'
+        "}\n"
+        "\n"
+        "inputs = {\n"
+        f'  instance_name = "{name}"\n'
+        f'  location = "{location}"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    return hcl
+
+
+def test_azure_instance_location_reads_the_scaffolded_assignment(
+    tmp_path: Path,
+) -> None:
+    instances = _import_instances()
+    location = f"region-{uuid.uuid4().hex[:6]}"
+    _seed_azure_scaffold(tmp_path, "sandbox", location)
+
+    assert instances.azure_instance_location(tmp_path, "sandbox") == location
+
+
+def test_azure_instance_location_missing_scaffold_names_the_init_remedy(
+    tmp_path: Path,
+) -> None:
+    instances = _import_instances()
+
+    with pytest.raises(instances.InstancesError) as exc_info:
+        instances.azure_instance_location(tmp_path, "sandbox")
+
+    message = str(exc_info.value)
+    assert "no terragrunt.hcl" in message
+    assert "make instance-init INSTANCE=sandbox CLOUD=azure LOCATION=" in message
+
+
+def test_azure_instance_location_missing_assignment_names_the_init_remedy(
+    tmp_path: Path,
+) -> None:
+    instances = _import_instances()
+    hcl = _seed_azure_scaffold(tmp_path, "sandbox", "westeurope")
+    hcl.write_text(
+        hcl.read_text(encoding="utf-8").replace('  location = "westeurope"\n', ""),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(instances.InstancesError) as exc_info:
+        instances.azure_instance_location(tmp_path, "sandbox")
+
+    message = str(exc_info.value)
+    assert "carries no location input" in message
+    assert "make instance-init INSTANCE=sandbox CLOUD=azure LOCATION=" in message
+
+
+def test_azure_instance_location_rejects_an_invalid_name(tmp_path: Path) -> None:
+    instances = _import_instances()
+
+    with pytest.raises(instances.InvalidInstanceNameError):
+        instances.azure_instance_location(tmp_path, "../escape")

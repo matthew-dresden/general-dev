@@ -87,7 +87,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from devcontainer_config import certs, containers, forwards, instances
+from devcontainer_config import certs, containers, forwards, instances, transport_azure
 from devcontainer_config.hostprobe import (
     CommandResult,
     CommandRunner,
@@ -95,13 +95,15 @@ from devcontainer_config.hostprobe import (
     read_positive_seconds,
 )
 
-# The two external commands this module asks a runner to invoke. Every aws
+# The external commands this module asks a runner to invoke. Every aws
 # argv below starts with AWS_EXECUTABLE; every docker argv with
-# DOCKER_EXECUTABLE; every ssh reachability probe with SSH_EXECUTABLE;
+# DOCKER_EXECUTABLE; every ssh reachability probe with SSH_EXECUTABLE; and
+# every azure VM argv the azure arms below build starts with AZ_EXECUTABLE;
 # nothing else names an executable.
 AWS_EXECUTABLE = "aws"
 DOCKER_EXECUTABLE = "docker"
 SSH_EXECUTABLE = "ssh"
+AZ_EXECUTABLE = "az"
 
 # The SSM public parameter holding Canonical's current Ubuntu 24.04 arm64
 # image for the region the scaffold targets. Read once per scaffold when the
@@ -164,6 +166,9 @@ VPC_CIDR_PATTERN = re.compile(r'vpc_cidr\s*=\s*"([^"]*)"')
 # sleeping POWER_POLL_SECONDS between polls. Both bounds are module
 # constants rather than literals at the call sites, so a test (or an
 # operator) reads and drives the exact same numbers the polling loop does.
+# The azure arms poll on the same cadence: their per-poll state reads go
+# through `transport_azure`'s builders, and the stop poll below reuses these
+# two constants for its bounded deallocation wait.
 POWER_POLL_LIMIT = 60
 POWER_POLL_SECONDS = 5
 STOPPED_STATE = "stopped"
@@ -173,6 +178,13 @@ SSM_ONLINE_STATUS = "Online"
 # The `--query` that turns one `aws ec2 describe-instances` call straight
 # into the instance's `State.Name` text.
 _EC2_STATE_QUERY = "Reservations[0].Instances[0].State.Name"
+
+# The two engine-address record keys the azure arms act on, and the
+# `--query` that turns one `az vm show -d` call into the power and
+# provisioning pair the azure status row renders from.
+_VM_NAME_KEY = "vm_name"
+_RESOURCE_GROUP_KEY = "resource_group"
+_AZURE_VM_SHOW_QUERY = "{power:powerState, provisioning:provisioningState}"
 
 # The committed `.gitignore` rule every scaffold's per-instance entry is
 # appended below: the blanket lock-file ignore marks the per-instance block,
@@ -958,17 +970,22 @@ class InstanceState:
     or, for the EC2-only probes on an SSH engine, no EC2 surface behind
     the instance at all). `lookup_error` is a sanitized one-line reason for
     the first probe that failed, or None when every probe answered. `state`
-    never raises for an aws/docker failure: a listing of many instances
+    never raises for an aws/docker/az failure: a listing of many instances
     degrades per row.
 
     `engine_reachable` is the SSH engine kind's own probe (`True`/`False`)
-    and None for an EC2 instance, whose kind has no such probe.
+    and None for every other kind, whose kind has no such probe.
+
+    `azure_state` is the azure kind's power column (the `powerState` the
+    instance view reports, e.g. `VM running`) and None for every other
+    kind; an EC2 row answers in `ec2_state` exactly as it always did.
     """
 
     name: str
     directory: bool
     recorded_id: str | None
     ec2_state: str | None
+    azure_state: str | None
     params_present: bool | None
     certs_present: bool | None
     client_cert_days_left: int | None
@@ -1047,6 +1064,97 @@ def _parameters_present(runner: Runner, name: str) -> bool:
     if not isinstance(parameters, list):
         raise _ProbeFailure("describe-parameters response carries no 'Parameters' list")
     return bool(parameters)
+
+
+def _azure_record_targets(address: dict[str, object], name: str) -> tuple[str, str]:
+    """The `(resource_group, vm_name)` pair the engine address record must carry.
+
+    The same deploy-remedy discipline `relay_values` applies to the relay
+    keys: a record present but missing a key this surface needs reads as the
+    not-yet-deployed state it effectively is, and the probe failure says so.
+
+    Raises:
+        _ProbeFailure: either key is missing or is not a non-empty string.
+    """
+    values: list[str] = []
+    for key in (_RESOURCE_GROUP_KEY, _VM_NAME_KEY):
+        value = address.get(key)
+        if not isinstance(value, str) or not value:
+            raise _ProbeFailure(
+                f"the engine address record for instance {name!r} carries no usable "
+                f"{key!r}; redeploy to write it: make instance-deploy INSTANCE={name}"
+            )
+        values.append(value)
+    return values[0], values[1]
+
+
+def _azure_vm_state(runner: Runner, resource_group: str, vm_name: str) -> str | None:
+    """The VM's `powerState` from one `az vm show -d` call, or None when unreported."""
+    argv = [
+        AZ_EXECUTABLE,
+        "vm",
+        "show",
+        "-g",
+        resource_group,
+        "-n",
+        vm_name,
+        "-d",
+        "--query",
+        _AZURE_VM_SHOW_QUERY,
+        "--output",
+        "json",
+    ]
+    stdout = _probe_run(runner, argv).stdout
+    try:
+        payload: object = json.loads(stdout) if stdout.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise _ProbeFailure("az vm show printed output that is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise _ProbeFailure("az vm show response is not a JSON object")
+    power = payload.get("power")
+    if power is None:
+        return None
+    return str(power)
+
+
+def _azure_secrets_present(runner: Runner, vault_name: str) -> bool:
+    """Whether every publishable TLS secret exists in `vault_name`.
+
+    Three probes aggregated: the vault is asked for each secret the
+    publication writes (`certs.AZURE_PUBLISHABLE`, the same set the publish
+    path writes), every probe must answer, and one `SecretNotFound` answer
+    means the material is not there.
+
+    Raises:
+        _ProbeFailure: a probe failed for any reason other than a missing
+            secret.
+    """
+    for secret_name in certs.AZURE_PUBLISHABLE.values():
+        argv = [
+            AZ_EXECUTABLE,
+            "keyvault",
+            "secret",
+            "show",
+            "--vault-name",
+            vault_name,
+            "--name",
+            secret_name,
+            "--query",
+            "id",
+            "--output",
+            "tsv",
+        ]
+        try:
+            result = runner(argv, None)
+        except OSError as exc:
+            raise _ProbeFailure(_one_line(str(exc))) from exc
+        if result.returncode != 0:
+            if certs.SECRET_NOT_FOUND_MARKER in result.stderr:
+                return False
+            raise _ProbeFailure(
+                f"{' '.join(argv)} exited {result.returncode}: {_one_line(result.stderr)}"
+            )
+    return True
 
 
 def _engine_reach_argv(values: dict[str, object], timeout_seconds: float) -> list[str]:
@@ -1149,7 +1257,13 @@ def state(root: Path, name: str, *, runner: Runner) -> InstanceState:
     has no EC2 surface behind it, so the describe and describe-parameters
     probes do not run and their fields stay None (the does-not-apply
     meaning), and the engine reachability probe answers in their place. An
-    EC2 instance keeps exactly the probe set and order it always had.
+    azure engine answers its own kind's probes in the same does-not-apply
+    style: the VM power state and the Key Vault TLS material (through the
+    vault the engine address record names) replace the EC2 describe and the
+    describe-parameters probe, the record's VM name stands in as the row's
+    display id, and a missing record degrades the row with the deploy
+    remedy instead of aborting the listing. An EC2 instance keeps exactly
+    the probe set and order it always had.
 
     Raises:
         StateError: `name` fails `instances.validate_name` -- a malformed
@@ -1173,7 +1287,10 @@ def state(root: Path, name: str, *, runner: Runner) -> InstanceState:
     kind = _state_kind(root, name, record)
 
     ec2_state: str | None = None
+    azure_state: str | None = None
+    displayed_id: str | None = instance_id
     engine_reachable: bool | None = None
+    params_present: bool | None = None
     if kind == instances.ENGINE_KIND_SSH:
         values: dict[str, object] | None = None
         try:
@@ -1184,14 +1301,42 @@ def state(root: Path, name: str, *, runner: Runner) -> InstanceState:
             engine_reachable, reach_reason = _engine_reachable(runner, values)
             if reach_reason is not None:
                 record(reach_reason)
+    elif kind == instances.ENGINE_KIND_AZURE:
+        address: dict[str, object] | None = None
+        try:
+            address = instances.engine_address(root, name)
+        except instances.InstancesError as exc:
+            record(exc)
+        if address is not None:
+            try:
+                resource_group, vm_name = _azure_record_targets(address, name)
+            except _ProbeFailure as exc:
+                record(exc)
+            else:
+                # The VM name is the azure row's display id: the kind has no
+                # EC2 id, and the record the deploy wrote is the addressable
+                # identity the power operations act on.
+                displayed_id = vm_name
+                try:
+                    azure_state = _azure_vm_state(runner, resource_group, vm_name)
+                except _ProbeFailure as exc:
+                    record(exc)
+                try:
+                    vault_name = instances.engine_vault_name(root, name)
+                except instances.InstancesError as exc:
+                    record(exc)
+                else:
+                    try:
+                        params_present = _azure_secrets_present(runner, vault_name)
+                    except _ProbeFailure as exc:
+                        record(exc)
     elif instance_id is not None:
         try:
             ec2_state = _ec2_state(runner, instance_id)
         except _ProbeFailure as exc:
             record(exc)
 
-    params_present: bool | None = None
-    if kind != instances.ENGINE_KIND_SSH:
+    if kind == instances.ENGINE_KIND_EC2:
         try:
             params_present = _parameters_present(runner, name)
         except _ProbeFailure as exc:
@@ -1226,8 +1371,9 @@ def state(root: Path, name: str, *, runner: Runner) -> InstanceState:
     return InstanceState(
         name=name,
         directory=directory,
-        recorded_id=instance_id,
+        recorded_id=displayed_id,
         ec2_state=ec2_state,
+        azure_state=azure_state,
         params_present=params_present,
         certs_present=certs_present,
         client_cert_days_left=client_cert_days_left,
@@ -1375,6 +1521,151 @@ def _poll_ssm_online(
     )
 
 
+# ---------------------------------------------------------------------------
+# Power operations, azure arm.
+# ---------------------------------------------------------------------------
+
+
+def _power_kind(root: Path, name: str) -> str:
+    """The instance's engine kind for the power dispatch, wrapped in `PowerError`.
+
+    Raises:
+        PowerError: the directory declares (however brokenly) an engine
+            manifest that cannot be read -- a power operation cannot know
+            which surface to act on.
+    """
+    try:
+        return instances.read_kind(root, name)
+    except instances.EngineManifestError as exc:
+        raise PowerError(f"ERROR: {exc}") from exc
+
+
+def _azure_power_targets(root: Path, name: str) -> tuple[str, str]:
+    """The `(resource_group, vm_name)` pair the azure power operation acts on.
+
+    Both come from the engine address record the deploy wrote
+    (`instances.engine_address`, the single accessor) -- never a second,
+    ad hoc read of the record's JSON.
+
+    Raises:
+        PowerError: the record is missing (its own message names the deploy
+            that writes it) or carries no usable target pair.
+    """
+    try:
+        address = instances.engine_address(root, name)
+    except instances.InstancesError as exc:
+        raise PowerError(f"ERROR: {exc}") from exc
+    try:
+        return _azure_record_targets(address, name)
+    except _ProbeFailure as exc:
+        raise PowerError(f"ERROR: {_one_line(str(exc))}") from exc
+
+
+def _run_power_az(
+    runner: Runner, operation_args: Sequence[str]
+) -> subprocess.CompletedProcess[str]:
+    """Run one az command in the power path, raising `PowerError` on any failure."""
+    argv = [AZ_EXECUTABLE, *operation_args]
+    try:
+        result = runner(argv, None)
+    except OSError as exc:
+        raise PowerError(
+            f"ERROR: could not run {' '.join(argv)}\n"
+            f"{_one_line(str(exc))}\n"
+            "Install the Azure CLI (brew install azure-cli) and sign in with "
+            "'az login', then retry."
+        ) from exc
+    if result.returncode != 0:
+        raise PowerError(
+            f"ERROR: {' '.join(argv)} exited {result.returncode}\n"
+            f"{_one_line(result.stderr)}\n"
+            "Resolve the failure above, then retry the power operation."
+        )
+    return result
+
+
+def _poll_azure_power(
+    runner: Runner,
+    resource_group: str,
+    vm_name: str,
+    *,
+    target: str,
+    sleep: Callable[[float], None],
+) -> None:
+    """Poll the VM's `PowerState/*` code until it equals `target`.
+
+    At most `POWER_POLL_LIMIT` reads, `POWER_POLL_SECONDS` apart (via the
+    injected `sleep`) -- the same cadence the EC2 poll keeps. The argv and
+    the parse are `transport_azure`'s builders (the one home of the
+    instance-view reads), so this loop and the readiness poll can never
+    disagree about what the platform answered.
+
+    Raises:
+        PowerError: a state read failed, or the limit was exhausted naming
+            the last observed state.
+    """
+    adapter = _command_adapter(runner)
+    observed = ""
+    for _ in range(POWER_POLL_LIMIT):
+        try:
+            observed = transport_azure.vm_power_state(resource_group, vm_name, adapter)
+        except transport_azure.RelayTransportError as exc:
+            raise PowerError(f"ERROR: {_one_line(str(exc))}") from exc
+        if observed == target:
+            return
+        sleep(POWER_POLL_SECONDS)
+    raise PowerError(
+        f"ERROR: VM {vm_name} did not reach {target!r} within "
+        f"{POWER_POLL_LIMIT} polls at {POWER_POLL_SECONDS}s intervals\n"
+        f"The last observed state was {observed!r}.\n"
+        f"Check the VM directly: az vm get-instance-view --resource-group "
+        f"{resource_group} --name {vm_name}"
+    )
+
+
+def _azure_stop(root: Path, name: str, *, runner: Runner, sleep: Callable[[float], None]) -> str:
+    """Deallocate `name`'s VM and wait until the platform reports it deallocated.
+
+    Idempotent the same way the EC2 stop is: an already-deallocated VM
+    answers `PowerState/deallocated` on the poll's first read.
+    """
+    resource_group, vm_name = _azure_power_targets(root, name)
+    _run_power_az(runner, ["vm", "deallocate", "-g", resource_group, "-n", vm_name])
+    _poll_azure_power(
+        runner,
+        resource_group,
+        vm_name,
+        target=transport_azure.POWER_DEALLOCATED_CODE,
+        sleep=sleep,
+    )
+    return (
+        f"Instance {name!r} ({vm_name}) is deallocated.\n"
+        f"Start it again with: make instance-start INSTANCE={name}"
+    )
+
+
+def _azure_start(root: Path, name: str, *, runner: Runner, sleep: Callable[[float], None]) -> str:
+    """Start `name`'s VM, then wait for its power state and VM agent readiness.
+
+    The bounded readiness wait is `transport_azure.wait_agent_ready` -- the
+    one home of the poll -- so the cli's `azure-wait-agent` entry point and
+    this path drive the identical bounded poll, never two copies.
+    """
+    resource_group, vm_name = _azure_power_targets(root, name)
+    _run_power_az(runner, ["vm", "start", "-g", resource_group, "-n", vm_name])
+    adapter = _command_adapter(runner)
+    try:
+        transport_azure.wait_agent_ready(resource_group, vm_name, adapter, pace=sleep)
+    except transport_azure.RelayTransportError as exc:
+        raise PowerError(f"ERROR: {_one_line(str(exc))}") from exc
+    return (
+        f"Instance {name!r} ({vm_name}) is running and its VM agent reports "
+        f"{transport_azure.AGENT_READY_DISPLAY_STATUS}.\n"
+        f"If connecting later fails, reinstall the daemon's client material: "
+        f"make cert-install INSTANCE={name}"
+    )
+
+
 def stop(
     root: Path,
     name: str,
@@ -1383,17 +1674,26 @@ def stop(
     runner: Runner,
     sleep: Callable[[float], None] = time.sleep,
 ) -> str:
-    """Stop `name`'s instance and wait until EC2 reports it `stopped`.
+    """Stop `name`'s instance and wait until its platform reports it down.
+
+    Kind-aware: an azure instance's VM is deallocated and the poll waits
+    for `PowerState/deallocated` (`region` is an EC2-only concept and is
+    unused on that arm); an EC2 instance keeps exactly the flow it always
+    had.
 
     Idempotent: stopping an already-stopped instance succeeds, and the poll
     observes the target state on its first read, so no waiting happens.
 
     Raises:
-        PowerError: `name` is invalid, no id is recorded (naming `make
-            instance-link`), an aws call fails, or the instance never
-            reached `stopped` within the polling limit.
+        PowerError: `name` is invalid, the kind's addressable identity is
+            not recorded (naming `make instance-link` for EC2, the deploy
+            that writes the record for azure), a platform call fails, or
+            the instance never reached its target state within the polling
+            limit.
     """
     _validated(name, PowerError)
+    if _power_kind(root, name) == instances.ENGINE_KIND_AZURE:
+        return _azure_stop(root, name, runner=runner, sleep=sleep)
     instance_id = _require_instance_id(root, name)
     _run_power_aws(
         runner,
@@ -1414,13 +1714,20 @@ def start(
     runner: Runner,
     sleep: Callable[[float], None] = time.sleep,
 ) -> str:
-    """Start `name`'s instance, then wait for its SSM agent to report `Online`.
+    """Start `name`'s instance, then wait until its engine agent reports ready.
+
+    Kind-aware: an azure VM is started and the shared readiness poll waits
+    for `PowerState/running` plus the VM agent's `Ready` (the azure
+    counterpart of the SSM-agent wait; `region` is unused on that arm); an
+    EC2 instance keeps exactly the flow it always had.
 
     Raises:
-        PowerError: `name` is invalid, no id is recorded (naming `make
-            instance-link`), an aws call fails, or either poll timed out.
+        PowerError: `name` is invalid, the kind's addressable identity is
+            not recorded, a platform call fails, or either wait timed out.
     """
     _validated(name, PowerError)
+    if _power_kind(root, name) == instances.ENGINE_KIND_AZURE:
+        return _azure_start(root, name, runner=runner, sleep=sleep)
     instance_id = _require_instance_id(root, name)
     _run_power_aws(
         runner,
@@ -1576,13 +1883,17 @@ def _remove_certificate_directory(name: str, *, failures: list[str], messages: l
 def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str, ...]:
     """Tear down everything `name` scattered outside its Terragrunt directory.
 
-    Deletes every SSM parameter under the instance's prefix, removes the
-    instance's docker context, and deletes its certificate-material
-    directory -- `instances.certs_dir(name)` in full, the recorded
-    `instance-id` file included. Every operation is attempted even after an
-    earlier one failed, and all failures are raised together in ONE
-    `CleanupError` at the end, so a docker failure never hides SSM
-    deletions that still needed to happen.
+    Kind-aware: an EC2 instance's cleanup deletes every SSM parameter under
+    the instance's prefix before the shared steps; an azure instance's has
+    no SSM surface at all (its TLS material lives in its terraform-managed
+    Key Vault and its configuration payload beside it), so the parameter
+    step is skipped entirely and `region` goes unused on that arm. Both
+    kinds then remove the instance's docker context and delete its
+    certificate-material directory -- `instances.certs_dir(name)` in full,
+    which for the azure kind carries the engine-address.json record too.
+    Every operation is attempted even after an earlier one failed, and all
+    failures are raised together in ONE `CleanupError` at the end, so a
+    docker failure never hides deletions that still needed to happen.
 
     A nonzero `docker context inspect` counts as "the context is absent,
     nothing to remove" only when docker's own answer says so (`no such
@@ -1590,58 +1901,64 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
     or unreachable daemon, say -- is recorded as a failed operation, so
     cleanup never reports success while the context survives.
 
-    The remote-state bucket is deliberately out of scope: each instance's
-    bucket is derived in `remote-instances/root.hcl` from its own name, so
-    its lifecycle is a Terragrunt/backend concern, never an instance's.
+    The remote-state bucket -- and the azure kind's storage account beside
+    it -- are deliberately out of scope: each instance's store is derived
+    in `remote-instances/root.hcl` from its own name, so its lifecycle is
+    a Terragrunt/backend concern, never an instance's.
 
     Raises:
         CleanupError: `name` is invalid, or any aws/docker/filesystem
             operation failed (the message names every failed operation).
     """
     _validated(name, CleanupError)
+    try:
+        kind = instances.read_kind(root, name)
+    except instances.EngineManifestError as exc:
+        raise CleanupError(f"ERROR: {exc}") from exc
     failures: list[str] = []
     messages: list[str] = []
 
-    prefix = instances.parameter_prefix(name)
-    listed = _attempt(
-        runner,
-        failures,
-        f"list SSM parameters under {prefix}",
-        [
-            AWS_EXECUTABLE,
-            "ssm",
-            "describe-parameters",
-            "--parameter-filters",
-            f"Key=Name,Option=BeginsWith,Values={prefix}",
-            "--output",
-            "json",
-            "--region",
-            region,
-        ],
-    )
-    if listed is not None:
-        try:
-            parameter_names = _parse_parameter_names(listed.stdout)
-        except CleanupError as exc:
-            failures.append(_one_line(str(exc)))
-        else:
-            for parameter_name in parameter_names:
-                deleted = _attempt(
-                    runner,
-                    failures,
-                    f"delete SSM parameter {parameter_name}",
-                    [
-                        AWS_EXECUTABLE,
-                        "ssm",
-                        "delete-parameter",
-                        "--name",
-                        parameter_name,
-                        "--region",
-                        region,
-                    ],
-                )
-                if deleted is not None:
-                    messages.append(f"deleted parameter {parameter_name}")
+    if kind == instances.ENGINE_KIND_EC2:
+        prefix = instances.parameter_prefix(name)
+        listed = _attempt(
+            runner,
+            failures,
+            f"list SSM parameters under {prefix}",
+            [
+                AWS_EXECUTABLE,
+                "ssm",
+                "describe-parameters",
+                "--parameter-filters",
+                f"Key=Name,Option=BeginsWith,Values={prefix}",
+                "--output",
+                "json",
+                "--region",
+                region,
+            ],
+        )
+        if listed is not None:
+            try:
+                parameter_names = _parse_parameter_names(listed.stdout)
+            except CleanupError as exc:
+                failures.append(_one_line(str(exc)))
+            else:
+                for parameter_name in parameter_names:
+                    deleted = _attempt(
+                        runner,
+                        failures,
+                        f"delete SSM parameter {parameter_name}",
+                        [
+                            AWS_EXECUTABLE,
+                            "ssm",
+                            "delete-parameter",
+                            "--name",
+                            parameter_name,
+                            "--region",
+                            region,
+                        ],
+                    )
+                    if deleted is not None:
+                        messages.append(f"deleted parameter {parameter_name}")
 
     _remove_docker_context(root, name, runner, failures=failures, messages=messages)
     _remove_certificate_directory(name, failures=failures, messages=messages)

@@ -1501,3 +1501,148 @@ def test_instance_cleanup_failure_exits_nonzero_with_the_cli_error_path(
     assert "ERROR" in err
     assert name in err
     assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
+# azure-wait-agent (the cert-install readiness poll's cli surface) and the
+# azure row's STATE column.
+# ---------------------------------------------------------------------------
+
+
+def _seed_azure_instance(
+    root: Path, name: str, *, resource_group: str, vm_name: str, vault_name: str
+) -> None:
+    """The azure scaffold and the relay address record, from generated values."""
+    instances = importlib.import_module("devcontainer_config.instances")
+    directory = root / "remote-instances" / name
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "terragrunt.hcl").write_text(
+        'include "envcommon" {\n'
+        '  path = "${dirname(find_in_parent_folders("root.hcl"))}'
+        '/_envcommon/remote-azure.hcl\"\n'
+        "}\n"
+        "\n"
+        "inputs = {\n"
+        f'  instance_name = "{name}"\n'
+        '  location = "westeurope"\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    instances.write_engine_address(
+        root,
+        name,
+        {
+            "vm_name": vm_name,
+            "vm_resource_id": (
+                f"/subscriptions/x/resourceGroups/{resource_group}"
+                f"/providers/Microsoft.Compute/virtualMachines/{vm_name}"
+            ),
+            "resource_group": resource_group,
+            "relay_namespace": f"gd-{uuid.uuid4().hex[:8]}.servicebus.windows.net",
+            "hybrid_connection": f"gd-{uuid.uuid4().hex[:8]}",
+            "vault_name": vault_name,
+            "vault_uri": f"https://{vault_name}.vault.azure.net",
+            "location": "westeurope",
+        },
+    )
+
+
+def test_azure_wait_agent_polls_through_the_shared_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The subcommand reads the record's VM pair and runs the shared bounded
+    poll on the production runner seam, printing the confirmed outcome."""
+    transport = importlib.import_module("devcontainer_config.transport")
+    hostprobe = importlib.import_module("devcontainer_config.hostprobe")
+    root = _git_root_with_origin(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = f"gd-rg-{uuid.uuid4().hex[:8]}", f"gd-vm-{uuid.uuid4().hex[:8]}"
+    _seed_azure_instance(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name="gd-vault"
+    )
+    seen_commands: list[tuple[str, ...]] = []
+
+    def runner(command: Sequence[str], timeout_seconds: float | None) -> object:
+        del timeout_seconds
+        seen_commands.append(tuple(command))
+        query = command[command.index("--query") + 1]
+        value = "Ready\n" if "vmAgent" in query else "PowerState/running\n"
+        return hostprobe.CommandResult(exit_code=0, stdout=value)
+
+    monkeypatch.setattr(transport, "subprocess_command_runner", runner)
+
+    exit_code = run_cli(monkeypatch, root, ["azure-wait-agent", name])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Ready" in out
+    assert any(
+        "--resource-group" in command
+        and command[command.index("--resource-group") + 1] == resource_group
+        and command[command.index("--name") + 1] == vm_name
+        for command in seen_commands
+    )
+
+
+def test_azure_wait_agent_without_a_record_names_the_deploy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _git_root_with_origin(tmp_path)
+    name = _instance_name("azinst")
+    (root / "remote-instances" / name).mkdir(parents=True)
+
+    exit_code = run_cli(monkeypatch, root, ["azure-wait-agent", name])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "engine-address.json" in err
+    assert f"make instance-deploy INSTANCE={name}" in err
+
+
+def test_instance_status_renders_the_azure_power_in_the_state_column(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    _instance_docker_config: Path,
+) -> None:
+    """The table's header and columns are the ones every kind shares; an
+    azure row renders the VM power state in STATE and the record's VM name
+    in ID, exactly where the EC2 row renders its own."""
+    instance_ops = _import_instance_ops()
+    root = _git_root_with_origin(tmp_path)
+    name = _instance_name("azinst")
+    resource_group, vm_name = f"gd-rg-{uuid.uuid4().hex[:8]}", f"gd-vm-{uuid.uuid4().hex[:8]}"
+    _seed_azure_instance(
+        root, name, resource_group=resource_group, vm_name=vm_name, vault_name="gd-vault"
+    )
+    certs = importlib.import_module("devcontainer_config.certs")
+    runner = _InstanceFakeRunner()
+    runner.queue(_instance_ok(json.dumps({"power": "VM running", "provisioning": "Succeeded"})))
+    for _ in certs.AZURE_PUBLISHABLE.values():
+        runner.queue(_instance_ok("https://gd-vault.vault.azure.net/secrets/x\n"))
+    runner.queue(_instance_err('context "nope": context not found'))
+    monkeypatch.setattr(instance_ops, "subprocess_runner", runner)
+
+    exit_code = run_cli(monkeypatch, root, ["instance-status", name])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    header = out.splitlines()[0]
+    assert header.split() == [
+        "INSTANCE",
+        "STATE",
+        "ID",
+        "PARAMS",
+        "CERTS",
+        "FORWARD",
+        "CONTEXT",
+    ]
+    row = out.splitlines()[1].split()
+    assert row[0] == name
+    assert row[1] == "VM", "the STATE column renders the VM power state"
+    assert row[2] == "running"
+    assert row[3] == vm_name

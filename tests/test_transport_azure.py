@@ -1670,3 +1670,171 @@ def test_install_material_argv_through_the_cli(
     assert exit_code == 0
     assert runner.invoke_command(), "the subcommand must issue the run command"
     assert "installed" in capsys.readouterr().out.lower()
+
+
+# ---------------------------------------------------------------------------
+# The readiness poll: the bounded power-plus-agent wait, the one home of the
+# instance-view reads.
+# ---------------------------------------------------------------------------
+
+
+class _ReadyRunner:
+    """A runner double answering the instance-view reads from scripted queues.
+
+    The power queue and the agent queue are consumed independently, so a
+    test scripts exactly the interleaving the poll should observe; a read
+    with an empty queue answers empty output (the platform reporting no
+    status yet), the same shape the real tsv query gives.
+    """
+
+    def __init__(
+        self,
+        power_states: list[str] | None = None,
+        agent_statuses: list[str] | None = None,
+        *,
+        power_default: str = "",
+    ) -> None:
+        self._power = list(power_states or [])
+        self._agent = list(agent_statuses or [])
+        self._power_default = power_default
+        self.commands: list[tuple[str, ...]] = []
+
+    def __call__(self, command: Sequence[str], timeout_seconds: float | None) -> CommandResult:
+        del timeout_seconds
+        self.commands.append(tuple(command))
+        query = command[command.index("--query") + 1]
+        if "vmAgent" in query:
+            value = self._agent.pop(0) if self._agent else ""
+        elif self._power:
+            value = self._power.pop(0)
+        else:
+            value = self._power_default
+        return CommandResult(exit_code=0, stdout=f"{value}\n")
+
+
+class _SteppingClock:
+    """A fake clock and pacer pair: every pace advances the clock one poll."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.paces: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.paces.append(seconds)
+        self.now += seconds
+
+
+def test_vm_power_and_agent_argv_are_pinned() -> None:
+    transport_azure = _import_transport_azure()
+    assert transport_azure.build_vm_power_argv("gd-rg", "gd-vm") == [
+        "vm",
+        "get-instance-view",
+        "--resource-group",
+        "gd-rg",
+        "--name",
+        "gd-vm",
+        "--query",
+        "instanceView.statuses[?starts_with(code,'PowerState')].code | [0]",
+        "--output",
+        "tsv",
+    ]
+    agent_argv = transport_azure.build_vm_agent_argv("gd-rg", "gd-vm")
+    assert agent_argv[-3] == "instanceView.vmAgent.statuses[0].displayStatus"
+    assert agent_argv[-2:] == ["--output", "tsv"]
+
+
+def test_wait_agent_ready_returns_on_the_first_ready_read() -> None:
+    transport_azure = _import_transport_azure()
+    runner = _ReadyRunner(["PowerState/running"], ["Ready"])
+
+    transport_azure.wait_agent_ready("gd-rg", "gd-vm", runner, deadline_seconds=60.0)
+
+    assert len(runner.commands) == 2, "ready on the first read: one power read, one agent read"
+    assert any("PowerState" in element for element in runner.commands[0])
+    assert any("vmAgent" in element for element in runner.commands[1])
+
+
+def test_wait_agent_ready_polls_until_running_then_agent_ready() -> None:
+    transport_azure = _import_transport_azure()
+    runner = _ReadyRunner(
+        ["", "PowerState/stopped", "PowerState/running", "PowerState/running"],
+        ["Starting", "Ready"],
+    )
+    clock = _SteppingClock()
+
+    transport_azure.wait_agent_ready(
+        "gd-rg", "gd-vm", runner, pace=clock.sleep, clock=clock.clock, deadline_seconds=600.0
+    )
+
+    # The power queue is drained to running before the agent is read at all,
+    # and each not-yet answer paced one poll interval.
+    assert clock.paces, "the poll must pace, never spin"
+    assert all(pace == 5.0 for pace in clock.paces)
+
+
+def test_wait_agent_ready_timeout_names_the_last_observed_state_and_the_variable() -> None:
+    transport_azure = _import_transport_azure()
+    runner = _ReadyRunner(["PowerState/deallocated"], power_default="PowerState/deallocated")
+    clock = _SteppingClock()
+
+    with pytest.raises(transport_azure.RelayTransportError) as excinfo:
+        transport_azure.wait_agent_ready(
+            "gd-rg",
+            "gd-vm",
+            runner,
+            pace=clock.sleep,
+            clock=clock.clock,
+            deadline_seconds=10.0,
+        )
+
+    message = str(excinfo.value)
+    assert "PowerState/deallocated" in message, "the last observed state must surface"
+    assert transport_azure.AZURE_AGENT_READY_TIMEOUT_ENV_VAR in message
+    assert "gd-vm" in message
+
+
+def test_wait_agent_ready_reads_its_deadline_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_azure = _import_transport_azure()
+    monkeypatch.setenv(transport_azure.AZURE_AGENT_READY_TIMEOUT_ENV_VAR, "3")
+    runner = _ReadyRunner(["PowerState/deallocated"], power_default="PowerState/deallocated")
+    clock = _SteppingClock()
+
+    with pytest.raises(transport_azure.RelayTransportError):
+        transport_azure.wait_agent_ready(
+            "gd-rg", "gd-vm", runner, pace=clock.sleep, clock=clock.clock
+        )
+
+    # One pace inside the 3s budget; the default 300s budget would pace
+    # dozens of times before timing out.
+    assert len(clock.paces) == 1, "the deadline came from the environment, not the default"
+
+
+def test_agent_ready_timeout_rejects_a_non_positive_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_azure = _import_transport_azure()
+    monkeypatch.setenv(transport_azure.AZURE_AGENT_READY_TIMEOUT_ENV_VAR, "not-a-number")
+
+    with pytest.raises(transport_azure.RelayTransportError) as excinfo:
+        transport_azure.agent_ready_timeout_seconds()
+
+    assert transport_azure.AZURE_AGENT_READY_TIMEOUT_ENV_VAR in str(excinfo.value)
+
+
+def test_wait_agent_ready_surfaces_a_failed_az_call() -> None:
+    transport_azure = _import_transport_azure()
+
+    def failing(command: Sequence[str], timeout_seconds: float | None) -> CommandResult:
+        del timeout_seconds
+        assert command[0] == "az"
+        return CommandResult(exit_code=1, stderr="ERROR: Please run az login")
+
+    with pytest.raises(transport_azure.RelayConfigError) as excinfo:
+        transport_azure.wait_agent_ready("gd-rg", "gd-vm", failing, deadline_seconds=10.0)
+
+    assert "az login" in str(excinfo.value)

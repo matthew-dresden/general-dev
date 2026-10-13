@@ -1532,14 +1532,27 @@ def test_the_kind_refusals_loop_re_resolution_not_one_carried_kind() -> None:
         )
 
 
-def test_the_fleet_kind_guard_resolves_every_instance_and_requires_ec2() -> None:
-    body = _make_define_body(_makefile_text(), "FLEET_EC2_KIND_GUARD")
+def test_the_state_fleet_guard_resolves_every_instance_and_refuses_mixed() -> None:
+    """The state surfaces are per kind, so the guard resolves each instance
+    fresh (never one carried kind), refuses a fleet that mixes kinds, and
+    answers with the single kind the fleet carries in fleet_kind for the
+    caller to dispatch on."""
+    body = _make_define_body(_makefile_text(), "FLEET_STATE_KIND_GUARD")
     assert "$(DISCOVER_INSTANCE_NAMES)" in body, (
         "the guard enumerates through the engine's own discovery, never a "
         "second shell reimplementation"
     )
     assert "unset RD_INSTANCE_RESOLVED" in body
-    assert 'rd_require_engine_kind ec2 "$(1)"' in body
+    assert 'fleet_kind="$$1"' in body, (
+        "the guard must answer with the fleet's one kind for the caller's dispatch"
+    )
+    assert 'fleet_kind="ec2"' in body, (
+        "an empty fleet reads as the EC2 kind the surfaces have always served"
+    )
+    assert "mixes engine kinds" in body, (
+        "a fleet carrying both remote kinds is refused, naming them, never skipped"
+    )
+    assert "$(1)" in body, "an all-ssh fleet is refused with the family's own remedy"
 
 
 @pytest.mark.parametrize(
@@ -1547,31 +1560,76 @@ def test_the_fleet_kind_guard_resolves_every_instance_and_requires_ec2() -> None
     (
         ("bucket-list", "BUCKET_KIND_REMEDY"),
         ("bucket-delete", "BUCKET_KIND_REMEDY"),
-        ("cert-status", "CERT_KIND_REMEDY"),
     ),
 )
-def test_fleet_wide_ec2_only_target_expands_the_fleet_kind_guard(
+def test_fleet_wide_state_target_expands_the_fleet_state_guard(
     target: str, remedy_variable: str
 ) -> None:
+    """bucket-list and bucket-delete address no single instance, so their kind
+    decision is the fleet state guard with the BUCKET_KIND_REMEDY remedy; the
+    recipe then dispatches on the fleet's kind between the s3 and azure
+    surfaces."""
     recipe = _target_recipe_body(_makefile_text(), target)
-    assert f"$(call FLEET_EC2_KIND_GUARD,$({remedy_variable}))" in recipe, (
+    assert f"$(call FLEET_STATE_KIND_GUARD,$({remedy_variable}))" in recipe, (
         f"{target} addresses no single instance, so its kind refusal is the "
         f"fleet guard with the {remedy_variable} remedy"
     )
+    assert "fleet_kind" in recipe, f"{target} must dispatch on the fleet's kind"
+    assert "devcontainer_config.state_store" in recipe, (
+        f"{target} must reach the azure fleet's storage accounts through the state store"
+    )
+    assert "devcontainer_config.state_bucket" in recipe, (
+        f"{target} must keep the EC2 fleet's bucket surface"
+    )
 
 
-def test_bucket_delete_single_instance_branch_refuses_through_the_predicate() -> None:
-    recipe = _target_recipe_body(_makefile_text(), "bucket-delete")
-    assert 'rd_require_engine_kind ec2 "$(BUCKET_KIND_REMEDY)"' in recipe
+def test_cert_status_refuses_only_ssh_engines_fleet_wide() -> None:
+    """cert-status renders both remote kinds (EC2 and azure carry TLS material
+    locally), so instead of the mixed-refusing fleet guard it loops the fleet
+    refusing only an ssh engine through the one predicate, naming the cert
+    remedy."""
+    recipe = _target_recipe_body(_makefile_text(), "cert-status")
+    assert "$(DISCOVER_INSTANCE_NAMES)" in recipe
+    assert "unset RD_INSTANCE_RESOLVED" in recipe
+    assert 'case "$$(rd_engine_kind)" in ec2|azure)' in recipe
+    assert 'rd_require_engine_kind ec2 "$(CERT_KIND_REMEDY)"' in recipe
+    assert "devcontainer_config.certs status" in recipe
+    assert "FLEET_STATE_KIND_GUARD" not in recipe, (
+        "cert-status deliberately reports a fleet mixing the two remote kinds, "
+        "so the mixed-refusing state guard must not front it"
+    )
 
 
-def test_cert_install_refuses_before_its_readiness_poll() -> None:
-    """The poll reads an EC2 id; an ssh engine must be refused before the
-    poll can mistake a missing id for its own failure."""
+def test_cert_install_dispatches_by_kind_before_its_readiness_poll() -> None:
+    """The poll reads an EC2 id (azure) or waits on the record's VM (azure);
+    an ssh engine must be refused before either poll can mistake its own
+    precondition for a poll failure, and the kind is read once, before any
+    poll runs."""
     recipe = _target_recipe_body(_makefile_text(), "cert-install")
+    kind_at = recipe.index('kind="$$(rd_engine_kind)"')
     refusal_at = recipe.index('rd_require_engine_kind ec2 "$(CERT_KIND_REMEDY)"')
     poll_at = recipe.index("instance-status")
-    assert refusal_at < poll_at
+    wait_agent_at = recipe.index("azure-wait-agent")
+    install_at = recipe.index("$(CERTS_SH) install")
+    assert kind_at < poll_at, "the kind must be read before either poll runs"
+    assert kind_at < wait_agent_at
+    assert refusal_at > wait_agent_at, (
+        "the ssh refusal sits in the dispatch's else branch, after the remote "
+        "kinds' polls, and never charges them"
+    )
+    assert wait_agent_at < install_at, (
+        "the azure readiness poll must precede the install arm, which drives the VM"
+    )
+    assert install_at < recipe.index("installed"), (
+        "the installed marker is touched after the install arm ran, for converge"
+    )
+
+
+def test_cert_install_azure_branch_polls_through_the_shared_cli_surface() -> None:
+    """The azure readiness poll rides the cli's azure-wait-agent, which wraps
+    transport_azure.wait_agent_ready -- the one home of the poll."""
+    recipe = _target_recipe_body(_makefile_text(), "cert-install")
+    assert "devcontainer_config.cli azure-wait-agent" in recipe
 
 
 def test_the_cert_issuing_script_refuses_ssh_engines_once_for_all_four() -> None:
@@ -1611,3 +1669,135 @@ def test_the_ec2_kind_remedy_names_the_engine_surface() -> None:
     assert "engine-remove" in remedy
     assert "connect-start" in remedy
     assert "," not in remedy, "the remedy rides a $(call ...) argument, which splits on commas"
+
+
+# ---------------------------------------------------------------------------
+# The azure instance lifecycle (feat/azure-relay-engine, slice 4): the
+# instance-* targets widen from EC2-only to ec2|azure, the init helper
+# dispatches on the engine kind, and the deploy writes the azure engine's
+# address record from the terragrunt outputs. The EC2 bodies stay pinned
+# where the branches separate; these pins hold the azure side of each split.
+# ---------------------------------------------------------------------------
+
+
+def test_the_init_helper_dispatches_by_engine_kind() -> None:
+    """tg_init serves both Terragrunt-running kinds: azure ensures its state
+    store through state_store (Terragrunt's azurerm backend has no
+    --backend-bootstrap form), and the EC2 branch keeps the exact
+    probe-then-init flow, region guard included."""
+    body = _make_define_body(_makefile_text(), "TERRAGRUNT_INIT_HELPER")
+    assert "instances.read_kind" in body, "the kind comes from the engine's own discriminator"
+    assert "devcontainer_config.state_store ensure" in body
+    assert "devcontainer_config.state_bucket init-form" in body
+    branch_at = body.index('if [ "$$kind" = "azure" ]; then')
+    azure_at = body.index("state_store ensure", branch_at)
+    else_at = body.index("else", azure_at)
+    guard_at = body.index("$(REMOTE_AWS_REGION_GUARD)", else_at)
+    ec2_at = body.index("devcontainer_config.state_bucket init-form", guard_at)
+    assert azure_at < else_at < guard_at < ec2_at, (
+        "the azure branch must carry no region guard; the EC2 branch keeps it "
+        "ahead of its init-form probe"
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    ("instance-plan", "instance-deploy", "instance-stop", "instance-start", "instance-destroy"),
+)
+def test_widened_target_allows_ec2_and_azure_and_refuses_only_ssh(target: str) -> None:
+    """The widened targets resolve, read the kind once, and refuse only the
+    ssh kind through the one predicate; the EC2 remedy stays the refusal's
+    remedy line."""
+    recipe = _target_recipe_body(_makefile_text(), target)
+    assert 'case "$$kind" in ec2|azure)' in recipe, (
+        f"{target} must allow both remote kinds through its kind check"
+    )
+    assert 'rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"' in recipe, (
+        f"{target}'s ssh refusal must still ride the EC2 remedy"
+    )
+
+
+@pytest.mark.parametrize("target", ("instance-stop", "instance-start"))
+def test_power_targets_keep_the_region_on_the_ec2_branch_only(target: str) -> None:
+    """The azure arm needs no region flag and no region guard; the EC2 arm
+    keeps both, byte-identical inside its branch."""
+    recipe = _target_recipe_body(_makefile_text(), target)
+    azure_at = recipe.index('if [ "$$kind" = "azure" ]; then')
+    else_at = recipe.index("else", azure_at)
+    fi_at = recipe.index("fi;", else_at)
+    azure_branch = recipe[azure_at:else_at]
+    ec2_branch = recipe[else_at:fi_at]
+    assert "--region" not in azure_branch, "the azure arm carries no region flag"
+    assert "$(REMOTE_AWS_REGION_GUARD)" not in azure_branch
+    assert "--region" in ec2_branch, "the EC2 arm keeps its --region flag"
+    assert "$(REMOTE_AWS_REGION_GUARD)" in ec2_branch, (
+        "the region guard moved into the EC2 branch, where the region is required"
+    )
+
+
+def test_deploy_writes_the_azure_address_record_from_the_outputs() -> None:
+    """After apply, the azure branch reads `terragrunt output -json` and
+    writes the engine-address record through
+    instances.write_engine_address, failing fast naming any missing required
+    output; the EC2 branch keeps the instance-link flow."""
+    recipe = _target_recipe_body(_makefile_text(), "instance-deploy")
+    assert "instances.write_engine_address" in recipe
+    for required in (
+        "vm_name",
+        "vm_resource_id",
+        "resource_group",
+        "relay_namespace",
+        "hybrid_connection",
+        "vault_name",
+        "vault_uri",
+        "location",
+    ):
+        assert f"'{required}'" in recipe, (
+            f"the record writer must require the {required} output, failing fast naming it"
+        )
+    assert "terragrunt output -json" in recipe
+    apply_at = recipe.index("terragrunt apply -auto-approve tfplan.deploy")
+    record_at = recipe.index("instances.write_engine_address")
+    link_at = recipe.index("devcontainer_config.cli instance-link")
+    assert apply_at < record_at < link_at or apply_at < link_at < record_at, (
+        "both addressing steps run after the apply they derive from"
+    )
+
+
+def test_destroy_azure_branch_runs_without_the_region_or_the_init_helper() -> None:
+    """The azure destroy arm needs no region guard and no tg_init (the azurerm
+    backend bootstraps nothing); it still cds into the instance directory for
+    the terragrunt destroy, and the cli cleanup runs without --region."""
+    recipe = _target_recipe_body(_makefile_text(), "instance-destroy")
+    azure_at = recipe.index('if [ "$$kind" = "azure" ]; then', recipe.index("[DESTROY]"))
+    else_at = recipe.index("else", azure_at)
+    azure_branch = recipe[azure_at:else_at]
+    ec2_branch = recipe[else_at : recipe.index("fi;", else_at)]
+    assert "remote-instances/$$name" in azure_branch, (
+        "the azure arm cds into the instance directory itself, tg_init does not run for it"
+    )
+    assert "tg_init" not in azure_branch
+    assert "$(REMOTE_AWS_REGION_GUARD)" not in azure_branch
+    assert "$(REMOTE_AWS_REGION_GUARD)" in ec2_branch
+    assert "tg_init" in ec2_branch
+    assert "--region" not in azure_branch
+    assert "--region" in ec2_branch
+
+
+def test_destroy_azure_note_names_the_vm_and_its_disks() -> None:
+    recipe = _target_recipe_body(_makefile_text(), "instance-destroy")
+    assert "the azure VM and its disks are deleted" in recipe
+    assert "the EC2 instance and its volumes are deleted" in recipe
+
+
+def test_instance_link_refuses_azure_naming_the_deploy_remedy() -> None:
+    """instance-link stays EC2-only; an azure engine is refused naming the
+    deploy that writes its record as the re-link path."""
+    recipe = _target_recipe_body(_makefile_text(), "instance-link")
+    azure_at = recipe.index("azure)")
+    branch = recipe[azure_at : recipe.index("esac", azure_at)]
+    assert "there is no EC2 id to link" in branch
+    assert "make instance-deploy INSTANCE=" in branch
+    assert 'rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"' in recipe, (
+        "the ssh kind still rides the shared EC2 remedy"
+    )

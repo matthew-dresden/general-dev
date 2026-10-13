@@ -662,11 +662,14 @@ def _material_install_timeout_seconds() -> float:
         ) from exc
 
 
-def _run_az(runner: CommandRunner, argv: Sequence[str], *, deadline: float) -> CommandResult:
+def _run_az(runner: CommandRunner, argv: Sequence[str], *, deadline: float | None) -> CommandResult:
     """One `az` call through the runner seam, with the module's az diagnoses.
 
     The binary is prefixed here, once, so every call site names only the
-    subcommand it means.
+    subcommand it means. `deadline` bounds the call when the caller has a
+    budget (the run-command poll does) and is `None` for the small,
+    loop-bounded state reads the readiness poll issues -- the poll's own
+    deadline governs those, not any single call's.
 
     Raises:
         RelayConfigError: `az` is not on PATH, or the call failed -- the
@@ -823,6 +826,172 @@ def install_material(
                 f"--vm-name {vm_name} --instance-view'."
             )
         pace(_RUN_COMMAND_POLL_SECONDS)
+
+
+# ---------------------------------------------------------------------------
+# The readiness poll: the bounded power-plus-agent wait a freshly started
+# VM must satisfy before anything may drive it. This section is the ONE
+# home of the `az vm get-instance-view` argv and its two queries: the cli's
+# `azure-wait-agent` entry point, and `instance_ops`' azure start path, both
+# come here rather than each composing their own copy of the poll.
+# ---------------------------------------------------------------------------
+
+# The deadline a start's readiness poll may run to, read through
+# `read_positive_seconds` from the environment rather than a literal, the
+# same shape every other bounded wait in this package takes.
+AZURE_AGENT_READY_TIMEOUT_ENV_VAR = "AZURE_AGENT_READY_TIMEOUT"
+_AZURE_AGENT_READY_TIMEOUT_DEFAULT_SECONDS = 300.0
+
+# One state read every _AGENT_READY_POLL_SECONDS inside the deadline --
+# never a fixed wait outside the loop, the same pacing discipline the
+# run-command poll above keeps.
+_AGENT_READY_POLL_SECONDS = 5.0
+
+# The two instance-view answers the poll waits for, exactly the codes and
+# display status the azure VM agent reports.
+POWER_RUNNING_CODE = "PowerState/running"
+POWER_DEALLOCATED_CODE = "PowerState/deallocated"
+AGENT_READY_DISPLAY_STATUS = "Ready"
+
+# The `--query` expressions that turn one `az vm get-instance-view` call
+# into the power code, and into the VM agent's display status. Named once,
+# here, because the builders below are the only places an instance view is
+# read from.
+_VM_POWER_QUERY = "instanceView.statuses[?starts_with(code,'PowerState')].code | [0]"
+_VM_AGENT_QUERY = "instanceView.vmAgent.statuses[0].displayStatus"
+
+
+def build_vm_power_argv(resource_group: str, vm_name: str) -> list[str]:
+    """The instance-view argv answering the VM's `PowerState/*` code alone."""
+    return [
+        "vm",
+        "get-instance-view",
+        "--resource-group",
+        resource_group,
+        "--name",
+        vm_name,
+        "--query",
+        _VM_POWER_QUERY,
+        "--output",
+        "tsv",
+    ]
+
+
+def build_vm_agent_argv(resource_group: str, vm_name: str) -> list[str]:
+    """The instance-view argv answering the VM agent's display status alone."""
+    return [
+        "vm",
+        "get-instance-view",
+        "--resource-group",
+        resource_group,
+        "--name",
+        vm_name,
+        "--query",
+        _VM_AGENT_QUERY,
+        "--output",
+        "tsv",
+    ]
+
+
+def vm_power_state(resource_group: str, vm_name: str, runner: CommandRunner) -> str:
+    """The VM's `PowerState/*` code, or `""` while the platform reports none yet.
+
+    Raises:
+        RelayConfigError: `az` is not on PATH, or the call failed (the
+            authentication cause names `az login`).
+    """
+    result = _run_az(runner, build_vm_power_argv(resource_group, vm_name), deadline=None)
+    return result.stdout.strip()
+
+
+def vm_agent_status(resource_group: str, vm_name: str, runner: CommandRunner) -> str:
+    """The VM agent's display status, or `""` while no agent status exists yet.
+
+    Raises:
+        RelayConfigError: `az` is not on PATH, or the call failed.
+    """
+    result = _run_az(runner, build_vm_agent_argv(resource_group, vm_name), deadline=None)
+    return result.stdout.strip()
+
+
+def agent_ready_timeout_seconds() -> float:
+    """`AZURE_AGENT_READY_TIMEOUT`, read through the shared hostprobe reader.
+
+    Raises:
+        RelayTransportError: the variable is set to something that is not a
+            finite positive number of seconds.
+    """
+    try:
+        return read_positive_seconds(
+            AZURE_AGENT_READY_TIMEOUT_ENV_VAR, _AZURE_AGENT_READY_TIMEOUT_DEFAULT_SECONDS
+        )
+    except HostProbeError as exc:
+        raise RelayTransportError(
+            f"ERROR: {exc}\n"
+            "Set it to a positive number of seconds, or unset it to use the default of "
+            f"{_AZURE_AGENT_READY_TIMEOUT_DEFAULT_SECONDS:g}."
+        ) from exc
+
+
+def wait_agent_ready(
+    resource_group: str,
+    vm_name: str,
+    runner: CommandRunner,
+    *,
+    pace: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+    deadline_seconds: float | None = None,
+) -> None:
+    """Poll until the VM reports `PowerState/running` AND its VM agent `Ready`.
+
+    The bounded readiness poll a freshly started azure VM must satisfy
+    before anything may drive it -- the azure counterpart of the EC2 path's
+    running-then-SSM-Online wait. One small instance-view read every
+    `_AGENT_READY_POLL_SECONDS` inside the `AZURE_AGENT_READY_TIMEOUT`
+    deadline (passed explicitly by tests, read from the environment
+    otherwise); the clock is injected so the tests walk the deadline
+    without waiting on anything.
+
+    Args:
+        resource_group: the VM's resource group, from the engine address
+            record the deploy wrote.
+        vm_name: the VM's name, from the same record.
+        runner: the `CommandRunner` every az call is issued through.
+        pace: the pacer between polls, `time.sleep` in production.
+        clock: the monotonic clock the deadline is measured on.
+        deadline_seconds: the total budget; read from
+            `AZURE_AGENT_READY_TIMEOUT` (default 300) when not given.
+
+    Raises:
+        RelayConfigError: an az call failed outright.
+        RelayTransportError: the deadline ran out before both answers
+            arrived (the message carries the last observed state and names
+            the environment variable that widens the budget), or a
+            configured deadline is not a positive number of seconds.
+    """
+    if deadline_seconds is None:
+        deadline_seconds = agent_ready_timeout_seconds()
+    deadline = clock() + deadline_seconds
+    observed = ""
+    while True:
+        power = vm_power_state(resource_group, vm_name, runner)
+        if power == POWER_RUNNING_CODE:
+            agent = vm_agent_status(resource_group, vm_name, runner)
+            if agent == AGENT_READY_DISPLAY_STATUS:
+                return
+            observed = agent or "no agent status reported"
+        else:
+            observed = power or "no power state reported"
+        if clock() >= deadline:
+            raise RelayTransportError(
+                f"ERROR: {vm_name} did not report {POWER_RUNNING_CODE} with its VM agent "
+                f"{AGENT_READY_DISPLAY_STATUS!r} within {deadline_seconds:g}s\n"
+                f"The last observed state was {observed!r}.\n"
+                f"Raise {AZURE_AGENT_READY_TIMEOUT_ENV_VAR} if this instance is simply "
+                "slow, and check the instance directly: az vm get-instance-view "
+                f"--resource-group {resource_group} --name {vm_name} --output json"
+            )
+        pace(_AGENT_READY_POLL_SECONDS)
 
 
 # ---------------------------------------------------------------------------

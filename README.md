@@ -8,25 +8,29 @@ plain nested repositories.
 
 What that buys you, and why you would use it:
 
-- **Many containers, three kinds of engine.** A container per clone, per
-  branch under review, or per project. Name one at creation (`make build
-  NAME=x`), list them across every engine at once (`make list-containers`),
-  and addressed per engine (`ENGINE=local` or `ENGINE=<instance>`) so
-  parallel terminals never switch the docker context underneath each other.
-- **Work survives the laptop.** Local containers bind-mount this checkout;
-  remote containers live on an engine reached over the network: an EC2
-  engine through an SSM port forward carrying the docker API under mutual
-  TLS, or an SSH engine through a managed ssh local forward. Either way
-  they keep running through sleeps, restarts and offline stretches. On the
-  EC2 path there is no key pair and no host access by design, and on every
-  path `make exec` opens a shell in a container, the only shell this
-  workspace offers.
-- **Every operation is automated.** Provisioning an engine, its
-  certificates and secrets, building, naming, starting, stopping, checking,
-  fleet operations and teardown: the whole lifecycle for engines and
-  containers alike runs through make targets, one command each. `make help`
-  lists them all, and the `gd-*` skills drive those same targets when an
-  agent runs them for you.
+- **Many containers, three kinds of engine.**
+  A container per clone, per branch under review, or per project.
+  - Name one at creation: `make build NAME=x`.
+  - List them across every engine at once: `make list-containers`.
+  - Address each engine directly (`ENGINE=local` or `ENGINE=<instance>`), so
+    parallel terminals never switch the docker context underneath each other.
+- **Work survives the laptop.**
+  Local containers bind-mount this checkout. Remote containers live on an
+  engine reached over the network, and keep running through sleeps,
+  restarts and offline stretches.
+  - **EC2 engine.** Reached through an SSM port forward carrying the docker
+    API under mutual TLS. No key pair and no host access, by design.
+  - **SSH engine.** Reached through a managed ssh local forward.
+  - On every path, `make exec` opens a shell in a container: the only shell
+    this workspace offers.
+- **Every operation is automated.**
+  The whole lifecycle for engines and containers alike runs through make
+  targets, one command each.
+  - Engines: provisioning, certificates, secrets, power, teardown.
+  - Containers: building, naming, starting, stopping, checking, fleet
+    operations, teardown.
+  - `make help` lists them all. The `gd-*` skills drive the same targets
+    when an agent runs them for you.
 
 ## Quick start, local
 

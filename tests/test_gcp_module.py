@@ -359,8 +359,13 @@ def test_the_startup_script_implements_the_boot_applied_contract() -> None:
     text = _read_code(_STARTUP_SCRIPT)
     # The marker wait: bounded, and before any fetch.
     assert "/etc/general-dev-provisioned" in text
-    assert "GD_STARTUP_MARKER_TIMEOUT" in text, (
-        "the marker wait's budget must be env-overridable, never a bare literal"
+    assert "MARKER_TIMEOUT_DEFAULT" in text, (
+        "the marker wait's budget arrives from the terraform variable the "
+        "instance metadata renders in, never a bare literal"
+    )
+    assert "GD_STARTUP_MARKER_TIMEOUT" not in text, (
+        "the script runs at boot on the VM, where a laptop-side env var "
+        "cannot reach; the override is the terraform variable"
     )
     marker_at = text.index("/etc/general-dev-provisioned")
     fetch_at = text.index("versions/latest:access")

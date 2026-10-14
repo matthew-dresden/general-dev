@@ -100,9 +100,10 @@ resource "google_compute_instance" "this" {
       data_disk_name       = local.data_disk_name
     })
     startup-script = templatefile("${path.module}/boot-startup-script.sh", {
-      secrets_prefix = var.name_prefix
-      project_id     = var.project_id
-      daemon_user    = var.docker_daemon_user
+      secrets_prefix         = var.name_prefix
+      project_id             = var.project_id
+      daemon_user            = var.docker_daemon_user
+      marker_timeout_default = var.boot_marker_timeout
     })
   }
 

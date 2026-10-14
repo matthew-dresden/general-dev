@@ -85,6 +85,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -338,7 +339,13 @@ def _fake_ssh_engine_block(tmp_path: Path) -> str:
     )
 
 
-def _fake_resolver_bin(tmp_path: Path, block: str, forwards_marker: Path | None = None) -> str:
+def _fake_resolver_bin(
+    tmp_path: Path,
+    block: str,
+    forwards_marker: Path | None = None,
+    *,
+    gcp_zone: str | None = None,
+) -> str:
     """A PATH directory whose python3 answers resolve-instance with `block`.
 
     Any other invocation is forwarded to the real interpreter, so nothing
@@ -347,7 +354,10 @@ def _fake_resolver_bin(tmp_path: Path, block: str, forwards_marker: Path | None 
     `forwards_marker` is given, `devcontainer_config.forwards` invocations
     are recorded into it (one argv line each) and answered with success
     instead of reaching the module for real -- the stand-in for a forward
-    that would otherwise need a real ssh endpoint.
+    that would otherwise need a real ssh endpoint. When `gcp_zone` is
+    given, `devcontainer_config.cli gcp-zone` answers with it -- the
+    stand-in for the engine address record the iap route reads the zone
+    from.
     """
     real_python = shutil.which("python3")
     assert real_python is not None, "python3 must be installed to run this suite"
@@ -361,10 +371,20 @@ def _fake_resolver_bin(tmp_path: Path, block: str, forwards_marker: Path | None 
             "  exit 0\n"
             "fi\n"
         )
+    gcp_zone_branch = ""
+    if gcp_zone is not None:
+        gcp_zone_branch = (
+            'if [ "$1" = "-m" ] && [ "$2" = "devcontainer_config.cli" ]'
+            ' && [ "$3" = "gcp-zone" ]; then\n'
+            f"  printf '{gcp_zone}\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+        )
     fake = bin_dir / "python3"
     fake.write_text(
         "#!/bin/sh\n"
         + record_forwards
+        + gcp_zone_branch
         + 'if [ "$1" = "-m" ] && [ "$2" = "devcontainer_config.cli" ]'
         ' && [ "$3" = "resolve-instance" ]; then\n'
         "  cat <<'RD_TEST_BLOCK'\n"
@@ -388,22 +408,27 @@ _TRANSPORT_GUARD_VARS = (
 
 
 def _run_connect_start_against_fake_engine(
-    tmp_path: Path, block: str, extra_env: dict[str, str]
+    tmp_path: Path,
+    block: str,
+    extra_env: dict[str, str],
+    *,
+    gcp_zone: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     """`make connect-start` against a stand-in engine: fake resolver, recorded forwards.
 
     The fake python3 answers resolve-instance with `block` and records every
     `devcontainer_config.forwards` invocation into a marker file instead of
     reaching the module, so the run proves the recipe's routing without any
-    ssh endpoint, AWS session or daemon. The environment is stripped of
-    every variable that could select or guard a transport on its own (the
-    transport guard, the AWS values and the recorded EC2 id), so only the
-    block's KIND and what `extra_env` adds can decide the run. Returns the
-    make result and the marker file.
+    ssh endpoint, AWS session or daemon. `gcp_zone`, when given, is what the
+    fake answers `cli gcp-zone` with, the iap route's record stand-in. The
+    environment is stripped of every variable that could select or guard a
+    transport on its own (the transport guard, the AWS values and the
+    recorded EC2 id), so only the block's KIND and what `extra_env` adds can
+    decide the run. Returns the make result and the marker file.
     """
     marker = tmp_path / "forwards-invocations.txt"
     marker.touch()
-    bin_dir = _fake_resolver_bin(tmp_path, block, forwards_marker=marker)
+    bin_dir = _fake_resolver_bin(tmp_path, block, forwards_marker=marker, gcp_zone=gcp_zone)
     env = dict(os.environ)
     for inherited in (
         "MAKEFLAGS",
@@ -1045,3 +1070,155 @@ def test_connect_start_still_needs_an_engine_for_the_ssh_guard(tmp_path: Path) -
     assert "DEVCONTAINER_TRANSPORT=ssh needs the engine named" in result.stderr
     assert "make connect-start INSTANCE=<name>" in result.stderr
     assert not marker.read_text(encoding="utf-8").strip(), "no forward may open behind the refusal"
+
+
+def _fake_gcp_engine_block(tmp_path: Path) -> str:
+    """The address block a gcp engine's resolution prints, in the resolver's gcp form.
+
+    The shape is `_print_address_block`'s gcp branch: the KIND line the gcp
+    kind declares and the same five-key shape the azure kind prints -- no
+    ENGINE_ values and no instance id, the IAP transport reading the engine
+    address record the deploy writes instead.
+    """
+    certs_dir = tmp_path / "certs"
+    certs_dir.mkdir()
+    return (
+        "INSTANCE=fake-gcp-engine\n"
+        "KIND=gcp\n"
+        f"TERRAGRUNT_DIR={tmp_path / 'tg'}\n"
+        f"DOCKER_CONTEXT={_RESOLVER_CONTEXT}\n"
+        f"CERTS_DIR={certs_dir}\n"
+    )
+
+
+def test_connect_start_routes_a_gcp_engine_to_the_iap_form(tmp_path: Path) -> None:
+    """`make connect-start INSTANCE=<gcp-engine>` opens the iap form, no variable.
+
+    The iap form's distinguishing flag is `--zone`, read through the cli's
+    gcp-zone reader -- the one accessor on the record -- and the transport
+    reads the rest of the record itself: no host values, no EC2 id and no
+    AWS session are ever part of the invocation.
+    """
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_gcp_engine_block(tmp_path),
+        {"INSTANCE": "fake-gcp-engine"},
+        gcp_zone="us-east1-b",
+    )
+    assert result.returncode == 0, (
+        f"a gcp engine needs no transport variable; stderr={result.stderr[:400]!r}"
+    )
+    invocations = marker.read_text(encoding="utf-8").strip().splitlines()
+    assert len(invocations) == 1, f"exactly one forwards run expected; got {invocations!r}"
+    argv = invocations[0]
+    assert "-m devcontainer_config.forwards open" in argv
+    assert "--name fake-gcp-engine" in argv
+    assert "--zone us-east1-b" in argv
+    assert f"--context {_RESOLVER_CONTEXT}" in argv
+    for forbidden in ("--host", "--instance-id", "--profile", "--region", "--docker-addr"):
+        assert forbidden not in argv, f"the iap form must never carry {forbidden}"
+
+
+@pytest.mark.parametrize(
+    ("guard", "unset_remedy"),
+    (
+        ("ssm", "set it to iap"),
+        ("ssh", "set it to iap"),
+        ("relay", "set it to iap"),
+    ),
+)
+def test_connect_start_refuses_every_other_guard_against_a_gcp_engine(
+    tmp_path: Path, guard: str, unset_remedy: str
+) -> None:
+    """The mirror guards: every transport value but iap refuses behind gcp."""
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_gcp_engine_block(tmp_path),
+        {"INSTANCE": "fake-gcp-engine", "DEVCONTAINER_TRANSPORT": guard},
+    )
+    assert result.returncode != 0, f"an {guard} guard behind a gcp engine must fail the run"
+    assert "is a gcp engine" in result.stderr
+    assert f"DEVCONTAINER_TRANSPORT={guard}" in result.stderr
+    assert "unset DEVCONTAINER_TRANSPORT" in result.stderr
+    assert unset_remedy in result.stderr
+    assert not marker.read_text(encoding="utf-8").strip(), "no forward may open behind the refusal"
+
+
+@pytest.mark.parametrize(
+    ("block_builder", "instance", "own_transport"),
+    (
+        (_fake_ssh_engine_block, "fake-ssh-engine", "ssh"),
+        (_fake_azure_engine_block, "fake-azure-engine", "relay"),
+    ),
+)
+def test_connect_start_refuses_the_iap_guard_against_non_gcp_engines(
+    tmp_path: Path,
+    block_builder: Callable[[Path], str],
+    instance: str,
+    own_transport: str,
+) -> None:
+    """The iap value belongs to gcp engines alone; both other named kinds
+    refuse it by name, pointing at the transport their own kind routes to."""
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        block_builder(tmp_path),
+        {"INSTANCE": instance, "DEVCONTAINER_TRANSPORT": "iap"},
+    )
+    assert result.returncode != 0, "an iap guard behind a non-gcp engine must fail the run"
+    expected_kind = {"fake-ssh-engine": "ssh engine", "fake-azure-engine": "azure engine"}[instance]
+    assert f"is an {expected_kind}" in result.stderr
+    assert "DEVCONTAINER_TRANSPORT=iap" in result.stderr
+    assert f"set it to {own_transport}" in result.stderr
+    assert not marker.read_text(encoding="utf-8").strip(), "no forward may open behind the refusal"
+
+
+def test_connect_start_refuses_the_iap_guard_against_an_ec2_engine(tmp_path: Path) -> None:
+    result, marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_resolver_block(tmp_path),
+        {"INSTANCE": "fake-inst", "DEVCONTAINER_TRANSPORT": "iap"},
+    )
+    assert result.returncode != 0, "an iap guard behind an EC2 engine must fail the run"
+    assert "is an EC2 engine" in result.stderr
+    assert "DEVCONTAINER_TRANSPORT=iap" in result.stderr
+    assert "Unset DEVCONTAINER_TRANSPORT or set it to ssm" in result.stderr
+    assert not marker.read_text(encoding="utf-8").strip(), "no forward may open behind the refusal"
+
+
+def test_connect_start_refuses_the_iap_guard_without_an_engine_named(tmp_path: Path) -> None:
+    """The iap value, like ssh and relay, needs the engine named."""
+    result, _marker = _run_connect_start_against_fake_engine(
+        tmp_path,
+        _fake_gcp_engine_block(tmp_path),
+        {"DEVCONTAINER_TRANSPORT": "iap"},
+    )
+    assert result.returncode != 0
+    assert "DEVCONTAINER_TRANSPORT=iap needs the engine named" in result.stderr
+    assert "make connect-start INSTANCE=<name>" in result.stderr
+
+
+def test_container_up_opens_the_gcp_iap_forward_for_a_gcp_engine() -> None:
+    """`rdc_up`'s gcp route: the iap form with the zone from the cli accessor.
+
+    Mirroring the azure branch's shape, the gcp branch reads the zone
+    through the same `cli gcp-zone` reader the connect-start dispatch uses
+    -- the record the deploy wrote is the one source of the zone, never a
+    second read of its JSON here -- and passes it as the iap form's
+    distinguishing flag, while the transport reads the rest of the record
+    itself.
+    """
+    up_body = _function_body("rdc_up", text=_container_text())
+    assert 'rd_engine_kind)" = "gcp"' in up_body, (
+        "the up dispatch must route the gcp kind to its own branch"
+    )
+    gcp_at = up_body.index('rd_engine_kind)" = "gcp"')
+    branch = up_body[gcp_at : up_body.index('elif [ "$backend" = "remote" ]; then', gcp_at)]
+    assert "-m devcontainer_config.forwards open" in branch
+    assert '--name "$INSTANCE"' in branch
+    assert "--zone" in branch and '"$gcp_zone"' in branch
+    assert "-m devcontainer_config.cli gcp-zone" in branch, (
+        "the zone must come from the same cli accessor the connect-start dispatch uses"
+    )
+    assert '--context "$REMOTE_DOCKER_CONTEXT"' in branch
+    for forbidden in ("--instance-id", "--host", "--profile", "--region"):
+        assert forbidden not in branch, f"the gcp up route must never carry {forbidden}"

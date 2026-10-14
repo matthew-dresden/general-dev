@@ -27,30 +27,30 @@ ENGINE                            pick where builds and containers live
 INSTANCES                         one remote engine per project under remote-instances/; instance names are project names (e.g. acme)
   make list-instances     host    List every instance with live status: EC2 state, id, params, certs, forward, context; ssh engines answer reachability instead.
   make list-containers    host    Every container this project owns, local engine plus every instance's, with per-engine reachability.
-  make instance-init      host    Writes <project>'s scaffold; never deploys. INSTANCE=<instance-name> [AMI=] [REGION= AMI/AZ lookup; deploys in REMOTE_AWS_REGION]. Azure: CLOUD=azure LOCATION=<location> [VM_SIZE=]
-  make instance-deploy    remote  Converge: provision, record the engine address (EC2 links the id, azure the record), trust chain, push secrets. Refuses replacement without CONFIRM=replace. INSTANCE= | ALL=1
+  make instance-init      host    Scaffolds <project>; never deploys. INSTANCE=<n> [AMI=] [REGION= AMI/AZ lookup; deploys in REMOTE_AWS_REGION]. Azure: CLOUD=azure LOCATION=<loc> GCP: CLOUD=gcp PROJECT=<p> ZONE=<z>
+  make instance-deploy    remote  Converge: provision, write the address record (EC2 links the id, azure and gcp the record), trust chain, push secrets. Refuses replacement unless CONFIRM=replace. INSTANCE= | ALL=1
   make instance-status    host    One instance's live state, or every instance with ALL=1. INSTANCE=<instance-name> | ALL=1
   make instance-plan      remote  Terragrunt plan per instance; bootstraps the state bucket (EC2) or ensures the azure state store on first run. INSTANCE=<instance-name> | ALL=1
-  make instance-stop      remote  Stop the instance's VM (EC2 or azure) and wait until it reports down. INSTANCE=<instance-name> | ALL=1
-  make instance-start     remote  Start it again and wait for its engine agent to report ready. INSTANCE=<instance-name> | ALL=1
-  make instance-destroy   remote  Destroy + cleanup context, certs (and EC2 params). CONFIRM=destroy only for ALL=1. INSTANCE=<instance-name> | ALL=1
+  make instance-stop      remote  Stop the instance's VM (EC2, azure or gcp) and wait until it reports down. INSTANCE=<instance-name> | ALL=1
+  make instance-start     remote  Start it again and wait for its engine agent (or the gcp provisioning marker) to report ready. INSTANCE=<instance-name> | ALL=1
+  make instance-destroy   remote  Destroy + cleanup context, certs (EC2 params, gcp secrets). CONFIRM=destroy only for ALL=1. INSTANCE=<instance-name> | ALL=1
   make instance-link      host    EC2 only: save the instance's EC2 id; deploy does this automatically. Azure has no id: the deploy writes its record. INSTANCE_ID=<id>
   make engine-init        host    Scaffold an ssh engine manifest (engine.json). INSTANCE=<name> HOST=<host> USER=<user> [PORT=22] [DOCKER_ADDR=/var/run/docker.sock; a Windows engine needs tcp://localhost:2375]
   make engine-verify      host    One-shot ssh engine reachability proof: opens the forward, handshakes docker through its context, closes the forward. The ssh engine's connect-start.
   make engine-remove      host    Remove an ssh engine whole: forward, docker context, local state, registration. Needs CONFIRM=remove; refuses while a project container exists on the engine.
   make cert-ca            host    Create this instance's certificate authority. Once per instance; refuses if one exists.
   make cert-client        host    Issue the client certificate 'make connect-start' presents. Run after cert-ca, and again at renewal.
-  make cert-publish       remote  Issue server material and publish it to the engine's store (Parameter Store, or Key Vault for azure). The daemon needs it to open its listener.
+  make cert-publish       remote  Issue server material and publish it to the engine's store (Parameter Store for EC2, Key Vault for azure, Secret Manager for gcp). The daemon needs it to open its listener.
   make cert-install       remote  Have the instance fetch the published material and start its daemon. Run after cert-publish.
   make cert-status        host    Client and CA expiry per instance. Remote engines only (EC2 and azure); ssh engines carry no TLS material.
   make push-secrets       remote  Publish shell.env and aws-profile-map.json to the engine's store (Parameter Store, or Key Vault for azure). Remote builds do this when needed.
-  make connect-start      remote  Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json, relay for azure engines); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>).
+  make connect-start      remote  Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json, relay for azure, iap for gcp); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>).
   make connect-status     host    Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1
   make connect-stop       host    Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1
   make connect-refresh    host    Stop and reopen from the recorded command -- for an expired SSO session or a dropped tunnel. INSTANCE=<name> | ALL=1
   make connect-list       host    Every instance's forward: pid, port, listening or not.
-  make bucket-list        host    Every state store this fleet's naming template matches (EC2 buckets, azure accounts): name, configured or orphaned. Per kind; mixed fleet refused. EC2 needs REMOTE_AWS_REGION.
-  make bucket-delete      host    Purge + delete state stores: INSTANCE=<name> (EC2 bucket or azure account), or ALL=1 CONFIRM=delete for every one. Per kind; mixed fleet refused. EC2 needs REMOTE_AWS_REGION.
+  make bucket-list        host    Every state store this fleet's naming template matches (EC2 azure gcp): name, configured or orphaned. Per kind; mixed fleet refused. EC2 needs REMOTE_AWS_REGION.
+  make bucket-delete      host    Purge + delete state stores: INSTANCE=<name> (EC2 azure or gcp), or ALL=1 CONFIRM=delete for every one. Per kind; mixed fleet refused. EC2 needs REMOTE_AWS_REGION.
   make remote             host    Point them at the remote engine (<REMOTE_DOCKER_CONTEXT>): ensures the engine's forward in the background, then switches docker. INSTANCE=<name> targets that instance.
 
 BUILD                             every target blocks until the container is up and exits non-zero if anything fails

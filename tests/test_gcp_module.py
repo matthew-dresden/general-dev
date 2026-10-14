@@ -370,9 +370,17 @@ def test_cloud_init_has_no_aws_surface_and_no_relay_unit() -> None:
 
 def test_cloud_init_disables_ssh_without_purging_it() -> None:
     text = _read_code(_CLOUD_INIT)
-    assert "systemctl disable --now ssh.service ssh.socket sshd 2>/dev/null || true" in text, (
-        "the socket-activated unit is named alongside the service: Ubuntu 24.04 "
-        "can ship either, and a live ssh.socket alone would answer connections"
+    assert "systemctl stop ssh.service 2>/dev/null || true" in text
+    assert "systemctl stop ssh.socket 2>/dev/null || true" in text, (
+        "the socket-activated unit is named alongside the service: Ubuntu "
+        "24.04 can ship either, and a live ssh.socket alone would answer "
+        "connections"
+    )
+    assert "systemctl disable ssh.service 2>/dev/null || true" in text
+    assert "systemctl disable ssh.socket 2>/dev/null || true" in text
+    assert "disable --now ssh.service ssh.socket sshd" not in text, (
+        "one combined disable fails atomically when any name is absent "
+        "(sshd is not a unit on noble), leaving the existing units running"
     )
     assert not re.search(r"apt-get purge\s+\S*openssh", text), (
         "openssh-server is not purged: the disable is the doctrine, the "

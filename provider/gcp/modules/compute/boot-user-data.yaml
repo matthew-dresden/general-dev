@@ -123,10 +123,19 @@ runcmd:
   # package intact leaves platform diagnostics unhindered while removing
   # the listener. The socket-activated unit is named alongside the service
   # (ssh.service ssh.socket) because Ubuntu 24.04 can ship either; the
-  # `|| true` covers images that ship none of the three names. The D1
-  # `set -e` discipline is not traded away for it, because a failed disable
-  # of an existing unit is exactly the case the assert right below catches.
-  - systemctl disable --now ssh.service ssh.socket sshd 2>/dev/null || true
+  # `|| true` covers images that ship none of the three names. The stops
+  # and disables are SEPARATE calls, per unit, on purpose: one combined
+  # `disable --now ssh.service ssh.socket sshd` fails atomically when any
+  # one of the names does not exist (sshd is absent from noble's ssh
+  # package), leaving the units that DO exist running -- observed live as
+  # a still-active ssh.service and a doctrine FATAL at first boot. The D1
+  # `set -e` discipline is not traded away for the absorption, because a
+  # failed disable of an existing unit is exactly the case the assert
+  # right below catches.
+  - systemctl stop ssh.service 2>/dev/null || true
+  - systemctl stop ssh.socket 2>/dev/null || true
+  - systemctl disable ssh.service 2>/dev/null || true
+  - systemctl disable ssh.socket 2>/dev/null || true
   # D1 post-condition for the ssh disable, the same shape the rootful
   # daemon's assert above applies: `disable --now` exiting 0 (or being
   # swallowed by `|| true` for a never-present unit) is not by itself

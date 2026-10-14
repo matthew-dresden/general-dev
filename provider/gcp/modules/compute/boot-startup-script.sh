@@ -259,6 +259,11 @@ fi
 # boot must see, never a half-apply reported as applied.
 apply_material() {
     install -d -m 0700 -o "$DAEMON_USER" -g "$DAEMON_USER" "$TLS_DIR" || return 1
+    # The state file's parent directory must exist before the state-file
+    # write: it is root-owned 0755 so the path is traversable, while the
+    # state file itself stays 0600 root-only -- the drift authority no
+    # container may rewrite.
+    install -d -m 0755 /etc/general-dev || return 1
     install -m 0600 -o "$DAEMON_USER" -g "$DAEMON_USER" \
         "$TMP_DIR/server-key" "$TLS_DIR/server-key.pem" || return 1
     install -m 0644 -o "$DAEMON_USER" -g "$DAEMON_USER" \

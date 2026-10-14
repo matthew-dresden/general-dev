@@ -501,6 +501,12 @@ def test_the_startup_script_implements_the_boot_applied_contract() -> None:
         "the applied-checksum state file is 0600: the daemon account and "
         "everything below it must not be able to rewrite the drift input"
     )
+    dir_at = text.index("install -d -m 0755 /etc/general-dev")
+    assert dir_at < text.index('printf \'%s\\n\' "$CHECKSUM" > "$APPLIED_STATE"'), (
+        "the state file's parent directory is created before the state-file "
+        "write: without it the write fails with 'cannot create ... Directory "
+        "nonexistent' on the first apply"
+    )
     state_at = text.index("$APPLIED_STATE")
     attribute_read_absent = "guest-attributes/$NAMESPACE/$CHECKSUM_KEY" not in text
     assert attribute_read_absent, (

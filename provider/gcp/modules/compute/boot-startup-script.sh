@@ -43,13 +43,13 @@ set -eu
 # bare expansions because the placeholders are substituted by templatefile
 # at render time, never shell variables -- the heredoc keeps the render
 # seam data instead of code a shell reader would misread as unassigned
-# references. The three values are validated upstream as space-free tokens
-# (an RFC1035 prefix, a project id and a daemon account name), so one read
-# line is exact. The delimiter is quoted: the placeholders are substituted
-# before the shell ever runs this file, so the body is literal data at
-# execution time and no shell expansion belongs in it.
-read -r SECRETS_PREFIX PROJECT_ID DAEMON_USER <<'RENDERED_VALUES'
-${secrets_prefix} ${project_id} ${daemon_user}
+# references. The four values are validated upstream as space-free tokens
+# (an RFC1035 prefix, a project id, a daemon account name and a number),
+# so one read line is exact. The delimiter is quoted: the placeholders are
+# substituted before the shell ever runs this file, so the body is
+# literal data at execution time and no shell expansion belongs in it.
+read -r SECRETS_PREFIX PROJECT_ID DAEMON_USER MARKER_TIMEOUT_DEFAULT <<'RENDERED_VALUES'
+${secrets_prefix} ${project_id} ${daemon_user} ${marker_timeout_default}
 RENDERED_VALUES
 
 # Fixed contract values: the guest-attribute namespace and keys
@@ -71,7 +71,7 @@ SENTINEL="general-dev: tls material applied"
 # instance metadata renders in; the default covers a first boot where
 # cloud-init is still installing packages, and its exhaustion is a
 # failure, never a silent continue.
-MARKER_TIMEOUT="$${MARKER_TIMEOUT_DEFAULT}"
+MARKER_TIMEOUT="$MARKER_TIMEOUT_DEFAULT"
 
 TLS_DIR="/home/$DAEMON_USER/tls"
 

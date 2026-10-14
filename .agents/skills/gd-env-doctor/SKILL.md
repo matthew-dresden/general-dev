@@ -64,7 +64,7 @@ operator (or the named skill) to run, never a run of this skill's own
 | Configuration | The `shell.env` credential-shape scan of `## Findings` | Read-only; the remedy names `make creds-init` and a hand edit of `shell.env`. |
 | Secrets | The four hostcreds checks of `## Findings` | Read-only; remedies name `make init`, `make creds-init`, `make push-creds` and `make verify-container`. |
 | Container state | `make status` and `make check` | The two dispatch reads `## Findings`' container-state group is built on; remedies name `make up`, `make build` and `make clean FORCE=1` for the operator. When the question spans engines rather than the active one, `make list-containers` is the fleet read `gd-container-verify`'s own map carries. |
-| Drift | The host-against-container hooks comparison; the other three rows report `NOT RUN` | Remedies name `make hooks-install` and `make push-secrets` for whoever owns the repair. |
+| Drift | The host-against-container hooks comparison; the other five rows report `NOT RUN` | Remedies name `make hooks-install` and `make push-secrets` for whoever owns the repair. |
 
 ## Findings
 
@@ -133,7 +133,7 @@ on those primitives, rather than a new resolution scheme.
 
 ### Drift
 
-Five conditions Section 4.2.1's thirteen checks never look at, because each
+Six conditions Section 4.2.1's thirteen checks never look at, because each
 compares two things `gd-instance-list`'s own precondition walk never puts side by
 side:
 
@@ -142,6 +142,7 @@ side:
 | Every variable in a committed `.example` file is present in the rendered private file | `NOT RUN`. No function of this name exists in this repository yet, the same gap `gd-instance-list`'s own introduction discloses for disk headroom and `HOST_PROXY`: this row states the check's exact contract: diff the export names in `repo.example_for(relative)` against the export names `verify._ACTIVE_EXPORT_LINE` finds in the rendered file, and names `verify` as the module a future work unit extends to own it, since Section 4.5 already gives `verify` the "written configuration is complete" responsibility this comparison extends. | Once implemented: re-render with `gd-env-setup-local` or `gd-env-setup-remote` (moving the three existing private files aside first, since the setup skills always call `render.write_all` with `overwrite=False`, so it refuses and names every existing path rather than replacing one already on disk), then re-run `gd-env-doctor`. |
 | The Parameter Store copy of `shell.env` agrees with the local one | `NOT RUN`. Nothing today fetches `/devcontainer/<instance>/shell.env` back from Parameter Store for comparison; `push-secrets.sh` (`make push-secrets`) publishes it and the shell-side `fetch_parameter` bootstrap (Section 3.5) reads it once at container creation, but neither compares the two. This row names a future work unit as the owner of that comparison. | Once the comparison itself is implemented: `make push-secrets` (`push-secrets.sh`) already republishes the local `shell.env` and `aws-profile-map.json` to Parameter Store, so a finding here is resolved the same way, then re-run `gd-env-doctor`. |
 | The Key Vault copy of the configuration secrets agrees with the local files (azure engines) | `NOT RUN`. Nothing today reads `shell-env` and `profile-map` back out of an azure engine's vault for comparison; the publish writes them and the container-create bootstrap fetches them once through the VM's managed identity, but neither compares the two against the local files. This row names a future work unit as the owner of that comparison, the azure twin of the Parameter Store row above. | Once the comparison itself is implemented: the publish behind `make push-secrets` (azure: the vault secrets) already rewrites both copies, so a finding here is resolved the same way, then re-run `gd-env-doctor`. |
+| The Secret Manager copy of the configuration secrets agrees with the local files (gcp engines) | `NOT RUN`. Nothing today reads `shell-env` and `profile-map` back out of a gcp engine's Secret Manager for comparison; the publish writes them (beside the TLS material's three and their checksum) and the container-create bootstrap fetches them once through the VM service account's metadata token, but neither compares the two against the local files. This row names a future work unit as the owner of that comparison, the gcp twin of the Key Vault row above. | Once the comparison itself is implemented: the publish behind `make push-secrets` (gcp: the Secret Manager secrets) already rewrites both copies, so a finding here is resolved the same way, then re-run `gd-env-doctor`. |
 | The active docker context's certificate paths match the material on disk | `NOT RUN`. Owned by the `certs` module (spec Section 4.5): `certs.py` (E6-F1-S1-T1, E6-F1-S1-T2) now implements both generation and the inspection/expiry arithmetic (`certs.status_rows`, `certs.classify`), but this comparison, whether the docker context's *configured TLS paths* still point at where the certificate files actually live, is a distinct check that no function in this repository performs yet. This is a different condition from `gd-instance-list`'s own check "client and CA certificates present and unexpired": engine asks whether the certificate files themselves are present and unexpired, this row asks whether the docker context's configured TLS paths still point at where those files actually live under `instances.certs_root()`'s `<instance>/` directory (`$DOCKER_CONFIG/certs/<instance>/`, or `~/.docker/certs/<instance>/` when `DOCKER_CONFIG` is unset). | Once implemented: reissue or realign the certificate material with the `gd-cert-lifecycle` skill (Section 4.2's roster; already authored, E4-F3-S2-T2), then re-run `gd-env-doctor`. |
 | Hooks installed on the host are also installed inside the container | `githooks.hooks_status(root)` (`devcontainer_config.githooks`) run on the host, compared against the identical call run inside the container. For a local backend the two are definitionally equal, since the container mounts the host's working tree directly (the same fact `rdc_check`'s local-branch row above states); for a remote backend, run inside the container over the resolved docker context with `rdc_exec` (`container.sh`, the same helper `rdc_check` already uses): `rdc_exec <container-id> sh -c "cd '<CONTAINER_WORKSPACE>' && env PYTHONPATH=<CONTAINER_WORKSPACE>/.claude/plugins/devcontainer/scripts python3 -m devcontainer_config.cli hooks-check"`, where `<CONTAINER_WORKSPACE>` is `repo.container_workspace(root)`. The explicit `cd` is required, not cosmetic: `cli._run_hooks_check` resolves the repository with `repo.find_root(Path.cwd())`, and `rdc_exec` forwards everything after the container id straight through as the command (`rd_docker exec -u "$CONTAINER_USER" "$id" "$@"`, `container.sh:86-89`), so there is no way to inject a bare `-w` after the container id; without the `cd`, the process starts at `/`, where `find_root` fails with "is not inside a git repository" instead of reporting hook drift, the same `sh -c "cd '${CONTAINER_WORKSPACE}' && ..."` pattern `container.sh`'s own `rdc_exec_probe` call already uses (line 479). This is exactly the gap AC-4.7 (Section 4.6) exists to prevent: "Hooks are installed on the host by `make hooks-install` and inside the container by postCreate, so a commit made from a container terminal is guarded identically." | Re-run `make hooks-install` on whichever side (host or container, named by which `hooks-check` failed) reports drift, then re-run `gd-env-doctor`. |
 
@@ -166,7 +167,7 @@ side:
    container, every name is a valid identifier).
 4. Container state: run `make status` and `make check`.
 5. Drift: run the host-against-container hooks comparison. Report the
-   other four drift rows as `NOT RUN`, each naming the module a future
+   other five drift rows as `NOT RUN`, each naming the module a future
    work unit will extend to own it, per `## Findings`.
 6. Print the findings list, grouped exactly as `## Findings` groups them,
    one line per row: the finding text, `ok`, `NOT RUN`, or the failure
@@ -177,7 +178,7 @@ side:
 ## Report shape
 
 The transcript below depicts this skill's contract today, run against a
-local backend: the four drift rows with no owning module yet report
+local backend: the five drift rows with no owning module yet report
 `NOT RUN`, exactly as `## Findings` states, never a fabricated `ok`; and the
 container-state row below prints `rdc_check`'s own local-branch result
 verbatim, exactly as `## Findings`' container-state group states, never the
@@ -218,6 +219,7 @@ DRIFT
   every .example variable is present in the rendered file             NOT RUN (verify: not implemented yet)
   Parameter Store copy of shell.env agrees with the local one         NOT RUN (comparison: not implemented yet)
   Key Vault copy of the configuration secrets agrees with local      NOT RUN (comparison: not implemented yet)
+  Secret Manager copy of the configuration secrets agrees with local NOT RUN (comparison: not implemented yet)
   active docker context certificate paths match the material on disk NOT RUN (certs: comparison not implemented yet)
   hooks installed on the host are also installed in the container    ok      match
 

@@ -3,10 +3,10 @@
 Terragrunt deployment layer for the remote devcontainer instances.
 
 - This directory has no deployment of its own: it is the shared configuration every deployment includes, plus one directory per instance.
-- The `make help` INSTANCES group drives an instance's whole lifecycle against these directories: `make instance-init` scaffolds the one file a new instance needs, `make instance-plan` and `make instance-deploy` run the underlying Terragrunt against it, `make instance-stop`/`instance-start` power the instance's VM (the EC2 kind or the azure kind), and `make instance-destroy` tears it down and cleans up.
-- Each instance declares its kind at scaffold time (`CLOUD=azure` selects the azure kind), and the kind decides which shared layer and which Terraform module the deployment includes.
-- For the EC2 kind, that module, and the full input surface it accepts, is documented in [`provider/aws/README.md`](../provider/aws/README.md); for the azure kind, [`provider/azure/README.md`](../provider/azure/README.md).
-- The operations-facing checklists for a team that provisions the instance on the requester's behalf, each generated from the same variable surface as its module, are [`docs/ec2-requirements.md`](../docs/ec2-requirements.md) and [`docs/azure-requirements.md`](../docs/azure-requirements.md).
+- The `make help` INSTANCES group drives an instance's whole lifecycle against these directories: `make instance-init` scaffolds the one file a new instance needs, `make instance-plan` and `make instance-deploy` run the underlying Terragrunt against it, `make instance-stop`/`instance-start` power the instance's VM (any of the three provisioned kinds), and `make instance-destroy` tears it down and cleans up.
+- Each instance declares its kind at scaffold time (`CLOUD=azure` selects the azure kind, `CLOUD=gcp` the gcp kind), and the kind decides which shared layer and which Terraform module the deployment includes.
+- For the EC2 kind, that module, and the full input surface it accepts, is documented in [`provider/aws/README.md`](../provider/aws/README.md); for the azure kind, [`provider/azure/README.md`](../provider/azure/README.md); for the gcp kind, [`provider/gcp/README.md`](../provider/gcp/README.md).
+- The operations-facing checklists for a team that provisions the instance on the requester's behalf, each generated from the same variable surface as its module, are [`docs/ec2-requirements.md`](../docs/ec2-requirements.md), [`docs/azure-requirements.md`](../docs/azure-requirements.md) and [`docs/gcp-requirements.md`](../docs/gcp-requirements.md).
 - This document covers neither: it is the reference for the directory layout under `remote-instances/` itself, for the one file a new instance requires, and for the sizing and state-model decisions the defaults encode.
 
 ## What a per-instance directory contains
@@ -111,8 +111,11 @@ An instance name keys every artifact below. Adding a second instance under a dif
 | Recorded EC2 id | `<certs-root>/<name>/instance-id`, the same directory the certificates live in | `E6` (`make instance-link` writes it; `make instance-deploy` records the applied id automatically) |
 | Local forwarded port | Allocated per instance, recorded, never a fixed number | `E6` |
 | Relay address record (azure) | `<certs-root>/<name>/engine-address.json`, beside the certificates: relay namespace, hybrid connection, VM name and resource id, resource group, vault name and URI, location | `E6` (`make instance-deploy` writes it from the Terragrunt outputs; the relay transport and the vault surfaces read it) |
+| Engine address record (gcp) | `<certs-root>/<name>/engine-address.json`, beside the certificates: instance name, zone, project id, region, secrets prefix, state bucket | `E6` (`make instance-deploy` writes it from the Terragrunt outputs; the IAP transport and the Secret Manager surfaces read it) |
+| Secret Manager secrets (gcp) | `<name-prefix>-tls-server-key`, `-tls-server-cert`, `-tls-ca`, `-tls-checksum`, `-shell-env`, `-profile-map` in the deployment's project, read by the VM's service account alone | The platform unit (`provider/gcp/modules/platform`), from `var.name_prefix` |
 | Key Vault (azure) | `<name-prefix>-vault` in the deployment's resource group, carrying the instance's published TLS material and configuration secrets | The platform unit (`provider/azure/modules/security`), from `var.name_prefix` |
 | State store (azure) | One storage account per instance in `rg-<name>-state`, name composed by `devcontainer_config.state_store` from the template and suffix `root-azure.hcl` declares | The state store's ensure, run before any Terragrunt command |
+| State store (gcp) | One `gdstate-<sanitized>-<digest>` bucket per instance in the deployment's project, name composed by `devcontainer_config.state_store_gcp` from the template and suffix `root-gcp.hcl` declares | The state store's ensure, run before any Terragrunt command |
 
 - The docker context row's Pattern is `<repo-slug>-<name>`, `devcontainer_config.repo.repo_slug` (derived from the git remote's URL) prepended to the instance name, never a literal, so a fork of this repository under a different name gets its own, non-colliding prefix without editing any of this table's owners.
 - `general-dev-<name>` above is this repository's own worked example, not a fixed pattern to copy into a fork.
@@ -120,7 +123,7 @@ An instance name keys every artifact below. Adding a second instance under a dif
 
 "Owned by" above names what creates or manages each artifact at runtime (Terragrunt, the security submodule's inline IAM policy, `E6`'s transport and certificate modules).
 
-- The EC2 rows are an EC2 instance's set, the azure rows an azure engine's, and the directory, context, certificate and forwarded-port rows both kinds share.
+- The EC2 rows are an EC2 instance's set, the azure rows an azure engine's, the gcp rows a gcp engine's, and the directory, context, certificate and forwarded-port rows every kind shares.
 - Deriving the value programmatically, turning an instance name into any one of these strings or paths, is a separate concern owned by exactly one Python module: `.claude/plugins/devcontainer/scripts/devcontainer_config/instances.py`.
 - A script or skill that needs one of these values calls into that module (or shells out to its `resolve-instance` entry point) instead of recomputing the pattern above independently; recomputing it a second time is exactly the drift this table exists to prevent.
 
@@ -184,10 +187,12 @@ Every instance owns its own remote-state store, one per instance per kind.
 - For the EC2 kind, `root.hcl` derives the bucket's name (`tg-state-<instance-name>-<region>-<account-id>-<suffix>`) from the instance name (the including directory), the region in `REMOTE_AWS_REGION`, the AWS account and a committed suffix, so an instance computes its own bucket's name without any per-instance file naming it.
 - For the azure kind, `root-azure.hcl` declares the name template and a committed suffix, and `devcontainer_config.state_store` composes the storage account's name from them.
 - The composition sanitizes the instance component to azure's lowercase-alphanumeric law, disambiguates it with a deterministic digest, and places it in one dedicated `rg-<instance>-state` resource group, so it outlives the deployment's own resource group cleanly.
-- The state *key* inside either store is `<name>/terraform.tfstate`, derived from the instance directory's own path, so two instances never share a store or a state key.
+- For the gcp kind, `root-gcp.hcl` declares the name template (`gdstate-<instance>`) and a committed suffix, and `devcontainer_config.state_store_gcp` composes the bucket's name from them: the instance component through the gcp name sanitizer, disambiguated by a digest of the instance, zone, project and suffix, in the project the deployment targets.
+- The state *key* inside any of the three stores is `<name>/terraform.tfstate`, derived from the instance directory's own path, so two instances never share a store or a state key.
 
 - Terragrunt bootstraps the bucket itself, with versioning, encryption and TLS enforcement included, the first time the instance runs a command with backend bootstrapping, which every Terragrunt-running make target does on your behalf (`make instance-plan`'s help line names this).
 - The azure store is ensured the same way (resource group, storage account and its `tfstate` container, each probed before it is created), because the azurerm backend has no bootstrap form of its own.
+- The gcp store is ensured the same way again (the bucket, probed before it is created with uniform bucket-level access), because the gcs backend has no bootstrap form of its own either.
 
 The store stands outside the instance lifecycle:
 
@@ -195,8 +200,8 @@ The store stands outside the instance lifecycle:
 - Its state *key* survives the destroy (the record of what existed), and the store is never touched.
 - Two targets manage the stores instead: `make bucket-list` shows every store the fleet's template matches, marking the ones a configured instance owns, and `make bucket-delete INSTANCE=<name>` purges every version and deletes one.
 - `ALL=1` deletes every store and additionally requires `CONFIRM=delete`. That one is worth pausing over, since it takes every instance's whole state history with it.
-- The surfaces are per kind: an all-EC2 fleet answers to the aws CLI, an all-azure fleet to the az CLI.
-- A fleet mixing the two kinds is refused naming them.
+- The surfaces are per kind: an all-EC2 fleet answers to the aws CLI, an all-azure fleet to the az CLI, an all-gcp fleet to the gcloud CLI.
+- A fleet mixing the kinds is refused naming them.
 
 ## The make targets, and the Terragrunt underneath them
 

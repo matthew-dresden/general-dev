@@ -1,6 +1,6 @@
 ---
 name: gd-instance-list
-description: Validates the Section 4.2.1 contract end to end, thirteen checks (six local, seven remote) per EC2 engine with the azure twins answering the same walk, and reports a per-check verdict table; the validation contract every other devcontainer skill reuses.
+description: Validates the Section 4.2.1 contract end to end, thirteen checks (six local, seven remote) per EC2 engine with the azure and gcp twins answering the same walk, and reports a per-check verdict table; the validation contract every other devcontainer skill reuses.
 ---
 
 # gd-instance-list
@@ -16,15 +16,16 @@ the thirteen checks in dependency order, stopping at the first failure, and
 reporting a verdict; it asks nothing of its own beyond the one question
 Section 4.1.1 already defines.
 
-The thirteen are written against the EC2 kind, and the azure kind answers
-the same walk with its own probes rather than a second table: the instance
-check reads the VM's power state and its VM agent instead of EC2 running
+The thirteen are written against the EC2 kind, and the azure and gcp kinds
+answer the same walk with their own probes rather than a second table: the instance
+check reads the VM's power state and its VM agent on azure, the VM status and
+its startup script's provisioning marker on gcp, instead of EC2 running
 state and the SSM agent, the forward check reads the relay listener and the
-hybrid-connection forward instead of the SSM one, the certificate check
-reads the same local material (both kinds carry TLS material locally; an
+hybrid-connection forward on azure and the IAP tunnel on gcp instead of the SSM one, the certificate check
+reads the same local material (every provisioned kind carries TLS material locally; an
 ssh engine carries none), and the AWS-only checks — the SSO session and
-everything SSM-shaped — have no azure counterpart at all, since nothing on
-the azure path touches AWS. `make list-instances` renders the same
+everything SSM-shaped — have no azure or gcp counterpart at all, since nothing on
+those paths touches AWS. `make list-instances` renders the same
 kind-awareness per row, and this skill's verdict carries whatever the
 resolved kind's probes answered, dashing the probes its kind does not have
 rather than reporting them as failures.

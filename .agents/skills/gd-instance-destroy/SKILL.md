@@ -1,6 +1,6 @@
 ---
 name: gd-instance-destroy
-description: Destroys one remote instance behind GATE-DESTROY, records the two-part precheck (operator confirmation, and the volume verified to hold no unpushed work before the confirmation is even requested), then runs make instance-destroy and verifies every derived artifact is gone (parameters, certificates, context and id on EC2; the relay address record, context and certificates on azure, with the vault dying with the deployment); never destroys on an ambiguous request.
+description: Destroys one remote instance behind GATE-DESTROY, records the two-part precheck (operator confirmation, and the volume verified to hold no unpushed work before the confirmation is even requested), then runs make instance-destroy and verifies every derived artifact is gone (parameters, certificates, context and id on EC2; the engine address record, context and certificates on azure and gcp, the six secrets deleted with the instance); never destroys on an ambiguous request.
 ---
 
 # gd-instance-destroy
@@ -23,11 +23,11 @@ by acting at the smaller scope by default.
 | Step | What this skill runs | Notes |
 |---|---|---|
 | Work-loss precheck | Invoke `gd-instance-list INSTANCE=<name>` and read its `no unpushed work in the volume` row | Must report clean before anything else; a dirty volume stops this skill before confirmation is requested. |
-| Confirm | Present the instance, its recorded address (the EC2 id, or the azure VM name from its relay address record), and the clean precheck; wait for the operator's explicit confirmation | Recorded verbatim. Silence, an empty answer, or ambiguity is a decline. |
-| Destroy | `make instance-destroy INSTANCE=<name>` | Destroys the instance and cleans up everything Terragrunt does not know about, per kind: EC2's Parameter Store parameters, certificates, docker context and linked id; azure's relay address record, certificates and docker context (the deployment's own resource group dies with `terragrunt destroy`, and the vault inside it dies with the group — the state store's dedicated group does not). `ALL=1` (fleet) additionally requires `CONFIRM=destroy` and belongs to `gd-instance-fleet`. |
-| Verify | `make list-instances` afterward | The instance is gone from the report, with no orphaned entry for any artifact its kind carried: EC2's parameter, certificate, context or id; azure's relay address record, certificate, context or VM. |
-| Bucket roster | `make bucket-list` | The instance's state store survives the destroy by design — the EC2 bucket, or the azure storage account — and this shows it, marked orphaned, along with every other store the fleet's template matches. |
-| State store removal | `make bucket-delete INSTANCE=<name>` | Deletes the instance's state store after purging it (the EC2 bucket's versions, or the azure account's containers). `ALL=1 CONFIRM=delete` clears every store; an operator decision, never this skill's. |
+| Confirm | Present the instance, its recorded address (the EC2 id, or the VM name from its engine address record), and the clean precheck; wait for the operator's explicit confirmation | Recorded verbatim. Silence, an empty answer, or ambiguity is a decline. |
+| Destroy | `make instance-destroy INSTANCE=<name>` | Destroys the instance and cleans up everything Terragrunt does not know about, per kind: EC2's Parameter Store parameters, certificates, docker context and linked id; azure's engine address record, certificates and docker context (the deployment's own resource group dies with `terragrunt destroy`, and the vault inside it dies with the group — the state store's dedicated group does not); gcp's six Secret Manager secrets, engine address record, certificates and docker context. `ALL=1` (fleet) additionally requires `CONFIRM=destroy` and belongs to `gd-instance-fleet`. |
+| Verify | `make list-instances` afterward | The instance is gone from the report, with no orphaned entry for any artifact its kind carried: EC2's parameter, certificate, context or id; azure's record, certificate, context or VM; gcp's record, certificate, context, VM or secrets. |
+| Bucket roster | `make bucket-list` | The instance's state store survives the destroy by design — the EC2 bucket, the azure storage account, or the gcp GCS bucket — and this shows it, marked orphaned, along with every other store the fleet's template matches. |
+| State store removal | `make bucket-delete INSTANCE=<name>` | Deletes the instance's state store after purging it (the EC2 bucket's versions, the azure account's containers, or the gcp bucket's objects). `ALL=1 CONFIRM=delete` clears every store; an operator decision, never this skill's. |
 
 ## Checks
 
@@ -35,7 +35,7 @@ by acting at the smaller scope by default.
 |---|---|---|---|
 | volume verified clean before confirmation | destroying the only copy of container-only work | `gd-instance-list`'s `no unpushed work in the volume` row is failing or absent | Stop. State the commits and `git push origin <branch>` run from inside the container as the remedy; destruction is not offered until the row is clean. |
 | confirmation recorded after the precheck | an autonomous run destroying AWS resources without a recorded, informed operator confirmation (AC-4.4, GATE-DESTROY) | destroy requested with no recorded clean precheck and confirmation | Present both, stop, and wait; proceeding without them is a work-unit failure this skill states rather than routes around. |
-| derived artifacts gone after the run | a half-destroyed instance reserving a name, prefix or context the next `gd-instance-create` cannot reuse cleanly | `make list-instances` still lists an artifact for the destroyed instance — EC2's parameter, certificate, context or id, or azure's record, certificate, context or VM | Re-run `make instance-destroy INSTANCE=<name>` once and re-verify; a residue that survives is reported with the exact artifact named, never cleaned by hand. |
+| derived artifacts gone after the run | a half-destroyed instance reserving a name, prefix or context the next `gd-instance-create` cannot reuse cleanly | `make list-instances` still lists an artifact for the destroyed instance — EC2's parameter, certificate, context or id, or azure's record, certificate, context or VM, or gcp's record, certificate, context, VM or secrets | Re-run `make instance-destroy INSTANCE=<name>` once and re-verify; a residue that survives is reported with the exact artifact named, never cleaned by hand. |
 
 ## Failure semantics
 

@@ -303,7 +303,7 @@ Certificate material is persisted under `certs.DEFAULT_CERTS_ROOT` / `instances.
 | Material | Default lifetime | Persisted at |
 |---|---|---|
 | CA (`ca-key.pem`, `ca.pem`) | 3650 days | `<certs-root>/<instance>/ca/` |
-| Server (key, certificate) | 365 days | Nowhere: generated and published in one step, never written under `<certs-root>/<instance>/`; published to Parameter Store for an EC2 instance, and to the instance's Key Vault (as the `tls-server-key`, `tls-server-cert` and `tls-ca` secrets) for an azure engine |
+| Server (key, certificate) | 365 days | Nowhere: generated and published in one step, never written under `<certs-root>/<instance>/`; published to Parameter Store for an EC2 instance, to the instance's Key Vault (as the `tls-server-key`, `tls-server-cert` and `tls-ca` secrets) for an azure engine, and to the project's Secret Manager (the same three secret names under the instance's secrets prefix, with the `tls-checksum` checksum secret beside them) for a gcp engine |
 | Client (`key.pem`, `cert.pem`) | 90 days | `<certs-root>/<instance>/` |
 
 - The client certificate's ninety-day lifetime is the one an operator actually lives with day to day, and it is sustainable only because rotating it is cheap.
@@ -318,6 +318,7 @@ Certificate material is persisted under `certs.DEFAULT_CERTS_ROOT` / `instances.
 - This is also why a client rotation is not a substitute for revoking access: Docker supports neither CRL nor OCSP, so the superseded client certificate stays cryptographically valid until its own `notAfter` passes.
 - Removing the principal's `ssm:StartSession` grant is what actually renders a certificate inert, because a certificate authenticates but IAM authorizes, and a certificate is useless without the tunnel it authenticates inside.
 - An azure engine's revocation is the same sentence in that cloud's vocabulary: removing the principal's Azure Relay Sender role on the namespace, or deleting the hybrid connection itself, is what renders a certificate inert, because the sender half of the couple is what a laptop certificate authenticates inside, and Entra authorizes that half.
+- A gcp engine's revocation is the same sentence twice over: IAM authorizes the tunnel half (removing the operator's Owner grant or `roles/iap.tunnelResourceAccessor` role renders the laptop uncouplable), and the material half is boot-applied, so deleting the instance's six Secret Manager secrets, or publishing new material whose checksum the VM has not yet applied, is what makes the old server material inert at the next boot, when the startup script's drift comparison finds nothing to serve or something different to serve.
 
 ## Transport
 
@@ -382,6 +383,16 @@ which is the same connection the operator targets make with, real values substit
 - The one-shot `verify` never starts the listener: a 404 there is diagnosed with the `make connect-start` remedy, which is the command that starts it.
 - Everything past the relay pipe is the shared machinery: the context is created or updated by the same `transport.ensure_context`, carries the same client certificate, dials `tcp://127.0.0.1:<port>` with the same SAN requirement, and completes the same `docker version` handshake.
 - No AWS value is required here either: an azure engine's addressing record, not an instance id or a region, is what this branch reads.
+
+**The gcp transport, for a gcp engine.** A gcp engine runs the same `forwards open` lifecycle through `devcontainer_config.transport_gcp`, with a Google IAP TCP tunnel in place of the tunnel machinery the other kinds own.
+
+- The tunnel is gcloud's own process: the daemon composes one `gcloud compute start-iap-tunnel <vm> <port> --local-host-port=127.0.0.1:<allocated-port> --zone <zone> --project <project>` argument vector, supervises the child, and parses nothing from its output; readiness is the local port accepting a real connection (bounded by `GCP_TUNNEL_CONNECT_TIMEOUT`), the same decided-by-a-connection-attempt contract every other transport keeps.
+- Authentication is the operator's ambient `gcloud auth login` session: IAP forwards the dial only after IAM accepts that identity, and gcloud owns the token and its refresh, so there is no token cache here; an expired session kills the child, and the diagnosis names `gcloud auth login` and a forward refresh as the remedy.
+- The remote end is the VM's nic0 internal address, which is why the daemon there binds `0.0.0.0` rather than loopback, and why the VPC's single ingress rule (`35.235.240.0/20` to the TLS port) is the network boundary: the tunnel is transport, the mTLS context is trust.
+- IAP ends idle sessions at roughly one hour, and gcloud reestablishes the listener on its own; during such a drop the daemon's whole job is keeping the child process alive, which supervision does.
+- One caveat is carried rather than worked around: return traffic sent after a client half-closes is not guaranteed to arrive on an IAP tunnel, and a protocol that half-closes and waits for a final reply could lose it. Docker's HTTP/1.1 and gRPC traffic closes cleanly after the response it needed, so the daemon states the caveat and changes nothing below the tunnel gcloud owns.
+- Everything past the tunnel pipe is the shared machinery: the same `transport.ensure_context`, the same client certificate, the same SAN requirement, the same `docker version` handshake, and the boot-applied material wait (`GCP_MATERIAL_APPLY_TIMEOUT`, `GCP_PROVISIONED_TIMEOUT`) in place of an install step.
+- No AWS value is required here either: a gcp engine's addressing record, not an instance id or a region, is what this branch reads.
 
 **A killed deploy leaves the state lock behind.**
 
@@ -522,7 +533,7 @@ The roster, grouped into the seven families `gd-help` maps in prose:
 
 | Family | Skills |
 |---|---|
-| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-setup-azure`, `gd-env-doctor` |
+| env- | `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-setup-azure`, `gd-env-setup-gcp`, `gd-env-doctor` |
 | project- | `gd-project-onboard` |
 | instance- | `gd-instance-create`, `gd-instance-fleet`, `gd-instance-list`, `gd-instance-destroy` |
 | container- | `gd-container-local`, `gd-container-remote`, `gd-container-verify`, `gd-container-lifecycle` |

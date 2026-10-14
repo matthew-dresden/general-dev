@@ -1,6 +1,6 @@
 ---
 name: gd-container-remote
-description: Drives the remote backend's container by opening the engine's forward as a background daemon with make connect-start (the SSM, ssh or azure relay forward, picked by the engine's kind), manages that daemon's lifecycle (status, stop, refresh, list) without touching the instance, points docker and VS Code at the instance with make remote, then builds, starts or reopens through the same state diagnosis as the local skill, against the cloned checkout in the instance's volume; destroys nothing.
+description: Drives the remote backend's container by opening the engine's forward as a background daemon with make connect-start (the SSM, ssh, azure relay or gcp IAP forward, picked by kind), manages that daemon's lifecycle (status, stop, refresh, list) without touching the instance, points docker and VS Code at the instance with make remote, then builds, starts or reopens through the same state diagnosis as the local skill, against the cloned checkout in the instance's volume; destroys nothing.
 ---
 
 # gd-container-remote
@@ -11,7 +11,9 @@ same never-destroys-anything boundary, one added stage: the container
 lives on a remote engine reached through a forward under
 mutual TLS — the SSM port forward on an EC2 instance, the azure relay
 forward on an azure engine (whose VM-side listener `make connect-start`
-starts on demand before opening the forward), the managed ssh forward on an
+starts on demand before opening the forward), the IAP tunnel on a gcp
+engine (a supervised `gcloud compute start-iap-tunnel` child), the managed
+ssh forward on an
 engine declared by an `engine.json` manifest — so the forward and the
 context switch come first and every
 later step runs against the instance's docker context. The engine's own
@@ -47,7 +49,7 @@ section).
 
 | Check | Prevents | Failure message | Remedy |
 |---|---|---|---|
-| the forward answers before any docker call | a build failing mid-flight on a dead tunnel instead of at the gate | `docker version` over the forwarded port does not answer within `DOCKER_HANDSHAKE_TIMEOUT` | Re-run `make connect-refresh INSTANCE=<name>` (an expired SSO or Entra session or a dropped forward is the usual cause; azure adds `az login` before the refresh), then re-probe before continuing; a forward that still does not answer is reported, never retried silently. On azure, a 404 naming the hybrid connection means the VM-side listener is not running: `make connect-start INSTANCE=<name>` starts it, so run that instead. |
+| the forward answers before any docker call | a build failing mid-flight on a dead tunnel instead of at the gate | `docker version` over the forwarded port does not answer within `DOCKER_HANDSHAKE_TIMEOUT` | Re-run `make connect-refresh INSTANCE=<name>` (an expired SSO, Entra or gcloud session or a dropped forward is the usual cause; azure adds `az login` before the refresh, gcp adds `gcloud auth login`), then re-probe before continuing; a forward that still does not answer is reported, never retried silently. On azure, a 404 naming the hybrid connection means the VM-side listener is not running: `make connect-start INSTANCE=<name>` starts it, so run that instead. On gcp, an idle IAP drop reestablishes on its own; a call that died exactly at a drop boundary is retried by re-running it. |
 | no unpushed work would be stranded by a rebuild | a rebuild re-cloning from origin and discarding container-only commits | `make check` reports uncommitted or unpushed work in the volume | State `make check`'s own remedy (push from inside the container), wait for the operator, then re-run `make check`; rebuilding is refused until it is clean. |
 
 ## Failure semantics

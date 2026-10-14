@@ -45,6 +45,12 @@ _INVOCATION = re.compile(r"\bssm\s+put-parameter\b")
 # a `--file` on a private temporary file, never an argument.
 _KEYVAULT_INVOCATION = re.compile(r"\bkeyvault\s+secret\s+set\b")
 
+# The gcp twin: push-secrets.sh's gcp branch writes the same two payload
+# files to Secret Manager, and the same argv invariant applies -- the value
+# rides a `--data-file` on a private temporary file, never a `--data`
+# argument.
+_SECRET_MANAGER_INVOCATION = re.compile(r"\bsecrets\s+(create|versions\s+add)\b")
+
 
 def _invocations(text: str, pattern: re.Pattern[str]) -> list[str]:
     """Each matching call in `text`, flattened across continuations.
@@ -165,3 +171,50 @@ def test_the_keyvault_calls_use_the_file_form() -> None:
     for script in _all_scripts():
         for call in _keyvault_set_invocations(script.read_text(encoding="utf-8")):
             assert "--file" in call, f"{script.name} sets a Key Vault secret without --file: {call}"
+
+
+def _secret_manager_invocations(text: str) -> list[str]:
+    """Each `gcloud secrets create` / `gcloud secrets versions add` call in
+    `text`, flattened across continuations."""
+    return _invocations(text, _SECRET_MANAGER_INVOCATION)
+
+
+def test_the_scan_finds_the_secret_manager_calls_it_claims_to_check() -> None:
+    """A repository that stopped writing Secret Manager secrets would make
+    the assertions below vacuous."""
+    found = [
+        (path.name, call)
+        for path in _all_scripts()
+        for call in _secret_manager_invocations(path.read_text(encoding="utf-8"))
+    ]
+    assert found, (
+        "no gcloud secrets create or versions add call found in any shell "
+        "script; the scan checks nothing"
+    )
+
+
+@pytest.mark.parametrize("script", _all_scripts(), ids=lambda path: path.name)
+def test_no_shell_script_passes_a_secret_manager_value_in_argv(script: Path) -> None:
+    """The Secret Manager twin of the put-parameter invariant: the value rides
+    `--data-file`, never a `--data` argument."""
+    offenders = [
+        call
+        for call in _secret_manager_invocations(script.read_text(encoding="utf-8"))
+        if re.search(r"--data(?!-file)", call)
+    ]
+    assert not offenders, (
+        f"{script.name} passes a secret value as an argument, exposing it in the process "
+        f"table and in any error this repository reports: {offenders}\n"
+        "Write it to a private file and pass --data-file=<path> instead, the way "
+        "devcontainer_config.certs.SecretManagerClient.write_secret does."
+    )
+
+
+def test_the_secret_manager_calls_use_the_data_file_form() -> None:
+    """Absence of `--data` is not enough: the calls must use the form that
+    replaced it."""
+    for script in _all_scripts():
+        for call in _secret_manager_invocations(script.read_text(encoding="utf-8")):
+            assert "--data-file=" in call, (
+                f"{script.name} writes a Secret Manager secret without --data-file: {call}"
+            )

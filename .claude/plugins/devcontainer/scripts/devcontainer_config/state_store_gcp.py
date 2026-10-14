@@ -20,7 +20,10 @@ restated, so the two roots cannot drift apart). The composition is
 through `instances.sanitize_gcp_name` -- the ONE sanitizer the gcp kind's
 derived names go through, the same one that named the VM -- and the digest
 is the first eight hex characters of SHA-256 over the four composition
-components joined with `|` (instance, zone, project, suffix). The digest,
+components joined with `|` (the SANITIZED instance, zone, project, suffix
+-- sanitized first, then digested, so the deploy-side terraform mirror,
+which hashes `var.instance_name` in its already-sanitized form, hashes the
+same string and the two sides agree for every legal name). The digest,
 never a random value, so a fresh clone composes the same name and finds the
 bucket an earlier ensure provisioned; the zone and project separate the
 same instance name deployed twice; and the committed suffix is digested
@@ -150,10 +153,13 @@ def declared_suffix(root_hcl_text: str) -> str:
 def state_digest(instance_name: str, zone: str, project_id: str, suffix: str) -> str:
     """The deterministic 8-hex disambiguator over the four composition components.
 
-    The raw instance name (not the sanitized one) is digested, so two names
-    that sanitize to the same component still separate; the zone and the
-    project separate the same name deployed twice; and the committed suffix
-    is digested too, so a rotated suffix changes every name at once.
+    The instance name passed here is the SANITIZED one -- this module
+    sanitizes before it digests, so the digest input is the same string
+    terraform's deploy-side mirror hashes (`var.instance_name`, which the
+    root composition only ever receives in sanitized form) and the two
+    sides agree for every legal instance name. The zone and the project
+    separate the same name deployed twice; and the committed suffix is
+    digested too, so a rotated suffix changes every name at once.
     """
     material = _DIGEST_INPUT_SEPARATOR.join((instance_name, zone, project_id, suffix))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:DIGEST_LENGTH]
@@ -188,7 +194,10 @@ def compose_from_root_hcl(
     except instances.InvalidGCPNameError as exc:
         raise StateStoreGCPError(f"ERROR: {exc}") from exc
     values = {
-        "instance_name": f"{sanitized}-{state_digest(instance_name, zone, project_id, suffix)}",
+        # Sanitize FIRST, then digest: the digest input is the sanitized
+        # name, the same string terraform's deploy-side mirror hashes, so
+        # the two sides agree for every legal instance name.
+        "instance_name": f"{sanitized}-{state_digest(sanitized, zone, project_id, suffix)}",
         "state_store_suffix": suffix,
     }
 

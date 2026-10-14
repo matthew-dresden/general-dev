@@ -675,9 +675,7 @@ def test_main_connect_retries_a_backend_refusal_then_connects(
         children.append(child)
         return child
 
-    monkeypatch.setattr(
-        transport_gcp, "default_process_launcher", refusing_then_healthy_launcher
-    )
+    monkeypatch.setattr(transport_gcp, "default_process_launcher", refusing_then_healthy_launcher)
     paced: list[float] = []
     monkeypatch.setattr(transport_gcp, "_pace", paced.append)
     monkeypatch.setenv("GCP_TUNNEL_CONNECT_TIMEOUT", str(_HANG_GUARD_SECONDS))
@@ -714,6 +712,47 @@ def test_main_connect_surfaces_a_persistent_backend_refusal_after_the_retries(
     assert exit_code == 1
     assert len(launcher.children) == 3, "three bounded attempts, no more"
     assert "Connected:" not in captured.out
+
+
+def test_main_connect_unusable_deadline_still_stops_the_spawned_child(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The connect backstop covers the whole spawn-retry-supervise flow.
+
+    A `GCPTransportError` raised from a malformed `GCP_TUNNEL_CONNECT_TIMEOUT`
+    lands after the child was spawned and before supervision began -- the
+    window that used to leave the child holding the port. The connect flow's
+    own SIGTERM trap must be live there (not only inside the supervise
+    loop), the finally must stop the still-live child, verify the port
+    actually closed, and restore the previous handler on the way out.
+    """
+    transport_gcp = _import_transport_gcp()
+    _issue_client_material(_NAME)
+    _write_engine_address(_NAME)
+    port = _free_port()
+    runner = _docker_runner(_CONTEXT, recorded_port=port)
+    monkeypatch.setattr(transport_gcp.transport, "subprocess_command_runner", runner)
+    launcher = _FakeLauncher(bind=True)
+    monkeypatch.setattr(transport_gcp, "default_process_launcher", launcher)
+    monkeypatch.setenv("GCP_TUNNEL_CONNECT_TIMEOUT", "not-a-number")
+
+    exit_code = transport_gcp.main(_connect_argv(_CONTEXT))
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "GCP_TUNNEL_CONNECT_TIMEOUT" in captured.err
+    assert launcher.children, "the failure landed after the spawn"
+    assert launcher.children[0].terminated, (
+        "the connect flow's finally backstop must stop the still-live child"
+    )
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=0.5)
+        raise AssertionError(f"the port {port} is still listening after the failed connect")
+    except (ConnectionRefusedError, OSError):
+        pass
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL, (
+        "the connect flow must restore the previous SIGTERM handler on the way out"
+    )
 
 
 def test_supervise_child_death_raises_the_tail_with_its_remedy() -> None:
@@ -1144,6 +1183,47 @@ def test_wait_applied_checksum_times_out_naming_the_budget_and_the_vm_error() ->
     message = str(excinfo.value)
     assert transport_gcp.MATERIAL_APPLY_TIMEOUT_ENV_VAR in message
     assert "fetch failed: 403" in message, "the VM's own diagnostic decorates the timeout"
+
+
+def test_wait_timeout_strips_control_bytes_from_the_vm_error_attribute() -> None:
+    """The `general-dev/error` attribute is VM-writable input, never trusted
+    output: C0/C1 control bytes (an ANSI escape's ESC included) are
+    stripped at the one read site, and the interpolation quotes what
+    remains, so a poisoned attribute decorates a diagnosis without ever
+    driving a terminal.
+    """
+    transport_gcp = _import_transport_gcp()
+    _write_engine_address(_NAME)
+    record = instances.engine_address(_repo_root(), _NAME)
+    poisoned = "\x1b[31;1mpoisoned\x1b[0m fetch failed: 403\x07\x9f"
+    runner = _GcloudFake(
+        {
+            _checksum_secret_command(): _gcp_ok(_CHECKSUM),
+            _attribute_command("tls-checksum"): _gcp_ok("c" * 64),
+            _attribute_command("error"): _gcp_ok(poisoned),
+        }
+    )
+    ticks = iter(range(0, 100, 10))
+
+    with pytest.raises(transport_gcp.GCPTransportError) as excinfo:
+        transport_gcp.wait_applied_checksum(
+            record,
+            runner,
+            instance=_NAME,
+            pace=lambda _seconds: None,
+            clock=lambda: next(ticks),
+            deadline_seconds=15.0,
+        )
+
+    message = str(excinfo.value)
+    for control in ("\x1b", "\x07", "\x9f"):
+        assert control not in message, f"a control byte reached the error message: {control!r}"
+    assert "poisoned" in message and "fetch failed: 403" in message, (
+        "the printable text survives the strip"
+    )
+    # The rendering is quoted, so what remains is delimited text, not an
+    # interpolated fragment.
+    assert repr("[31;1mpoisoned[0m fetch failed: 403") in message
 
 
 def test_wait_applied_checksum_stops_immediately_on_an_expired_session() -> None:

@@ -15,16 +15,28 @@
 #   OAuth token from the metadata server. The token is passed to the API
 #   curl through stdin (`-H @-`), never as an argv element: an argv token
 #   would be readable from the process table for the length of the call.
-# - It compares the fetched checksum against the general-dev/tls-checksum
-#   guest attribute. On drift or first apply: write the material with its
-#   modes, restart the rootless daemon's user unit, update the attribute,
-#   and only then echo the sentinel. On no drift: skip the restart.
+# - It compares the fetched checksum against the root-owned state file
+#   /etc/general-dev/applied-checksum -- 0600, written only by this script
+#   after a successful apply and restart, so nothing short of host root can
+#   forge "already applied" and defeat rotation. The general-dev/tls-checksum
+#   guest attribute is written beside it as a pure REPORTING channel (the
+#   laptop-side waits read it) but is never trusted for the drift decision:
+#   the attribute is VM-writable through the metadata API by any process on
+#   the VM, and a value a process could plant there would pin the daemon on
+#   stale material forever. On drift or first apply: apply the material
+#   through apply_material (whose every failure is recorded, never a bare
+#   set -e exit that would leave mixed material unrecorded), write the
+#   state file and the attribute, and only then echo the sentinel. On no
+#   drift: skip the restart.
 # - On a pre-publish boot (no checksum secret yet) it exits 0 quietly with
 #   an explanatory line: provisioning already handled its own marker, and
 #   a first boot that precedes the first publish is a success.
 # - On any failure it records general-dev/error with the failing step and
-#   exits 1; the laptop-side waits (wait_applied_checksum,
-#   wait_provisioned) read exactly these attributes.
+#   exits 1; on every SUCCESS path it clears general-dev/error, so a stale
+#   diagnostic from an earlier boot can never decorate a wait that is
+#   actually about to succeed. The laptop-side waits read exactly these
+#   attributes (wait_applied_checksum, wait_provisioned); a poisoned error
+#   attribute can at most delay them, never make them skip a step.
 #
 # Rendered by templatefile() with exactly three values -- secrets_prefix,
 # project_id and daemon_user -- so every other literal below is fixed by
@@ -55,8 +67,9 @@ RENDERED_VALUES
 # Fixed contract values: the guest-attribute namespace and keys
 # (transport_gcp's constants), the metadata server (the fixed name every
 # gcp VM resolves to the link-local metadata address), the Secret Manager
-# API root, the four leaf names the TLS publication uses, and the
-# readiness marker cloud-init writes last.
+# API root, the four leaf names the TLS publication uses, the readiness
+# marker cloud-init writes last, and the root-owned state file the drift
+# decision trusts (this script is its only writer; see the header).
 NAMESPACE="general-dev"
 CHECKSUM_KEY="tls-checksum"
 PROVISIONED_KEY="provisioned"
@@ -65,6 +78,7 @@ PROVISIONED_VALUE="TRUE"
 METADATA="http://metadata.google.internal/computeMetadata/v1"
 SECRET_API="https://secretmanager.googleapis.com/v1"
 MARKER="/etc/general-dev-provisioned"
+APPLIED_STATE="/etc/general-dev/applied-checksum"
 SENTINEL="general-dev: tls material applied"
 
 # The marker wait's budget, in seconds, from the terraform variable the
@@ -103,6 +117,16 @@ put_attribute() {
     curl -sf -X PUT -H 'Metadata-Flavor: Google' \
         --data "$2" \
         "$METADATA/instance/guest-attributes/$NAMESPACE/$1" >/dev/null
+}
+
+clear_error() {
+    # Every success path clears the error attribute: a diagnostic left by
+    # an earlier boot's failure must never decorate a wait that is about
+    # to succeed. Best-effort like record_error -- a failed clear is
+    # announced, never fatal, because the material is already applied.
+    if ! put_attribute "$ERROR_KEY" ""; then
+        console "general-dev: could not clear the error attribute (the material itself is fine)"
+    fi
 }
 
 fetch_secret() {
@@ -172,6 +196,7 @@ else
     if [ "$fetch_rc" = "3" ]; then
         console "general-dev: no TLS material published yet (no checksum secret under $SECRETS_PREFIX-); nothing to apply on this boot"
         put_attribute "$PROVISIONED_KEY" "$PROVISIONED_VALUE"
+        clear_error
         exit 0
     fi
     fail "fetch the checksum secret" \
@@ -203,46 +228,65 @@ fi
 
 # --- Drift decision ------------------------------------------------------
 
+# The comparison is against the root-owned state file, never the
+# tls-checksum guest attribute: the attribute is writable by any process
+# on the VM through the metadata API, and a planted value would read as
+# "already applied" and silently defeat rotation. This file is written
+# only by the apply path below, after the material and the restart have
+# both succeeded, so its value is this script's own witness.
 applied=""
-if curl -sf -H 'Metadata-Flavor: Google' \
-        "$METADATA/instance/guest-attributes/$NAMESPACE/$CHECKSUM_KEY" > "$TMP_DIR/applied"; then
-    applied="$(tr -d '[:space:]' < "$TMP_DIR/applied")"
+if [ -f "$APPLIED_STATE" ]; then
+    applied="$(tr -d '[:space:]' < "$APPLIED_STATE")"
 fi
 if [ "$applied" = "$CHECKSUM" ]; then
     # No drift: the applied material is exactly the published one. The
     # daemon keeps running untouched; only the readiness attribute is
-    # refreshed.
+    # refreshed, and any error a previous boot recorded is cleared.
     put_attribute "$PROVISIONED_KEY" "$PROVISIONED_VALUE"
+    clear_error
     exit 0
 fi
 
 # --- Apply on drift or first boot -----------------------------------------
 
-# Stage under the daemon account's ownership with the modes the daemon
-# requires: the private key 0600, the certificates world-readable inside
-# the 0700 directory only.
-install -d -m 0700 -o "$DAEMON_USER" -g "$DAEMON_USER" "$TLS_DIR"
-install -m 0600 -o "$DAEMON_USER" -g "$DAEMON_USER" \
-    "$TMP_DIR/server-key" "$TLS_DIR/server-key.pem"
-install -m 0644 -o "$DAEMON_USER" -g "$DAEMON_USER" \
-    "$TMP_DIR/server-cert" "$TLS_DIR/server-cert.pem"
-install -m 0644 -o "$DAEMON_USER" -g "$DAEMON_USER" \
-    "$TMP_DIR/ca" "$TLS_DIR/ca.pem"
+# apply_material: the installs and the daemon restart, in the one order
+# the state file's meaning depends on -- stage every file first, then
+# restart, then write the state file LAST, so a value in it always
+# describes material that is live. Every failure is routed through fail
+# (which records the error attribute): a bare set -e exit here would leave
+# mixed material on disk with nothing recorded, and a state file that
+# still names the old checksum is exactly the "drifted" state the next
+# boot must see, never a half-apply reported as applied.
+apply_material() {
+    install -d -m 0700 -o "$DAEMON_USER" -g "$DAEMON_USER" "$TLS_DIR" || return 1
+    install -m 0600 -o "$DAEMON_USER" -g "$DAEMON_USER" \
+        "$TMP_DIR/server-key" "$TLS_DIR/server-key.pem" || return 1
+    install -m 0644 -o "$DAEMON_USER" -g "$DAEMON_USER" \
+        "$TMP_DIR/server-cert" "$TLS_DIR/server-cert.pem" || return 1
+    install -m 0644 -o "$DAEMON_USER" -g "$DAEMON_USER" \
+        "$TMP_DIR/ca" "$TLS_DIR/ca.pem" || return 1
+    # Restart the rootless daemon under its own user manager: runuser execs
+    # directly (the account's nologin shell is never consulted) and the
+    # environment it needs is passed on the command line, the same pattern
+    # provisioning itself uses. The restart is what makes the new material
+    # live; skipping it on the no-drift path above is the point of the
+    # drift guard.
+    DAEMON_UID="$(id -u "$DAEMON_USER")"
+    runuser -u "$DAEMON_USER" -- \
+            env HOME="/home/$DAEMON_USER" \
+            XDG_RUNTIME_DIR="/run/user/$DAEMON_UID" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$DAEMON_UID/bus" \
+            systemctl --user restart docker.service || return 1
+    # The state file records what is NOW live, only after the apply and
+    # the restart both succeeded: 0600, root-owned, the drift decision's
+    # single trusted input.
+    printf '%s\n' "$CHECKSUM" > "$APPLIED_STATE" || return 1
+    chmod 0600 "$APPLIED_STATE" || return 1
+}
 
-# Restart the rootless daemon under its own user manager: runuser execs
-# directly (the account's nologin shell is never consulted) and the
-# environment it needs is passed on the command line, the same pattern
-# provisioning itself uses. The restart is what makes the new material
-# live; skipping it on the no-drift path above is the point of the drift
-# guard.
-DAEMON_UID="$(id -u "$DAEMON_USER")"
-if ! runuser -u "$DAEMON_USER" -- \
-        env HOME="/home/$DAEMON_USER" \
-        XDG_RUNTIME_DIR="/run/user/$DAEMON_UID" \
-        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$DAEMON_UID/bus" \
-        systemctl --user restart docker.service; then
-    fail "restart the rootless daemon" \
-        "systemctl --user restart docker.service failed under $DAEMON_USER"
+if ! apply_material; then
+    fail "apply the TLS material" \
+        "staging the material or restarting the rootless daemon failed; the state file still names what was live before this boot"
 fi
 
 # Record what was applied only after the apply and the restart succeeded,
@@ -251,4 +295,5 @@ fi
 # ahead of the state they describe.
 put_attribute "$CHECKSUM_KEY" "$CHECKSUM"
 put_attribute "$PROVISIONED_KEY" "$PROVISIONED_VALUE"
+clear_error
 console "$SENTINEL ($CHECKSUM)"

@@ -176,6 +176,41 @@ def test_the_iap_firewall_is_the_single_ingress_rule() -> None:
     assert "target_tags = [var.instance_tag]" in body, (
         "the rule must target the instance's network tag, not the whole network"
     )
+    # Flow logging is off by omission: no log_config block is declared
+    # anywhere on the firewall, because a log_config block ENABLES logging
+    # -- a block with EXCLUDE_ALL_METADATA is still flow logging on, only
+    # with metadata excluded.
+    assert "log_config" not in body, (
+        "the one rule declares no log_config: the block's presence ENABLES "
+        "flow logging, and logging-off is expressed by the block's absence"
+    )
+
+
+def test_the_network_module_declares_no_tags_input() -> None:
+    """gcp network resources expose no labels, so the module refuses an input
+    it could only silently drop -- and the root wires none into it."""
+    variables_text = _read_code(_GCP / "modules" / "network" / "variables.tf")
+    assert 'variable "tags"' not in variables_text, (
+        "the network module declares no tags variable: google_compute_network, "
+        "google_compute_subnetwork, google_compute_router, "
+        "google_compute_router_nat and google_compute_firewall expose no "
+        "labels attribute, so the input would be accepted and silently dropped"
+    )
+    assert "this module's resources carry no labels" in _read(
+        _GCP / "modules" / "network" / "variables.tf"
+    ), "the module's variables file states why no labels input exists"
+    composition_text = _read_code(_GCP / "remote-gcp-vm.tf")
+    network_block = re.search(r'module "network" \{(.*?)\n\}', composition_text, re.DOTALL)
+    assert network_block is not None
+    assert "tags" not in network_block.group(1), "the root wires no tags into the network module"
+    # The README's labels row is scoped to the resources that do expose
+    # labels, naming the network module's exemption.
+    readme = _read(_GCP / "README.md")
+    tags_row = next(line for line in readme.splitlines() if line.startswith("| `tags` |"))
+    assert "network" in tags_row and "expose none" in tags_row, (
+        "the README's tags row must scope the labels to instance/disk/secrets "
+        "and state the network module's exemption"
+    )
 
 
 def test_the_custom_mode_network_carries_no_implied_allow() -> None:
@@ -236,6 +271,19 @@ def test_the_instance_tags_carry_the_firewall_target() -> None:
         "the instance's network tag must be exactly the local the root "
         "composition hands the firewall, so the one rule and the one tagged "
         "interface cannot drift apart"
+    )
+
+
+def test_the_data_disk_carries_the_labels_the_variables_document() -> None:
+    """var.tags' documented contract covers the instance AND its data disk."""
+    text = _read_code(_COMPUTE_MAIN)
+    match = re.search(r"resource \"google_compute_disk\" \"data\" \{(.*?)\n\}", text, re.DOTALL)
+    assert match is not None, "no google_compute_disk data resource found"
+    assert "labels = var.tags" in match.group(1), (
+        "the data disk must carry the same labels the instance carries: "
+        "the tags variable's own description names the disk, so a disk "
+        "without them would silently opt out of the labeling the rest of "
+        "the composition answers to"
     )
 
 
@@ -322,11 +370,58 @@ def test_cloud_init_has_no_aws_surface_and_no_relay_unit() -> None:
 
 def test_cloud_init_disables_ssh_without_purging_it() -> None:
     text = _read_code(_CLOUD_INIT)
-    assert "systemctl disable --now ssh sshd 2>/dev/null || true" in text
+    assert "systemctl disable --now ssh.service ssh.socket sshd 2>/dev/null || true" in text, (
+        "the socket-activated unit is named alongside the service: Ubuntu 24.04 "
+        "can ship either, and a live ssh.socket alone would answer connections"
+    )
     assert not re.search(r"apt-get purge\s+\S*openssh", text), (
         "openssh-server is not purged: the disable is the doctrine, the "
         "package stays for platform compatibility"
     )
+    # The disable's post-condition is asserted, ssh.socket included: the
+    # `|| true` covers images that ship none of the unit names, so the
+    # assert is what turns a failed disable of an existing unit into a
+    # FATAL instead of a silent listener.
+    assert re.search(
+        r"is-active --quiet ssh\.socket.*is-enabled --quiet ssh\.socket", text, re.DOTALL
+    ), "the ssh post-condition assert must cover ssh.socket, not the service alone"
+    assert "FATAL: ssh.service/ssh.socket still active or enabled" in text
+
+
+def test_cloud_init_pins_the_rootlesskit_detach_netns_drop_in() -> None:
+    """The 0.0.0.0 listener's reachability rests on rootlesskit detaching the
+    container netns while dockerd keeps the host netns; that behavior is
+    pinned by a systemd user drop-in, not left to the installed
+    rootlesskit's default, which has flipped across releases.
+
+    The drop-in mirrors the delegate.conf pattern: root-created under the
+    daemon user's own systemd user unit directory, owned by the daemon
+    user, declared before the unit is enabled.
+    """
+    text = _read(_CLOUD_INIT)
+    assert "/home/${daemon_user}/.config/systemd/user/docker.service.d/rootlesskit.conf" in text, (
+        "the drop-in lives beside the generated unit, in the daemon user's own config"
+    )
+    assert "DOCKERD_ROOTLESS_ROOTLESSKIT_DETACH_NETNS=true" in text, (
+        "the environment the listener's nic0 reachability depends on is "
+        "declared, never inherited from the installed rootlesskit's default"
+    )
+    assert "detaches the container netns" in text, (
+        "the doctrine comment must state WHY the value is pinned: the "
+        "daemon's 0.0.0.0 listener is reachable on nic0 only because "
+        "rootlesskit detaches the container netns while dockerd keeps the "
+        "host netns"
+    )
+    # Ordering: the drop-in is written before the unit is enabled, and it
+    # is chowned to the daemon user (root-created, daemon-owned, the
+    # delegate.conf pattern).
+    drop_in_at = text.index("rootlesskit.conf")
+    enable_at = text.index("systemctl --user enable docker.service")
+    assert drop_in_at < enable_at, "the drop-in must exist before the unit is enabled"
+    chown_at = text.index(
+        "chown ${daemon_user}:${daemon_user} /home/${daemon_user}/.config/systemd/user/docker.service.d/rootlesskit.conf"
+    )
+    assert chown_at > drop_in_at
 
 
 def test_cloud_init_locates_the_data_disk_by_the_deterministic_by_id_handle() -> None:
@@ -379,23 +474,62 @@ def test_the_startup_script_implements_the_boot_applied_contract() -> None:
         "no Authorization header may be built as an argv element: it would be "
         "readable from the process table for the length of the call"
     )
-    # The guest-attribute PUTs: checksum (only after apply+restart),
-    # provisioned (every success path), error (any failure).
+    # The guest-attribute PUTs: checksum (reporting only, after
+    # apply+restart), provisioned (every success path), error (any
+    # failure, cleared on every success).
     assert re.search(r"put_attribute \"\$CHECKSUM_KEY\" \"\$CHECKSUM\"", text)
     assert re.search(r"put_attribute \"\$PROVISIONED_KEY\" \"\$PROVISIONED_VALUE\"", text)
     assert "$ERROR_KEY" in text
-    # The drift guard: compare then skip.
-    assert (
-        'applied" = "$CHECKSUM"' in text.replace("[ ", "[").replace(" ]", "]")
-        or '[ "$applied" = "$CHECKSUM" ]' in text
-    ), (
-        "the script must compare the fetched checksum against the applied "
-        "attribute and skip the restart on no drift"
+    # The drift guard trusts the root-owned state file, never the VM-
+    # writable guest attribute: a planted attribute value must not be able
+    # to read as "already applied" and defeat rotation. The state file is
+    # 0600 and written only by the apply path, after the restart.
+    assert 'APPLIED_STATE="/etc/general-dev/applied-checksum"' in text, (
+        "the drift comparison reads the root-owned state file, not the "
+        "tls-checksum attribute: the attribute is VM-writable, so a planted "
+        "value there would silently defeat rotation"
     )
-    # The sentinel comes last, after the attribute writes.
+    assert 'chmod 0600 "$APPLIED_STATE"' in text, (
+        "the applied-checksum state file is 0600: the daemon account and "
+        "everything below it must not be able to rewrite the drift input"
+    )
+    state_at = text.index("$APPLIED_STATE")
+    attribute_read_absent = "guest-attributes/$NAMESPACE/$CHECKSUM_KEY" not in text
+    assert attribute_read_absent, (
+        "the fetched checksum must never be compared against the "
+        "tls-checksum attribute; the attribute is the reporting channel "
+        "the laptop-side waits read, nothing more"
+    )
+    assert state_at < text.index('applied" = "$CHECKSUM"'), (
+        "the drift comparison reads the state file"
+    )
+    # The apply phase is one recorded unit: every failure inside it routes
+    # through fail (which records the error attribute), never a bare set -e
+    # exit that would leave mixed material on disk with nothing recorded.
+    apply_at = text.index("apply_material()")
+    apply_call_at = text.index("if ! apply_material; then")
+    assert apply_at < apply_call_at
+    assert 'fail "apply the TLS material"' in text, (
+        "an apply-phase failure must be recorded, never a bare set -e exit"
+    )
+    # The state file is written LAST inside the apply, so its value always
+    # describes material that is live.
+    state_write_at = text.index('printf \'%s\\n\' "$CHECKSUM" > "$APPLIED_STATE"')
+    restart_at = text.index("systemctl --user restart docker.service")
+    assert restart_at < state_write_at, (
+        "the state file is written only after the restart succeeded, so a "
+        "half-apply never reads as applied"
+    )
+    # The sentinel comes last, after the attribute writes and the clear.
     assert text.rstrip().endswith('console "$SENTINEL ($CHECKSUM)"'), (
-        "the sentinel is echoed only after the apply, the restart and both "
+        "the sentinel is echoed only after the apply, the restart and all "
         "attribute writes succeeded"
+    )
+    # Every success path clears the error attribute: a stale diagnostic
+    # from an earlier boot must never decorate a wait that is about to
+    # succeed. Three success paths exist: pre-publish, no-drift, post-apply.
+    assert text.count("clear_error") >= 4, (
+        "clear_error is defined once and called on all three success paths"
     )
     # The pre-publish boot: exit 0, quietly, after recording provisioned.
     assert "no TLS material published yet" in text
@@ -731,8 +865,13 @@ def test_the_root_variables_carry_the_composition_validations() -> None:
     # address record's accessors enforce, and the prefix's bound is the
     # service account id law under the gd- junction.
     assert 'can(regex("^[a-z][a-z0-9-]{0,30}[a-z0-9]$", var.instance_name))' in text
-    assert 'can(regex("^[a-z0-9-]{6,30}$", var.project_id))' in text
-    assert 'can(regex("^[a-z0-9-]+-[a-z]$", var.zone))' in text
+    assert 'can(regex("^[a-z0-9][a-z0-9-]{5,29}$", var.project_id))' in text, (
+        "the project shape must mirror instances.PROJECT_ID_PATTERN, anchored "
+        "against a leading hyphen"
+    )
+    assert 'can(regex("^[a-z0-9][a-z0-9-]*-[a-z]$", var.zone))' in text, (
+        "the zone shape must mirror instances.ZONE_PATTERN, anchored against a leading hyphen"
+    )
     assert 'can(regex("^[a-z0-9-]+$", var.region))' in text
     assert 'can(regex("^[a-z][a-z0-9-]{2,26}[a-z0-9]$", var.name_prefix))' in text
 
@@ -746,6 +885,30 @@ def test_the_compute_module_validates_its_own_doctrine_address() -> None:
         "validation is the wrong shape to inherit"
     )
     assert "var.docker_tls_listen_port > 0 && var.docker_tls_listen_port <= 65535" in text
+
+
+def test_the_root_declares_and_passes_the_marker_timeout() -> None:
+    """boot_marker_timeout is a root input (terragrunt.hcl can tune it), passed
+    through to the compute submodule whose startup script renders it.
+
+    The laptop's GCP_PROVISIONED_TIMEOUT (300) is shorter than the VM's
+    marker budget (600) and only ever applies to already-provisioned VMs;
+    the root variable's own description carries that relationship, so a
+    reader tuning one budget finds the other's terms beside it.
+    """
+    variables_text = _read(_GCP / "variables.tf")
+    match = re.search(
+        r'variable "boot_marker_timeout" .*?default\s+= 600', variables_text, re.DOTALL
+    )
+    assert match is not None, "the root declares boot_marker_timeout with the 600 default"
+    assert "GCP_PROVISIONED_TIMEOUT" in variables_text, (
+        "the root variable's description names the laptop-side budget it "
+        "must not be confused with, and which of the two waits longer"
+    )
+    composition_text = _read_code(_GCP / "remote-gcp-vm.tf")
+    assert re.search(r"boot_marker_timeout\s+= var\.boot_marker_timeout", composition_text), (
+        "the root passes the marker timeout through to the compute submodule"
+    )
 
 
 # ---------------------------------------------------------------------------

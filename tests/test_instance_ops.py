@@ -2365,8 +2365,7 @@ def test_scaffold_gcp_writes_the_gcp_contract(tmp_path: Path) -> None:
     assert f"data_volume_size_gb = {ops.DEFAULT_VOLUME_SIZE_GB}" in text
     assert 'vpc_cidr   = "10.100.0.0/16"' in text
     assert f'environment = "{name}"' in text, (
-        'gcp labels are lowercase-only; the template must not write an'
-        ' azure-style capitalized key'
+        "gcp labels are lowercase-only; the template must not write an azure-style capitalized key"
     )
     # Forward-looking: the scaffold writes the declaration without checking
     # the layer or provider it names.
@@ -2398,8 +2397,7 @@ def test_scaffold_gcp_sanitizes_an_underscored_name(tmp_path: Path) -> None:
     text = result.path.read_text(encoding="utf-8")
     assert f'instance_name = "{instances.sanitize_gcp_name(name)}"' in text
     assert f'environment = "{name}"' in text, (
-        'gcp labels are lowercase-only; the template must not write an'
-        ' azure-style capitalized key'
+        "gcp labels are lowercase-only; the template must not write an azure-style capitalized key"
     )
 
 
@@ -2699,6 +2697,7 @@ def test_stop_gcp_stops_and_polls_to_terminated(tmp_path: Path) -> None:
     _write_gcp_engine_address(root, name)
     sleeps: list[float] = []
     runner = _FakeRunner()
+    runner.queue(_ok("RUNNING\n"))  # the pre-read: not yet terminated
     runner.queue(_ok(""))  # the stop call
     runner.queue(_ok("STOPPING\n"))  # the poll: not yet
     runner.queue(_ok("TERMINATED\n"))  # the poll: done
@@ -2707,13 +2706,19 @@ def test_stop_gcp_stops_and_polls_to_terminated(tmp_path: Path) -> None:
 
     assert name in message
     assert "stopped" in message
-    assert runner.calls[0][:5] == ("gcloud", "compute", "instances", "stop", name)
-    assert "--zone" in runner.calls[0] and "--project" in runner.calls[0]
-    assert runner.calls[1][1:4] == ("compute", "instances", "describe")
+    assert runner.calls[0][1:4] == ("compute", "instances", "describe"), (
+        "the idempotency pre-read reuses the poll's own argv builder"
+    )
+    assert runner.calls[1][:5] == ("gcloud", "compute", "instances", "stop", name)
+    assert "--zone" in runner.calls[1] and "--project" in runner.calls[1]
+    assert runner.calls[2][1:4] == ("compute", "instances", "describe")
     assert sleeps == [ops.POWER_POLL_SECONDS], "one not-yet answer paced one poll interval"
 
 
 def test_stop_gcp_is_idempotent_when_already_terminated(tmp_path: Path) -> None:
+    """The idempotency mechanism is a pre-read: a VM already TERMINATED skips
+    the platform's stop call entirely -- a stop on a terminated VM is a
+    gcloud error, and a re-run must converge, not fail."""
     ops = _import_instance_ops()
     root = _git_root(tmp_path)
     name = _instance_name("gcpinst")
@@ -2721,13 +2726,16 @@ def test_stop_gcp_is_idempotent_when_already_terminated(tmp_path: Path) -> None:
     _write_gcp_engine_address(root, name)
     sleeps: list[float] = []
     runner = _FakeRunner()
-    runner.queue(_ok(""))  # the stop call
-    runner.queue(_ok("TERMINATED\n"))  # the poll: done on the first read
+    runner.queue(_ok("TERMINATED\n"))  # the pre-read: already stopped
 
     message = ops.stop(root, name, region=REGION, runner=runner, sleep=sleeps.append)
 
-    assert "stopped" in message
-    assert sleeps == [], "the first read answers the target, so no waiting happens"
+    assert "already stopped" in message
+    assert sleeps == []
+    assert not any("stop" in call for call in runner.calls), (
+        "the pre-read must skip the stop call: the runner recorded no stop argv"
+    )
+    assert len(runner.calls) == 1, "the pre-read describe is the only call"
 
 
 def test_stop_gcp_timeout_names_the_last_observed_status(tmp_path: Path) -> None:
@@ -2737,7 +2745,8 @@ def test_stop_gcp_timeout_names_the_last_observed_status(tmp_path: Path) -> None
     _write_gcp_scaffold(root, name)
     _write_gcp_engine_address(root, name)
     runner = _FakeRunner()
-    runner.queue(_ok(""))
+    runner.queue(_ok("RUNNING\n"))  # the pre-read
+    runner.queue(_ok(""))  # the stop call
     for _ in range(ops.POWER_POLL_LIMIT):
         runner.queue(_ok("STOPPING\n"))
 
@@ -2774,6 +2783,7 @@ def test_start_gcp_waits_for_the_provisioned_marker(tmp_path: Path) -> None:
     _write_gcp_engine_address(root, name)
     sleeps: list[float] = []
     runner = _FakeRunner()
+    runner.queue(_ok("TERMINATED\n"))  # the pre-read: not running yet
     runner.queue(_ok(""))  # the start call
     runner.queue(_err("not found"))  # the marker read: not yet
     runner.queue(_ok("TRUE\n"))  # the marker read: ready
@@ -2782,11 +2792,38 @@ def test_start_gcp_waits_for_the_provisioned_marker(tmp_path: Path) -> None:
 
     assert name in message
     assert "provisioning complete" in message
-    assert runner.calls[0][:5] == ("gcloud", "compute", "instances", "start", name)
+    assert runner.calls[0][1:4] == ("compute", "instances", "describe"), (
+        "the idempotency pre-read reuses the poll's own argv builder"
+    )
+    assert runner.calls[1][:5] == ("gcloud", "compute", "instances", "start", name)
     assert sleeps == [5.0], "the not-yet marker answer paced one poll interval"
-    assert runner.calls[1][5] == "--query-path=general-dev/provisioned", (
+    assert runner.calls[2][5] == "--query-path=general-dev/provisioned", (
         "the start wait gates on the provisioning marker, never on describe status alone"
     )
+
+
+def test_start_gcp_skips_the_start_call_when_already_running(tmp_path: Path) -> None:
+    """The idempotency mechanism is a pre-read: a VM already RUNNING skips the
+    platform's start call -- a start on a running VM is a gcloud error, and
+    a re-run must converge -- but still waits out the provisioning marker,
+    so a start that returned before the marker existed converges too."""
+    ops = _import_instance_ops()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    _write_gcp_engine_address(root, name)
+    sleeps: list[float] = []
+    runner = _FakeRunner()
+    runner.queue(_ok("RUNNING\n"))  # the pre-read: already running
+    runner.queue(_ok("TRUE\n"))  # the marker read: ready
+
+    message = ops.start(root, name, region=REGION, runner=runner, sleep=sleeps.append)
+
+    assert "provisioning complete" in message
+    assert not any("start" in call for call in runner.calls), (
+        "the pre-read must skip the start call: the runner recorded no start argv"
+    )
+    assert runner.calls[1][5] == "--query-path=general-dev/provisioned"
 
 
 def test_start_gcp_surfaces_a_failed_readiness_read_as_a_power_error(
@@ -2800,6 +2837,7 @@ def test_start_gcp_surfaces_a_failed_readiness_read_as_a_power_error(
     _write_gcp_scaffold(root, name)
     _write_gcp_engine_address(root, name)
     runner = _FakeRunner()
+    runner.queue(_ok("TERMINATED\n"))  # the pre-read: not running yet
     runner.queue(_ok(""))  # the start call
     runner.queue(_err("Your credentials have expired. Run gcloud auth login"))
 
@@ -2809,68 +2847,181 @@ def test_start_gcp_surfaces_a_failed_readiness_read_as_a_power_error(
     assert "gcloud auth login" in str(exc_info.value)
 
 
-def test_cleanup_gcp_deletes_the_six_secrets_and_tolerates_absent(
+def _gcp_secrets_list_argv(name: str, project: str) -> tuple[str, ...]:
+    """The enumeration argv the gcp cleanup arm lists the instance's secrets with."""
+    return (
+        "gcloud",
+        "secrets",
+        "list",
+        f"--filter=name~^{name}-",
+        "--project",
+        project,
+        "--format",
+        "value(name)",
+    )
+
+
+def test_cleanup_gcp_enumerates_under_the_prefix_and_deletes_what_exists(
     tmp_path: Path,
 ) -> None:
+    """The enumeration, not a fixed six-id probe: what `secrets list` answers
+    under the record's prefix is what gets deleted (an older leaf set's
+    secret is cleaned too), an already-absent one is tolerated, and no aws
+    surface is touched."""
     ops = _import_instance_ops()
-    certs = _import_certs()
     root = _git_root(tmp_path)
     name = _instance_name("gcpinst")
     _write_gcp_scaffold(root, name)
     project = _write_gcp_engine_address(root, name)
+    old_leaf = f"{name}-tls-ca-old"
     runner = _FakeRunner()
-    for index, _secret_id in enumerate(certs.gcp_instance_secret_ids(name)):
-        if index % 2 == 0:
-            runner.queue(_ok(""))  # deleted
-        else:
-            runner.queue(_err("ERROR: ... not found: 404."))  # already absent
+    runner.queue(_ok(f"{name}-tls-server-key\n{old_leaf}\n"))  # the enumeration
+    runner.queue(_ok(""))  # delete the first listed secret
+    runner.queue(_err("ERROR: ... not found: 404."))  # the old leaf is already absent
     runner.queue(_err('context "nope": context not found'))  # the context inspect: absent
 
     messages = ops.cleanup(root, name, region=REGION, runner=runner)
 
+    assert runner.calls[0] == _gcp_secrets_list_argv(name, project)
+    assert runner.calls[1] == (
+        "gcloud",
+        "secrets",
+        "delete",
+        f"{name}-tls-server-key",
+        "--project",
+        project,
+    )
+    assert runner.calls[2] == ("gcloud", "secrets", "delete", old_leaf, "--project", project), (
+        "a secret an older leaf set wrote is cleaned by the enumeration too"
+    )
+    assert any("deleted secret" in message for message in messages)
     assert any("absent; nothing to delete" in message for message in messages)
-    assert sum("deleted secret" in message for message in messages) == 3
-    assert runner.calls[:6] == [
-        ("gcloud", "secrets", "delete", secret_id, "--project", project)
-        for secret_id in certs.gcp_instance_secret_ids(name)
-    ]
     assert all(call[0] != "aws" for call in runner.calls), (
         "a gcp engine has no SSM surface for cleanup to touch"
     )
 
 
-def test_cleanup_gcp_still_aggregates_failures(tmp_path: Path) -> None:
+def test_cleanup_gcp_nothing_listed_reports_the_clean_surface(tmp_path: Path) -> None:
     ops = _import_instance_ops()
-    certs = _import_certs()
     root = _git_root(tmp_path)
     name = _instance_name("gcpinst")
     _write_gcp_scaffold(root, name)
     _write_gcp_engine_address(root, name)
     runner = _FakeRunner()
-    for _ in certs.gcp_instance_secret_ids(name):
-        runner.queue(_err("ERROR: PERMISSION_DENIED"))
-    runner.queue(_err("docker daemon exploded"))  # the context inspect fails for real
+    runner.queue(_ok(""))  # the enumeration answers nothing
+    runner.queue(_err('context "nope": context not found'))  # the context inspect: absent
 
-    with pytest.raises(ops.CleanupError) as exc_info:
-        ops.cleanup(root, name, region=REGION, runner=runner)
+    messages = ops.cleanup(root, name, region=REGION, runner=runner)
 
-    message = str(exc_info.value)
-    assert "PERMISSION_DENIED" in message
-    assert "docker daemon exploded" in message
+    assert any("nothing to delete" in message for message in messages)
+    assert all("delete" != call[1] or call[0] != "gcloud" for call in runner.calls), (
+        "nothing listed means nothing is deleted"
+    )
 
 
-def test_cleanup_gcp_a_missing_record_fails_but_still_removes_the_rest(
+def test_cleanup_gcp_a_failed_deletion_preserves_the_record_and_names_the_remedy(
     tmp_path: Path,
 ) -> None:
+    """A failed deletion leaves the docker context and the certificate
+    directory UNTOUCHED -- the record inside is the retry's only source of
+    prefix and project -- and the aggregated error names the manual
+    `gcloud secrets delete` command for every secret left behind."""
     ops = _import_instance_ops()
+    instances = _import_instances()
     root = _git_root(tmp_path)
     name = _instance_name("gcpinst")
     _write_gcp_scaffold(root, name)
+    project = _write_gcp_engine_address(root, name)
+    secret_ids = _import_certs().gcp_instance_secret_ids(name)
     runner = _FakeRunner()
-    runner.queue(_err('context "nope": context not found'))  # the context inspect: absent
+    runner.queue(_ok("\n".join(secret_ids) + "\n"))  # the enumeration
+    runner.queue(_ok(""))  # first delete succeeds
+    runner.queue(_err("ERROR: PERMISSION_DENIED"))  # second delete fails
+    runner.queue(_err("ERROR: PERMISSION_DENIED"))  # the rest fail too
+    runner.queue(_err("ERROR: PERMISSION_DENIED"))
+    runner.queue(_err("ERROR: PERMISSION_DENIED"))
+    runner.queue(_err("ERROR: PERMISSION_DENIED"))
 
     with pytest.raises(ops.CleanupError) as exc_info:
         ops.cleanup(root, name, region=REGION, runner=runner)
 
     message = str(exc_info.value)
-    assert "engine address record" in message or "secrets_prefix" in message
+    for secret_id in secret_ids[1:]:
+        assert f"gcloud secrets delete {secret_id} --project {project}" in message
+    assert "PERMISSION_DENIED" in message
+    # The record survived: the retry can still recompose the ids.
+    assert instances.engine_address_path(name).is_file(), (
+        "a failed secret deletion must leave the certificate directory (and "
+        "the record inside) in place"
+    )
+    assert not any(call[:3] == ("docker", "context", "inspect") for call in runner.calls), (
+        "the docker context must not be removed while secrets are left behind"
+    )
+
+
+def test_cleanup_gcp_a_missing_record_deletes_nothing_and_names_the_manual_deletes(
+    tmp_path: Path,
+) -> None:
+    """A genuinely absent record deletes nothing -- a composed prefix is a
+    guess, and a guess that deletes in Secret Manager is not a cleanup --
+    but the error names all six manual commands, composed from the same
+    scaffold readers the state store composes from, and removes neither
+    the docker context nor the (record-less) certificate directory."""
+    ops = _import_instance_ops()
+    certs = _import_certs()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    project = instances.gcp_scaffold_project(root, name)
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.CleanupError) as exc_info:
+        ops.cleanup(root, name, region=REGION, runner=runner)
+
+    message = str(exc_info.value)
+    for secret_id in certs.gcp_instance_secret_ids(name):
+        assert f"gcloud secrets delete {secret_id} --project {project}" in message
+    assert "gcloud secrets list --filter" in message, (
+        "the discovery form is named beside the deletes, for anything an older prefix wrote"
+    )
+    assert runner.calls == [], "nothing is deleted and no context is touched"
+
+
+def test_cleanup_gcp_an_unreadable_record_preserves_it_and_names_the_manual_deletes(
+    tmp_path: Path,
+) -> None:
+    """A record present but missing its prefix is the unreadable case: the
+    ids are composed from the scaffold instead, nothing is deleted, and
+    the record survives for a retry that can recompose from it."""
+    ops = _import_instance_ops()
+    certs = _import_certs()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name("gcpinst")
+    _write_gcp_scaffold(root, name)
+    project = instances.gcp_scaffold_project(root, name)
+    instances.write_engine_address(
+        root,
+        name,
+        {
+            "instance_name": name,
+            "zone": _GCP_ZONE,
+            "project_id": project,
+            "region": _GCP_REGION,
+            "state_bucket": f"gdstate-{name}-deadbeef",
+        },
+    )
+    runner = _FakeRunner()
+
+    with pytest.raises(ops.CleanupError) as exc_info:
+        ops.cleanup(root, name, region=REGION, runner=runner)
+
+    message = str(exc_info.value)
+    for secret_id in certs.gcp_instance_secret_ids(name):
+        assert f"gcloud secrets delete {secret_id} --project {project}" in message
+    assert instances.engine_address_path(name).is_file(), (
+        "the unreadable record is the retry's only source of prefix and "
+        "project; it must survive the failed cleanup"
+    )
+    assert runner.calls == []

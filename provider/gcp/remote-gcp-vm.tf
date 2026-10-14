@@ -61,7 +61,11 @@ module "network" {
   subnet_cidr            = var.subnet_cidr
   instance_tag           = local.instance_tag
   docker_tls_listen_port = var.docker_tls_listen_port
-  tags                   = var.tags
+
+  # No tags input here, by the network module's own absence: gcp network
+  # resources expose no labels, and the module refuses an input it could
+  # only silently drop (see its variables file). var.tags reaches the
+  # platform and compute submodules, whose resources do carry labels.
 }
 
 module "platform" {
@@ -93,6 +97,7 @@ module "compute" {
   docker_tls_listen_port    = var.docker_tls_listen_port
   docker_repo_base_url      = var.docker_repo_base_url
   docker_repo_channel       = var.docker_repo_channel
+  boot_marker_timeout       = var.boot_marker_timeout
   tags                      = var.tags
 
   # The instance must not boot before the platform unit's secretAccessor

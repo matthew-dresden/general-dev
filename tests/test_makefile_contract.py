@@ -1848,8 +1848,10 @@ def test_cert_install_dispatches_by_kind_before_its_readiness_poll() -> None:
     assert wait_agent_at < install_at, (
         "the azure readiness poll must precede the install arm, which drives the VM"
     )
-    assert install_at < recipe.index("installed"), (
-        "the installed marker is touched after the install arm ran, for converge"
+    assert install_at < recipe.index('> "$$HOME/.docker/certs/$(INSTANCE)/installed"'), (
+        "the installed marker is WRITTEN after the install arm ran, for "
+        "converge; the gcp arm's compare-on-rerun reads it earlier, which "
+        "is the drift check doing its job"
     )
 
 
@@ -2214,12 +2216,55 @@ def test_deploy_gcp_writes_the_address_record_from_the_outputs() -> None:
 
 def test_deploy_gcp_installed_marker_names_the_vm() -> None:
     """The installed marker names the VM the material was applied to, so a
-    gcp instance replaced under CONFIRM=replace reinstalls."""
+    gcp instance replaced under CONFIRM=replace reinstalls.
+
+    The marker carries the VM's NUMERIC id (what cert-install's gcp arm
+    writes), and the gate compares it against the live VM's numeric id read
+    off the same describe -- the record carries no id, so the describe is
+    where the azure arm's vm_resource_id comes from on this kind.
+    """
     recipe = _target_recipe_body(_makefile_text(), "instance-deploy")
+    gcp_gate_at = recipe.index('[ "$$install_needed" = "0" ] && [ "$$kind" = "gcp" ]')
+    gate = recipe[gcp_gate_at : recipe.index("fi;", gcp_gate_at)]
+    assert "instances.engine_address" in gate, (
+        "the gcp gate reads the record for the VM name, zone and project the describe needs"
+    )
+    assert '--format="value(id)"' in gate, (
+        "the gate compares the marker against the live VM's numeric id, the "
+        "value cert-install's gcp arm writes into the marker"
+    )
+    assert '[ "$$(cat "$$marker")" = "$$recorded_vm" ] || install_needed=1;' in gate, (
+        "the azure arm's comparison shape carries over: marker vs live id"
+    )
+
+
+def test_cert_install_gcp_marker_carries_the_numeric_vm_id() -> None:
+    """The gcp marker records the VM's numeric id, mirroring azure's
+    vm_resource_id drift check, and cert-install compares it on re-run: a
+    replaced VM's id differs, so the material is re-applied even when a
+    stale attribute would call it current."""
+    recipe = _target_recipe_body(_makefile_text(), "cert-install")
+    gcp_at = recipe.index('elif [ "$$kind" = "gcp" ]; then')
+    ec2_at = recipe.index('elif [ "$$kind" = "ec2" ]; then', gcp_at)
+    gcp_arm = recipe[gcp_at:ec2_at]
+    assert '--format="value(id)"' in gcp_arm, (
+        "the numeric id comes from the same describe the status read uses"
+    )
+    marker_compare_at = gcp_arm.index('installed")" != "$$gcp_vm_id"')
+    describe_at = gcp_arm.index('--format="value(id)"')
+    assert describe_at < marker_compare_at, (
+        "the marker is compared against the freshly described id on re-run"
+    )
+    assert "applied=drifted;" in gcp_arm, "an id mismatch forces the apply path, not just a message"
+    # The marker write carries the id, not the record's instance name; the
+    # write lives in the shared marker tail after the kind dispatch.
     assert (
-        "instances.engine_address(repo.find_root(Path.cwd()), '$$name').get('instance_name', '')"
-        in recipe
-    ), "the gcp marker check reads the record's VM name, the azure one its vm_resource_id"
+        'printf \'%s\\n\' "$$gcp_vm_id" > "$$HOME/.docker/certs/$(INSTANCE)/installed";' in recipe
+    ), "the marker records the numeric id the gate compares against"
+    assert (
+        "print(instances.engine_address(repo.find_root(Path.cwd()), '$(INSTANCE)').get('instance_name', ''))"
+        not in recipe
+    ), "the superseded instance_name marker write is gone, not dead code"
 
 
 def test_cert_install_gcp_arm_compares_then_reboots_then_waits() -> None:
@@ -2255,11 +2300,12 @@ def test_cert_install_gcp_arm_compares_then_reboots_then_waits() -> None:
         ".get('vm_resource_id', '')"
     )
     assert azure_marker in recipe
-    gcp_marker = (
-        "instances.engine_address(repo.find_root(Path.cwd()), '$(INSTANCE)')"
-        ".get('instance_name', '')"
-    )
-    assert gcp_marker in recipe, "the gcp marker names the VM, the azure marker its resource id"
+    # The gcp marker carries the VM's numeric id (the gate compares it
+    # against a live describe), where azure's carries its record's resource
+    # id; the record's instance_name write is superseded, not dead code.
+    assert (
+        'printf \'%s\\n\' "$$gcp_vm_id" > "$$HOME/.docker/certs/$(INSTANCE)/installed";' in recipe
+    ), "the gcp marker names the VM's numeric id, the azure marker its resource id"
 
 
 @pytest.mark.parametrize(

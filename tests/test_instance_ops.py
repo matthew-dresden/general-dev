@@ -2300,6 +2300,41 @@ def test_cleanup_azure_still_aggregates_failures(tmp_path: Path) -> None:
     assert all(call[0] != "aws" for call in runner.calls)
 
 
+def test_cleanup_azure_touches_only_the_redirected_certs_root(tmp_path: Path) -> None:
+    """A cleanup flow's cert state never leaves the redirected DOCKER_CONFIG.
+
+    The record write creates the instance's certificate-material directory,
+    `instances.certs_dir(name)`, whose root `instances.certs_root()` composes
+    from DOCKER_CONFIG; this pin drives one representative azure cleanup and
+    asserts the directory was created under this file's redirected root and
+    never under the operator's real `~/.docker/certs`, so a future fixture
+    or derivation regression fails here loudly instead of leaking again.
+    """
+    ops = _import_instance_ops()
+    instances = _import_instances()
+    root = _git_root(tmp_path)
+    name = _instance_name("azinst")
+    _write_azure_scaffold(root, name)
+    _write_engine_address(
+        root, name, resource_group="gd-rg", vm_name="gd-vm", vault_name="gd-vault"
+    )
+    redirected_dir = Path(os.environ["DOCKER_CONFIG"]) / "certs" / name
+    assert redirected_dir.is_dir(), (
+        "the record write created the certs dir under the redirected DOCKER_CONFIG"
+    )
+    assert instances.engine_address_path(name).parent == redirected_dir
+    runner = _FakeRunner()
+    runner.queue(_err('context "nope": context not found'))  # the context inspect: absent
+
+    messages = ops.cleanup(root, name, region=REGION, runner=runner)
+
+    assert not redirected_dir.exists(), "cleanup removed the redirected certs dir it created"
+    assert not (Path.home() / ".docker" / "certs" / name).exists(), (
+        "nothing was ever written to the operator's real ~/.docker/certs"
+    )
+    assert any("removed certificate directory" in message for message in messages)
+
+
 # ---------------------------------------------------------------------------
 # The gcp scaffold arm: the template, the sanitized-name inputs, and the
 # per-cloud refusals.

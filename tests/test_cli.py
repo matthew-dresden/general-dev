@@ -1551,6 +1551,7 @@ def test_azure_wait_agent_polls_through_the_shared_helper(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    _instance_docker_config: Path,
 ) -> None:
     """The subcommand reads the record's VM pair and runs the shared bounded
     poll on the production runner seam, printing the confirmed outcome."""

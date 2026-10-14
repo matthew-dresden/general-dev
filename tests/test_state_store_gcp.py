@@ -134,6 +134,7 @@ def _seed_gcp_instance(root: Path, name: str, tmp_path: Path, project: str) -> N
         "inputs = {\n"
         f'  project_id = "{project}"\n'
         f'  zone       = "{ZONE}"\n'
+        f'  region     = "{REGION}"\n'
         "}\n",
         encoding="utf-8",
     )
@@ -298,27 +299,26 @@ def test_bucket_name_raises_when_the_gcp_root_is_missing(
         state_store_gcp.bucket_name(tmp_path, instance)
 
 
-def test_bucket_name_raises_when_the_record_has_no_project(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_bucket_name_raises_when_the_scaffold_has_no_project(
+    tmp_path: Path,
 ) -> None:
-    _redirect_docker_config(monkeypatch, tmp_path)
+    """A scaffold without a project input is refused, naming the init.
+
+    The compose path reads the scaffold, never the deploy-written record:
+    the state store runs before the apply that would write the record, so
+    the scaffold is the only pre-deploy truth it may depend on.
+    """
     root = _root_with_root_hcl(tmp_path)
     instance = _instance_name()
-    _seed_gcp_instance(root, instance, tmp_path, _project_id())
-    record = dict(_record_payload(instance, _project_id()))
-    del record["project_id"]
-    instances.write_engine_address(root, instance, record)
-    runner = _QueueRunner()
+    directory = root / "remote-instances" / instance
+    directory.mkdir(parents=True)
+    (directory / "terragrunt.hcl").write_text(
+        f'inputs = {{\n  zone   = "{ZONE}"\n  region = "{REGION}"\n}}\n',
+        encoding="utf-8",
+    )
 
-    with pytest.raises(StateStoreGCPError, match="project_id"):
+    with pytest.raises(StateStoreGCPError, match="carries no project_id input"):
         state_store_gcp.bucket_name(root, instance)
-
-    assert runner.calls == [], "a missing record key must fail before any gcloud call"
-
-
-# ---------------------------------------------------------------------------
-# init_form: one describe probe picks the form; everything else raises.
-# ---------------------------------------------------------------------------
 
 
 def test_existing_bucket_answers_the_plain_form(

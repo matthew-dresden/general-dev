@@ -646,6 +646,76 @@ def test_main_connect_child_death_during_readiness_names_the_remedy(
     assert "Connected:" not in captured.out
 
 
+def test_main_connect_retries_a_backend_refusal_then_connects(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A VM fresh from a power cycle answers IAP before its daemon listens.
+
+    The child then dies in seconds with `failed to connect to backend`;
+    the daemon retries the spawn bounded times and connects once the
+    daemon is up, instead of surfacing a dead tunnel the operator would
+    have to refresh by hand.
+    """
+    transport_gcp = _import_transport_gcp()
+    _issue_client_material(_NAME)
+    _write_engine_address(_NAME)
+    port = _free_port()
+    runner = _docker_runner(_CONTEXT, recorded_port=port)
+    monkeypatch.setattr(transport_gcp.transport, "subprocess_command_runner", runner)
+    refusal = b"ERROR: ... failed to connect to backend. (Failed to connect to port 2376)"
+    children: list[_FakeChild] = []
+
+    def refusing_then_healthy_launcher(argv: Sequence[str]) -> _FakeChild:
+        if len(children) == 0:
+            child = _FakeChild(bind_port=None, stderr_text=refusal)
+            child.returncode = 1
+        else:
+            child = _FakeChild(bind_port=port)
+            child.block_reads()
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(
+        transport_gcp, "default_process_launcher", refusing_then_healthy_launcher
+    )
+    paced: list[float] = []
+    monkeypatch.setattr(transport_gcp, "_pace", paced.append)
+    monkeypatch.setenv("GCP_TUNNEL_CONNECT_TIMEOUT", str(_HANG_GUARD_SECONDS))
+    _kill_once_handler_installed(monkeypatch, transport_gcp)
+
+    exit_code = transport_gcp.main(_connect_argv(_CONTEXT))
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "Connected:" in captured.out
+    assert "retrying the tunnel" in captured.out
+    assert len(children) == 2, "exactly one bounded retry before the connect"
+    assert children[1].terminated, "the SIGTERM stop reaches the retried tunnel"
+    assert paced == [5.0], "the retry paces once between attempts"
+
+
+def test_main_connect_surfaces_a_persistent_backend_refusal_after_the_retries(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Three refusals in a row are a real failure, not a boot race."""
+    transport_gcp = _import_transport_gcp()
+    _issue_client_material(_NAME)
+    _write_engine_address(_NAME)
+    port = _free_port()
+    runner = _docker_runner(_CONTEXT, recorded_port=port)
+    monkeypatch.setattr(transport_gcp.transport, "subprocess_command_runner", runner)
+    refusal = b"ERROR: ... failed to connect to backend. (Failed to connect to port 2376)"
+    launcher = _FakeLauncher(bind=False, stderr_text=refusal, exit_immediately=True)
+    monkeypatch.setattr(transport_gcp, "default_process_launcher", launcher)
+
+    exit_code = transport_gcp.main(_connect_argv(_CONTEXT))
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert len(launcher.children) == 3, "three bounded attempts, no more"
+    assert "Connected:" not in captured.out
+
+
 def test_supervise_child_death_raises_the_tail_with_its_remedy() -> None:
     """A tunnel that exits while served is a dropped tunnel, whatever its code.
 

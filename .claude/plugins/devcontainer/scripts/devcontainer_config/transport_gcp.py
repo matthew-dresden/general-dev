@@ -166,7 +166,7 @@ _MATERIAL_APPLY_TIMEOUT_DEFAULT_SECONDS = 900.0
 # `AZURE_AGENT_READY_TIMEOUT` (default 300), read through the same shared
 # reader.
 PROVISIONED_TIMEOUT_ENV_VAR = "GCP_PROVISIONED_TIMEOUT"
-_PROVISIONED_TIMEOUT_DEFAULT_SECONDS = 300.0
+_PROVISIONED_TIMEOUT_DEFAULT_SECONDS = 900.0
 
 # One attribute read every this many seconds inside either deadline --
 # never a fixed wait outside the loop, the same pacing discipline the
@@ -826,7 +826,7 @@ def wait_provisioned(
     listener needs actually ran. While the attribute is absent the poll
     keeps pacing -- a first boot has not finished yet -- and an expired
     gcloud session stops it immediately. The deadline is
-    `GCP_PROVISIONED_TIMEOUT` (default 300, the azure agent-ready wait's
+    `GCP_PROVISIONED_TIMEOUT` (default 900, the azure agent-ready wait's
     default) unless passed explicitly.
 
     Raises:

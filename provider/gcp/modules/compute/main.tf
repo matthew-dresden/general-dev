@@ -163,4 +163,9 @@ resource "google_compute_disk" "data" {
   zone    = var.zone
   size    = var.data_volume_size_gb
   type    = "pd-balanced"
+
+  # The same labels the instance carries: var.tags' documented contract
+  # covers the instance AND its data disk, so the disk cannot silently
+  # opt out of the labeling the rest of the composition answers to.
+  labels = var.tags
 }

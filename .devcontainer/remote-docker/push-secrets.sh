@@ -171,8 +171,13 @@ fi
 # into, never an argument -- the same invariant devcontainer_config.certs'
 # SecretManagerClient enforces for every secret write it issues, applied at
 # this script's level. The create-versus-version-add decision is an
-# explicit probe (`gcloud secrets describe`), never a caught error, the
-# same probe-before-mutate discipline the state stores apply.
+# explicit probe (`gcloud secrets describe`) issued immediately before
+# EACH publish, never a caught error and never one probe shared between
+# the two payloads: the two secrets have independent histories (a partial
+# publish, a hand-created secret, a leaf added in a later version), so
+# keying one payload's decision on the other's existence would create a
+# second version where the secret did not exist or fail one that did --
+# the same probe-before-mutate discipline the state stores apply.
 rd_publish_config_payload_to_secret_manager() {
   local prefix project scripts_dir
   scripts_dir="${REPO_ROOT}/.claude/plugins/devcontainer/scripts"
@@ -198,33 +203,27 @@ rd_publish_config_payload_to_secret_manager() {
   trap 'rm -rf "$RD_PUT_DIR"' EXIT
   write_config_payload "$RD_PUT_DIR"
 
-  if gcloud secrets describe "${prefix}-shell-env" --project "$project" > /dev/null 2>&1; then
-    rd_log "Publishing ${prefix}-shell-env to Secret Manager (new version)..."
-    gcloud secrets versions add "${prefix}-shell-env" --project "$project" \
-      --data-file="${RD_PUT_DIR}/shell.env" > /dev/null \
-      || rd_fail "Publishing ${prefix}-shell-env to Secret Manager failed" \
-        "If gcloud reported an authentication failure, sign in and retry:" \
-        "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
-    rd_log "Publishing ${prefix}-profile-map to Secret Manager (new version)..."
-    gcloud secrets versions add "${prefix}-profile-map" --project "$project" \
-      --data-file="${RD_PUT_DIR}/.devcontainer/aws-profile-map.json" > /dev/null \
-      || rd_fail "Publishing ${prefix}-profile-map to Secret Manager failed" \
-        "If gcloud reported an authentication failure, sign in and retry:" \
-        "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
-  else
-    rd_log "Creating ${prefix}-shell-env in Secret Manager..."
-    gcloud secrets create "${prefix}-shell-env" --project "$project" \
-      --data-file="${RD_PUT_DIR}/shell.env" > /dev/null \
-      || rd_fail "Creating ${prefix}-shell-env in Secret Manager failed" \
-        "If gcloud reported an authentication failure, sign in and retry:" \
-        "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
-    rd_log "Creating ${prefix}-profile-map in Secret Manager..."
-    gcloud secrets create "${prefix}-profile-map" --project "$project" \
-      --data-file="${RD_PUT_DIR}/.devcontainer/aws-profile-map.json" > /dev/null \
-      || rd_fail "Creating ${prefix}-profile-map in Secret Manager failed" \
-        "If gcloud reported an authentication failure, sign in and retry:" \
-        "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
-  fi
+  rd_gcp_put_secret() {
+    local id="$1" file="$2"
+    if gcloud secrets describe "$id" --project "$project" > /dev/null 2>&1; then
+      rd_log "Publishing $id to Secret Manager (new version)..."
+      gcloud secrets versions add "$id" --project "$project" \
+        --data-file="$file" > /dev/null \
+        || rd_fail "Publishing $id to Secret Manager failed" \
+          "If gcloud reported an authentication failure, sign in and retry:" \
+          "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
+    else
+      rd_log "Creating $id in Secret Manager..."
+      gcloud secrets create "$id" --project "$project" \
+        --data-file="$file" > /dev/null \
+        || rd_fail "Creating $id in Secret Manager failed" \
+          "If gcloud reported an authentication failure, sign in and retry:" \
+          "  ${RD_BOLD}gcloud auth login${RD_RESET}, then ${RD_BOLD}make push-secrets${RD_RESET}"
+    fi
+  }
+
+  rd_gcp_put_secret "${prefix}-shell-env" "${RD_PUT_DIR}/shell.env"
+  rd_gcp_put_secret "${prefix}-profile-map" "${RD_PUT_DIR}/.devcontainer/aws-profile-map.json"
 }
 
 if [ "${KIND:-}" = "gcp" ]; then

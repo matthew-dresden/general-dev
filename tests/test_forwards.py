@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,36 @@ from devcontainer_config.forwards import ForwardError, ForwardRecord
 from devcontainer_config.hostprobe import CommandResult
 
 READINESS_LINE = f"{forwards.READINESS_MARKER} docker context 'ctx' -> i-abc over SSM.\n"
+
+# The fake children registered by pid, so the autouse fixture below can
+# route the GROUP signals the production stop sends (`os.killpg`, pid ==
+# pgid for a start_new_session daemon) to the fake's own hooks.
+_GROUP_SIGNAL_ROUTES: dict[int, "_FakePopen"] = {}
+
+
+@pytest.fixture(autouse=True)
+def _killpg_reaches_the_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Route `os.killpg` to the fake children.
+
+    The daemon is stopped by GROUP signal, which a fake child cannot answer
+    for real: a signal aimed at a registered fake's pid invokes that fake's
+    terminate() (SIGINT/SIGTERM) or kill() (SIGKILL), so the stop
+    assertions keep reading the same attributes the production stop sets.
+    A pid no fake registered raises ProcessLookupError, the same answer a
+    vanished group gives the real call -- which is exactly what the
+    lifecycle's stop path expects for the throwaway pids a record carries.
+    """
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        process = _GROUP_SIGNAL_ROUTES.get(pid)
+        if process is None:
+            raise ProcessLookupError(f"no fake child registered for pid {pid}")
+        if sig == signal.SIGKILL:
+            process.kill()
+        else:
+            process.terminate()
+
+    monkeypatch.setattr(forwards.os, "killpg", fake_killpg)
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +87,7 @@ class _FakePopen:
         self.returncode: int | None = None
         self.terminated = False
         self.killed = False
+        _GROUP_SIGNAL_ROUTES[pid] = self
 
     def poll(self) -> int | None:
         return self.returncode
@@ -373,6 +405,59 @@ def test_open_poll_limit_gives_the_relay_kind_the_larger_default(
     assert forwards._open_poll_limit(relay=True) == 60
 
 
+def test_open_poll_limit_gives_the_iap_kind_the_larger_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The iap transport's own worst case is its boot-race retry loop -- three
+    readiness attempts at GCP_TUNNEL_CONNECT_TIMEOUT (default 60) plus the
+    paces between them -- so the open budget must sit above that, and an
+    explicit FORWARD_OPEN_TIMEOUT_SECONDS wins for the kind as for any
+    other."""
+    monkeypatch.delenv(forwards.OPEN_TIMEOUT_ENV_VAR, raising=False)
+    assert forwards._open_poll_limit() == forwards._OPEN_POLL_LIMIT_DEFAULT
+    iap_default = forwards._open_poll_limit(iap=True)
+    assert iap_default == forwards._OPEN_POLL_LIMIT_RELAY_DEFAULT
+    assert iap_default * forwards.OPEN_POLL_SECONDS > 180, (
+        "the iap default must exceed the transport's 3x60s retry worst case "
+        "plus the paces between attempts"
+    )
+    # An explicit value wins for the iap kind too.
+    monkeypatch.setenv(forwards.OPEN_TIMEOUT_ENV_VAR, "30")
+    assert forwards._open_poll_limit(iap=True) == 60
+
+
+def test_iap_open_uses_the_larger_budget_and_names_the_env_var_on_exhaustion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cold iap connect can burn its own retry budget before announcing: the
+    open must not kill a daemon that was still inside its boot-race
+    retries, and the exhaustion must say which variable widens the wait."""
+    tmp_path = _git_root(tmp_path)
+    _write_gcp_address("x")
+    spawner = _Spawner(announce=False)
+    polls: list[float] = []
+    monkeypatch.delenv(forwards.OPEN_TIMEOUT_ENV_VAR, raising=False)
+
+    with pytest.raises(ForwardError) as exc_info:
+        forwards.open_forward(
+            "unused-for-iap",
+            "general-dev-x",
+            "",
+            "",
+            tmp_path,
+            kind=forwards.KIND_IAP,
+            engine={"zone": _GCP_ZONE},
+            spawner=spawner,
+            poll_clock=polls.append,
+        )
+
+    assert len(polls) == forwards._OPEN_POLL_LIMIT_RELAY_DEFAULT, (
+        "the iap kind runs the 600-poll (300s) default, not the generic 60s one"
+    )
+    assert forwards.OPEN_TIMEOUT_ENV_VAR in str(exc_info.value)
+    assert spawner.process.terminated, "a hung spawn must still be stopped, never orphaned"
+
+
 def test_ssm_open_exhausts_at_the_default_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -496,6 +581,70 @@ def test_refresh_takes_the_relay_budget_from_the_recorded_engine_kind(
 
     assert len(polls) == forwards._OPEN_POLL_LIMIT_RELAY_DEFAULT
     assert silent.process.terminated
+
+
+# ---------------------------------------------------------------------------
+# The exhaustion stop: `_stop_child` reaches the daemon's whole process
+# group (the spawn detaches with start_new_session=True, so pid == pgid)
+# and escalates SIGINT, SIGTERM, SIGKILL -- the same discipline the stop
+# path's group stop applies -- so a readiness or verify exhaustion can
+# never leave the transport's own children holding the port behind a dead
+# wrapper.
+# ---------------------------------------------------------------------------
+
+
+def test_stop_child_signals_the_process_group_with_the_escalation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child that ignores SIGINT and SIGTERM is answered with SIGKILL, and
+    every signal lands on the group, never the bare pid."""
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr(forwards.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+    waits = {"count": 0}
+
+    class _StubbornChild:
+        pid = 4711
+
+        def wait(self, timeout: float | None = None) -> int:
+            waits["count"] += 1
+            if waits["count"] <= 2:
+                raise subprocess.TimeoutExpired(cmd="child", timeout=timeout)
+            return 0
+
+    forwards._stop_child(_StubbornChild())  # type: ignore[arg-type]
+
+    assert sent == [
+        (4711, signal.SIGINT),
+        (4711, signal.SIGTERM),
+        (4711, signal.SIGKILL),
+    ], f"the escalation order and the group target are the contract: {sent}"
+    assert waits["count"] == 3
+
+
+def test_stop_child_treats_a_vanished_group_as_already_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group whose last member already exited ends the stop immediately."""
+    sent: list[tuple[int, int]] = []
+
+    def raise_missing(pid: int, sig: int) -> None:
+        sent.append((pid, sig))
+        raise ProcessLookupError
+
+    monkeypatch.setattr(forwards.os, "killpg", raise_missing)
+    waits: list[float | None] = []
+
+    class _Child:
+        pid = 5
+
+        def wait(self, timeout: float | None = None) -> int:
+            waits.append(timeout)
+            return 0
+
+    forwards._stop_child(_Child())  # type: ignore[arg-type]
+
+    assert sent == [(5, signal.SIGINT)], "only the first signal is sent before the exit wins"
+    assert waits == [None], "the vanished group reaps the child and returns"
 
 
 # ---------------------------------------------------------------------------

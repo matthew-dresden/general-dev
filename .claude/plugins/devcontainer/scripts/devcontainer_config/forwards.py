@@ -123,13 +123,17 @@ FORWARD_LOG_FILENAME = "forward.log"
 # polls, `OPEN_POLL_SECONDS` apart, before an unannounced child is stopped
 # and reported. `FORWARD_OPEN_TIMEOUT_SECONDS` (read through
 # `read_positive_seconds`, the one shared reader of this variable shape)
-# overrides the timeout main converts into the poll count. The relay kind's
-# default is larger because its connect flow runs one synchronous
-# `az vm run-command` listener start before the readiness marker prints --
-# a cold start is bounded by the transport's own AZURE_LISTENER_START_TIMEOUT
-# (default 240 seconds), so the generic budget would always exhaust first
-# and kill a daemon that was about to announce; 600 polls is 300 seconds at
-# the default cadence, above that listener budget with headroom.
+# overrides the timeout main converts into the poll count. The relay and
+# iap kinds' default is larger: the relay's connect flow runs one
+# synchronous `az vm run-command` listener start before the readiness
+# marker prints -- a cold start is bounded by the transport's own
+# AZURE_LISTENER_START_TIMEOUT (default 240 seconds), so the generic budget
+# would always exhaust first and kill a daemon that was about to announce.
+# The iap transport's own worst case is its boot-race retry loop, three
+# readiness attempts at GCP_TUNNEL_CONNECT_TIMEOUT (default 60) plus the
+# paces between them -- again above the generic budget -- so it shares the
+# relay's: 600 polls is 300 seconds at the default cadence, above either
+# transport's own worst case with headroom.
 OPEN_POLL_SECONDS = 0.5
 _OPEN_POLL_LIMIT_DEFAULT = 120  # 60 seconds at the default cadence
 _OPEN_POLL_LIMIT_RELAY_DEFAULT = 600  # 300 seconds at the default cadence
@@ -507,13 +511,31 @@ def _poll_open(
 
 
 def _stop_child(process: subprocess.Popen[bytes]) -> None:
-    """Stop a live child handle: SIGTERM then SIGKILL, never waiting forever."""
-    process.terminate()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
+    """Stop a live child handle: its whole GROUP, escalating, never waiting forever.
+
+    The daemon spawns with `start_new_session=True`, so its pid IS its pgid
+    and `killpg(process.pid, ...)` reaches the child and everything it
+    spawned -- exactly the group discipline the stop path's
+    `_terminate_tree` applies, kept here because this readiness/verify
+    exhaustion path must never leave a half-open session's grandchildren
+    holding the port behind a dead wrapper. SIGINT first (the transports
+    tear their own children down cleanly on the interrupt), then SIGTERM
+    to a holdout, then SIGKILL, each waited out by the same bounded wait
+    the single-process escalation always used.
+    """
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            # The group already exited: the stopped state, not a failure.
+            process.wait()
+            return
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    process.wait()
 
 
 def _spawn_until_ready(
@@ -767,7 +789,7 @@ def open_forward(
         poll_seconds=poll_seconds,
         poll_limit=poll_limit
         if poll_limit is not None
-        else _open_poll_limit(relay=kind == KIND_RELAY),
+        else _open_poll_limit(relay=kind == KIND_RELAY, iap=kind == KIND_IAP),
     )
     port = _recorded_port(root, instance, runner)
     _verify_port_ready(
@@ -963,9 +985,11 @@ def refresh_forward(
     verification `open_forward` uses, so the fresh daemon is confirmed by
     the same two independent answers before the record is rewritten. The
     re-open's budget comes from `FORWARD_OPEN_TIMEOUT_SECONDS` like any
-    open's, with the record's own engine kind selecting the relay default --
-    a relay refresh re-runs the recorded command's listener start, whose
-    cold start needs the same larger budget a relay open gets.
+    open's, with the record's own engine kind selecting the larger relay
+    and iap default -- a relay refresh re-runs the recorded command's
+    listener start, whose cold start needs the same larger budget a relay
+    open gets, and an iap refresh re-runs the recorded command's boot-race
+    retries on the same terms.
 
     Raises:
         ForwardError: there is no record to refresh, or the stop or the
@@ -991,7 +1015,9 @@ def refresh_forward(
         poll_limit=(
             open_poll_limit
             if open_poll_limit is not None
-            else _open_poll_limit(relay=record.engine_kind == KIND_RELAY)
+            else _open_poll_limit(
+                relay=record.engine_kind == KIND_RELAY, iap=record.engine_kind == KIND_IAP
+            )
         ),
     )
     port = _recorded_port(root, instance, runner)
@@ -1018,18 +1044,19 @@ def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
 
 
-def _open_poll_limit(*, relay: bool = False) -> int:
+def _open_poll_limit(*, relay: bool = False, iap: bool = False) -> int:
     """The open poll's budget, in polls, from `FORWARD_OPEN_TIMEOUT_SECONDS`.
 
-    Unset, a relay open or refresh gets the relay default -- above the
-    listener start its connect flow runs synchronously -- and every other
-    kind the generic default; an explicitly set value wins for every kind.
+    Unset, a relay or iap open or refresh gets the larger default -- above
+    the listener start the relay connect flow runs synchronously and above
+    the iap transport's own retry worst case -- and every other kind the
+    generic default; an explicitly set value wins for every kind.
 
     Raises:
         ForwardError: the variable is set to something that is not a
             finite positive number of seconds.
     """
-    default_limit = _OPEN_POLL_LIMIT_RELAY_DEFAULT if relay else _OPEN_POLL_LIMIT_DEFAULT
+    default_limit = _OPEN_POLL_LIMIT_RELAY_DEFAULT if (relay or iap) else _OPEN_POLL_LIMIT_DEFAULT
     try:
         timeout = read_positive_seconds(
             OPEN_TIMEOUT_ENV_VAR, float(default_limit * OPEN_POLL_SECONDS)

@@ -2096,10 +2096,19 @@ def _poll_gcp_status(
 def _gcp_stop(root: Path, name: str, *, runner: Runner, sleep: Callable[[float], None]) -> str:
     """Stop `name`'s VM and wait until the platform reports it TERMINATED.
 
-    Idempotent the same way the EC2 and azure stops are: an already-
-    TERMINATED VM answers the poll's first read.
+    Idempotent by a pre-read, not by trusting the call: the VM's status is
+    read once through the same argv builder the poll uses, and an
+    already-TERMINATED VM skips the platform's stop call entirely -- a stop
+    on a terminated VM is a gcloud error, and re-running this target must
+    converge, not fail. Any other state runs the stop and the poll, whose
+    first read is the already-stopping case's short path.
     """
     instance_name, zone, project_id = _gcp_power_targets(root, name)
+    if _gcp_vm_state(runner, instance_name, zone, project_id) == GCP_TERMINATED_STATUS:
+        return (
+            f"Instance {name!r} ({instance_name}) is already stopped.\n"
+            f"Start it again with: make instance-start INSTANCE={name}"
+        )
     _run_power_gcp(
         runner,
         ["compute", "instances", "stop", instance_name, "--zone", zone, "--project", project_id],
@@ -2116,18 +2125,33 @@ def _gcp_stop(root: Path, name: str, *, runner: Runner, sleep: Callable[[float],
 def _gcp_start(root: Path, name: str, *, runner: Runner, sleep: Callable[[float], None]) -> str:
     """Start `name`'s VM, then wait for the provisioning marker's own readiness.
 
-    The bounded readiness wait is `transport_gcp.wait_provisioned` -- the
-    one home of the guest-attribute poll -- so the cli's accessor and this
-    path drive the identical bounded poll, never two copies. The wait
-    gates on the `general-dev/provisioned` guest attribute the startup
-    script writes, never on describe status alone: RUNNING means the VM
-    was scheduled, and the marker is the evidence provisioning ran.
+    Idempotent by a pre-read: a VM whose status already reads RUNNING
+    skips the platform's start call -- a start on a running VM is a gcloud
+    error, and re-running this target must converge, not fail. The bounded
+    readiness wait is `transport_gcp.wait_provisioned` -- the one home of
+    the guest-attribute poll -- so the cli's accessor and this path drive
+    the identical bounded poll, never two copies. The wait gates on the
+    `general-dev/provisioned` guest attribute the startup script writes,
+    never on describe status alone: RUNNING means the VM was scheduled,
+    and the marker is the evidence provisioning ran (an already-running
+    VM waits out the same marker, so a start that returned before the
+    marker existed still converges).
     """
     instance_name, zone, project_id = _gcp_power_targets(root, name)
-    _run_power_gcp(
-        runner,
-        ["compute", "instances", "start", instance_name, "--zone", zone, "--project", project_id],
-    )
+    if _gcp_vm_state(runner, instance_name, zone, project_id) != "RUNNING":
+        _run_power_gcp(
+            runner,
+            [
+                "compute",
+                "instances",
+                "start",
+                instance_name,
+                "--zone",
+                zone,
+                "--project",
+                project_id,
+            ],
+        )
     try:
         transport_gcp.wait_provisioned(
             instances.engine_address(root, name), runner, instance=name, pace=sleep
@@ -2158,8 +2182,11 @@ def stop(
     for `TERMINATED` (`region` is unused on that arm too); an EC2 instance
     keeps exactly the flow it always had.
 
-    Idempotent: stopping an already-stopped instance succeeds, and the poll
-    observes the target state on its first read, so no waiting happens.
+    Idempotent: stopping an already-stopped instance succeeds without a
+    platform call. On gcp the mechanism is a pre-read of the VM's status
+    through the poll's own argv builder, and an already-TERMINATED VM
+    skips the stop call; on azure and EC2 the poll observes the target
+    state on its first read, so no waiting happens.
 
     Raises:
         PowerError: `name` is invalid, the kind's addressable identity is
@@ -2202,7 +2229,9 @@ def start(
     gcp VM is started and the readiness poll waits for the
     `general-dev/provisioned` guest attribute the startup script writes --
     the gcp counterpart of the SSM-agent wait (`region` is unused on that
-    arm too); an EC2 instance keeps exactly the flow it always had.
+    arm too); an EC2 instance keeps exactly the flow it always had. The
+    gcp arm is idempotent by the same pre-read its stop is: a VM already
+    RUNNING skips the start call and waits out the provisioning marker.
 
     Raises:
         PowerError: `name` is invalid, the kind's addressable identity is
@@ -2377,9 +2406,11 @@ def _delete_gcp_secret(
     """Delete one Secret Manager secret, tolerating an already-absent one.
 
     A not-found answer is the desired end state, reported like the context
-    removal's absent case; any other failure lands in `failures`, the same
-    aggregate `cleanup` raises at the end. Shared by the gcp cleanup arm's
-    loop over the six per-instance secrets.
+    removal's absent case; any other failure lands in `failures` with the
+    secret's own manual-delete command attached -- a secret left behind
+    must be deletable by hand from the error alone, without the record the
+    teardown refused to remove. Shared by the gcp cleanup arm's loop over
+    the secrets the enumeration listed.
 
     Raises:
         CleanupError: the six secret ids could not be composed because the
@@ -2396,7 +2427,10 @@ def _delete_gcp_secret(
     try:
         result = runner(list(argv), None)
     except OSError as exc:
-        failures.append(f"delete secret {secret_id}: {_one_line(str(exc))}")
+        failures.append(
+            f"delete secret {secret_id}: {_one_line(str(exc))}\n"
+            f"  delete it by hand: gcloud secrets delete {secret_id} --project {project_id}"
+        )
         return
     if result.returncode == 0:
         messages.append(f"deleted secret {secret_id}")
@@ -2406,8 +2440,132 @@ def _delete_gcp_secret(
         return
     failures.append(
         f"delete secret {secret_id}: {' '.join(argv)} exited {result.returncode}: "
-        f"{_one_line(result.stderr)}"
+        f"{_one_line(result.stderr)}\n"
+        f"  delete it by hand: gcloud secrets delete {secret_id} --project {project_id}"
     )
+
+
+def _gcp_cleanup_manual_remedy(secret_ids: Sequence[str], project_id: str | None) -> str:
+    """The manual-delete block for secrets a cleanup pass left behind.
+
+    One `gcloud secrets delete <id> --project <project>` line per id,
+    pre-indented for embedding in a failure entry, so the aggregated error
+    alone carries everything the operator needs to finish the teardown by
+    hand; a project that could not be resolved reads as the
+    `--project <project>` placeholder, never a silently dropped flag.
+    """
+    project = project_id if project_id else "<project>"
+    return "\n".join(
+        f"  gcloud secrets delete {secret_id} --project {project}" for secret_id in secret_ids
+    )
+
+
+def _cleanup_gcp_secrets(
+    root: Path, name: str, runner: Runner, *, failures: list[str], messages: list[str]
+) -> bool:
+    """The gcp cleanup arm's secret surface; True only when nothing was left behind.
+
+    The record the deploy wrote is the retry's only source of the prefix
+    and the project, so the arm's discipline is delete-what-is-listed and
+    preserve-what-failed: with a usable record, the secrets under the
+    record's prefix are enumerated with
+    `gcloud secrets list --filter="name~^<prefix>-"` and each is deleted
+    (the enumeration, not a fixed six-id probe, so a secret an older leaf
+    set wrote is cleaned too); any failed deletion, an enumeration that
+    could not run, or a record that is unreadable leaves the docker
+    context and the certificate directory UNTOUCHED -- the record inside
+    is the only thing that can recompose the ids on a retry -- and the
+    failure entries name the manual `gcloud secrets delete` commands. A
+    genuinely absent record deletes nothing at all (a composed prefix is
+    a guess, and a guess that deletes in Secret Manager is not a cleanup)
+    but still names the six manual commands, composed from the same
+    scaffold readers the state store composes from, with the
+    `gcloud secrets list --filter` form beside them for anything an older
+    prefix wrote.
+
+    Returns:
+        True when the secrets surface is confirmed clean (nothing was
+        listed, or every listed secret was deleted), False when anything
+        was left behind or could not be confirmed.
+    """
+    try:
+        project_id = instances.gcp_project_id(root, name)
+        prefix = instances.gcp_secrets_prefix(root, name)
+    except instances.InstancesError:
+        return _cleanup_gcp_secrets_without_record(root, name, failures=failures)
+
+    listed_argv = [
+        GCLOUD_EXECUTABLE,
+        "secrets",
+        "list",
+        f"--filter=name~^{prefix}-",
+        "--project",
+        project_id,
+        "--format",
+        "value(name)",
+    ]
+    remedy = _gcp_cleanup_manual_remedy(certs.gcp_instance_secret_ids(prefix), project_id)
+    try:
+        result = runner(list(listed_argv), None)
+    except OSError as exc:
+        failures.append(
+            f"list Secret Manager secrets under {prefix}-: {_one_line(str(exc))}\n"
+            f"  list what is there: {' '.join(listed_argv)}\n"
+            f"{remedy}"
+        )
+        return False
+    if result.returncode != 0:
+        failures.append(
+            f"list Secret Manager secrets under {prefix}-: {' '.join(listed_argv)} "
+            f"exited {result.returncode}: {_one_line(result.stderr)}\n"
+            f"  list what is there: {' '.join(listed_argv)}\n"
+            f"{remedy}"
+        )
+        return False
+    listed = [secret_id for secret_id in result.stdout.split() if secret_id]
+    for secret_id in listed:
+        _delete_gcp_secret(runner, failures, messages, secret_id=secret_id, project_id=project_id)
+    if failures:
+        return False
+    if not listed:
+        messages.append(f"no Secret Manager secret under {prefix}-; nothing to delete")
+    return True
+
+
+def _cleanup_gcp_secrets_without_record(root: Path, name: str, *, failures: list[str]) -> bool:
+    """The absent-record arm: delete nothing, name the manual path.
+
+    The ids are composed the way the scaffold composes them -- the project
+    from the scaffolded terragrunt.hcl (the state store's own pre-deploy
+    reader) and the prefix from the ONE sanitizer the scaffold minted
+    `name_prefix` with -- so the error can name all six manual deletes
+    without the record. When even the sanitizer refuses the name, the
+    entry names the `gcloud secrets list --filter` discovery instead,
+    because a prefix that cannot be composed must never be guessed at.
+    """
+    project: str | None = None
+    try:
+        project = instances.gcp_scaffold_project(root, name)
+    except instances.InstancesError:
+        pass
+    try:
+        prefix = instances.sanitize_gcp_name(name)
+    except instances.InvalidGCPNameError as exc:
+        failures.append(
+            f"compose the Secret Manager prefix for instance {name!r}: {exc}\n"
+            "  No secret id can be composed without it, so nothing was deleted.\n"
+            "  Find the instance's secrets by hand, then delete them:\n"
+            "  gcloud secrets list --filter='name~^<prefix>-' --project <project>"
+        )
+        return False
+    discovery = f"gcloud secrets list --filter='name~^{prefix}-' --project {project or '<project>'}"
+    failures.append(
+        "the engine address record is unusable, so no Secret Manager secret was "
+        f"deleted for {name!r}\n"
+        f"  list what is there: {discovery}\n"
+        + _gcp_cleanup_manual_remedy(certs.gcp_instance_secret_ids(prefix), project)
+    )
+    return False
 
 
 def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str, ...]:
@@ -2415,18 +2573,20 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
 
     Kind-aware: an EC2 instance's cleanup deletes every SSM parameter under
     the instance's prefix before the shared steps; a gcp instance's deletes
-    the six Secret Manager secrets the publish and payload paths wrote
+    the Secret Manager secrets the enumeration under its prefix lists --
+    the six the publish and payload paths wrote among them
     (`region` is an EC2-only concept and is unused on that arm); an azure
     instance's has no SSM surface at all (its TLS material lives in its
     terraform-managed Key Vault and its configuration payload beside it),
     so the parameter step is skipped entirely and `region` goes unused on
-    that arm. All kinds then remove the instance's docker context and
-    delete its certificate-material directory -- `instances.certs_dir(name)`
-    in full, which for the azure and gcp kinds carries the
-    engine-address.json record too. Every operation is attempted even after
-    an earlier one failed, and all failures are raised together in ONE
-    `CleanupError` at the end, so a docker failure never hides deletions
-    that still needed to happen.
+    that arm. Every kind then removes the instance's docker context and
+    deletes its certificate-material directory --
+    `instances.certs_dir(name)` in full, which for the azure and gcp kinds
+    carries the engine-address.json record too -- except on the gcp arm
+    while its secret surface is not confirmed clean (below). Every
+    operation is attempted even after an earlier one failed, and all
+    failures are raised together in ONE `CleanupError` at the end, so a
+    docker failure never hides deletions that still needed to happen.
 
     A nonzero `docker context inspect` counts as "the context is absent,
     nothing to remove" only when docker's own answer says so (`no such
@@ -2438,6 +2598,17 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
     gcp kind's GCS bucket beside it -- are deliberately out of scope: each
     instance's store is derived from its own name in the cloud root, so its
     lifecycle is a Terragrunt/backend concern, never an instance's.
+
+    The gcp arm's ordering preserves the retry's inputs: the engine-address
+    record inside the certificate directory is the ONLY source of the
+    secrets prefix and project a retry can recompose ids from, so while any
+    secret deletion (or the enumeration feeding it) failed -- or the record
+    itself is unreadable -- the docker context and the certificate
+    directory are left in place, and the aggregated error names the manual
+    `gcloud secrets delete <prefix>-<leaf> --project <project>` command for
+    every secret left behind. Only a confirmed-clean secret surface
+    (nothing listed, or everything listed deleted) lets the context and
+    certificate directory be removed.
 
     Raises:
         CleanupError: `name` is invalid, or any aws/gcloud/docker/filesystem
@@ -2493,24 +2664,15 @@ def cleanup(root: Path, name: str, *, region: str, runner: Runner) -> tuple[str,
                     if deleted is not None:
                         messages.append(f"deleted parameter {parameter_name}")
 
+    secrets_surface_clean = True
     if kind == instances.ENGINE_KIND_GCP:
-        try:
-            project_id = instances.gcp_project_id(root, name)
-            prefix = instances.gcp_secrets_prefix(root, name)
-        except instances.InstancesError as exc:
-            failures.append(_one_line(str(exc)))
-        else:
-            for secret_id in certs.gcp_instance_secret_ids(prefix):
-                _delete_gcp_secret(
-                    runner,
-                    failures,
-                    messages,
-                    secret_id=secret_id,
-                    project_id=project_id,
-                )
+        secrets_surface_clean = _cleanup_gcp_secrets(
+            root, name, runner, failures=failures, messages=messages
+        )
 
-    _remove_docker_context(root, name, runner, failures=failures, messages=messages)
-    _remove_certificate_directory(name, failures=failures, messages=messages)
+    if secrets_surface_clean:
+        _remove_docker_context(root, name, runner, failures=failures, messages=messages)
+        _remove_certificate_directory(name, failures=failures, messages=messages)
 
     if failures:
         raise CleanupError(

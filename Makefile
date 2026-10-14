@@ -352,10 +352,10 @@ help:
 	note "INSTANCES" "one remote engine per project under remote-instances/; instance names are project names (e.g. acme)"; \
 	row "make list-instances"   "host"   "List every instance with live status: EC2 state, id, params, certs, forward, context; ssh engines answer reachability instead."; \
 	row "make list-containers"  "host"   "Every container this project owns, local engine plus every instance's, with per-engine reachability."; \
-	row "make instance-init"    "host"   "Scaffolds <project>; never deploys. INSTANCE=<n> [AMI=] [REGION= AMI/AZ lookup; deploys in REMOTE_AWS_REGION]. Azure: CLOUD=azure LOCATION=<loc> GCP: CLOUD=gcp PROJECT=<p> ZONE=<z>"; \
+	row "make instance-init"    "host"   "Scaffolds only INSTANCE=<n> [AMI=] [REGION= AMI/AZ lookup; deploys in REMOTE_AWS_REGION] Azure: CLOUD=azure LOCATION=<loc> [VM_SIZE=] GCP: CLOUD=gcp PROJECT=<p> ZONE=<z> [VM_SIZE=]"; \
 	row "make instance-deploy"  "remote" "Converge: provision, write the address record (EC2 links the id, azure and gcp the record), trust chain, push secrets. Refuses replacement unless CONFIRM=replace. INSTANCE= | ALL=1"; \
 	row "make instance-status"  "host"   "One instance's live state, or every instance with ALL=1. INSTANCE=<instance-name> | ALL=1"; \
-	row "make instance-plan"    "remote" "Terragrunt plan per instance; bootstraps the state bucket (EC2) or ensures the azure state store on first run. INSTANCE=<instance-name> | ALL=1"; \
+	row "make instance-plan"    "remote" "Terragrunt plan per instance; bootstraps the state bucket (EC2) or ensures the azure or gcp state store on first run. INSTANCE=<instance-name> | ALL=1"; \
 	row "make instance-stop"    "remote" "Stop the instance's VM (EC2, azure or gcp) and wait until it reports down. INSTANCE=<instance-name> | ALL=1"; \
 	row "make instance-start"   "remote" "Start it again and wait for its engine agent (or the gcp provisioning marker) to report ready. INSTANCE=<instance-name> | ALL=1"; \
 	row "make instance-destroy" "remote" "Destroy + cleanup context, certs (EC2 params, gcp secrets). CONFIRM=destroy only for ALL=1. INSTANCE=<instance-name> | ALL=1"; \
@@ -367,8 +367,8 @@ help:
 	row "make cert-client"      "host"   "Issue the client certificate 'make connect-start' presents. Run after cert-ca, and again at renewal."; \
 	row "make cert-publish"     "remote" "Issue server material and publish it to the engine's store (Parameter Store for EC2, Key Vault for azure, Secret Manager for gcp). The daemon needs it to open its listener."; \
 	row "make cert-install"     "remote" "Have the instance fetch the published material and start its daemon. Run after cert-publish."; \
-	row "make cert-status"      "host"   "Client and CA expiry per instance. Remote engines only (EC2 and azure); ssh engines carry no TLS material."; \
-	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to the engine's store (Parameter Store, or Key Vault for azure). Remote builds do this when needed."; \
+	row "make cert-status"      "host"   "Client and CA expiry per instance. Remote engines only (EC2, azure and gcp); ssh engines carry no TLS material."; \
+	row "make push-secrets"     "remote" "Publish shell.env and aws-profile-map.json to the engine's store (Parameter Store for EC2, Key Vault for azure, Secret Manager for gcp). Remote builds do this when needed."; \
 	row "make connect-start"    "remote" "Open an engine's forward as a background daemon (SSM for EC2, ssh for engine.json, relay for azure, iap for gcp); returns once docker answers. INSTANCE=<name> (or ENGINE=<name>)."; \
 	row "make connect-status"   "host"   "Forward daemon state per instance: pid, port, listening. INSTANCE=<name> | ALL=1"; \
 	row "make connect-stop"     "host"   "Close one forward daemon, or every one with ALL=1. INSTANCE=<name> | ALL=1"; \
@@ -1198,7 +1198,10 @@ instance-deploy:
 			[ "$$(cat "$$marker")" = "$$recorded_vm" ] || install_needed=1; \
 		fi; \
 		if [ "$$install_needed" = "0" ] && [ "$$kind" = "gcp" ]; then \
-			recorded_vm=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$$name').get('instance_name', ''))") || { printf '\033[0;31m[ERROR]\033[0m %s: the engine address record could not be read for the installed-marker check\n' "$$name" >&2; exit 1; }; \
+			gcp_vm=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$$name')['instance_name'])") || { printf '\033[0;31m[ERROR]\033[0m %s: the engine address record could not be read for the installed-marker check\n' "$$name" >&2; exit 1; }; \
+			gcp_zone=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$$name')['zone'])") || exit 1; \
+			gcp_project=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$$name')['project_id'])") || exit 1; \
+			recorded_vm=$$(gcloud compute instances describe "$$gcp_vm" --zone "$$gcp_zone" --project "$$gcp_project" --format="value(id)") || { printf '\033[0;31m[ERROR]\033[0m %s: the VM could not be described for the installed-marker check; if gcloud reported an authentication failure, run gcloud auth login and retry\n' "$$name" >&2; exit 1; }; \
 			[ "$$(cat "$$marker")" = "$$recorded_vm" ] || install_needed=1; \
 		fi; \
 		if [ "$$install_needed" = "1" ]; then \
@@ -1408,10 +1411,15 @@ cert-install:
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli azure-wait-agent "$(INSTANCE)" || exit 1; \
 	elif [ "$$kind" = "gcp" ]; then \
 		applied=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instance_ops, instances, repo, transport_gcp; name='$(INSTANCE)'; record=instances.engine_address(repo.find_root(Path.cwd()), name); print('applied' if transport_gcp.applied_checksum_matches(record, instance_ops.subprocess_runner, instance=name) else 'drifted')") || { printf '\033[0;31m[ERROR]\033[0m %s: the applied-checksum comparison could not run; the record and the gcloud session are named above\n' "$(INSTANCE)" >&2; exit 1; }; \
+		gcp_vm=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$(INSTANCE)')['instance_name'])") || exit 1; \
+		gcp_zone=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli gcp-zone "$(INSTANCE)") || exit 1; \
+		gcp_project=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli gcp-project-id "$(INSTANCE)") || exit 1; \
+		gcp_vm_id=$$(gcloud compute instances describe "$$gcp_vm" --zone "$$gcp_zone" --project "$$gcp_project" --format="value(id)") || { printf '\033[0;31m[ERROR]\033[0m %s: the VM could not be described; if gcloud reported an authentication failure, run gcloud auth login and retry\n' "$(INSTANCE)" >&2; exit 1; }; \
+		if [ -f "$$HOME/.docker/certs/$(INSTANCE)/installed" ] && [ "$$(cat "$$HOME/.docker/certs/$(INSTANCE)/installed")" != "$$gcp_vm_id" ]; then \
+			printf '\033[0;36m[APPLY]\033[0m %s: the marker names a different VM id than the one running (a replaced VM); reinstalling\n' "$(INSTANCE)"; \
+			applied=drifted; \
+		fi; \
 		if [ "$$applied" != "applied" ]; then \
-			gcp_vm=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$(INSTANCE)')['instance_name'])") || exit 1; \
-			gcp_zone=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli gcp-zone "$(INSTANCE)") || exit 1; \
-			gcp_project=$$(PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -m devcontainer_config.cli gcp-project-id "$(INSTANCE)") || exit 1; \
 			gcp_status=$$(gcloud compute instances describe "$$gcp_vm" --zone "$$gcp_zone" --project "$$gcp_project" --format="value(status)") || { printf '\033[0;31m[ERROR]\033[0m %s: the VM status could not be read; if gcloud reported an authentication failure, run gcloud auth login and retry\n' "$(INSTANCE)" >&2; exit 1; }; \
 			if [ "$$gcp_status" = "TERMINATED" ]; then \
 				printf '\033[0;36m[APPLY]\033[0m %s: the VM is stopped; starting it to apply the material\n' "$(INSTANCE)"; \
@@ -1444,7 +1452,7 @@ cert-install:
 	if [ "$$kind" = "azure" ]; then \
 		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$(INSTANCE)').get('vm_resource_id', ''))" > "$$HOME/.docker/certs/$(INSTANCE)/installed"; \
 	elif [ "$$kind" = "gcp" ]; then \
-		PYTHONPATH=$(DEVCONTAINER_SCRIPTS_DIR) python3 -c "from pathlib import Path; from devcontainer_config import instances, repo; print(instances.engine_address(repo.find_root(Path.cwd()), '$(INSTANCE)').get('instance_name', ''))" > "$$HOME/.docker/certs/$(INSTANCE)/installed"; \
+		printf '%s\n' "$$gcp_vm_id" > "$$HOME/.docker/certs/$(INSTANCE)/installed"; \
 	else \
 		touch "$$HOME/.docker/certs/$(INSTANCE)/installed"; \
 	fi

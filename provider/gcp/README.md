@@ -117,11 +117,12 @@ Eight inputs declare no default and are always required regardless of any toggle
 | `docker_tls_listen_port` | `number` | optional | `2376` | TCP port the mTLS listener binds to; the IAP tunnel dials it and the firewall's one rule admits it. |
 | `docker_repo_base_url` | `string` | optional | `"https://download.docker.com/linux/ubuntu"` | Base URL of the Docker apt repository the compute submodule's cloud-init adds. |
 | `docker_repo_channel` | `string` | optional | `"stable"` | Release channel of the Docker apt repository the compute submodule's cloud-init adds. |
+| `boot_marker_timeout` | `number` | optional | `600` | Seconds the every-boot startup script waits for the cloud-init provisioning marker before failing its apply step; a first boot's provisioning runs the full budget on the VM. The laptop-side `GCP_PROVISIONED_TIMEOUT` (300) is shorter and only ever applies to already-provisioned VMs. |
 | `project_id` | `string` | always required | none | GCP project id every resource is created in, carried explicitly on every resource. Validated: 6-30 lowercase letters, digits and dashes. |
 | `zone` | `string` | always required | none | GCP zone the instance and its disks are created in. Validated: `<region>-<letter>` (us-east1-b). |
 | `state_store_suffix` | `string` | optional | `"q4m7zk"` | Mirror of the committed suffix `remote-instances/root-gcp.hcl` declares, read only by the `state_bucket` output's digest. The bucket itself is not terraform-managed. |
 | `name_prefix` | `string` | always required | none | Prefix used to name every derived resource this composition creates, in sanitized RFC1035 form. Validated: 3-27 lowercase alphanumeric or dash characters, beginning with a letter and ending alphanumerically, so the derived `gd-<prefix>` service account id stays inside gcp's 6-30 service-account-id law. |
-| `tags` | `map(string)` | optional | `{}` | Common labels merged onto every resource this composition creates. Validated against gcp's label law (lowercase letters, digits, underscores and dashes). |
+| `tags` | `map(string)` | optional | `{}` | Common labels merged onto the resources that expose labels: the instance, its data disk and the six per-instance secrets. The network submodule takes no labels input -- gcp network resources expose none. Validated against gcp's label law (lowercase letters, digits, underscores and dashes). |
 
 Every input any of the three submodules (`modules/network`, `modules/platform`, `modules/compute`) declares is redeclared here as a root input of the same name and passed straight through, or resolved into a `locals` value from a toggle and its matching replacement input. No submodule input exists that is not represented in this table.
 

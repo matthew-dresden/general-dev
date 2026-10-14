@@ -98,12 +98,11 @@ variable "docker_tls_listen_port" {
   }
 }
 
-variable "tags" {
-  description = <<-EOT
-    Common labels merged onto the virtual network, subnetwork, router, NAT
-    gateway and firewall this module creates. Optional; defaults to an
-    empty map when the caller has no additional labels to apply.
-  EOT
-  type        = map(string)
-  default     = {}
-}
+# Deliberately absent: no tags/labels input --
+# this module's resources carry no labels: gcp network resources expose
+# none -- google_compute_network, google_compute_subnetwork,
+# google_compute_router, google_compute_router_nat and
+# google_compute_firewall all have no labels attribute. A labels variable
+# here would be accepted and silently dropped at plan time, so the module
+# refuses to declare one; the composition's labels ride on the instance,
+# its data disk and the platform unit's secrets, which do expose them.

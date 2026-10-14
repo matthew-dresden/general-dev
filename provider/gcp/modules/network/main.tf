@@ -130,10 +130,11 @@ resource "google_compute_firewall" "iap_ingress" {
   # tag is unreachable even from IAP.
   target_tags = [var.instance_tag]
 
-  # Flow logs stay off by explicit choice: the daemon's TLS listener is
-  # the audited surface, not the VPC's packet stream, and the one rule's
-  # admits/denies are visible in the daemon's own mTLS handshake failures.
-  log_config {
-    metadata = "EXCLUDE_ALL_METADATA"
-  }
+  # Flow logging is off by omission -- no log_config block is declared,
+  # which is how google_compute_firewall expresses "logging disabled": the
+  # daemon's TLS listener is the audited surface, not the VPC's packet
+  # stream, and the one rule's admits/denies are visible in the daemon's
+  # own mTLS handshake failures. The absence IS the doctrine, the same
+  # shape the interface's missing access_config is: there is no flag left
+  # at false to flip back.
 }

@@ -825,7 +825,7 @@ def _render_gcp_terragrunt_hcl(
         f'  subnet_cidr = "{subnet_cidr}"',
         "",
         "  tags = {",
-        f'    Environment = "{name}"',
+        f'    environment = "{name}"',
         "  }",
         "}",
     ]

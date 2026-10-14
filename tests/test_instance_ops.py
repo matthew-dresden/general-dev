@@ -2364,7 +2364,10 @@ def test_scaffold_gcp_writes_the_gcp_contract(tmp_path: Path) -> None:
     assert f"root_volume_size_gb = {ops.DEFAULT_VOLUME_SIZE_GB}" in text
     assert f"data_volume_size_gb = {ops.DEFAULT_VOLUME_SIZE_GB}" in text
     assert 'vpc_cidr   = "10.100.0.0/16"' in text
-    assert f'Environment = "{name}"' in text
+    assert f'environment = "{name}"' in text, (
+        'gcp labels are lowercase-only; the template must not write an'
+        ' azure-style capitalized key'
+    )
     # Forward-looking: the scaffold writes the declaration without checking
     # the layer or provider it names.
     assert not (root / "remote-instances" / "_envcommon" / "remote-gcp.hcl").exists()
@@ -2394,7 +2397,10 @@ def test_scaffold_gcp_sanitizes_an_underscored_name(tmp_path: Path) -> None:
 
     text = result.path.read_text(encoding="utf-8")
     assert f'instance_name = "{instances.sanitize_gcp_name(name)}"' in text
-    assert f'Environment = "{name}"' in text
+    assert f'environment = "{name}"' in text, (
+        'gcp labels are lowercase-only; the template must not write an'
+        ' azure-style capitalized key'
+    )
 
 
 def test_scaffold_gcp_refuses_a_name_with_no_legal_form(tmp_path: Path) -> None:

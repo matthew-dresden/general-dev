@@ -129,6 +129,14 @@ jobs:
           make list-instances || true
           make -s list-instances | grep -E '^gcp-e2e .*RUNNING'
 
+      - name: Dump the VM's serial console on a failed converge
+        if: failure()
+        run: |
+          set -euo pipefail
+          gcloud compute instances get-serial-port-output gcp-e2e \
+            --zone us-east4-a --project "$GCP_PROJECT" \
+            | tail -120
+
       - name: Tear everything down
         if: always()
         run: |

@@ -2589,7 +2589,17 @@ def _gcp_describe_argv(name: str, project: str) -> tuple[str, ...]:
 
 
 def _gcp_secret_describe_argv(secret_id: str, project: str) -> tuple[str, ...]:
-    return ("gcloud", "secrets", "describe", secret_id, "--project", project)
+    return (
+        "gcloud",
+        "secrets",
+        "versions",
+        "describe",
+        "latest",
+        "--secret",
+        secret_id,
+        "--project",
+        project,
+    )
 
 
 def test_state_for_a_gcp_engine_probes_the_vm_and_the_six_secrets(tmp_path: Path) -> None:

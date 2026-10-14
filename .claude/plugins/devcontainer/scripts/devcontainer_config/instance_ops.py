@@ -1418,22 +1418,34 @@ def _gcp_vm_state(runner: Runner, instance_name: str, zone: str, project_id: str
 
 
 def _gcp_secrets_present(runner: Runner, prefix: str, project_id: str) -> bool:
-    """Whether all six of the instance's Secret Manager secrets exist.
+    """Whether all six of the instance's Secret Manager secrets carry a version.
 
     Six probes aggregated: the project is asked for each secret the
     publication and payload paths write (`certs.gcp_instance_secret_ids`,
     the same set the publish and push paths write), every probe must
     answer, and one not-found answer means the material is not there.
+    The probes ask for a VERSION (latest), because the platform unit
+    creates the secret resources empty: a resource-only probe would call
+    a never-published instance published and skip the cert-install that
+    carries its material.
 
     Raises:
         _ProbeFailure: a probe failed for any reason other than a missing
             secret.
     """
     for secret_id in certs.gcp_instance_secret_ids(prefix):
+        # A version probe, not a resource probe: the platform unit creates
+        # all six secrets EMPTY, so `secrets describe` answers success on a
+        # never-published instance and the trust chain would skip the
+        # publish that carries the material. `versions describe latest`
+        # succeeds only when at least one version exists.
         argv = [
             GCLOUD_EXECUTABLE,
             "secrets",
+            "versions",
             "describe",
+            "latest",
+            "--secret",
             secret_id,
             "--project",
             project_id,

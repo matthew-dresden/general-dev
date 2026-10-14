@@ -938,6 +938,21 @@ def diagnose_tunnel_exit(returncode: int | None, stderr_tail: str, *, instance: 
     )
 
 
+_BACKEND_REFUSAL_MARKER = "failed to connect to backend"
+
+
+def _tunnel_exit_is_backend_refusal(tail_text: str) -> bool:
+    """Whether the child died because the VM's daemon port refused it.
+
+    After a power cycle the VM answers IAP before rootless dockerd is
+    listening; gcloud's connectivity test then fails with `failed to
+    connect to backend` and the child exits. That failure is retryable
+    (the daemon comes up seconds later), unlike an auth refusal or a
+    wrong-zone error, which the same classifier leaves alone.
+    """
+    return _BACKEND_REFUSAL_MARKER in tail_text
+
+
 def wait_tunnel_ready(
     port: int,
     process: subprocess.Popen[bytes],
@@ -1222,25 +1237,46 @@ def _run_connect(args: argparse.Namespace) -> int:
     """
     instance_name, zone, project_id, local_port, runner = _common_setup(args.name, args.context)
     _use_context(runner, args.context)
-    process, tail = _spawn_tunnel(
-        default_process_launcher,
-        build_tunnel_argv(
-            instance_name=instance_name,
-            zone=zone,
-            project_id=project_id,
-            local_port=local_port,
-        ),
-    )
-    try:
-        wait_tunnel_ready(local_port, process, tail, instance=args.name)
-        print(
-            f"Connected: docker context {args.context!r} -> {args.name} over iap (zone {zone}).",
-            flush=True,
+    # A VM freshly started answers IAP before its daemon listens; the
+    # child then dies with a backend refusal seconds in. Bounded retries
+    # absorb that boot race; every other child death (auth, wrong zone,
+    # anything unclassified) surfaces immediately with its own remedy.
+    attempts = 3
+    while True:
+        process, tail = _spawn_tunnel(
+            default_process_launcher,
+            build_tunnel_argv(
+                instance_name=instance_name,
+                zone=zone,
+                project_id=project_id,
+                local_port=local_port,
+            ),
         )
-        _run_until_interrupted(process, tail, instance=args.name, port=local_port)
-    finally:
-        if process.poll() is None:
+        try:
+            wait_tunnel_ready(local_port, process, tail, instance=args.name)
+            break
+        except GAPTunnelError as exc:
+            attempts -= 1
+            still_refusing = process.poll() is not None and _tunnel_exit_is_backend_refusal(
+                tail.snapshot()
+            )
+            if process.poll() is None or attempts <= 0 or not still_refusing:
+                raise
             transport.stop_forward(process)
+            print(
+                f"retrying the tunnel: the VM's daemon was not listening yet "
+                f"({attempts} attempt(s) left)",
+                flush=True,
+            )
+            _pace(5.0)
+    print(
+        f"Connected: docker context {args.context!r} -> {args.name} over iap (zone {zone}).",
+        flush=True,
+    )
+    _run_until_interrupted(process, tail, instance=args.name, port=local_port)
+    if process.poll() is None:
+        transport.stop_forward(process)
+        wait_port_closed(local_port, instance=args.name)
     return 0
 
 

@@ -242,7 +242,7 @@ def _validated_instance(instance: str) -> None:
 
 
 def _record_component(accessor: Callable[[Path, str], str], root: Path, instance: str) -> str:
-    """One engine-address record value, wrapped in this module's error class.
+    """One instances accessor value, wrapped in this module's error class.
 
     The accessor is passed as the function itself (never fetched by name at
     run time), so a rename on `instances` fails at import instead of
@@ -272,8 +272,8 @@ def bucket_name(root: Path, instance: str) -> str:
     root_hcl_text = _root_hcl_text(
         root, "the bucket name is composed from the template and suffix that file declares"
     )
-    zone = _record_component(instances.gcp_zone, root, instance)
-    project_id = _record_component(instances.gcp_project_id, root, instance)
+    zone = _record_component(instances.gcp_scaffold_zone, root, instance)
+    project_id = _record_component(instances.gcp_scaffold_project, root, instance)
     return compose_from_root_hcl(root_hcl_text, instance, zone, project_id)
 
 
@@ -350,7 +350,7 @@ def init_form(root: Path, instance: str, runner: Runner) -> str:
     """
     _validated_instance(instance)
     name = bucket_name(root, instance)
-    project_id = _record_component(instances.gcp_project_id, root, instance)
+    project_id = instances.gcp_scaffold_project(root, instance)
     return _bucket_form(runner, name, project_id)
 
 
@@ -478,8 +478,8 @@ def ensure(root: Path, instance: str, runner: Runner) -> tuple[str, ...]:
     """
     _validated_instance(instance)
     name = bucket_name(root, instance)
-    project_id = _record_component(instances.gcp_project_id, root, instance)
-    region = _record_component(instances.gcp_region, root, instance)
+    project_id = _record_component(instances.gcp_scaffold_project, root, instance)
+    region = _record_component(instances.gcp_scaffold_region, root, instance)
     messages = [
         _create_bucket(runner, name, project_id, region),
         _write_sidecar(root, instance, bucket=name),
@@ -569,7 +569,7 @@ def list_buckets(root: Path, runner: Runner) -> tuple[BucketListing, ...]:
             raise StateStoreGCPError(f"ERROR: {exc}") from exc
         if kind != instances.ENGINE_KIND_GCP:
             continue
-        project_id = _record_component(instances.gcp_project_id, root, instance)
+        project_id = _record_component(instances.gcp_scaffold_project, root, instance)
         if project_id not in projects:
             projects.append(project_id)
     listed: dict[str, str] = {}
@@ -615,8 +615,8 @@ def list_buckets(root: Path, runner: Runner) -> tuple[BucketListing, ...]:
         name = compose_from_root_hcl(
             root_hcl_text,
             instance,
-            _record_component(instances.gcp_zone, root, instance),
-            _record_component(instances.gcp_project_id, root, instance),
+            _record_component(instances.gcp_scaffold_zone, root, instance),
+            _record_component(instances.gcp_scaffold_project, root, instance),
         )
         if name in matched:
             listings.append(
@@ -714,7 +714,7 @@ def delete_store(root: Path, instance: str, runner: Runner) -> str:
     """
     _validated_instance(instance)
     name = bucket_name(root, instance)
-    project_id = _record_component(instances.gcp_project_id, root, instance)
+    project_id = instances.gcp_scaffold_project(root, instance)
     message = delete_bucket(name, project_id, runner)
     if _remove_sidecar(root, instance):
         message += f"; removed {sidecar_path(root, instance)}"

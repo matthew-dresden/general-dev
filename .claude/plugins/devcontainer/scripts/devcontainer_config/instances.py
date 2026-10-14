@@ -969,6 +969,90 @@ def azure_instance_location(root: Path, name: str) -> str:
     return match.group(1)
 
 
+# The scaffold-owned gcp input lines the state store reads pre-deploy:
+# the record does not exist until the deploy's apply, and the bucket the
+# bootstrap provisions must compose from the same project, zone and region
+# the scaffold names, so these are text-matched the same way
+# `azure_instance_location` text-matches its input.
+_GCP_PROJECT_PATTERN = re.compile(r'^\s*project_id\s*=\s*"([^"]*)"', re.MULTILINE)
+_GCP_ZONE_PATTERN_SCAFFOLD = re.compile(r'^\s*zone\s*=\s*"([^"]*)"', re.MULTILINE)
+_GCP_REGION_PATTERN_SCAFFOLD = re.compile(r'^\s*region\s*=\s*"([^"]*)"', re.MULTILINE)
+
+
+def _gcp_scaffold_input(root: Path, name: str, key: str, pattern: re.Pattern[str]) -> str:
+    """One gcp input assignment from `name`'s scaffolded terragrunt.hcl.
+
+    The scaffold owns the line's exact shape; a hand-edited file that
+    dropped the line reads as missing, never as a silently guessed
+    default.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        InstancesError: the terragrunt.hcl is missing (never scaffolded)
+            or carries no assignment for the key (the message names the
+            scaffold command that writes one).
+    """
+    validate_name(name)
+    terragrunt_hcl = terragrunt_dir(root, name) / "terragrunt.hcl"
+    try:
+        text = terragrunt_hcl.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise InstancesError(
+            f"ERROR: no terragrunt.hcl at {terragrunt_hcl}\n"
+            f"Instance {name!r} has no scaffold, so there is no gcp {key} "
+            "to read.\n"
+            f"Scaffold it first: make instance-init INSTANCE={name} "
+            f"CLOUD=gcp PROJECT=<project> ZONE=<zone>"
+        ) from exc
+    match = pattern.search(text)
+    if match is None:
+        raise InstancesError(
+            f"ERROR: {terragrunt_hcl} carries no {key} input\n"
+            f"The gcp {key} is read from the scaffolded "
+            f"'{key} = \"...\"' assignment, and this file has none.\n"
+            f"Scaffold it first: make instance-init INSTANCE={name} "
+            f"CLOUD=gcp PROJECT=<project> ZONE=<zone>"
+        )
+    return match.group(1)
+
+
+def gcp_scaffold_project(root: Path, name: str) -> str:
+    """The `project_id` input `name`'s scaffolded terragrunt.hcl carries.
+
+    The state store's pre-deploy reader: the bucket is composed and
+    created before the apply that would write the engine address record,
+    so it composes from the scaffold, never the record.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        InstancesError: the scaffold is missing or carries no
+            `project_id` assignment.
+    """
+    return _gcp_scaffold_input(root, name, "project_id", _GCP_PROJECT_PATTERN)
+
+
+def gcp_scaffold_zone(root: Path, name: str) -> str:
+    """The `zone` input `name`'s scaffolded terragrunt.hcl carries.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        InstancesError: the scaffold is missing or carries no `zone`
+            assignment.
+    """
+    return _gcp_scaffold_input(root, name, "zone", _GCP_ZONE_PATTERN_SCAFFOLD)
+
+
+def gcp_scaffold_region(root: Path, name: str) -> str:
+    """The `region` input `name`'s scaffolded terragrunt.hcl carries.
+
+    Raises:
+        InvalidInstanceNameError: `name` fails `validate_name`.
+        InstancesError: the scaffold is missing or carries no `region`
+            assignment.
+    """
+    return _gcp_scaffold_input(root, name, "region", _GCP_REGION_PATTERN_SCAFFOLD)
+
+
 def engine_vault_name(root: Path, name: str) -> str:
     """The Key Vault name `name`'s engine address record carries.
 

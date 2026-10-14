@@ -5,7 +5,8 @@
 # discipline. See Section 5.6 of repos/spec/devcontainer-platform.md.
 #
 # The two payloads ride SEPARATE metadata keys, and the split is the
-# design: `user-data` (the rendered cloud-init, base64) runs ONCE at first
+# design: `user-data` (the rendered cloud-init, plain text: GCE's
+# datasource does not decode base64) runs ONCE at first
 # boot and builds the engine; `startup-script` (plain text -- the guest
 # agent writes and executes it, and it sits far under the 256 KiB metadata
 # value cap) runs at EVERY boot and applies the TLS material from the
@@ -81,13 +82,14 @@ resource "google_compute_instance" "this" {
   # The metadata surface: guest attributes enabled (the startup script's
   # checksum, provisioned and error attributes are the boot-applied
   # install's whole channel -- without this flag the guest-attribute API
-  # answers nothing), the rendered cloud-init (base64 -- gce decodes the
-  # user-data value itself), the plain-text startup script (see this
-  # file's header for the split), and google's own logging switch.
+  # answers nothing), the rendered cloud-init (plain text: GCE's
+  # datasource hands it over undecoded, so base64 arrives as gibberish
+  # cloud-init ignores), the plain-text startup script (see this file's
+  # header for the split), and google's own logging switch.
   metadata = {
     enable-guest-attributes = "TRUE"
     google-logging-enabled  = "true"
-    user-data = base64encode(templatefile("${path.module}/boot-user-data.yaml", {
+    user-data = templatefile("${path.module}/boot-user-data.yaml", {
       daemon_user          = var.docker_daemon_user
       data_root            = var.docker_data_root
       tls_listen_address   = var.docker_tls_listen_address
@@ -96,7 +98,7 @@ resource "google_compute_instance" "this" {
       docker_repo_base_url = var.docker_repo_base_url
       docker_repo_channel  = var.docker_repo_channel
       data_disk_name       = local.data_disk_name
-    }))
+    })
     startup-script = templatefile("${path.module}/boot-startup-script.sh", {
       secrets_prefix = var.name_prefix
       project_id     = var.project_id

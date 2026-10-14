@@ -71,7 +71,7 @@ SENTINEL="general-dev: tls material applied"
 # the environment; the default covers a first boot where cloud-init is
 # still installing packages, and its exhaustion is a failure, never a
 # silent continue.
-if [ -n "$GD_STARTUP_MARKER_TIMEOUT" ]; then
+if [ -n "${GD_STARTUP_MARKER_TIMEOUT:-}" ]; then
     MARKER_TIMEOUT="$GD_STARTUP_MARKER_TIMEOUT"
 else
     MARKER_TIMEOUT=600

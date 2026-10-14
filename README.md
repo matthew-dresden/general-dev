@@ -58,6 +58,47 @@ Four kinds of remote engine, one workflow shape each: any machine reachable over
 
 - All four clone the workspace into a volume on the engine, and all four keep the container running after you disconnect.
 
+### The cloud engines
+
+The three provisioned clouds share one route, in the order they are run:
+
+```sh
+make instance-init INSTANCE=<project> CLOUD=<azure|gcp> <per-cloud inputs, table below>
+                                         # scaffold remote-instances/<project>/terragrunt.hcl;
+                                         # edit its inputs where the table below says so
+make instance-deploy INSTANCE=<project>  # converge: provision, record the engine address,
+                                         # trust chain where missing, push secrets
+make remote INSTANCE=<project>           # open the cloud forward as a background daemon,
+                                         # point docker at the engine, return
+make build INSTANCE=<project>            # clone into a volume on the engine, build, run postCreate
+make exec INSTANCE=<project>             # a shell inside the container
+```
+
+| Cloud | `instance-init` form | Cloud CLI prerequisite | What `instance-deploy` provisions | The one thing you edit or know |
+|---|---|---|---|---|
+| EC2 | `make instance-init INSTANCE=<project>`, no `CLOUD=` and no cloud inputs | aws CLI v2 and session-manager-plugin | the instance; records its EC2 id; the trust chain where missing; pushes the secrets | edit the instance type, volume sizes, availability zone and tags; set `REMOTE_AWS_REGION` and `REMOTE_AWS_PROFILE` before `instance-deploy` (env, no default) |
+| Azure | `make instance-init INSTANCE=<project> CLOUD=azure LOCATION=<location>` (`VM_SIZE=` optional) | azure CLI (`brew install azure-cli`), logged in with `az login` | the resource group, vnet and subnet, the VM, its Key Vault, the relay namespace and hybrid connection, and the state storage; records the relay address | add your Entra object ids to `relay_sender_object_ids` and `keyvault_officer_object_ids`: the one edit the scaffold cannot do for you, because they name you; the relay listener idles out after fifteen minutes |
+| GCP | `make instance-init INSTANCE=<project> CLOUD=gcp PROJECT=<project-id> ZONE=<zone>` (`VM_SIZE=` optional) | gcloud CLI (`brew install google-cloud-sdk`), logged in with `gcloud auth login` | the state bucket, the VPC with the IAP-only ingress rule, Cloud Router and NAT, the VM, the service account and the six secrets; records the engine address | the zone derives the region and `VM_SIZE` defaults to `e2-standard-2`; nothing else to edit |
+
+- `make instance-init` writes the one file a new instance needs and never deploys; `make instance-deploy` applies it, is safe to re-run, and prints the follow-on chain above when it finishes.
+- Common build prerequisites, on the laptop: docker CLI and git; for `build` and `rebuild` additionally `npm install -g @devcontainers/cli` and `jq`. Missing tools fail fast with the install command.
+- Then VS Code → **Dev Containers: Attach to Running Container…**; the same step is the way back after any disconnect, the container never stopped (`shutdownAction: "none"`).
+- The transport, the same shape on all three: each engine's port forward carries the docker API under mutual TLS, and nothing listens for inbound connections beyond the engine's own guarded path.
+  - EC2: the daemon binds its TLS port to loopback and the only route to it is the SSM port forward, authenticated by IAM; the certificate authenticates the client and IAM authorizes the session; host access does not exist, by design.
+  - Azure: the daemon binds its TLS port to loopback and the only route is the relay hybrid connection the VM dials out to; Entra ID authorizes the sender half, and mutual TLS then authenticates the docker client at the daemon; no public IP, no inbound rule, and no SSH anywhere, by design.
+  - GCP: IAP is the SSM analog, Google's proxy that dials the VM's internal address after your gcloud identity passes IAM, so the forward is your own gcloud CLI process, and nothing listens for inbound connections from outside the VPC.
+    - The daemon binds every interface as rootless mTLS, because the forward terminates on nic0; the boundary is the VPC's single ingress rule, `35.235.240.0/20` to the daemon port.
+    - IAP is free; its idle sessions drop at roughly an hour and reestablish automatically, and gcloud owns the reestablishment; no external IP, no SSH, and no bastion anywhere, by design.
+- The skill route, per cloud: `gd-env-setup-remote` (EC2), `gd-env-setup-azure` (azure) or `gd-env-setup-gcp` (GCP), each performing the same provisioning and certificate steps and verifying each one before continuing; `gd-cert-lifecycle` owns certificate renewal afterward, and `gd-instance-list` validates which engine is active. The full roster: [docs/skills.md](docs/skills.md).
+
+Deeper on each step:
+
+- The transports and the daily connect/disconnect workflow: [remote-docker README](.devcontainer/remote-docker/README.md)
+- The runbook's remote paths: [environment-setup.md](docs/environment-setup.md), "Pointing at the remote engine instead" and its per-cloud subsections ("The ssh engine path", "The Azure engine path", "The Google Cloud engine path")
+- Provisioning by hand: EC2 IAM, network and user data in [docs/ec2-requirements.md](docs/ec2-requirements.md); azure network, identity and relay in [docs/azure-requirements.md](docs/azure-requirements.md); GCP network, security and IAM in [docs/gcp-requirements.md](docs/gcp-requirements.md)
+- The Terraform modules and their full input surfaces: [provider/azure/README.md](provider/azure/README.md), [provider/gcp/README.md](provider/gcp/README.md)
+- Instance architecture and the state model: [remote-instances/README.md](remote-instances/README.md)
+
 ### General SSH
 
 Works against any endpoint where `ssh <user>@<host> docker version` can answer: a Linux daemon through its socket, or Windows through Docker Desktop's exposed TCP endpoint.
@@ -66,17 +107,17 @@ Works against any endpoint where `ssh <user>@<host> docker version` can answer: 
 
 ```sh
 make engine-init INSTANCE=<name> HOST=<host> USER=<user>
-                                         # declares the engine (engine.json);
-                                         # PORT= and DOCKER_ADDR= optional
-                                         # (defaults: 22 and the Linux docker
-                                         # socket; a Windows endpoint needs
-                                         # DOCKER_ADDR=tcp://localhost:2375)
-make engine-verify INSTANCE=<name>       # one-shot proof: ssh forward opens,
-                                         # docker handshake answers, forward closes
-make remote INSTANCE=<name>              # open the forward as a background daemon,
-                                         # point docker at the engine, return
-make build INSTANCE=<name>               # clone into a volume on the engine, build, run postCreate
-make exec INSTANCE=<name>                # a shell inside the container
+                                          # declares the engine (engine.json);
+                                          # PORT= and DOCKER_ADDR= optional
+                                          # (defaults: 22 and the Linux docker
+                                          # socket; a Windows endpoint needs
+                                          # DOCKER_ADDR=tcp://localhost:2375)
+make engine-verify INSTANCE=<name>        # one-shot proof: ssh forward opens,
+                                          # docker handshake answers, forward closes
+make remote INSTANCE=<name>               # open the forward as a background daemon,
+                                          # point docker at the engine, return
+make build INSTANCE=<name>                # clone into a volume on the engine, build, run postCreate
+make exec INSTANCE=<name>                 # a shell inside the container
 ```
 
 - No AWS involvement: configuration seeds into the workspace volume at build time, and credentials arrive by the hostcreds push over the same forward.
@@ -86,132 +127,8 @@ make exec INSTANCE=<name>                # a shell inside the container
 
 Deeper on each step:
 
-- The full path with platform guidance (Linux socket vs the Windows TCP requirement): [environment-setup.md, "The ssh engine path"](docs/environment-setup.md)
+- Platform guidance (Linux socket vs the Windows TCP requirement): [environment-setup.md, "The ssh engine path"](docs/environment-setup.md)
 - Engine architecture and the daily workflow: [remote-docker README](.devcontainer/remote-docker/README.md)
-
-### AWS EC2
-
-The EC2 engine is a rootless Docker daemon on an EC2 instance.
-
-- Nothing listens for inbound connections: the daemon binds its TLS port to loopback on the instance, and the only route to it is an SSM port forward, authenticated by IAM, carrying the docker API under mutual TLS.
-- The certificate authenticates the client; IAM authorizes the session.
-- Host access does not exist, by design.
-
-**Prerequisites (laptop):** aws CLI v2, session-manager-plugin, docker CLI, git; for `build`/`rebuild` additionally `npm install -g @devcontainers/cli` and `jq`. Missing tools fail fast with the install command.
-
-**The make route, in the order they are run:**
-
-```sh
-make instance-init INSTANCE=<project>    # scaffold remote-instances/<project>/terragrunt.hcl
-                                          # then edit its inputs: instance type, volume
-                                          # sizes, availability zone, tags
-make instance-deploy INSTANCE=<project>  # converge: provision, record the EC2 id, trust
-                                          # chain where missing, push secrets
-make remote INSTANCE=<project>           # open the SSM forward as a background daemon,
-                                          # point docker at the instance, return
-make build INSTANCE=<project>            # clone into a volume on the engine, build, run postCreate
-make exec INSTANCE=<project>             # a shell inside the container
-```
-
-- `make instance-init` writes the one file a new instance needs and never deploys; `make instance-deploy` applies it and is safe to re-run, and prints the follow-on chain above when it finishes.
-- Then VS Code → **Dev Containers: Attach to Running Container…**.
-- The same step is the way back after any disconnect; the container never stopped (`shutdownAction: "none"`).
-
-**The skill route:** `gd-env-setup-remote` performs the same provisioning and certificate steps and verifies each one before continuing, `gd-cert-lifecycle` owns certificate renewal afterward, and `gd-instance-list` validates which engine is active. The full roster: [docs/skills.md](docs/skills.md).
-
-Deeper on each step:
-
-- Which instance a command acts on when `INSTANCE` is omitted, and addressing engines without switching context (`ENGINE=local|<name>`): [environment-setup.md, "Working with several engines at once"](docs/environment-setup.md)
-- Instance architecture, prerequisites and the daily connect/disconnect workflow: [remote-docker README](.devcontainer/remote-docker/README.md)
-- Provisioning an instance by hand (IAM, network, user data): [docs/ec2-requirements.md](docs/ec2-requirements.md)
-
-### Azure
-
-The azure engine is a rootless Docker daemon on an Azure virtual machine.
-
-- Nothing listens for inbound connections: the daemon binds its TLS port to loopback on the VM, and the only route to it is an Azure Relay hybrid connection the VM dials out to.
-- Entra ID authorizes the laptop's sender half of that connection; mutual TLS then authenticates the docker client at the daemon.
-- No public IP, no inbound rule, and no SSH anywhere, by design.
-- The VM's relay listener stops itself after fifteen idle minutes, so the relay accrues listener time only while you are working.
-
-**Prerequisites (laptop):** azure CLI (`brew install azure-cli`, logged in with `az login`), docker CLI, git; for `build`/`rebuild` additionally `npm install -g @devcontainers/cli` and `jq`, the same build prerequisites the EC2 path has. Missing tools fail fast with the install command.
-
-**The make route, in the order they are run:**
-
-```sh
-make instance-init INSTANCE=<project> CLOUD=azure LOCATION=<location>
-                                          # scaffold remote-instances/<project>/terragrunt.hcl
-                                          # ([VM_SIZE=] optional); then edit its inputs and
-                                          # add your Entra object id to relay_sender_object_ids
-                                          # and keyvault_officer_object_ids, see below
-make instance-deploy INSTANCE=<project>  # converge: provisions the resource group, vnet and
-                                          # subnet, the VM, its Key Vault, the relay namespace
-                                          # and hybrid connection, and the state storage;
-                                          # records the relay address; prints the follow-on chain
-make remote INSTANCE=<project>           # open the relay forward as a background daemon,
-                                          # point docker at the engine, return
-make build INSTANCE=<project>            # clone into a volume on the engine, build, run postCreate
-make exec INSTANCE=<project>             # a shell inside the container
-```
-
-- `make instance-init` writes the one file a new azure instance needs and never deploys.
-- The two object-id lists are the one edit the scaffold cannot do for you, because they name *you*.
-  - `relay_sender_object_ids` grants your Entra identity the Relay Sender role on the namespace: the right to open the sender half of the hybrid connection the forward rides.
-  - `keyvault_officer_object_ids` grants the Key Vault Secrets Officer role on the vault: the right to publish the instance's TLS material and secrets into it.
-- The deploy carries both in as role assignments on the first run, so without them it provisions fine and the connect and the credential push afterwards have no grant to stand on.
-- `make instance-deploy` applies the file, is safe to re-run, and prints the follow-on chain above when it finishes.
-- Then VS Code → **Dev Containers: Attach to Running Container…**.
-- The same step is the way back after any disconnect; the container never stopped (`shutdownAction: "none"`).
-
-**The skill route:** `gd-env-setup-azure` performs the same provisioning and certificate steps and verifies each one before continuing, `gd-cert-lifecycle` owns certificate renewal afterward, and `gd-instance-list` validates which engine is active. The full roster: [docs/skills.md](docs/skills.md).
-
-Deeper on each step:
-
-- Provisioning an instance by hand (network, identity, relay, host configuration): [docs/azure-requirements.md](docs/azure-requirements.md)
-- The Terraform module and its full input surface: [provider/azure/README.md](provider/azure/README.md)
-- Instance architecture and the state model: [remote-instances/README.md](remote-instances/README.md)
-- The full ordered runbook: [environment-setup.md, "The Azure engine path"](docs/environment-setup.md)
-
-### Google Cloud
-
-The gcp engine is a rootless Docker daemon on a Google Cloud virtual machine.
-
-- Nothing listens for inbound connections from outside the VPC: IAP is the SSM analog, Google's proxy that dials the VM's internal address after your gcloud identity passes IAM, so the forward is your own gcloud CLI process carrying the docker API under mutual TLS.
-- The daemon binds every interface as rootless mTLS, because the forward terminates on nic0; the boundary is the VPC's single ingress rule, `35.235.240.0/20` to the daemon port.
-- IAP is free, and its idle sessions drop at roughly an hour and reestablish automatically; gcloud owns the reestablishment.
-- No external IP, no SSH, and no bastion anywhere, by design.
-
-**Prerequisites (laptop):** gcloud CLI (`brew install google-cloud-sdk`, logged in with `gcloud auth login`), docker CLI, git; for `build`/`rebuild` additionally `npm install -g @devcontainers/cli` and `jq`, the same build prerequisites the EC2 path has. Missing tools fail fast with the install command.
-
-**The make route, in the order they are run:**
-
-```sh
-make instance-init INSTANCE=<project> CLOUD=gcp PROJECT=<project-id> ZONE=us-east4-a [VM_SIZE=]
-                                          # scaffold remote-instances/<project>/terragrunt.hcl
-                                          # (the zone derives the region; VM_SIZE defaults
-                                          # to e2-standard-2); then edit its inputs if needed
-make instance-deploy INSTANCE=<project>  # converge: ensures the state bucket, provisions the VPC
-                                          # with the IAP-only ingress rule, Cloud Router and NAT,
-                                          # the VM, the service account and the six secrets;
-                                          # records the engine address; prints the follow-on chain
-make remote INSTANCE=<project>           # open the IAP forward as a background daemon,
-                                          # point docker at the engine, return
-make build INSTANCE=<project>            # clone into a volume on the engine, build, run postCreate
-make exec INSTANCE=<project>             # a shell inside the container
-```
-
-- `make instance-init` writes the one file a new gcp instance needs and never deploys; `make instance-deploy` applies it, is safe to re-run, and prints the follow-on chain above when it finishes.
-- Then VS Code → **Dev Containers: Attach to Running Container…**.
-- The same step is the way back after any disconnect; the container never stopped (`shutdownAction: "none"`).
-
-**The skill route:** `gd-env-setup-gcp` performs the same provisioning and certificate steps and verifies each one before continuing, `gd-cert-lifecycle` owns certificate renewal afterward, and `gd-instance-list` validates which engine is active. The full roster: [docs/skills.md](docs/skills.md).
-
-Deeper on each step:
-
-- Provisioning an instance by hand (network, IAM, host configuration): [docs/gcp-requirements.md](docs/gcp-requirements.md)
-- The Terraform module and its full input surface: [provider/gcp/README.md](provider/gcp/README.md)
-- Instance architecture and the state model: [remote-instances/README.md](remote-instances/README.md)
-- The full ordered runbook: [environment-setup.md, "The Google Cloud engine path"](docs/environment-setup.md)
 
 ## Daily use
 
@@ -259,10 +176,8 @@ How VS Code discovers nested repositories, and what postCreate writes to make cl
   - For example, `make skills-install AGENT=claude SCOPE=global` symlinks the roster into `~/.claude/skills`.
   - Symlinks, never copies; see [docs/skills.md](docs/skills.md).
 - `make verify-container` re-checks the pushed credentials inside the container: fragment modes, the startup block, silent shell startup, and git and aws reachability for whichever sources the manifest names.
-- One remote engine per project under `remote-instances/`: the `make help` INSTANCES group scaffolds, converges, powers and retires the EC2 kind, the azure kind and the gcp kind (`CLOUD=azure LOCATION=<location>` or `CLOUD=gcp PROJECT=<project-id> ZONE=<zone>` at scaffold time selects them; `make list-instances` shows every instance's live state).
-  - The third engine kind, SSH, is any machine reachable over SSH that runs Docker: a Linux daemon through its socket or a TCP endpoint, or Windows through Docker Desktop's exposed TCP endpoint. An SSH engine, declared by a `remote-instances/<name>/engine.json` manifest with no AWS behind it, is scaffolded, verified and removed with `make engine-init`, `make engine-verify` and `make engine-remove`.
-  - The fourth engine kind, azure, is an Azure virtual machine reached through an Azure Relay hybrid connection the VM dials out to (no public IP, no inbound rule, no SSH), scaffolded, converged, powered and retired with the same `instance-*` targets, `make instance-init … CLOUD=azure LOCATION=<location>`, `make instance-deploy`, `make instance-stop`/`instance-start` and `make instance-destroy`.
-  - The fifth engine kind, gcp, is a Google Cloud virtual machine reached through an IAP TCP forward the gcloud CLI opens (no external IP, no SSH, one ingress rule admitting Google's IAP range), scaffolded, converged, powered and retired with the same `instance-*` targets, `make instance-init … CLOUD=gcp PROJECT=<project-id> ZONE=<zone> [VM_SIZE=]`, `make instance-deploy`, `make instance-stop`/`instance-start` and `make instance-destroy`.
+- One remote engine per project under `remote-instances/`, matching the quick-start table's row per cloud: `make instance-init` scaffolds, `make instance-deploy` converges, `make instance-stop`/`make instance-start` power and `make instance-destroy` retires, for the EC2 kind, the azure kind and the gcp kind alike; `make list-instances` shows every instance's live state.
+  - The SSH kind, any machine reachable over SSH that runs Docker (a Linux daemon through its socket or a TCP endpoint, or Windows through Docker Desktop's exposed TCP endpoint), is declared by a `remote-instances/<name>/engine.json` manifest with no AWS behind it, and scaffolded, verified and removed with `make engine-init`, `make engine-verify` and `make engine-remove`.
 - Claude Code starts on the classic renderer and never offers the flicker-free fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen` still opts in for the current container.
 - Claude Code talks to the z.ai GLM Coding Plan: `/model opus` (or `--model opus`) runs the GLM 5.3 flagship, `/model sonnet` runs GLM 5.3 Flash, and `/status` shows the active one. The key comes from `ZAI_API_KEY` at request time, never from a file.
 - Shift+Enter inserts a newline in every VS Code terminal, tmux or not, once `make keybindings` has run on the machine.

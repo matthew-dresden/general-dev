@@ -316,6 +316,9 @@ _ENUMERATION_WORD_TO_COUNT = {
     "nine": 9,
     "ten": 10,
     "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
 }
 
 # AC-DOC-003's negative clause: no claim that DEVCONTAINER_TRANSPORT changes

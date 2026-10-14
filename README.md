@@ -1,10 +1,10 @@
 # general-dev
 
-A reusable devcontainer platform: one repository that creates and manages one to many separate development containers, whether on this laptop's Docker engine, on remote EC2 engines, on SSH engines, on Azure engines, or on any mix of them at once. The projects you work on are cloned inside the workspace as plain nested repositories.
+A reusable devcontainer platform: one repository that creates and manages one to many separate development containers, whether on this laptop's Docker engine, on remote EC2 engines, on SSH engines, on Azure engines, on GCP engines, or on any mix of them at once. The projects you work on are cloned inside the workspace as plain nested repositories.
 
 What that buys you, and why you would use it:
 
-- **Many containers, four kinds of engine.** A container per clone, per branch under review, or per project.
+- **Many containers, five kinds of engine.** A container per clone, per branch under review, or per project.
   - Name one at creation: `make build NAME=x`.
   - List them across every engine at once: `make list-containers`.
   - Address each engine directly (`ENGINE=local` or `ENGINE=<instance>`), so parallel terminals never switch the docker context underneath each other.
@@ -12,6 +12,7 @@ What that buys you, and why you would use it:
   - **EC2 engine.** Reached through an SSM port forward carrying the docker API under mutual TLS. No key pair and no host access, by design.
   - **SSH engine.** Reached through a managed ssh local forward.
   - **Azure engine.** Reached through an Azure Relay hybrid connection the VM dials out to; no inbound ports, no public IP, and no SSH anywhere, by design.
+  - **GCP engine.** Reached through an IAP TCP forward the gcloud CLI opens; no external IP, no SSH, and the only ingress rule admits Google's IAP range to the daemon port, by design.
   - On every path, `make exec` opens a shell in a container: the only shell this workspace offers.
 - **Every operation is automated.** The whole lifecycle for engines and containers alike runs through make targets, one command each.
   - Engines: provisioning, certificates, secrets, power, teardown.
@@ -53,9 +54,9 @@ Deeper on each step:
 
 ## Quick start, remote
 
-Three kinds of remote engine, one workflow shape each: any machine reachable over SSH that runs Docker (general SSH), an EC2 instance this repository provisions (AWS EC2), or an Azure virtual machine this repository provisions (Azure).
+Four kinds of remote engine, one workflow shape each: any machine reachable over SSH that runs Docker (general SSH), an EC2 instance this repository provisions (AWS EC2), an Azure virtual machine this repository provisions (Azure), or a Google Cloud virtual machine this repository provisions (Google Cloud).
 
-- All three clone the workspace into a volume on the engine, and all three keep the container running after you disconnect.
+- All four clone the workspace into a volume on the engine, and all four keep the container running after you disconnect.
 
 ### General SSH
 
@@ -171,6 +172,47 @@ Deeper on each step:
 - Instance architecture and the state model: [remote-instances/README.md](remote-instances/README.md)
 - The full ordered runbook: [environment-setup.md, "The Azure engine path"](docs/environment-setup.md)
 
+### Google Cloud
+
+The gcp engine is a rootless Docker daemon on a Google Cloud virtual machine.
+
+- Nothing listens for inbound connections from outside the VPC: IAP is the SSM analog, Google's proxy that dials the VM's internal address after your gcloud identity passes IAM, so the forward is your own gcloud CLI process carrying the docker API under mutual TLS.
+- The daemon binds every interface as rootless mTLS, because the forward terminates on nic0; the boundary is the VPC's single ingress rule, `35.235.240.0/20` to the daemon port.
+- IAP is free, and its idle sessions drop at roughly an hour and reestablish automatically; gcloud owns the reestablishment.
+- No external IP, no SSH, and no bastion anywhere, by design.
+
+**Prerequisites (laptop):** gcloud CLI (`brew install google-cloud-sdk`, logged in with `gcloud auth login`), docker CLI, git; for `build`/`rebuild` additionally `npm install -g @devcontainers/cli` and `jq`, the same build prerequisites the EC2 path has. Missing tools fail fast with the install command.
+
+**The make route, in the order they are run:**
+
+```sh
+make instance-init INSTANCE=<project> CLOUD=gcp PROJECT=brimcapitalgroup ZONE=us-east4-a [VM_SIZE=]
+                                          # scaffold remote-instances/<project>/terragrunt.hcl
+                                          # (the zone derives the region; VM_SIZE defaults
+                                          # to e2-standard-2); then edit its inputs if needed
+make instance-deploy INSTANCE=<project>  # converge: ensures the state bucket, provisions the VPC
+                                          # with the IAP-only ingress rule, Cloud Router and NAT,
+                                          # the VM, the service account and the six secrets;
+                                          # records the engine address; prints the follow-on chain
+make remote INSTANCE=<project>           # open the IAP forward as a background daemon,
+                                          # point docker at the engine, return
+make build INSTANCE=<project>            # clone into a volume on the engine, build, run postCreate
+make exec INSTANCE=<project>             # a shell inside the container
+```
+
+- `make instance-init` writes the one file a new gcp instance needs and never deploys; `make instance-deploy` applies it, is safe to re-run, and prints the follow-on chain above when it finishes.
+- Then VS Code → **Dev Containers: Attach to Running Container…**.
+- The same step is the way back after any disconnect; the container never stopped (`shutdownAction: "none"`).
+
+**The skill route:** `gd-env-setup-gcp` performs the same provisioning and certificate steps and verifies each one before continuing, `gd-cert-lifecycle` owns certificate renewal afterward, and `gd-instance-list` validates which engine is active. The full roster: [docs/skills.md](docs/skills.md).
+
+Deeper on each step:
+
+- Provisioning an instance by hand (network, IAM, host configuration): [docs/gcp-requirements.md](docs/gcp-requirements.md)
+- The Terraform module and its full input surface: [provider/gcp/README.md](provider/gcp/README.md)
+- Instance architecture and the state model: [remote-instances/README.md](remote-instances/README.md)
+- The full ordered runbook: [environment-setup.md, "The Google Cloud engine path"](docs/environment-setup.md)
+
 ## Daily use
 
 | | |
@@ -217,9 +259,10 @@ How VS Code discovers nested repositories, and what postCreate writes to make cl
   - For example, `make skills-install AGENT=claude SCOPE=global` symlinks the roster into `~/.claude/skills`.
   - Symlinks, never copies; see [docs/skills.md](docs/skills.md).
 - `make verify-container` re-checks the pushed credentials inside the container: fragment modes, the startup block, silent shell startup, and git and aws reachability for whichever sources the manifest names.
-- One remote engine per project under `remote-instances/`: the `make help` INSTANCES group scaffolds, converges, powers and retires the EC2 kind and the azure kind (`CLOUD=azure` at scaffold time selects it; `make list-instances` shows every instance's live state).
+- One remote engine per project under `remote-instances/`: the `make help` INSTANCES group scaffolds, converges, powers and retires the EC2 kind, the azure kind and the gcp kind (`CLOUD=azure LOCATION=<location>` or `CLOUD=gcp PROJECT=<project-id> ZONE=<zone>` at scaffold time selects them; `make list-instances` shows every instance's live state).
   - The third engine kind, SSH, is any machine reachable over SSH that runs Docker: a Linux daemon through its socket or a TCP endpoint, or Windows through Docker Desktop's exposed TCP endpoint. An SSH engine, declared by a `remote-instances/<name>/engine.json` manifest with no AWS behind it, is scaffolded, verified and removed with `make engine-init`, `make engine-verify` and `make engine-remove`.
   - The fourth engine kind, azure, is an Azure virtual machine reached through an Azure Relay hybrid connection the VM dials out to (no public IP, no inbound rule, no SSH), scaffolded, converged, powered and retired with the same `instance-*` targets, `make instance-init … CLOUD=azure LOCATION=<location>`, `make instance-deploy`, `make instance-stop`/`instance-start` and `make instance-destroy`.
+  - The fifth engine kind, gcp, is a Google Cloud virtual machine reached through an IAP TCP forward the gcloud CLI opens (no external IP, no SSH, one ingress rule admitting Google's IAP range), scaffolded, converged, powered and retired with the same `instance-*` targets, `make instance-init … CLOUD=gcp PROJECT=<project-id> ZONE=<zone> [VM_SIZE=]`, `make instance-deploy`, `make instance-stop`/`instance-start` and `make instance-destroy`.
 - Claude Code starts on the classic renderer and never offers the flicker-free fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen` still opts in for the current container.
 - Claude Code talks to the z.ai GLM Coding Plan: `/model opus` (or `--model opus`) runs the GLM 5.3 flagship, `/model sonnet` runs GLM 5.3 Flash, and `/status` shows the active one. The key comes from `ZAI_API_KEY` at request time, never from a file.
 - Shift+Enter inserts a newline in every VS Code terminal, tmux or not, once `make keybindings` has run on the machine.
@@ -230,7 +273,7 @@ How VS Code discovers nested repositories, and what postCreate writes to make cl
 - This repo's `.devcontainer` is self-managed: asdf is not installed, minikube is disabled, and the postcreate wrapper carries the SSM secret bootstrap. Nothing regenerates the directory, so changes here stay. (Provenance and license attribution: `NOTICE`.)
 - Rotating a credential is `make creds-init` plus `make push-creds`, never a `shell.env` edit; after any `shell.env` change, re-run `make push-secrets` so the remote copies match.
 - Credentials live only in the macOS keychain, git's own credential helper and the AWS SSO session, all named in the gitignored hostcreds manifest, plus the fragments `make push-creds` writes inside the container.
-  - Parameter Store (`/devcontainer/<project>/…`) holds the credential-free `shell.env` and profile map for an EC2 engine; an azure engine's copies publish to the instance's own Key Vault instead, one vault per instance.
+  - Parameter Store (`/devcontainer/<project>/…`) holds the credential-free `shell.env` and profile map for an EC2 engine; an azure engine's copies publish to the instance's own Key Vault instead, one vault per instance; a gcp engine's publish into its project's Secret Manager under the instance's own secrets prefix, six per-instance secrets.
   - None of it is ever in git.
 
 ## Layout
@@ -242,6 +285,7 @@ How VS Code discovers nested repositories, and what postCreate writes to make cl
 | `.devcontainer/remote-docker/` | Remote engines, EC2 and azure: the transports (SSM forward, relay forward), certificate and secret entry points, instance config, see its [README](.devcontainer/remote-docker/README.md) |
 | `remote-instances/` | One remote engine per project: a Terragrunt deployment (`terragrunt.hcl`) per EC2 or azure engine (the azure one including `root-azure.hcl` and the `_envcommon/remote-azure.hcl` layer), scaffolded by `make instance-init`, or an SSH engine declared by an `engine.json` manifest, scaffolded by `make engine-init`; see its [README](remote-instances/README.md) |
 | `provider/azure/` | The azure Terraform module those deployments consume: network, platform unit (security group, identity, Key Vault, relay) and VM, see its [README](provider/azure/README.md) |
+| `provider/gcp/` | The gcp Terraform module those deployments consume: network (the single IAP-range ingress rule, Cloud Router and NAT), platform unit (service account, six Secret Manager secrets) and VM, see its [README](provider/gcp/README.md) |
 | `.devcontainer/nix-family-os/`, `wsl-family-os/` | Host-side proxy (tinyproxy) helpers for local mode |
 | `repos/` | Where project repositories are cloned. Only its `.gitkeep` is tracked |
 | `.agents/skills/` | Canonical agent-agnostic skills home (roster prefixed `gd-`); wired into an agent on this Mac by the `skills-*` make targets |
@@ -251,5 +295,6 @@ How VS Code discovers nested repositories, and what postCreate writes to make cl
 | `docs/environment-files.md` | Every private configuration value and what it does |
 | `docs/ec2-requirements.md` | Provisioning an EC2 instance by hand: network, IAM, host configuration |
 | `docs/azure-requirements.md` | Provisioning an azure instance by hand: network, identity and relay, host configuration |
+| `docs/gcp-requirements.md` | Provisioning a gcp instance by hand: network, security and IAM, host configuration |
 | `docs/skills.md` | The skill roster: families, flows, coverage guarantee, and installing it for an agent |
 | `CLAUDE.md` | Engineering standards for AI-assisted work in this repo |

@@ -28,10 +28,14 @@ and `certs.rotate_client` (E6-F1-S2-T1) generate the material `## Operations`
 names below, and the publication surface is per kind:
 `certs.publication_set(instance)` declares exactly the
 Parameter Store entries Section 5.3 allows an EC2 instance's material to
-publish, and `certs.azure_publication_set(instance)` declares exactly the
+publish, `certs.azure_publication_set(instance)` declares exactly the
 Key Vault secret names an azure engine's material publishes into, written
 through `certs.KeyVaultClient` with the vault named by the engine's relay
-address record. Every
+address record, and `certs.gcp_publication_set(instance)` declares exactly
+the Secret Manager secret ids a gcp engine's material publishes into, the
+three TLS secrets and the checksum secret beside them, written through
+`certs.SecretManagerClient` with the project named by the engine's address
+record. Every
 operation below calls these functions directly rather than shelling out to
 `openssl` by hand. `certs.py` is the one place that ever does that
 (Section 3.4's dependency rule), and every publish step iterates whatever
@@ -44,7 +48,8 @@ any spelling, the CA private key's own second, structural enforcement of the
 5.5). Publication is `certs.publish`'s own
 operation, behind `make cert-publish` (Section 4.1.2): it issues the server
 material, writes each entry the kind's publication set returned (Parameter
-Store on EC2; the instance's Key Vault on azure), then reads every one back
+Store on EC2; the instance's Key Vault on azure; the project's Secret
+Manager on gcp), then reads every one back
 and compares it against what it wrote
 before reporting anything published. It reaches the store through those clients
 rather than shelling out to `aws` or `az` here for two reasons. The value
@@ -101,7 +106,7 @@ here.
 |---|---|---|
 | Create CA | `make cert-ca` | Refuses when a CA already exists, naming the path. |
 | Issue client certificate / Rotate client certificate | `make cert-client` | Run again at renewal. |
-| Issue server certificate | `make cert-publish` | Issues the server material and publishes it to the engine's store: Parameter Store on EC2, the instance's Key Vault on azure. |
+| Issue server certificate | `make cert-publish` | Issues the server material and publishes it to the engine's store: Parameter Store on EC2, the instance's Key Vault on azure, the project's Secret Manager (with the checksum secret beside the material) on gcp. |
 | Install on the instance | `make cert-install` | The instance fetches the published material and starts its daemon; run after `make cert-publish`. |
 | Report expiry | `make cert-status` | Output shape and exit codes are `## Expiry`'s. |
 
@@ -217,7 +222,15 @@ for who may command the daemon versus who may open the tunnel). Concretely,
 per kind: on EC2, removing the principal's `ssm:StartSession` permission;
 on azure, removing the principal's Azure Relay Sender role on the namespace,
 or deleting the relay hybrid connection itself — either one renders the
-laptop's sender half uncouplable, and the certificate it presented inert.
+laptop's sender half uncouplable, and the certificate it presented inert;
+on gcp, removing the principal's IAP authorization (its Owner grant or its
+`roles/iap.tunnelResourceAccessor` role) renders the laptop uncouplable the
+same way, and that kind's boot-applied material model adds a second lever,
+because the VM applies material only at boot: deleting the instance's six
+Secret Manager secrets, or publishing material whose checksum the VM has
+not yet applied, is what makes the old server material inert at the next
+boot, when the startup script's drift comparison finds nothing or something
+different to serve.
 A request to
 revoke a certificate is answered with this explanation and the per-kind
 remedy, never with a report that a certificate was
@@ -279,7 +292,7 @@ which operation in `## Operations` clears a given row.
 | `openssl` is missing or too old | `certs.py`'s `_require_openssl` runs before any `mkdir` or `os.open` in every operation above, so a missing binary leaves no half-created instance directory or file behind; the reported error names the tool and its install command (`brew install openssl` on macOS, `apt-get install openssl` on Linux/WSL). `_require_openssl` checks only that a binary named `openssl` is on `PATH`, not that it supports the flags `certs.py` uses, so a *present but too old* `openssl` fails opaquely instead: `_issue_certificate`'s signing step passes `x509 -req -copy_extensions copy`, an OpenSSL 3.0+-only flag, and a pre-3.0 `openssl` (including the LibreSSL binary macOS ships at `/usr/bin/openssl`, still on `PATH` on an unconfigured host) rejects it with `unknown option -copy_extensions`, surfaced as an `openssl x509 failed` `CertsError` naming that raw stderr rather than the tool-version cause. `docs/environment-files.md`'s certificate section documents the OpenSSL 3.0+ requirement and the `brew`-before-`/usr/bin` `PATH` ordering it depends on, and `gd-env-setup-local` checks it; verifying the binary's actual capability rather than merely its presence on `PATH` is left to a later work unit rather than folded into this one. |
 | A precondition check fails | A client or server certificate requested for an instance whose CA private key is missing: stop naming the path, and state that creating a new CA invalidates every certificate it signed and requires reissuing and republishing the server certificate. Never create a second CA silently, because the resulting handshake failure later would name neither cause. A certificate found present but expired during Issue or Rotate: fail naming its role, its path and its expiry date, and name the `## Operations` row that reissues it. Never proceed with an expired certificate, and never report one as a warning; only `## Expiry`'s own `RENEW` row, for a certificate still inside the warning window, is a warning. An instance name that resolves to no directory under `remote-instances/` (Section 4.1.1's own edge case): fail listing every configured instance, the same message every remote make target already gives for the same condition, rather than this skill inventing a second one. |
 | An action the skill took did not verify | Every row in `## Operations` parses what it generated before trusting it, and every row that publishes re-reads the parameter afterward rather than trusting the publish call's own exit code; every row that changes context-relevant material additionally requires `## Docker context`'s handshake to succeed. When a parse disagrees (a missing required SAN, a missing `clientAuth`), when a re-read disagrees with what was generated, or when the handshake still fails after `## Docker context`'s rewrite: this skill reports the material generated (and, for a publish, published), the verification that failed, and that the operation is not complete. It never retries the same generation or publish silently a second time; a second attempt is a fresh invocation the operator asks for, the same rule `gd-container-lifecycle`'s own "never retry silently" states for its own actions. |
-| A step needs the operator (SSO, `sudo`, a key, an `az` login) | Publishing needs a valid cloud credential for the engine's kind: an AWS session on the answered profile for an EC2 instance, an `az` login authorized for the vault on azure. On an unresolved credential, this skill states the exact login (`aws sso login --profile <profile>` with the profile substituted, or `az login`), waits for the operator to complete the browser login, then re-probes (`hostprobe.probe_aws_identity(runner, profile=<profile>)`, or the re-run `az account show`) before continuing, the identical remedy and re-probe `gd-env-setup-remote` and `gd-env-setup-azure` state for the same condition, reused rather than a second implementation. Never assumes the login succeeded, and never falls back to any other credential source (Section 5.4: one backend). |
+| A step needs the operator (SSO, `sudo`, a key, an `az` or `gcloud` login) | Publishing needs a valid cloud credential for the engine's kind: an AWS session on the answered profile for an EC2 instance, an `az` login authorized for the vault on azure, a `gcloud` login authorized for the project on gcp. On an unresolved credential, this skill states the exact login (`aws sso login --profile <profile>` with the profile substituted, `az login`, or `gcloud auth login`), waits for the operator to complete the browser login, then re-probes (`hostprobe.probe_aws_identity(runner, profile=<profile>)`, the re-run `az account show`, or the re-run `gcloud auth list`) before continuing, the identical remedy and re-probe `gd-env-setup-remote`, `gd-env-setup-azure` and `gd-env-setup-gcp` state for the same condition, reused rather than a second implementation. Never assumes the login succeeded, and never falls back to any other credential source (Section 5.4: one backend). |
 | A gate is reached (Section 4.4) | This skill reaches no Section 4.4 gate: every operation in `## Operations` generates or reads certificate material and publishes a Parameter Store entry, never a `terragrunt apply` or `terragrunt destroy`, and creates or destroys no AWS resource of the kind `GATE-APPLY`, `GATE-CUTOVER` or `GATE-DESTROY` governs. |
 | An answer fails validation | The one answer this skill's own roster row asks for, which instance, is covered by the precondition row above when it names no configured directory. A request this skill has no operation for (naming `revoke` being the one Section 3.6.3 anticipates) is answered by `## Revocation` stating why the request cannot be honored, rather than this skill guessing which of `## Operations`'s five real operations was meant. |
 | The operator aborts | Nothing in `## Operations` writes a file or publishes a parameter until generation has completed and the value to write is already in hand; an abort before that point leaves every existing file and every existing parameter exactly as they were. An abort between a publish and `## Docker context`'s own handshake leaves the new material published but the context not yet confirmed against it, reported exactly as the "did not verify" row above states, never as success, and resolved by re-invoking this skill rather than this skill retrying on its own. |

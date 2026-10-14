@@ -1,6 +1,6 @@
-# remote-docker. Remote Docker engines for devcontainers (EC2 and azure)
+# remote-docker. Remote Docker engines for devcontainers (EC2, azure and gcp)
 
-Laptop-side tooling that connects VS Code Dev Containers to a Docker engine running on a remote instance: an EC2 instance over an AWS SSM port forward, or an Azure virtual machine over an Azure Relay hybrid connection, each secured with mTLS.
+Laptop-side tooling that connects VS Code Dev Containers to a Docker engine running on a remote instance: an EC2 instance over an AWS SSM port forward, an Azure virtual machine over an Azure Relay hybrid connection, or a Google Cloud virtual machine over a gcloud IAP tunnel, each secured with mTLS.
 
 - Devcontainers run **on the instance**, with source code cloned into named Docker volumes there, so containers keep running and lose nothing when the laptop disconnects, sleeps, or shuts down.
 
@@ -30,11 +30,13 @@ flowchart LR
   - The docker API is authenticated by mutual TLS, and the daemon's TLS listener is bound to loopback on the instance, so the port forward is the only way to reach it.
   - There is no SSH layer, no key pair and no interactive path to the host at all.
   - The azure kind carries the same doctrine in that cloud's vocabulary: its network security group's rule list is empty, its VM has no public IP, and the transport is an Azure Relay hybrid connection whose listener is a unit on the VM dialing *outward* to the relay service; the laptop's forward is the sender half, authorized by Entra, and the mTLS docker API rides it to the same loopback listener.
+  - The gcp kind carries it in that cloud's vocabulary: the VM has no external IP, the network's only ingress rule admits Google's IAP range (`35.235.240.0/20`) to the daemon's TLS port, and the transport is an IAP TCP tunnel the gcloud CLI opens to the VM's internal address; the tunnel authenticates with the operator's gcloud identity through IAM, and the mTLS docker API rides it to a daemon bound to every interface, rootless, because the tunnel terminates on nic0.
 - **Survives disconnects:** `shutdownAction: "none"` in devcontainer.json keeps containers running when VS Code detaches; `live-restore` keeps them running across dockerd restarts; source lives in Docker volumes on the instance.
 - **Secrets:** never in git.
   - `push-secrets.sh` publishes the local gitignored `shell.env` / `aws-profile-map.json` to SSM Parameter Store per project; the postcreate wrapper fetches them on the instance via the instance role.
   - An SSH engine (a `remote-instances/<name>/engine.json` manifest) runs with zero AWS: the same transform is seeded into the workspace volume at build time and refreshable in the running container with `make push-secrets`, and Parameter Store is never involved.
   - An azure engine's copies publish to the instance's own Key Vault instead, and the container fetches them with the VM's managed identity, with no stored credential anywhere on the azure path.
+  - A gcp engine's copies publish into its project's Secret Manager instead, as two secrets under the instance's prefix beside the TLS material's three and their checksum, and the container fetches them with the VM service account's metadata token, with no stored credential anywhere on the gcp path.
 
 ### Questions this design answers
 
@@ -72,6 +74,7 @@ A short exchange on the decisions the architecture forces; each answer links the
 - docker CLI (a local engine is not required)
 - git
 - azure CLI (`brew install azure-cli`), needed only for azure engines and logged in with `az login` before one is provisioned or connected to
+- gcloud CLI (`brew install google-cloud-sdk`), needed only for gcp engines and logged in with `gcloud auth login` before one is provisioned or connected to (the IAP tunnel is gcloud's own process and authenticates with that session)
 - Client certificate material for the instance, issued by `make cert-status`'s module (`~/.docker/certs/<instance>/`)
 
 `make build` / `make rebuild` additionally need:
@@ -418,6 +421,9 @@ Two rules keep it honest, and both matter when editing these scripts:
 - **The azure relay answers 404, no listener:** the VM-side listener stops itself when idle, because azure bills listener-hours while a connected listener exists. `make connect-start INSTANCE=<name>` starts it first (through one `az vm run-command invoke`) and then opens the forward; run that rather than retrying the call that surfaced the 404.
 - **The azure listener refuses to start:** read why with the same channel the start used: `az vm run-command invoke -g <resource-group> --vm-name <vm-name> --command-id RunShellScript --scripts "journalctl -u gd-relay -n 50 --no-pager"`, then take the action its output names.
 - **Every azure probe dashes / the VM is deallocated:** `make instance-start INSTANCE=<name>` starts the VM and waits until its agent reports ready, then `make remote INSTANCE=<name>` re-opens the forward.
+- **A gcp connect fails with an authorization error and the daemon gone:** the tunnel child authenticates with the ambient gcloud session, which expired. Run `gcloud auth login`, then `make connect-refresh INSTANCE=<name>`.
+- **Every gcp probe dashes / the VM is TERMINATED:** `make instance-start INSTANCE=<name>` starts the VM and waits for the startup script's `general-dev/provisioned` marker, then `make remote INSTANCE=<name>` re-opens the tunnel.
+- **A gcp cert-install or instance-start times out naming `general-dev/error`:** the VM's startup script recorded its own diagnostic; resolve the failing step it names in the project (a missing secret, a denied binding), then re-run. The serial console carries the same log: `gcloud compute instances get-serial-port-output <vm> --zone <zone>`.
 - **Instance not Online in SSM:** check instance state and `aws ssm describe-instance-information` in us-east-1.
 - **postCreate fails with "shell.env not found … SSM bootstrap failed":** `push-secrets.sh` wasn't run for this project, or the parameter prefix differs; the wrapper uses `/devcontainer/<workspace-basename>` by default (override with `DEVCONTAINER_SSM_PREFIX`).
 - **Back to local development:** `make disconnect`, switches to the `LOCAL_DOCKER_CONTEXT` from `config.env` (`orbstack`).

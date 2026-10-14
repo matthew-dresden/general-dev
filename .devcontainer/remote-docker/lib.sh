@@ -72,10 +72,11 @@ rd_require_aws_config() {
 
 rd_require_remote_config() {
   # An SSH engine's manifest (remote-instances/<name>/engine.json) is its
-  # whole declaration, and an azure engine's relay needs no EC2 id and no
-  # AWS session either: neither kind has an id store or an AWS login behind
-  # it, so only the docker context the engine answers on is demanded.
-  if [ "$(rd_engine_kind)" = "ssh" ] || [ "$(rd_engine_kind)" = "azure" ]; then
+  # whole declaration, and the azure and gcp engines need no EC2 id and no
+  # AWS session either: none of those kinds has an id store or an AWS login
+  # behind it, so only the docker context the engine answers on is demanded.
+  if [ "$(rd_engine_kind)" = "ssh" ] || [ "$(rd_engine_kind)" = "azure" ] \
+    || [ "$(rd_engine_kind)" = "gcp" ]; then
     : "${REMOTE_DOCKER_CONTEXT:?REMOTE_DOCKER_CONTEXT must be set}"
     return 0
   fi
@@ -99,13 +100,19 @@ rd_check_prereqs() {
   # An SSH engine opens no AWS session: neither the aws CLI nor the SSM
   # session-manager-plugin is on its path. An azure engine opens no AWS
   # session either: its relay is reached through the az CLI alone, so az is
-  # the one tool demanded of it. Docker and jq are demanded by their own
-  # call sites, as before.
+  # the one tool demanded of it. A gcp engine likewise: its tunnel is the
+  # gcloud CLI's own `compute start-iap-tunnel`, so gcloud is the one tool
+  # demanded of it. Docker and jq are demanded by their own call sites, as
+  # before.
   if [ "$(rd_engine_kind)" = "ssh" ]; then
     return 0
   fi
   if [ "$(rd_engine_kind)" = "azure" ]; then
     rd_require_cmd az "Install: brew install azure-cli"
+    return 0
+  fi
+  if [ "$(rd_engine_kind)" = "gcp" ]; then
+    rd_require_cmd gcloud "Install: brew install google-cloud-sdk"
     return 0
   fi
   rd_require_cmd aws "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
@@ -261,10 +268,10 @@ rd_require_engine_instance_agreement() {
 
 # The engine-kind predicate and its refusal, the one place this library
 # tells the kinds apart. An instance's kind is the KIND line its resolved
-# address block exported (the resolver emits KIND=ssh for an SSH engine and
-# KIND=azure for an azure engine, and no KIND line at all for an EC2
-# instance), so the default is ec2, the same default every consumer of the
-# resolved block reads. Callers must have
+# address block exported (the resolver emits KIND=ssh for an SSH engine,
+# KIND=azure for an azure engine, KIND=gcp for a gcp engine, and no KIND
+# line at all for an EC2 instance), so the default is ec2, the same default
+# every consumer of the resolved block reads. Callers must have
 # resolved the instance (rd_resolve_instance) before asking, because KIND is
 # exported by that resolution; before it has run, the predicate honestly
 # answers ec2, which is exactly what an unresolved EC2 default is.
@@ -413,12 +420,13 @@ rd_engine_diagnosis() {
     printf 'start Docker (OrbStack, Docker Desktop, dockerd), or target the remote engine: make remote\n'
     return 0
   fi
-  # An SSH engine and an azure engine open no AWS session, so the SSO check
-  # below is an EC2 question only; running it for either would read an
-  # absent profile as an expired session and send the operator to sign in
-  # to something the engine never uses.
+  # An SSH engine, an azure engine and a gcp engine open no AWS session, so
+  # the SSO check below is an EC2 question only; running it for any of the
+  # others would read an absent profile as an expired session and send the
+  # operator to sign in to something the engine never uses.
   if [ "$(rd_engine_kind)" != "ssh" ] \
     && [ "$(rd_engine_kind)" != "azure" ] \
+    && [ "$(rd_engine_kind)" != "gcp" ] \
     && command -v aws > /dev/null 2>&1 \
     && ! aws sts get-caller-identity --profile "$REMOTE_AWS_PROFILE" --region "$REMOTE_AWS_REGION" > /dev/null 2>&1; then
     printf 'the AWS session for profile '\''%s'\'' has expired, which breaks the port forward.\n' "$REMOTE_AWS_PROFILE"
@@ -433,6 +441,11 @@ rd_engine_diagnosis() {
   if [ "$(rd_engine_kind)" = "azure" ]; then
     printf "the relay forward to %s's endpoint has dropped.\n" "${REMOTE_DOCKER_CONTEXT:-<unresolved>}"
     printf '%s reopens it\n' "$refresh_remedy"
+    return 0
+  fi
+  if [ "$(rd_engine_kind)" = "gcp" ]; then
+    printf "the IAP tunnel to %s's endpoint has dropped.\n" "${REMOTE_DOCKER_CONTEXT:-<unresolved>}"
+    printf '%s reopens it; if the cause is an expired gcloud session, gcloud auth login first\n' "$refresh_remedy"
     return 0
   fi
   printf 'the SSM port forward to %s has dropped.\n' "$REMOTE_INSTANCE_ID"

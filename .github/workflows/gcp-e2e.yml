@@ -1,0 +1,172 @@
+# Live Google Cloud end-to-end verification for the gcp engine kind.
+#
+# Runs the real lifecycle against a disposable instance in us-east4-a:
+# provision, converge, publish, tunnel, daemon handshake, power cycle,
+# teardown, and a zero-residue check. Costs real money for the duration of
+# the run (a cheap VM plus disks); it exists because the hermetic suite can
+# fake gcloud but cannot fake Google Cloud.
+#
+# Authentication is Workload Identity Federation, not a stored key: a
+# workload identity pool and provider trust this repository, and the three
+# identifiers below are repository variables (not secrets). Configure once:
+#   1. Enable the APIs the run and the setup need: compute, secretmanager,
+#      iam, iamcredentials, storage, sts.
+#   2. Create a workload identity pool and a GitHub OIDC provider in it.
+#   3. Before binding the provider, mint one token from this repo and read
+#      its actual `sub` claim (the Azure lesson: the subject carries id
+#      suffixes you cannot guess), then set the provider's attribute
+#      condition to that exact subject. Never use a pull-request subject:
+#      a PR-triggered job must never be able to mint this credential.
+#   4. Create a service account, grant it Owner on the project (the run
+#      creates role assignments, which is what forces the wide role; a
+#      narrower preset is a follow-up input, not the default), and bind
+#      roles/iam.workloadIdentityUser on the SA to the pool provider.
+#   5. Set repository variables: GCP_WIF_PROVIDER
+#      (projects/NUMBER/locations/global/workloadIdentityPools/POOL/
+#      providers/NAME), GCP_SERVICE_ACCOUNT (the SA email),
+#      GCP_PROJECT (the project id).
+# The deploying principal is also the secret owner on every path the run
+# touches: state_store_gcp.ensure and the converge create and read state
+# and secrets as the impersonated service account.
+name: gcp-engine-e2e
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: gcp-engine-e2e
+  cancel-in-progress: false
+
+env:
+  LOCAL_DOCKER_CONTEXT: default
+
+jobs:
+  gcp-engine-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y jq
+          sudo npm install -g @devcontainers/cli
+
+      - name: Install terraform and terragrunt
+        run: |
+          set -euo pipefail
+          wget -qO- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y terraform
+          sudo curl -fsSL https://github.com/gruntwork-io/terragrunt/releases/latest/download/terragrunt_linux_amd64 -o /usr/local/bin/terragrunt
+          sudo chmod +x /usr/local/bin/terragrunt
+          terraform version
+          terragrunt --version
+
+      - name: Enable the APIs a fresh project needs
+        run: |
+          set -euo pipefail
+          for api in compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com iamcredentials.googleapis.com storage.googleapis.com sts.googleapis.com; do
+            gcloud services enable "$api" --project "$GCP_PROJECT"
+          done
+        env:
+          GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+
+      - name: Scaffold the disposable gcp instance
+        run: |
+          set -euo pipefail
+          make instance-init INSTANCE=gcp-e2e CLOUD=gcp PROJECT="$GCP_PROJECT" ZONE=us-east4-a
+        env:
+          GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+
+      - name: Converge (state store, provision, certify, publish)
+        run: |
+          set -euo pipefail
+          make instance-deploy INSTANCE=gcp-e2e
+
+      - name: Verify certificates
+        run: |
+          set -euo pipefail
+          make cert-status
+
+      - name: Open the IAP forward and prove the daemon answers
+        run: |
+          set -euo pipefail
+          make connect-start INSTANCE=gcp-e2e
+          ctx=$(docker context ls --format '{{.Name}}' | grep gcp-e2e)
+          docker --context "$ctx" version
+          docker --context "$ctx" info --format '{{.SecurityOptions}}' | grep -qi rootless
+
+      - name: Power-cycle the VM and re-prove the daemon
+        run: |
+          set -euo pipefail
+          make instance-stop INSTANCE=gcp-e2e
+          make instance-start INSTANCE=gcp-e2e
+          make cert-install INSTANCE=gcp-e2e
+          make connect-refresh INSTANCE=gcp-e2e
+          ctx=$(docker context ls --format '{{.Name}}' | grep gcp-e2e)
+          docker --context "$ctx" version
+
+      - name: Fleet status shows the gcp engine
+        run: |
+          set -euo pipefail
+          # The committed remote-dev EC2 row degrades on a runner with no AWS
+          # identity (the integration workflow's own precedent), which turns
+          # the listing's exit code; the assertion is the gcp row itself.
+          make list-instances || true
+          make -s list-instances | grep -E '^gcp-e2e .*RUNNING'
+
+      - name: Tear everything down
+        if: always()
+        run: |
+          set -euo pipefail
+          make connect-stop INSTANCE=gcp-e2e || true
+          make clean INSTANCE=gcp-e2e || true
+          make instance-destroy INSTANCE=gcp-e2e
+          make bucket-delete INSTANCE=gcp-e2e
+
+      - name: Prove zero residue
+        if: always()
+        run: |
+          set -euo pipefail
+          leftover_vms=$(gcloud compute instances list --project "$GCP_PROJECT" --filter="name~^gcp-e2e" --format="value(name)")
+          [ -z "$leftover_vms" ] || {
+            echo "ERROR: leftover instances:" >&2
+            echo "$leftover_vms" >&2
+            exit 1
+          }
+          leftover_buckets=$(gcloud storage buckets list --project "$GCP_PROJECT" --filter="name~^gdstate" --format="value(name)")
+          [ -z "$leftover_buckets" ] || {
+            echo "ERROR: leftover state buckets:" >&2
+            echo "$leftover_buckets" >&2
+            exit 1
+          }
+          leftover_secrets=$(gcloud secrets list --project "$GCP_PROJECT" --filter="name~gcp-e2e" --format="value(name)")
+          [ -z "$leftover_secrets" ] || {
+            echo "ERROR: leftover secrets:" >&2
+            echo "$leftover_secrets" >&2
+            exit 1
+          }
+          [ ! -e "$HOME/.docker/certs/gcp-e2e" ] || {
+            echo "ERROR: leftover local certificate directory" >&2
+            exit 1
+          }
+          docker context ls --format '{{.Name}}' | grep gcp-e2e && {
+            echo "ERROR: leftover docker context" >&2
+            exit 1
+          } || true
+        env:
+          GCP_PROJECT: ${{ vars.GCP_PROJECT }}

@@ -62,6 +62,7 @@ The tooling is macOS-first: the keychain credential source, the OrbStack context
 | zsh | ships with macOS | `zsh --version` |
 | aws CLI v2 | `brew install awscli` | `aws --version` prints `aws-cli/2…` |
 | azure CLI | `brew install azure-cli` | `az version` prints a version and a set of module versions |
+| gcloud CLI | `brew install google-cloud-sdk` | `gcloud version` prints a version |
 | gh | `brew install gh`, then `gh auth login` | `gh auth status` reports a login |
 | devcontainer CLI | `npm install -g @devcontainers/cli` | `devcontainer --version` |
 | jq | `brew install jq` | `jq --version` |
@@ -74,6 +75,10 @@ Two of those need one more step beyond installation:
 The azure CLI row is needed only when azure engines are in play; a machine that never targets one never runs it.
 
 - `az login` must succeed before an azure engine is provisioned or connected to, because the relay token the forward presents and the state store's subscription lookup both resolve through that login.
+
+The gcloud CLI row is the same shape for gcp engines: needed only when one is in play.
+
+- `gcloud auth login` must succeed before a gcp engine is connected to, because the IAP tunnel is the gcloud CLI's own process and authenticates with the operator's ambient session.
 
 Verify: every row's command above answers without an error.
 
@@ -307,6 +312,7 @@ The `make help` INSTANCES group drives every stage:
 - The probes are kind-aware.
 - An ssh engine (one declared by a `remote-instances/<name>/engine.json` manifest; see the ssh transport in devcontainer.md) runs no EC2 probe at all and answers one reachability probe instead, rendered in the same STATE column as `ok` or `unreachable`.
 - An azure engine answers with its VM power state and its Key Vault TLS material, the record's VM name standing in for the EC2 id, with the probes its kind does not have dashed.
+- A gcp engine answers the same way from its own platform: its VM status and its six Secret Manager secrets, the record's VM name standing in for the EC2 id, with the probes its kind does not have dashed.
 - `make instance-status INSTANCE=<name>` narrows the report to one instance.
 - The targets that accept `INSTANCE=<name>` also take `ALL=1` for every configured instance at once.
 
@@ -320,7 +326,7 @@ The container side mirrors both shapes.
 ### The ssh engine path
 
 - An EC2 instance is one kind of remote engine.
-- The other kind is any machine reachable over SSH that runs Docker: a Linux daemon through its socket or a TCP endpoint, or Windows through Docker Desktop's exposed TCP endpoint.
+- Another kind is any machine reachable over SSH that runs Docker: a Linux daemon through its socket or a TCP endpoint, or Windows through Docker Desktop's exposed TCP endpoint.
 - The whole engine is one `remote-instances/<name>/engine.json` manifest.
 - No AWS value exists behind it anywhere: no Terragrunt deployment, no state bucket, no Parameter Store prefix, no certificates, no instance role.
 - The ssh transport in [devcontainer.md](devcontainer.md)'s "Transport" section carries the docker API to it over a managed ssh local forward instead of an SSM session.
@@ -343,7 +349,7 @@ The lifecycle is five targets:
 ### The Azure engine path
 
 - An EC2 instance is one provisioned kind of remote engine.
-- The other provisioned kind is an Azure virtual machine.
+- Another provisioned kind is an Azure virtual machine.
 - Like the EC2 kind, this repository provisions it through Terragrunt, but against a different cloud and a different transport.
 - The deployment creates the resource group, the virtual network and subnet, the platform unit (a zero-inbound network security group, a user-assigned managed identity, the instance's Key Vault, and the relay namespace and hybrid connection), and the VM itself with its root and data disks.
 - The instance carries no public IP and no SSH surface anywhere: the docker API travels over the relay hybrid connection, whose listener end is a unit on the VM dialing *outward* to the relay service, and whose sender half is the laptop's forward, authorized by Entra and carrying the same mTLS docker API.
@@ -376,6 +382,56 @@ The connect flow differs from the SSM one in two ways worth knowing:
 - A 401 partway through a workday is remedied the same way the SSO expiry is: `az login`, then `make connect-refresh INSTANCE=<name>` re-opens the forward from its recorded command.
 - `gd-env-setup-azure` drives this whole path for an agent.
 
+### The Google Cloud engine path
+
+- An EC2 instance and an Azure virtual machine are the first two provisioned kinds of remote engine.
+- The third provisioned kind is a Google Cloud virtual machine.
+- Like the azure kind, this repository provisions it through Terragrunt, but against a different cloud and a different transport.
+- The deployment creates the custom-mode virtual network and subnetwork, the single ingress firewall rule (tcp on the daemon port from `35.235.240.0/20`, Google's documented IAP range), the Cloud Router and Cloud NAT that give the internal-only instance its egress path, the platform unit (a service account and the six per-instance Secret Manager secrets with their per-secret reader bindings), and the VM itself with its root and data disks.
+- The instance carries no external IP and no SSH surface anywhere: the docker API travels over an IAP TCP tunnel the gcloud CLI opens, whose remote end is the VM's internal address and whose local end is one loopback port gcloud multiplexes for every docker call.
+- The daemon binds every interface as rootless mTLS, because the tunnel terminates on nic0; the security boundary is the VPC's one ingress rule, not a bind address.
+- State storage is one GCS bucket per instance behind the gcs backend, ensured before the first Terragrunt run: the gcp counterpart of the per-instance S3 bucket and the azure storage account.
+
+The lifecycle is the same targets the other provisioned kinds use, selected by `CLOUD=gcp` at scaffold time:
+
+| Stage | Command |
+|---|---|
+| Scaffold the deployment | `make instance-init INSTANCE=<name> CLOUD=gcp PROJECT=<project-id> ZONE=<zone>` (`VM_SIZE=` optional, default `e2-standard-2`; the region derives from the zone; `REGION=` and `AMI=` are EC2-only and refused here) |
+| Edit the deployment | edit the file `instance-init` wrote: machine type, volume sizes, CIDR blocks, tags |
+| Provision and converge | `make instance-deploy INSTANCE=<name>`: Terragrunt apply; ensures the state bucket, provisions the network with its one rule and the NAT, the platform unit and the VM, writes the engine address record, pushes secrets |
+| Open the tunnel | `make remote INSTANCE=<name>` (or `make connect-start INSTANCE=<name>`, which leaves the machine-wide context alone); the engine's own kind selects the IAP transport, so a gcp engine needs no variable |
+| Build and open | `make build INSTANCE=<name>`, then `make reopen INSTANCE=<name>` |
+| Pause to save cost | `make instance-stop INSTANCE=<name>`, later `make instance-start INSTANCE=<name>` (stop and start the VM; containers, volumes and checkouts survive) |
+| Retire | `make instance-destroy INSTANCE=<name>`: Terragrunt destroy plus cleanup of the local record, context, certificates and the six Secret Manager secrets; the state bucket survives, like the EC2 bucket |
+
+The connect flow is the gcloud one:
+
+- The tunnel is gcloud's own process (`gcloud compute start-iap-tunnel`), authenticated with the operator's ambient `gcloud auth login` session: gcloud identity, then IAP, then the VM's nic0, then mTLS at the daemon.
+- gcloud owns the token and the listener: there is no token cache of ours to refresh, and IAP ends idle sessions at roughly an hour while gcloud reestablishes the local listener on its own.
+- An expired gcloud session kills the tunnel child; the remedy is `gcloud auth login`, then `make connect-refresh INSTANCE=<name>`.
+- The boot-applied material model differs from the install-on-demand one the other kinds use: the VM's startup script fetches the TLS material at every boot, applies it only when its checksum has drifted from the published one, and restarts the daemon only then. A rotation reboots the daemon only on drift, and `make cert-install INSTANCE=<name>` waits on the guest attributes (`general-dev/tls-checksum`, `general-dev/provisioned`) that report the result.
+
+Troubleshooting entries specific to this kind:
+
+- **The tunnel child dies with an expired session.**
+  - Symptom: `make connect-status INSTANCE=<name>` reports the daemon gone, and its log names an authorization failure.
+  - Cause: the ambient gcloud session expired; the tunnel authenticates with it on every dial.
+  - Fix: `gcloud auth login`, then `make connect-refresh INSTANCE=<name>`, which re-opens the forward from its recorded command with a fresh session.
+- **The VM is TERMINATED.**
+  - Symptom: every gcp probe dashes, or a connect names the VM not running.
+  - Cause: the instance was stopped, deliberately with `make instance-stop` or by a project idle policy.
+  - Fix: `make instance-start INSTANCE=<name>` starts the VM and waits for the startup script's `general-dev/provisioned` marker, then `make remote INSTANCE=<name>` re-opens the tunnel.
+- **An attribute wait times out naming `general-dev/error` content.**
+  - Symptom: `make cert-install INSTANCE=<name>` or `make instance-start INSTANCE=<name>` fails after its bounded wait, carrying the VM's own diagnostic from the `general-dev/error` guest attribute.
+  - Cause: the VM's startup script failed at the step the diagnostic names, typically a missing secret, a denied binding or a metadata read.
+  - Fix: resolve the named cause in the project (publish the material, repair the binding), then re-run the same command; the serial console carries the same log (`gcloud compute instances get-serial-port-output <vm> --zone <zone>`).
+- **An idle tunnel drop mid-session.**
+  - Symptom: a docker call hangs once and then answers, or `make connect-status` shows a fresh listener.
+  - Cause: IAP ends idle sessions at roughly an hour, and gcloud reestablishes the local listener on its own.
+  - Fix: none; keep working. A call that dies exactly at a drop boundary is retried by re-running it.
+
+- `gd-env-setup-gcp` drives this whole path for an agent.
+
 ### What scaffold and deploy do
 
 - `make instance-init INSTANCE=<name>` writes the one file a new instance requires, `remote-instances/<name>/terragrunt.hcl`, from a template carrying the default sizing and a freshly allocated CIDR block, then prints the commonly edited inputs.
@@ -384,9 +440,10 @@ The connect flow differs from the SSM one in two ways worth knowing:
 - To track a deployment deliberately, delete that appended line and commit the directory.
 - On the EC2 kind, `instance-init`'s `REGION=` option selects only where the default AMI and availability zone are looked up; the deployment region is `REMOTE_AWS_REGION`, which every Terragrunt-running target requires with no default.
 - On the azure kind, `REGION=` is refused and the deployment's placement is the `LOCATION=` the scaffold carries as an input; no `REMOTE_AWS_REGION` is demanded of azure commands.
+- On the gcp kind, `REGION=` and `AMI=` are refused the same way: the placement is the `PROJECT=` and `ZONE=` the scaffold carries as inputs, the region derives from the zone, and no `REMOTE_AWS_REGION` is demanded of gcp commands.
 
-- `make instance-deploy INSTANCE=<name>` converges the instance: terragrunt init (bootstrapping the EC2 instance's state bucket on the very first run, or ensuring the azure instance's state storage account), validate, a plan guarded against accidental replacement, apply of exactly the guarded plan, then follow-ups.
-- The follow-ups run only when a status probe reports the corresponding piece missing: recording the applied address (the EC2 id, or the azure engine-address record written from the terragrunt outputs), issuing and publishing the certificate material, and pushing secrets.
+- `make instance-deploy INSTANCE=<name>` converges the instance: terragrunt init (bootstrapping the EC2 instance's state bucket on the very first run, or ensuring the azure instance's state storage account, or ensuring the gcp instance's state bucket), validate, a plan guarded against accidental replacement, apply of exactly the guarded plan, then follow-ups.
+- The follow-ups run only when a status probe reports the corresponding piece missing: recording the applied address (the EC2 id, or the engine-address record written from the terragrunt outputs on the azure and gcp kinds), issuing and publishing the certificate material, and pushing secrets.
 - When the material is already present, the steps are skipped entirely, so a deploy never restarts a live daemon; renewals are manual, via `make cert-status`.
 - The replacement guard is the safety net worth knowing: a plan that would replace or destroy resources is refused unless `CONFIRM=replace` is set, naming the offending plan lines (see Troubleshooting).
 
@@ -394,7 +451,8 @@ The connect flow differs from the SSM one in two ways worth knowing:
 
 - Two independent factors stack up between this machine and the docker daemon, each answering a different question.
 - On the EC2 kind, IAM authorizes the SSM session: the `ssm:StartSession` grant decides who may open the port forward at all, and removing it is the only revocation mechanism the platform has.
-- On the azure kind, Entra authorizes the sender half the same way: the Azure Relay Sender role decides who may couple to the hybrid connection at all, and removing it, or deleting the hybrid connection, is that kind's revocation mechanism.
+- On the azure kind, Entra authorizes the sender half the same way: the Azure Relay Sender role decides who may couple to the hybrid connection at all, and removing it, or deleting the hybrid connection itself, is that kind's revocation mechanism.
+- On the gcp kind, IAM authorizes the tunnel the same way: the operator's Owner grant, or the narrow `roles/iap.tunnelResourceAccessor` role, decides who may open the IAP tunnel at all, and removing it is that kind's revocation mechanism.
 - The certificates then authenticate the docker API itself, in both directions, on top of that forward: the daemon presents a server certificate the client verifies, and the client presents a certificate the daemon verifies against the CA it holds.
 - Neither factor substitutes for the other.
 - A valid SSO or Entra identity alone commands nothing, and a copied client certificate is inert without a forward the cloud authorizes.
@@ -406,23 +464,24 @@ The connect flow differs from the SSM one in two ways worth knowing:
 
 ### Stop, start and destroy
 
-- `make instance-stop INSTANCE=<name>` stops the instance's VM and waits until its platform reports it down (EC2 `stopped`, azure `PowerState/deallocated`).
-- `make instance-start INSTANCE=<name>` starts it again and waits for its engine agent to report ready (the EC2 SSM agent's `Online`, or the azure VM agent's `Ready`).
+- `make instance-stop INSTANCE=<name>` stops the instance's VM and waits until its platform reports it down (EC2 `stopped`, azure `PowerState/deallocated`, gcp `TERMINATED`).
+- `make instance-start INSTANCE=<name>` starts it again and waits for its engine agent to report ready (the EC2 SSM agent's `Online`, the azure VM agent's `Ready`, or the gcp startup script's `general-dev/provisioned` marker).
 - Everything on the instance survives the cycle: containers, images, volumes, the cloned checkouts.
 - The port forward does not survive it; open the forward again after a start with `make remote INSTANCE=<name>`.
 - If connecting then still fails, reinstall the daemon's TLS material with `make cert-install INSTANCE=<name>`.
 
-- `make instance-destroy INSTANCE=<name>` runs terragrunt destroy for that instance, then cleans up everything Terragrunt does not know about: for an EC2 instance its Parameter Store parameters, for both kinds its docker context and its certificate directory (the recorded id file included; on azure the same directory carries the engine-address record).
+- `make instance-destroy INSTANCE=<name>` runs terragrunt destroy for that instance, then cleans up everything Terragrunt does not know about: for an EC2 instance its Parameter Store parameters, for a gcp instance its six Secret Manager secrets, and for every kind its docker context and its certificate directory (the recorded id file included; on the azure and gcp kinds the same directory carries the engine-address record).
 - `ALL=1` destroys every configured instance, and only that form requires `CONFIRM=destroy`, because a typo'd ALL should never be all it takes to end the fleet.
 
 - Each instance owns its remote-state store, and it stands outside that instance's lifecycle: one store per instance, named from `remote-instances/root.hcl`'s own template and a committed suffix.
 - The EC2 kind's S3 bucket is `tg-state-<instance-name>-<region>-<account-id>-<suffix>`.
 - The azure kind's storage account composes its lowercase-alphanumeric form from the same per-instance naming idea, holding a `tfstate` blob container in a dedicated `rg-<instance>-state` resource group.
+- The gcp kind's bucket composes its `gdstate-<sanitized-instance>-<digest>` form from the same idea, in the project the deployment targets.
 - No destroy target deletes it; two targets manage the stores instead, per kind.
 - `make bucket-list` shows every store the fleet's template matches and marks the ones a configured instance owns.
 - `make bucket-delete INSTANCE=<name>` purges and deletes one; `ALL=1` deletes every store in the fleet and additionally requires `CONFIRM=delete`, because it takes every instance's state history with it.
-- The surfaces are per kind: an all-EC2 fleet answers to the aws CLI and needs `REMOTE_AWS_REGION`; an all-azure fleet answers to the az CLI.
-- A fleet mixing the two kinds is refused naming them, so the per-kind forms run on a fleet configured for one kind at a time.
+- The surfaces are per kind: an all-EC2 fleet answers to the aws CLI and needs `REMOTE_AWS_REGION`; an all-azure fleet answers to the az CLI; an all-gcp fleet answers to the gcloud CLI.
+- A fleet mixing the kinds is refused naming them, so the per-kind forms run on a fleet configured for one kind at a time.
 
 ### Working with several engines at once
 

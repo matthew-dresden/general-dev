@@ -21,7 +21,7 @@ re-renders an existing file, and re-rendering is `gd-env-setup-local`'s and
 |---|---|---|
 | Create the private files | `make init` | Creates `shell.env`, `devcontainer-environment-variables.json`, `.devcontainer/aws-profile-map.json` and the hostcreds manifest `.devcontainer/hostcreds.map.json` from their examples. Never overwrites an existing file. |
 | Bind Shift+Enter | `make keybindings` | Host-only; must run on this machine, not in a container. This step is the `flow: keybindings setup` flow of `docs/skills.md`'s Flows section. |
-| Name the next skill | None | Ends by naming `gd-env-setup-local` (this machine is the engine), `gd-env-setup-remote` (an EC2 instance is the engine) or `gd-env-setup-azure` (an azure engine is the engine), per which backend the operator means to use. This skill runs none of them. |
+| Name the next skill | None | Ends by naming `gd-env-setup-local` (this machine is the engine), `gd-env-setup-remote` (an EC2 instance is the engine), `gd-env-setup-azure` (an azure engine is the engine) or `gd-env-setup-gcp` (a gcp engine is the engine), per which backend the operator means to use. This skill runs none of them. |
 
 ## Checks
 
@@ -40,8 +40,8 @@ re-renders an existing file, and re-rendering is `gd-env-setup-local`'s and
 
 ## Related skills
 
-- `gd-env-setup-local`, `gd-env-setup-remote` and `gd-env-setup-azure`: the
-  interviews this skill hands off to, one per backend; they own what the
-  files contain.
+- `gd-env-setup-local`, `gd-env-setup-remote`, `gd-env-setup-azure` and
+  `gd-env-setup-gcp`: the interviews this skill hands off to, one per
+  backend; they own what the files contain.
 - `gd-creds-setup`: the manifest `make init` creates is the manifest that
   skill operates on.

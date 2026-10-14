@@ -803,7 +803,7 @@ def test_connect_start_recipe_rejects_an_unrecognized_transport() -> None:
     assert "ERROR" in result.stderr
     assert "DEVCONTAINER_TRANSPORT" in result.stderr
     assert "bogus-transport" in result.stderr
-    for accepted in ("ssh", "ssm", "relay"):
+    for accepted in ("ssh", "ssm", "relay", "iap"):
         assert accepted in result.stderr, (
             f"the accepted-values refusal must name {accepted}, which the dispatch routes"
         )
@@ -839,6 +839,49 @@ def test_connect_recipe_dispatches_the_azure_engine_to_the_relay_route() -> None
     # The mirror guards: relay behind an ssh or an EC2 engine is refused.
     assert "DEVCONTAINER_TRANSPORT=relay selects the azure relay transport" in recipe
     assert "DEVCONTAINER_TRANSPORT=relay needs the engine named" in recipe
+
+
+def test_connect_recipe_dispatches_the_gcp_engine_to_the_iap_route() -> None:
+    """The gcp kind routes to the iap form, whose distinguishing flag is --zone.
+
+    The zone is read through the cli's gcp-zone reader -- the same accessor
+    the shell entry points consume -- and the transport reads the rest of
+    the engine address record itself, so the route carries the name, the
+    zone and the context and nothing else. The gcp contradiction refusals
+    name all three other transports symmetrically, the way the ssh and
+    azure refusals do.
+    """
+    text = _makefile_text()
+    recipe = _connect_recipe_body(text)
+    assert 'elif [ "$$kind" = "gcp" ]; then' in recipe, (
+        "the kind dispatch must carry the gcp branch"
+    )
+    assert 'route="iap"' in recipe
+    route_case_at = recipe.index('case "$$route"')
+    iap_at = recipe.index("iap)", route_case_at)
+    iap_branch = recipe[iap_at : recipe.index(";;", iap_at)]
+    assert "--name" in iap_branch and "--context" in iap_branch and "--zone" in iap_branch
+    assert "devcontainer_config.cli gcp-zone" in iap_branch, (
+        "the zone must come from the record's one cli accessor, never a second read"
+    )
+    for forbidden in ("--instance-id", "--host", "--profile", "--region", "--docker-addr"):
+        assert forbidden not in iap_branch, (
+            f"the iap route must never carry {forbidden}: the address record is the config"
+        )
+    for guard in ("REMOTE_AWS_REGION is required", "REMOTE_AWS_PROFILE is required"):
+        assert guard not in iap_branch, "the iap branch opens no AWS session"
+    # The gcp contradiction refusals, symmetric with the ssh and azure ones.
+    for other in ("ssm", "ssh", "relay"):
+        assert f"DEVCONTAINER_TRANSPORT={other}" in recipe and "is a gcp engine" in recipe
+        assert "set it to iap" in recipe
+    # The mirror guards: iap behind an ssh, azure or EC2 engine is refused.
+    assert "DEVCONTAINER_TRANSPORT=iap selects the gcp IAP tunnel transport" in recipe
+    assert "DEVCONTAINER_TRANSPORT=iap needs the engine named" in recipe
+    # The accepted-values refusal names all four transports.
+    assert (
+        "ssm (the EC2 SSM forward), ssh (the SSH engine forward), relay (the azure "
+        "relay forward), and iap (the gcp IAP tunnel forward)" in recipe
+    )
 
 
 def test_shell_env_example_documents_the_transport_selector() -> None:
@@ -1328,7 +1371,9 @@ def test_instance_init_help_row_presents_region_as_the_ami_az_lookup_only() -> N
 
     instance-init's REGION= resolves the default AMI and the written
     availability zone at scaffold time; the deployment region is
-    REMOTE_AWS_REGION. The row must say so.
+    REMOTE_AWS_REGION. The row must say so -- the description budget the
+    three-cloud row shares is tight, so the compression lives in the
+    placeholders, never in this scoping statement.
     """
     help_recipe = _help_recipe_body(_makefile_text())
     rows = [line for line in help_recipe.splitlines() if '"make instance-init"' in line]
@@ -1343,22 +1388,38 @@ def test_instance_init_help_row_presents_region_as_the_ami_az_lookup_only() -> N
 def test_instance_init_help_row_names_the_azure_form() -> None:
     """The row must name the azure invocation form alongside the EC2 one.
 
-    The azure form is INSTANCE=<instance-name> with CLOUD=azure,
-    LOCATION=<location> required and VM_SIZE= optional; the shared
-    INSTANCE=<instance-name> the row already carries is the azure form's
-    own selector, so the azure-specific tail must name the three azure
-    variables.
+    The azure form is INSTANCE= with CLOUD=azure and LOCATION= required
+    (VM_SIZE= shares the per-cloud default the cli documents); the shared
+    INSTANCE= the row carries is the azure form's own selector, so the
+    azure-specific tail names the two azure variables the operator must
+    choose.
     """
     help_recipe = _help_recipe_body(_makefile_text())
     rows = [line for line in help_recipe.splitlines() if '"make instance-init"' in line]
     assert len(rows) == 1
     assert "CLOUD=azure" in rows[0], "the row must name the azure cloud selector"
-    assert "LOCATION=<location>" in rows[0], (
+    assert "LOCATION=" in rows[0], (
         "the row must name the azure location, the one required azure variable"
     )
-    assert "[VM_SIZE=]" in rows[0], "the row must name VM_SIZE as optional"
-    assert "INSTANCE=<instance-name>" in rows[0], (
-        "the azure form's selector is the shared INSTANCE=<instance-name>"
+    assert "INSTANCE=" in rows[0], "the azure form's selector is the shared INSTANCE="
+
+
+def test_instance_init_help_row_names_the_gcp_form() -> None:
+    """The row must name the gcp invocation form alongside the other two.
+
+    The gcp form is INSTANCE= with CLOUD=gcp, PROJECT= and ZONE= required
+    (the region is derived from the zone, so it is never advertised as a
+    choice), and the row must name every cloud selector the scaffold
+    serves, so an operator scanning for their cloud finds it.
+    """
+    help_recipe = _help_recipe_body(_makefile_text())
+    rows = [line for line in help_recipe.splitlines() if '"make instance-init"' in line]
+    assert len(rows) == 1
+    assert "CLOUD=gcp" in rows[0], "the row must name the gcp cloud selector"
+    assert "PROJECT=" in rows[0], "the row must name the gcp project, a required gcp variable"
+    assert "ZONE=" in rows[0], "the row must name the gcp zone, a required gcp variable"
+    assert "REGION=" in rows[0] and "AMI/AZ" in rows[0], (
+        "the region choice advertised must stay the EC2 AMI/AZ lookup, never a gcp input"
     )
 
 
@@ -1751,18 +1812,18 @@ def test_bucket_delete_single_instance_arm_keeps_the_predicate_refusal() -> None
 
 
 def test_cert_status_refuses_only_ssh_engines_fleet_wide() -> None:
-    """cert-status renders both remote kinds (EC2 and azure carry TLS material
-    locally), so instead of the mixed-refusing fleet guard it loops the fleet
-    refusing only an ssh engine through the one predicate, naming the cert
-    remedy."""
+    """cert-status renders all three remote kinds' local TLS material (EC2,
+    azure and gcp all carry a client certificate and a CA), so instead of the
+    mixed-refusing fleet guard it loops the fleet refusing only an ssh engine
+    through the one predicate, naming the cert remedy."""
     recipe = _target_recipe_body(_makefile_text(), "cert-status")
     assert "$(DISCOVER_INSTANCE_NAMES)" in recipe
     assert "unset RD_INSTANCE_RESOLVED" in recipe
-    assert 'case "$$(rd_engine_kind)" in ec2|azure)' in recipe
+    assert 'case "$$(rd_engine_kind)" in ec2|azure|gcp)' in recipe
     assert 'rd_require_engine_kind ec2 "$(CERT_KIND_REMEDY)"' in recipe
     assert "devcontainer_config.certs status" in recipe
     assert "FLEET_STATE_KIND_GUARD" not in recipe, (
-        "cert-status deliberately reports a fleet mixing the two remote kinds, "
+        "cert-status deliberately reports a fleet mixing the remote kinds, "
         "so the mixed-refusing state guard must not front it"
     )
 
@@ -1871,13 +1932,15 @@ def test_the_init_helper_dispatches_by_engine_kind() -> None:
     "target",
     ("instance-plan", "instance-deploy", "instance-stop", "instance-start", "instance-destroy"),
 )
-def test_widened_target_allows_ec2_and_azure_and_refuses_only_ssh(target: str) -> None:
+def test_widened_target_allows_the_three_remote_kinds_and_refuses_only_ssh(
+    target: str,
+) -> None:
     """The widened targets resolve, read the kind once, and refuse only the
     ssh kind through the one predicate; the EC2 remedy stays the refusal's
-    remedy line."""
+    remedy line, and all three remote kinds pass the kind check."""
     recipe = _target_recipe_body(_makefile_text(), target)
-    assert 'case "$$kind" in ec2|azure)' in recipe, (
-        f"{target} must allow both remote kinds through its kind check"
+    assert 'case "$$kind" in ec2|azure|gcp)' in recipe, (
+        f"{target} must allow all three remote kinds through its kind check"
     )
     assert 'rd_require_engine_kind ec2 "$(EC2_KIND_REMEDY)"' in recipe, (
         f"{target}'s ssh refusal must still ride the EC2 remedy"
@@ -1886,19 +1949,23 @@ def test_widened_target_allows_ec2_and_azure_and_refuses_only_ssh(target: str) -
 
 @pytest.mark.parametrize("target", ("instance-stop", "instance-start"))
 def test_power_targets_keep_the_region_on_the_ec2_branch_only(target: str) -> None:
-    """The azure arm needs no region flag and no region guard; the EC2 arm
-    keeps both, byte-identical inside its branch."""
+    """The azure and gcp arms need no region flag and no region guard; the
+    EC2 arm keeps both, byte-identical inside its branch."""
     recipe = _target_recipe_body(_makefile_text(), target)
-    azure_at = recipe.index('if [ "$$kind" = "azure" ]; then')
-    else_at = recipe.index("else", azure_at)
+    ec2_at = recipe.index('if [ "$$kind" = "ec2" ]; then')
+    else_at = recipe.index("else", ec2_at)
     fi_at = recipe.index("fi;", else_at)
-    azure_branch = recipe[azure_at:else_at]
-    ec2_branch = recipe[else_at:fi_at]
-    assert "--region" not in azure_branch, "the azure arm carries no region flag"
-    assert "$(REMOTE_AWS_REGION_GUARD)" not in azure_branch
+    ec2_branch = recipe[ec2_at:else_at]
+    other_branch = recipe[else_at:fi_at]
     assert "--region" in ec2_branch, "the EC2 arm keeps its --region flag"
     assert "$(REMOTE_AWS_REGION_GUARD)" in ec2_branch, (
         "the region guard moved into the EC2 branch, where the region is required"
+    )
+    assert "--region" not in other_branch, "the azure and gcp arms carry no region flag"
+    assert "$(REMOTE_AWS_REGION_GUARD)" not in other_branch
+    assert 'if [ "$$kind" = "azure" ]' not in recipe, (
+        "the dispatch is EC2-versus-the-rest: every non-EC2 kind runs the same "
+        "region-less cli invocation"
     )
 
 
@@ -1937,8 +2004,9 @@ def test_destroy_azure_branch_runs_without_the_region_or_the_init_helper() -> No
     the terragrunt destroy, and the cli cleanup runs without --region."""
     recipe = _target_recipe_body(_makefile_text(), "instance-destroy")
     azure_at = recipe.index('if [ "$$kind" = "azure" ]; then', recipe.index("[DESTROY]"))
-    else_at = recipe.index("else", azure_at)
-    azure_branch = recipe[azure_at:else_at]
+    gcp_at = recipe.index('elif [ "$$kind" = "gcp" ]; then', azure_at)
+    else_at = recipe.index("else", gcp_at)
+    azure_branch = recipe[azure_at:gcp_at]
     ec2_branch = recipe[else_at : recipe.index("fi;", else_at)]
     assert "remote-instances/$$name" in azure_branch, (
         "the azure arm cds into the instance directory itself, tg_init does not run for it"
@@ -1949,6 +2017,27 @@ def test_destroy_azure_branch_runs_without_the_region_or_the_init_helper() -> No
     assert "tg_init" in ec2_branch
     assert "--region" not in azure_branch
     assert "--region" in ec2_branch
+
+
+def test_destroy_gcp_branch_keeps_the_init_helper_without_the_region() -> None:
+    """The gcp destroy arm keeps the tg_init (the gcs backend must reach its
+    bucket to read the state a destroy needs, and the ensure makes it exist)
+    and carries no region guard: the record's zone and project address the
+    VM, and the cli cleanup runs without --region."""
+    recipe = _target_recipe_body(_makefile_text(), "instance-destroy")
+    assert "the gcp VM and its disks are deleted" in recipe
+    assert "its six secrets are deleted by cleanup" in recipe
+    # The destroy dispatch is the second gcp branch in the recipe; the first
+    # is the note block above it.
+    note_end = recipe.index("fi;", recipe.index("its six secrets are deleted by cleanup"))
+    gcp_at = recipe.index('elif [ "$$kind" = "gcp" ]; then', note_end)
+    else_at = recipe.index("else", gcp_at)
+    gcp_branch = recipe[gcp_at:else_at]
+    assert "tg_init" in gcp_branch, "the ensure runs before a destroy, like the EC2 arm's"
+    assert "$(REMOTE_AWS_REGION_GUARD)" not in gcp_branch
+    assert "--region" not in gcp_branch
+    assert "terragrunt destroy -auto-approve" in gcp_branch
+    assert "instance-cleanup" in gcp_branch
 
 
 def test_destroy_azure_note_names_the_vm_and_its_disks() -> None:
@@ -2059,4 +2148,163 @@ def test_cert_install_marker_carries_the_vm_resource_id_on_azure_only() -> None:
     assert "instances.engine_address" not in ec2_arm, (
         "the recorded-id write is the azure arm's alone: EC2 has no resource "
         "id for the marker to carry"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The gcp engine kind's lifecycle, state-store and certificate wiring.
+# ---------------------------------------------------------------------------
+
+
+def test_tg_init_gcp_arm_ensures_the_gcp_state_store() -> None:
+    """The gcp kind's init work is state_store_gcp's ensure -- Terragrunt's
+    gcs backend bootstraps nothing -- and carries no region guard, the same
+    shape the azure arm keeps."""
+    helper = _make_define_body(_makefile_text(), "TERRAGRUNT_INIT_HELPER")
+    azure_at = helper.index('if [ "$$kind" = "azure" ]; then')
+    gcp_at = helper.index('elif [ "$$kind" = "gcp" ]; then', azure_at)
+    else_at = helper.index("else", gcp_at)
+    gcp_arm = helper[gcp_at:else_at]
+    ec2_arm = helper[else_at : helper.index("fi;", else_at)]
+    assert "devcontainer_config.state_store_gcp ensure" in gcp_arm
+    assert "terragrunt" not in gcp_arm, "the gcp ensure replaces bootstrap outright"
+    assert "$(REMOTE_AWS_REGION_GUARD)" not in gcp_arm, (
+        "the record's region addresses the bucket; no region is required"
+    )
+    assert "$(REMOTE_AWS_REGION_GUARD)" in ec2_arm, "the EC2 arm keeps its region guard"
+    assert "state_bucket init-form" in ec2_arm, "the EC2 arm keeps its probe-decided form"
+    assert "devcontainer_config.state_store ensure" in helper[azure_at:gcp_at], (
+        "the azure arm keeps its own ensure"
+    )
+
+
+def test_deploy_gcp_writes_the_address_record_from_the_outputs() -> None:
+    """After apply, the gcp branch reads `terragrunt output -json` and writes
+    the engine-address record through instances.write_engine_address, failing
+    fast naming any missing required output; the azure and EC2 branches keep
+    their own flows."""
+    recipe = _target_recipe_body(_makefile_text(), "instance-deploy")
+    gcp_at = recipe.index('elif [ "$$kind" = "gcp" ]; then', recipe.index("terragrunt apply"))
+    # The arm boundary is the EC2 branch's instance-link step: slicing to the
+    # next "else" would stop inside the record-writer's own python one-liner,
+    # whose conditional expressions carry the word too.
+    else_at = recipe.index("devcontainer_config.cli instance-link", gcp_at)
+    gcp_arm = recipe[gcp_at:else_at]
+    assert "instances.write_engine_address" in gcp_arm
+    assert "terragrunt output -json" in gcp_arm
+    for required in (
+        "instance_name",
+        "zone",
+        "project_id",
+        "region",
+        "secrets_prefix",
+        "state_bucket",
+    ):
+        assert f"'{required}'" in gcp_arm, (
+            f"the gcp record writer must require the {required} output, failing fast naming it"
+        )
+    assert "missing required terragrunt outputs" in gcp_arm
+    # The azure record's required keys stay untouched.
+    for azure_required in ("vm_resource_id", "relay_namespace", "vault_uri"):
+        assert f"'{azure_required}'" in recipe
+    apply_at = recipe.index("terragrunt apply -auto-approve tfplan.deploy")
+    gcp_record_at = recipe.index("instances.write_engine_address", gcp_at)
+    assert apply_at < gcp_record_at, "the gcp record is written after the apply it derives from"
+
+
+def test_deploy_gcp_installed_marker_names_the_vm() -> None:
+    """The installed marker names the VM the material was applied to, so a
+    gcp instance replaced under CONFIRM=replace reinstalls."""
+    recipe = _target_recipe_body(_makefile_text(), "instance-deploy")
+    assert (
+        "instances.engine_address(repo.find_root(Path.cwd()), '$$name').get('instance_name', '')"
+        in recipe
+    ), "the gcp marker check reads the record's VM name, the azure one its vm_resource_id"
+
+
+def test_cert_install_gcp_arm_compares_then_reboots_then_waits() -> None:
+    """The gcp arm: the drift compare via applied_checksum_matches, an
+    already-applied VM done without a reboot, a drifted or absent one reset
+    (started first when TERMINATED, which refuses a reset), then the bounded
+    wait through the cli's gcp-applied-checksum accessor. No CERTS_SH install
+    runs for the kind: certs.sh refuses it."""
+    recipe = _target_recipe_body(_makefile_text(), "cert-install")
+    gcp_at = recipe.index('elif [ "$$kind" = "gcp" ]; then')
+    ec2_at = recipe.index('elif [ "$$kind" = "ec2" ]; then', gcp_at)
+    gcp_arm = recipe[gcp_at:ec2_at]
+    assert "transport_gcp.applied_checksum_matches" in gcp_arm
+    assert "instance_ops.subprocess_runner" in gcp_arm, (
+        "the compare runs on the production runner seam"
+    )
+    assert "instances reset" in gcp_arm
+    assert "instances start" in gcp_arm
+    assert "TERMINATED" in gcp_arm, "reset refuses a TERMINATED VM: start it instead"
+    assert "gcp-applied-checksum" in gcp_arm, "the wait rides the cli accessor"
+    assert "CERTS_SH" not in gcp_arm, "the boot-applied flow never runs the certs.sh install"
+    assert 'if [ "$$kind" != "gcp" ]; then' in recipe, (
+        "the shared CERTS_SH install step is gated off for the gcp kind"
+    )
+    assert "gcp-zone" in gcp_arm and "gcp-project-id" in gcp_arm, (
+        "the zone and project come from the record's own readers"
+    )
+    # The azure and ec2 arms keep their exact shapes.
+    assert "azure-wait-agent" in recipe
+    assert "describe-instance-status" in recipe
+    azure_marker = (
+        "instances.engine_address(repo.find_root(Path.cwd()), '$(INSTANCE)')"
+        ".get('vm_resource_id', '')"
+    )
+    assert azure_marker in recipe
+    gcp_marker = (
+        "instances.engine_address(repo.find_root(Path.cwd()), '$(INSTANCE)')"
+        ".get('instance_name', '')"
+    )
+    assert gcp_marker in recipe, "the gcp marker names the VM, the azure marker its resource id"
+
+
+@pytest.mark.parametrize(
+    ("target", "gcp_surface"),
+    (
+        ("bucket-list", "devcontainer_config.state_store_gcp list"),
+        ("bucket-delete", "devcontainer_config.state_store_gcp delete-all"),
+    ),
+)
+def test_fleet_state_targets_dispatch_the_gcp_surface(target: str, gcp_surface: str) -> None:
+    """The fleet state targets route an all-gcp fleet to state_store_gcp, keep
+    the azure and EC2 surfaces byte-identical, and no longer refuse the kind."""
+    recipe = _target_recipe_body(_makefile_text(), target)
+    assert gcp_surface in recipe
+    assert "devcontainer_config.state_store " in recipe or (
+        "devcontainer_config.state_store;" in recipe
+    ), "the azure surface keeps its module"
+    assert "devcontainer_config.state_bucket" in recipe, "the EC2 surface keeps its module"
+    assert "not wired yet" not in recipe, "the gcp refusal is gone; the surface is wired"
+
+
+def test_bucket_delete_single_instance_gcp_arm_routes_to_state_store_gcp() -> None:
+    recipe = _target_recipe_body(_makefile_text(), "bucket-delete")
+    assert "devcontainer_config.state_store_gcp delete" in recipe
+    assert 'rd_engine_kind)" = "gcp"' in recipe
+
+
+def test_the_kind_remedies_name_all_three_remote_kinds() -> None:
+    """The per-family remedies were written when two remote kinds existed;
+    with the gcp surfaces landed, they name all three and point only the ssh
+    kind elsewhere."""
+    makefile_text = _makefile_text()
+    ec2_remedy = _make_variable(makefile_text, "EC2_KIND_REMEDY")
+    assert "ec2" in ec2_remedy and "azure" in ec2_remedy and "gcp" in ec2_remedy
+    assert "provider slice" not in ec2_remedy
+    bucket_remedy = _make_variable(makefile_text, "BUCKET_KIND_REMEDY")
+    assert "gcloud storage" in bucket_remedy
+    assert "provider slice" not in bucket_remedy
+    cert_remedy = _make_variable(makefile_text, "CERT_KIND_REMEDY")
+    assert "gcp" in cert_remedy
+    assert "provider slice" not in cert_remedy
+
+
+def test_the_fleet_state_guard_names_all_three_kinds_in_its_mixed_refusal() -> None:
+    body = _make_define_body(_makefile_text(), "FLEET_STATE_KIND_GUARD")
+    assert "gcloud storage" in body, (
+        "the mixed-fleet refusal names the gcp fleet's surface beside the other two"
     )

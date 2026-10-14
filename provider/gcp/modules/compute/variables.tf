@@ -227,3 +227,15 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+
+variable "boot_marker_timeout" {
+  description = "Seconds the every-boot startup script waits for the cloud-init provisioning marker before failing the apply step; the default covers a first boot still installing packages."
+  type        = number
+  default     = 600
+
+  validation {
+    condition     = var.boot_marker_timeout > 0
+    error_message = "boot_marker_timeout must be a positive number of seconds."
+  }
+}

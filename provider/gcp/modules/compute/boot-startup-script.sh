@@ -67,15 +67,11 @@ SECRET_API="https://secretmanager.googleapis.com/v1"
 MARKER="/etc/general-dev-provisioned"
 SENTINEL="general-dev: tls material applied"
 
-# The marker wait's budget, in seconds, overridable for exercised runs via
-# the environment; the default covers a first boot where cloud-init is
-# still installing packages, and its exhaustion is a failure, never a
-# silent continue.
-if [ -n "${GD_STARTUP_MARKER_TIMEOUT:-}" ]; then
-    MARKER_TIMEOUT="$GD_STARTUP_MARKER_TIMEOUT"
-else
-    MARKER_TIMEOUT=600
-fi
+# The marker wait's budget, in seconds, from the terraform variable the
+# instance metadata renders in; the default covers a first boot where
+# cloud-init is still installing packages, and its exhaustion is a
+# failure, never a silent continue.
+MARKER_TIMEOUT="$${MARKER_TIMEOUT_DEFAULT}"
 
 TLS_DIR="/home/$DAEMON_USER/tls"
 

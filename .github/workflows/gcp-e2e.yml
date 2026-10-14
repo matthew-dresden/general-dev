@@ -92,6 +92,15 @@ jobs:
         env:
           GCP_PROJECT: ${{ vars.GCP_PROJECT }}
 
+      - name: Create the publishable configuration files
+        run: |
+          set -euo pipefail
+          # The runner's checkout carries no shell.env (gitignored by
+          # design); the example defaults are what the converge publishes
+          # and what the container's postcreate bootstraps from Secret
+          # Manager.
+          make init
+
       - name: Converge (state store, provision, certify, publish)
         run: |
           set -euo pipefail

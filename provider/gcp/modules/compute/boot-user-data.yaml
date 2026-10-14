@@ -121,11 +121,26 @@ runcmd:
   # sshd is dead weight. Disabling, not purging: the gcp guest agent
   # (google-guest-agent) does not need an ssh server, but keeping the
   # package intact leaves platform diagnostics unhindered while removing
-  # the listener. The `|| true` covers images that ship neither unit name;
-  # the D1 `set -e` discipline is not traded away for it, because a failed
-  # disable of an existing unit is exactly the case the next assert
-  # catches.
-  - systemctl disable --now ssh sshd 2>/dev/null || true
+  # the listener. The socket-activated unit is named alongside the service
+  # (ssh.service ssh.socket) because Ubuntu 24.04 can ship either; the
+  # `|| true` covers images that ship none of the three names. The D1
+  # `set -e` discipline is not traded away for it, because a failed disable
+  # of an existing unit is exactly the case the assert right below catches.
+  - systemctl disable --now ssh.service ssh.socket sshd 2>/dev/null || true
+  # D1 post-condition for the ssh disable, the same shape the rootful
+  # daemon's assert above applies: `disable --now` exiting 0 (or being
+  # swallowed by `|| true` for a never-present unit) is not by itself
+  # proof the listener is gone. If any ssh unit is still active or still
+  # enabled -- the socket included, which alone would answer the TLS port's
+  # neighbors on a host that was supposed to have no listener at all -- the
+  # host would be left reachable through a channel the VPC's one rule was
+  # never written for, with no non-zero exit and no diagnostic to show
+  # for it.
+  - |
+    if systemctl is-active --quiet ssh.service || systemctl is-active --quiet ssh.socket || systemctl is-enabled --quiet ssh.service || systemctl is-enabled --quiet ssh.socket; then
+      echo "FATAL: ssh.service/ssh.socket still active or enabled after 'disable --now' - no ssh anywhere, by doctrine" | tee /dev/console
+      exit 1
+    fi
   - id -u ${daemon_user} > /dev/null 2>&1 || useradd --create-home --shell /usr/sbin/nologin ${daemon_user}
   # Silent failure 1 of 3 (Section 8.1): without lingering, systemd tears
   # down the daemon user's user manager, and the rootless daemon with it,
@@ -234,6 +249,27 @@ runcmd:
     }
     DAEMON_JSON
     chown ${daemon_user}:${daemon_user} /home/${daemon_user}/.config/docker/daemon.json
+  # Rootlesskit's detach-netns behavior, pinned by drop-in: the daemon's
+  # 0.0.0.0 listener is reachable on nic0 only because rootlesskit -- the
+  # namespace builder rootless docker runs dockerd under --
+  # detaches the container netns while dockerd itself keeps the host netns
+  # and binds the interface address there; the upstream default for
+  # DOCKERD_ROOTLESS_ROOTLESSKIT_DETACH_NETNS has flipped across
+  # rootlesskit releases, so the value the doctrine depends on is declared
+  # here rather than inherited from whichever rootlesskit the apt pull
+  # brought in. Root writes the drop-in into the daemon user's own systemd
+  # user unit directory (the delegate.conf pattern above: root-created,
+  # owned by the daemon user), and the unit reads it at the enable below
+  # and at every later start.
+  - |
+    set -e
+    DAEMON_UID=$(id -u ${daemon_user})
+    install -d -m 0755 -o ${daemon_user} -g ${daemon_user} /home/${daemon_user}/.config/systemd/user/docker.service.d
+    cat > /home/${daemon_user}/.config/systemd/user/docker.service.d/rootlesskit.conf <<'EOF_ROOTLESSKIT'
+    [Service]
+    Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_DETACH_NETNS=true
+    EOF_ROOTLESSKIT
+    chown ${daemon_user}:${daemon_user} /home/${daemon_user}/.config/systemd/user/docker.service.d/rootlesskit.conf
   # The daemon is enabled, not started: its first start reads the TLS
   # paths above, which this template never populates -- the boot-applied
   # install delivers that material and restarts the unit once it has.

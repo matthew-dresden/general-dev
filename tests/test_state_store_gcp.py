@@ -84,8 +84,13 @@ def _project_id() -> str:
 
 
 def _digest(instance: str, project: str) -> str:
-    """The digest the module's own rule derives, recomputed here independently."""
-    material = f"{instance}|{ZONE}|{project}|{SUFFIX}"
+    """The digest the module's own rule derives, recomputed here independently.
+
+    The module sanitizes FIRST and digests the sanitized name -- the same
+    string terraform's deploy-side mirror hashes -- so this helper
+    sanitizes too.
+    """
+    material = f"{instances.sanitize_gcp_name(instance)}|{ZONE}|{project}|{SUFFIX}"
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:8]
 
 
@@ -219,12 +224,23 @@ def test_compose_differentiates_across_zones_and_projects() -> None:
 
 
 def test_compose_differentiates_names_that_sanitize_alike() -> None:
-    """Two names that sanitize to the same component must still get different
-    buckets: the digest runs over the raw name, never the sanitized one."""
+    """Different sanitized names still get different buckets, and the digest
+    input is the SANITIZED name: two spellings of the same instance
+    (the raw directory name and its sanitized form) compose the SAME
+    bucket, which is the point -- terraform's deploy-side mirror hashes
+    the sanitized var.instance_name, so both sides must agree."""
     project = _project_id()
-    first = state_store_gcp.compose_from_root_hcl(ROOT_HCL, "inst-one", ZONE, project)
-    second = state_store_gcp.compose_from_root_hcl(ROOT_HCL, "inst-two", ZONE, project)
-    assert first != second
+    raw = "Inst_One"
+    sanitized = instances.sanitize_gcp_name(raw)
+    first = state_store_gcp.compose_from_root_hcl(ROOT_HCL, raw, ZONE, project)
+    second = state_store_gcp.compose_from_root_hcl(ROOT_HCL, sanitized, ZONE, project)
+    assert first == second, (
+        "the digest runs over the sanitized name, so a raw directory name "
+        "and its sanitized form compose one bucket, the same one the "
+        "terraform mirror hashes"
+    )
+    other = state_store_gcp.compose_from_root_hcl(ROOT_HCL, "inst-two", ZONE, project)
+    assert other != first
 
 
 def test_compose_raises_naming_the_template_when_it_is_missing() -> None:

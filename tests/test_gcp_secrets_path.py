@@ -177,8 +177,15 @@ def test_push_secrets_gcp_publish_is_file_only_probed_and_names_the_remedies() -
     assert "gcp-secrets-prefix" in gcp_fn, "the prefix comes from the record's one reader"
     assert "gcp-project-id" in gcp_fn, "the project comes from the record's one reader"
     assert "make instance-deploy" in gcp_fn, "a missing record names the deploy that writes it"
-    # The create-versus-version-add decision is an explicit probe.
-    assert 'gcloud secrets describe "${prefix}-shell-env"' in gcp_fn
+    # The create-versus-version-add decision is an explicit probe, issued
+    # per secret inside one helper both publishes share -- one probe keyed
+    # on one payload's existence must never decide the other's.
+    assert 'gcloud secrets describe "$id"' in gcp_fn, (
+        "each publish probes its own secret's existence immediately before it"
+    )
+    assert gcp_fn.count("rd_gcp_put_secret ") >= 2 or gcp_fn.count("rd_gcp_put_secret\t") >= 2, (
+        "both payloads go through the same probe-then-publish helper"
+    )
     assert "gcloud secrets create" in gcp_fn
     assert "gcloud secrets versions add" in gcp_fn
     # Every value rides a --data-file, never an argument.
@@ -188,8 +195,9 @@ def test_push_secrets_gcp_publish_is_file_only_probed_and_names_the_remedies() -
         for line in joined.splitlines()
         if "gcloud secrets" in line and "describe" not in line
     ]
-    assert len(data_file_lines) == 4, (
-        f"two creates plus two version adds expected: {data_file_lines}"
+    assert len(data_file_lines) == 2, (
+        f"one create plus one version add expected (the helper serves both "
+        f"payloads): {data_file_lines}"
     )
     for line in data_file_lines:
         assert "--data-file=" in line, (
@@ -251,8 +259,10 @@ def _fake_resolver_bin(tmp_path: Path) -> str:
 def _fake_gcloud_bin(tmp_path: Path, log: Path, capture: Path) -> str:
     """A PATH directory whose gcloud records argv and captures each --data-file body.
 
-    `secrets describe` answers "missing" so the publish takes the create
-    path; `secrets create` captures the data file's bytes per secret id.
+    `secrets describe` answers "missing" (exit 1) unless the secret id is
+    named in `FAKE_GCLOUD_PRESENT` (space-separated), which lets a test
+    stage the partial-publish state; `secrets create` and
+    `secrets versions add` both capture the data file's bytes per secret id.
     """
     bin_dir = tmp_path / "gcloud-bin"
     bin_dir.mkdir(exist_ok=True)
@@ -260,14 +270,21 @@ def _fake_gcloud_bin(tmp_path: Path, log: Path, capture: Path) -> str:
     fake.write_text(
         "#!/bin/sh\n"
         'printf \'%s\\n\' "$*" >> "$FAKE_GCLOUD_LOG"\n'
-        'for argument in "$@"; do\n'
-        '  [ "$argument" = "describe" ] && exit 1\n'
-        "done\n"
+        'if [ "$1" = "secrets" ] && [ "$2" = "describe" ]; then\n'
+        '  case " $FAKE_GCLOUD_PRESENT " in\n'
+        '    *" $3 "*) exit 0 ;;\n'
+        "  esac\n"
+        "  exit 1\n"
+        "fi\n"
         'secret=""\n'
         'data_file=""\n'
         'previous=""\n'
+        'mode=""\n'
         'for argument in "$@"; do\n'
-        '  [ "$previous" = "create" ] && secret="$argument"\n'
+        '  if [ "$mode" = "" ] && { [ "$previous" = "create" ] || [ "$previous" = "add" ]; }; then\n'
+        '    secret="$argument"\n'
+        '    mode="capturing"\n'
+        "  fi\n"
         '  case "$argument" in --data-file=*) data_file="${argument#--data-file=}" ;; esac\n'
         '  previous="$argument"\n'
         "done\n"
@@ -399,6 +416,90 @@ def test_push_secrets_gcp_delivery_publishes_the_shared_transform(tmp_path: Path
     assert "export HOST_PROXY='false'" in stored_env
     assert f"export BASH_ENV='/workspaces/{_DELIVERY_PROJECT}/shell.env'" in stored_env
     assert "HTTP_PROXY" not in stored_env and "#" not in stored_env
+
+
+def test_push_secrets_gcp_delivery_probes_each_secret_and_mixes_create_with_add(
+    tmp_path: Path,
+) -> None:
+    """The partial-publish strand: one payload's existence never decides the
+    other's.
+
+    With the stub answering describe-absent for shell-env and
+    describe-present for profile-map, the run must create the first and
+    version-add the second -- two probes, one per publish, in publish
+    order -- and Secret Manager must end up holding both payloads' bytes.
+    """
+    (tmp_path / "shell.env").write_text(_FIXTURE_ENV_TEXT, encoding="utf-8")
+    (tmp_path / "aws-profile-map.json").write_text(_FIXTURE_PROFILE_MAP, encoding="utf-8")
+    gcloud_log = tmp_path / "gcloud-calls.log"
+    gcloud_capture = tmp_path / "gcloud-captured"
+    gcloud_capture.mkdir()
+    bin_dir = Path(_fake_resolver_bin(tmp_path))
+    gcloud_bin = Path(_fake_gcloud_bin(tmp_path, gcloud_log, gcloud_capture))
+
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{bin_dir}:{gcloud_bin}:{env.get('PATH', '')}",
+        PROJECT_NAME=_DELIVERY_PROJECT,
+        SHELL_ENV_SOURCE=str(tmp_path / "shell.env"),
+        PROFILE_MAP_SOURCE=str(tmp_path / "aws-profile-map.json"),
+        REPO_SHELL_ENV=str(tmp_path / "shell.env"),
+        FAKE_GCLOUD_LOG=str(gcloud_log),
+        FAKE_GCLOUD_CAPTURE=str(gcloud_capture),
+        FAKE_GCLOUD_PRESENT=f"{_RESOLVER_PREFIX}-profile-map",
+        CONTAINER_WORKSPACES_ROOT="/workspaces",
+    )
+    for var in (
+        "INSTANCE",
+        "KIND",
+        "ENGINE",
+        "REMOTE_INSTANCE_ID",
+        "PARAMETER_PREFIX",
+        "REMOTE_AWS_PROFILE",
+        "REMOTE_AWS_REGION",
+    ):
+        env.pop(var, None)
+    assert _BASH_BIN is not None
+    result = subprocess.run(
+        [_BASH_BIN, str(_PUSH_SECRETS_SH)],
+        capture_output=True,
+        text=True,
+        timeout=_timeout_seconds(),
+        env=env,
+    )
+
+    assert result.returncode == 0, (
+        f"the gcp publish must succeed end to end; stderr={result.stderr[:400]!r}"
+    )
+    assert "Secrets published to Secret Manager" in result.stdout
+
+    calls = gcloud_log.read_text(encoding="utf-8").splitlines()
+    # Four gcloud calls, in order: probe shell-env, create it, probe
+    # profile-map, add a version to it.
+    assert len(calls) == 4
+    assert calls[0] == (
+        f"secrets describe {_RESOLVER_PREFIX}-shell-env --project {_RESOLVER_PROJECT}"
+    )
+    assert calls[1].startswith(
+        f"secrets create {_RESOLVER_PREFIX}-shell-env --project {_RESOLVER_PROJECT} --data-file="
+    )
+    assert calls[2] == (
+        f"secrets describe {_RESOLVER_PREFIX}-profile-map --project {_RESOLVER_PROJECT}"
+    )
+    assert calls[3].startswith(
+        f"secrets versions add {_RESOLVER_PREFIX}-profile-map --project {_RESOLVER_PROJECT} --data-file="
+    )
+    assert not any("secrets create" in call and "profile-map" in call for call in calls), (
+        "the present secret must never take the create path"
+    )
+
+    reference = _run_write_config_payload(tmp_path)
+    stored = {path.read_text(encoding="utf-8") for path in sorted(gcloud_capture.iterdir())}
+    expected = {
+        (reference / "shell.env").read_text(encoding="utf-8"),
+        (reference / ".devcontainer" / "aws-profile-map.json").read_text(encoding="utf-8"),
+    }
+    assert stored == expected, "both publishes land their full payloads, whatever path each took"
 
 
 # ---------------------------------------------------------------------------

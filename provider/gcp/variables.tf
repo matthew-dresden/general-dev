@@ -314,6 +314,26 @@ variable "docker_repo_channel" {
   default     = "stable"
 }
 
+variable "boot_marker_timeout" {
+  description = <<-EOT
+    Seconds the every-boot startup script waits for the cloud-init
+    provisioning marker before failing its apply step (for example 600).
+    Type number, defaults to 600: the budget covers a first boot still
+    installing packages, and only the VM itself ever waits this long. The
+    laptop-side GCP_PROVISIONED_TIMEOUT (default 300) is deliberately
+    shorter and only ever applies to ALREADY-provisioned VMs -- a first
+    boot's provisioning runs the full marker budget on the VM, where the
+    startup script is its own witness.
+  EOT
+  type        = number
+  default     = 600
+
+  validation {
+    condition     = var.boot_marker_timeout > 0
+    error_message = "var.boot_marker_timeout (${var.boot_marker_timeout}) must be a positive number of seconds."
+  }
+}
+
 # --- Deploy-contract and shared inputs -------------------------------------
 
 variable "project_id" {
@@ -330,10 +350,10 @@ variable "project_id" {
 
   validation {
     # The shape the engine address record's project accessor enforces
-    # (devcontainer_config.instances.PROJECT_ID_PATTERN), refused here at
-    # plan time rather than at apply.
-    condition     = can(regex("^[a-z0-9-]{6,30}$", var.project_id))
-    error_message = "var.project_id (${var.project_id}) must be a gcp project id of 6 to 30 lowercase letters, digits and dashes."
+    # (devcontainer_config.instances.PROJECT_ID_PATTERN, anchored against a
+    # leading hyphen), refused here at plan time rather than at apply.
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{5,29}$", var.project_id))
+    error_message = "var.project_id (${var.project_id}) must be a gcp project id of 6 to 30 lowercase letters, digits and dashes, beginning alphanumerically."
   }
 }
 
@@ -348,10 +368,10 @@ variable "zone" {
 
   validation {
     # The shape the engine address record's zone accessor enforces
-    # (devcontainer_config.instances.ZONE_PATTERN): a region, a dash and a
-    # final zone letter.
-    condition     = can(regex("^[a-z0-9-]+-[a-z]$", var.zone))
-    error_message = "var.zone (${var.zone}) must be a gcp zone of the form <region>-<letter> (us-east1-b)."
+    # (devcontainer_config.instances.ZONE_PATTERN, anchored against a
+    # leading hyphen): a region, a dash and a final zone letter.
+    condition     = can(regex("^[a-z0-9][a-z0-9-]*-[a-z]$", var.zone))
+    error_message = "var.zone (${var.zone}) must be a gcp zone of the form <region>-<letter> (us-east1-b), beginning alphanumerically."
   }
 }
 
@@ -401,15 +421,17 @@ variable "name_prefix" {
 
 variable "tags" {
   description = <<-EOT
-    Common labels merged onto every resource this composition creates,
-    across all three submodules (for example { Environment = "acme" }). Type
-    map(string), defaults to an empty map when the caller has no additional
-    labels to apply. gcp renders these as resource labels, whose law is
-    narrower than azure tags': lowercase letters, digits, underscores and
-    dashes, beginning and ending alphanumerically, 63 characters at most
-    (values may be empty) -- the validation below enforces that ASCII law
-    at plan time, the charset every value this platform writes already
-    satisfies.
+    Common labels merged onto the resources that expose labels: the
+    instance and its data disk in the compute submodule and the platform
+    submodule's six per-instance secrets (for example
+    { Environment = "acme" }). Type map(string), defaults to an empty map
+    when the caller has no additional labels to apply. The network
+    submodule takes no labels input, because gcp network resources expose
+    none. gcp renders these as resource labels, whose law is narrower than
+    azure tags': lowercase letters, digits, underscores and dashes,
+    beginning and ending alphanumerically, 63 characters at most (values
+    may be empty) -- the validation below enforces that ASCII law at plan
+    time, the charset every value this platform writes already satisfies.
   EOT
   type        = map(string)
   default     = {}

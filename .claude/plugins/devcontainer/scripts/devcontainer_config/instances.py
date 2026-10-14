@@ -1097,14 +1097,17 @@ STATE_BUCKET_KEY = "state_bucket"
 # before anything composes them into a gcloud argument vector: a zone is
 # the lowercase `<region>-<zone-letter>` form gcloud takes (the region slug
 # itself carries digits -- us-east1-b -- so the class is letters, digits and
-# hyphens, anchored to end in one hyphen-plus-letter), and a project id is
-# the gcp id form of 6-30 lowercase letters, digits and hyphens. Anything
-# outside these -- a scheme, a path, whitespace, a shell metacharacter --
-# would compose a dial aimed somewhere else, so the record is refused
-# outright rather than escaped, the same discipline transport_azure applies
-# to the values it composes into URLs.
-ZONE_PATTERN = re.compile(r"^[a-z0-9-]+-[a-z]$")
-PROJECT_ID_PATTERN = re.compile(r"^[a-z0-9-]{6,30}$")
+# hyphens, anchored to start alphanumerically and end in one
+# hyphen-plus-letter), and a project id is the gcp id form of 6-30 lowercase
+# letters, digits and hyphens starting alphanumerically. Both anchor their
+# first character against a leading hyphen -- a value beginning with one is
+# a flag-injection shape, not a gcp name, and no gcp zone or project id
+# carries one. Anything else outside these -- a scheme, a path, whitespace,
+# a shell metacharacter -- would compose a dial aimed somewhere else, so the
+# record is refused outright rather than escaped, the same discipline
+# transport_azure applies to the values it composes into URLs.
+ZONE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*-[a-z]$")
+PROJECT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{5,29}$")
 
 
 def _validated_gcp_record_value(

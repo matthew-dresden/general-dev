@@ -23,12 +23,12 @@
 #   declaration is authoritative (state_store_gcp parses it and composes
 #   the bucket terragrunt actually writes state to, through the side-car),
 #   and this local is the deploy-side mirror of the same formula. They
-#   agree exactly when the instance directory's name is already in its
-#   sanitized form (lowercase letters, digits and dashes) -- the platform's
-#   naming convention -- because this module receives only the sanitized
-#   name while state_store_gcp digests the raw directory name. var.
-#   state_store_suffix mirrors the committed suffix for the same reason,
-#   and tests/test_gcp_module.py pins both sides.
+#   agree for every legal instance name: state_store_gcp sanitizes the
+#   directory name FIRST and digests the sanitized form, and this module
+#   receives only the sanitized name (var.instance_name), so both sides
+#   hash the same string. var. state_store_suffix mirrors the committed
+#   suffix for the same reason, and tests/test_gcp_module.py pins both
+#   sides.
 
 output "instance_name" {
   description = "Name of the virtual machine this deployment creates, the sanitized RFC1035 label every gcloud surface addresses it by. The engine address record carries this verbatim."
@@ -60,11 +60,11 @@ output "state_bucket" {
     Name of the instance's state bucket, composed with the same formula
     devcontainer_config.state_store_gcp applies to remote-instances/
     root-gcp.hcl's declaration (gdstate-<sanitized>-<8 hex of
-    sha256(instance|zone|project|suffix)>). The bucket itself is NOT
-    terraform-managed -- state_store_gcp owns it -- and this output is the
-    deploy-side mirror of that composition, exact whenever the instance
-    directory's name is already in sanitized form (see this file's header).
-    The engine address record carries this verbatim.
+    sha256(sanitized-instance|zone|project|suffix)>). The bucket itself is
+    NOT terraform-managed -- state_store_gcp owns it -- and this output is
+    the deploy-side mirror of that composition, exact for every legal
+    instance name because both sides hash the sanitized form (see this
+    file's header). The engine address record carries this verbatim.
   EOT
   value       = local.state_bucket
 }

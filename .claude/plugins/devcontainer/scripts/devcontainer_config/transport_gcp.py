@@ -207,6 +207,13 @@ _STDERR_TAIL_LINES = 50
 # unexpected bearer-shaped line from ever reaching a log or an error.
 _REDACT_PATTERN = re.compile(r"(?i)(authorization:\s*bearer\s+)\S+")
 
+# Every C0/C1 control byte (DEL included), the class escape sequences open
+# with. The VM-writable `general-dev/error` guest attribute is stripped of
+# this class at its one read site before any error message renders it, so
+# an attribute an attacker wrote can decorate a diagnosis but never move a
+# cursor: the class is removed, and the callers quote what remains.
+_CONTROL_BYTES_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
 # The child-exit classifications, matched case-insensitively against the
 # stderr tail. The auth set is the expired-ambient-session wording gcloud's
 # own help names (`gcloud auth login`) plus its consistent classmates; the
@@ -721,15 +728,22 @@ def _last_error_attribute(record: dict[str, object], runner: GcloudRunner, *, in
 
     Best-effort by design: the wait's failure message is more useful with
     the VM's own failure note in it, but this read must never displace the
-    timeout it decorates with an error of its own.
+    timeout it decorates with an error of its own. The attribute is
+    VM-writable through the guest-attribute API, so its text is never
+    interpolated raw: every C0/C1 control byte (escape sequences included)
+    is stripped here, at this single read site, before the value reaches
+    any error message -- the callers render the result quoted, so a
+    poisoned attribute can decorate a diagnosis but never drive a
+    terminal.
     """
     try:
-        return (
+        value = (
             read_guest_attribute(record, runner, instance=instance, key=_GUEST_ATTRIBUTE_ERROR_KEY)
             or "(the VM recorded no error attribute)"
         )
     except GCPTransportError:
         return "(the VM's error attribute could not be read)"
+    return _CONTROL_BYTES_PATTERN.sub("", value)
 
 
 def wait_applied_checksum(
@@ -786,7 +800,7 @@ def wait_applied_checksum(
                 f"material within {deadline_seconds:g}s\n"
                 f"The last observed {GUEST_ATTRIBUTE_NAMESPACE}/"
                 f"{GUEST_ATTRIBUTE_CHECKSUM_KEY} was {observed!r}; the VM's own "
-                f"diagnostic: {_last_error_attribute(record, runner, instance=instance)}\n"
+                f"diagnostic: {_last_error_attribute(record, runner, instance=instance)!r}\n"
                 f"Raise {MATERIAL_APPLY_TIMEOUT_ENV_VAR} if this instance is simply "
                 "slow, and read the startup script's own log on the VM "
                 "(serial console output) for its fetch and apply steps."
@@ -840,7 +854,7 @@ def wait_provisioned(
                 f"{GUEST_ATTRIBUTE_NAMESPACE}/{GUEST_ATTRIBUTE_PROVISIONED_KEY}="
                 f"{GUEST_ATTRIBUTE_PROVISIONED_VALUE} within {deadline_seconds:g}s\n"
                 f"The VM's own diagnostic: "
-                f"{_last_error_attribute(record, runner, instance=instance)}\n"
+                f"{_last_error_attribute(record, runner, instance=instance)!r}\n"
                 f"Raise {PROVISIONED_TIMEOUT_ENV_VAR} if this instance is simply "
                 "slow, and read the startup script's own log on the VM "
                 "(serial console output) for its provisioning steps."
@@ -1204,8 +1218,13 @@ def _run_until_interrupted(
     interrupted = False
     try:
         if process.stdout is not None:
-            for line in process.stdout:
-                sys.stdout.buffer.write(line)
+            # The same scrub the stderr tail applies: no credential is known
+            # to ride either of gcloud's streams, and the redact keeps an
+            # unexpected bearer-shaped line from reaching the daemon log
+            # through the stdout echo either.
+            for raw_line in process.stdout:
+                line = _REDACT_PATTERN.sub(r"\1***", raw_line.decode("utf-8", errors="replace"))
+                sys.stdout.buffer.write(line.encode("utf-8", errors="replace"))
                 sys.stdout.buffer.flush()
         process.wait()
     except (_StopServing, KeyboardInterrupt):
@@ -1229,54 +1248,80 @@ def _run_connect(args: argparse.Namespace) -> int:
     waits for its port to answer (bounded, child-death-aware), prints the
     `Connected:` marker `devcontainer_config.forwards` polls for -- only
     after the port accepts a connection and the context is usable, never
-    before -- and supervises until SIGINT/SIGTERM or child death. The
-    `finally` backstop stops the child if anything between the spawn and
-    the supervise loop raised; on every path that already stopped it, the
-    child's own exit means `poll()` answers and the backstop is a no-op,
-    so the child is never terminated twice and never left behind.
+    before -- and supervises until SIGINT/SIGTERM or child death.
+
+    The SIGTERM trap and the stop backstop are installed here, around the
+    WHOLE spawn-retry-supervise flow, not only inside the supervise loop:
+    a SIGTERM (or Ctrl-C) that lands during the boot-race retries would
+    otherwise kill this process with the freshly spawned child still
+    holding the port. The handler raises `_StopServing`, the same signal
+    `_run_until_interrupted` traps; the `finally` restores the previous
+    handler and stops the child whenever one is still alive, then verifies
+    the port actually closed -- exactly the clean stop the supervise loop's
+    own exit path performs, so an interrupt at any point in the flow leaves
+    no tunnel child and no held port behind, and exits 0. On every path
+    that already stopped the child, its own exit means `poll()` answers
+    and the backstop is a no-op, so the child is never terminated twice
+    and never left behind.
     """
     instance_name, zone, project_id, local_port, runner = _common_setup(args.name, args.context)
     _use_context(runner, args.context)
-    # A VM freshly started answers IAP before its daemon listens; the
-    # child then dies with a backend refusal seconds in. Bounded retries
-    # absorb that boot race; every other child death (auth, wrong zone,
-    # anything unclassified) surfaces immediately with its own remedy.
-    attempts = 3
-    while True:
-        process, tail = _spawn_tunnel(
-            default_process_launcher,
-            build_tunnel_argv(
-                instance_name=instance_name,
-                zone=zone,
-                project_id=project_id,
-                local_port=local_port,
-            ),
+
+    def _raise_stop(signum: int, frame: object) -> NoReturn:
+        del signum, frame  # the signal's identity does not change the stop
+        raise _StopServing
+
+    previous = signal.signal(signal.SIGTERM, _raise_stop)
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        # A VM freshly started answers IAP before its daemon listens; the
+        # child then dies with a backend refusal seconds in. Bounded retries
+        # absorb that boot race; every other child death (auth, wrong zone,
+        # anything unclassified) surfaces immediately with its own remedy.
+        attempts = 3
+        while True:
+            process, tail = _spawn_tunnel(
+                default_process_launcher,
+                build_tunnel_argv(
+                    instance_name=instance_name,
+                    zone=zone,
+                    project_id=project_id,
+                    local_port=local_port,
+                ),
+            )
+            try:
+                wait_tunnel_ready(local_port, process, tail, instance=args.name)
+                break
+            except GAPTunnelError as exc:
+                attempts -= 1
+                still_refusing = process.poll() is not None and _tunnel_exit_is_backend_refusal(
+                    tail.snapshot()
+                )
+                if process.poll() is None or attempts <= 0 or not still_refusing:
+                    raise
+                transport.stop_forward(process)
+                print(
+                    f"retrying the tunnel: the VM's daemon was not listening yet "
+                    f"({attempts} attempt(s) left)",
+                    flush=True,
+                )
+                _pace(5.0)
+        print(
+            f"Connected: docker context {args.context!r} -> {args.name} over iap (zone {zone}).",
+            flush=True,
         )
-        try:
-            wait_tunnel_ready(local_port, process, tail, instance=args.name)
-            break
-        except GAPTunnelError as exc:
-            attempts -= 1
-            still_refusing = process.poll() is not None and _tunnel_exit_is_backend_refusal(
-                tail.snapshot()
-            )
-            if process.poll() is None or attempts <= 0 or not still_refusing:
-                raise
+        _run_until_interrupted(process, tail, instance=args.name, port=local_port)
+    except (_StopServing, KeyboardInterrupt):
+        # Both interrupt paths land in the same clean stop the supervise
+        # loop performs: the finally below stops the still-live child and
+        # verifies the port closed, and the daemon exits 0, which
+        # `devcontainer_config.forwards`' lifecycle relies on.
+        pass
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        if process is not None and process.poll() is None:
             transport.stop_forward(process)
-            print(
-                f"retrying the tunnel: the VM's daemon was not listening yet "
-                f"({attempts} attempt(s) left)",
-                flush=True,
-            )
-            _pace(5.0)
-    print(
-        f"Connected: docker context {args.context!r} -> {args.name} over iap (zone {zone}).",
-        flush=True,
-    )
-    _run_until_interrupted(process, tail, instance=args.name, port=local_port)
-    if process.poll() is None:
-        transport.stop_forward(process)
-        wait_port_closed(local_port, instance=args.name)
+            wait_port_closed(local_port, instance=args.name)
     return 0
 
 

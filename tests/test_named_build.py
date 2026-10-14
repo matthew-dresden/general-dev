@@ -287,6 +287,12 @@ def _run_name_validation(
         timeout=_probe_timeout_seconds(),
         env=env,
     )
+    if not log.exists():
+        pytest.fail(
+            f"the stub docker was never invoked; the run wrote: "
+            f"rc={result.returncode} stdout={result.stdout[-1500:]!r} "
+            f"stderr={result.stderr[-1500:]!r}"
+        )
     return result, log.read_text(encoding="utf-8").splitlines()
 
 

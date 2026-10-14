@@ -103,7 +103,7 @@ resource "google_compute_instance" "this" {
       secrets_prefix         = var.name_prefix
       project_id             = var.project_id
       daemon_user            = var.docker_daemon_user
-      marker_timeout_default = var.boot_marker_timeout
+      marker_timeout_default = tostring(var.boot_marker_timeout)
     })
   }
 

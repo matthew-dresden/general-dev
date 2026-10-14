@@ -79,6 +79,20 @@ resource "google_compute_instance" "this" {
     subnetwork = var.subnet_id
   }
 
+  # The data disk rides the instance at creation (see the disk resource's
+  # comment): READ_WRITE is the daemon's exclusive data-root, mounted
+  # read-write by the rendered cloud-init; the device name pins the
+  # by-id handle the cloud-init locates it through, and no LUN is pinned
+  # (gcp assigns SCSI LUNs itself and the inline block exposes none).
+  dynamic "attached_disk" {
+    for_each = var.create_data_volume ? [1] : []
+    content {
+      source      = google_compute_disk.data[0].self_link
+      mode        = "READ_WRITE"
+      device_name = local.data_disk_name
+    }
+  }
+
   # The metadata surface: guest attributes enabled (the startup script's
   # checksum, provisioned and error attributes are the boot-applied
   # install's whole channel -- without this flag the guest-attribute API
@@ -130,11 +144,17 @@ resource "google_compute_instance" "this" {
   allow_stopping_for_update = true
 }
 
-# The data disk and its attachment exist only when the caller opts in; a
-# deployment that wants root-disk-only storage gets exactly that, with no
-# google_compute_disk or attachment declared at all rather than one that is
-# merely unused. The disk's name is the one local the rendered cloud-init
-# composes its by-id handle from (see the locals above).
+# The data disk exists only when the caller opts in; a deployment that
+# wants root-disk-only storage gets exactly that, with no
+# google_compute_disk declared at all rather than one that is merely
+# unused. The disk's name is the one local the rendered cloud-init
+# composes its by-id handle from (see the locals above). The disk rides
+# the instance's own attached_disk block, not a standalone
+# google_compute_attached_disk: the inline block attaches at INSTANCE
+# CREATION, so the first boot already sees the by-id handle, where the
+# standalone resource attaches after the instance is up and the first
+# boot's provisioning races the attach (observed live: the cloud-init
+# FATAL on an absent handle, and the failed module never re-runs).
 resource "google_compute_disk" "data" {
   count = var.create_data_volume ? 1 : 0
 
@@ -143,23 +163,4 @@ resource "google_compute_disk" "data" {
   zone    = var.zone
   size    = var.data_volume_size_gb
   type    = "pd-balanced"
-}
-
-resource "google_compute_attached_disk" "data" {
-  count = var.create_data_volume ? 1 : 0
-
-  disk     = google_compute_disk.data[0].id
-  instance = google_compute_instance.this.id
-  project  = var.project_id
-  zone     = var.zone
-
-  # READ_WRITE: the disk is the daemon's exclusive data-root, mounted
-  # read-write by the rendered cloud-init. No LUN is pinned -- gcp assigns
-  # SCSI LUNs itself and the provider exposes no argument for it -- and
-  # none is needed: the rendered cloud-init locates the disk through the
-  # deterministic by-id handle the disk's own name derives, not through an
-  # attachment-slot path. No provisioned_iops is declared: pd-balanced
-  # provisions its own performance profile, and pinning IOPS is a pd-ssd
-  # concern.
-  mode = "READ_WRITE"
 }

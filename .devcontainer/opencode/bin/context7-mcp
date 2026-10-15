@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# context7 MCP wrapper: fetches the Upstash context7 API key from AWS SSM
+# Parameter Store at runtime (SSO-gated) so no secret lives on disk or in the
+# opencode config.
+#
+# Every organization-specific value is parameterized. Each variable is set in
+# shell.env (the gitignored host config) and reaches this wrapper through the
+# container environment:
+#   SSM_CONTEXT7_PREFIX - the base prefix of the context7 parameters; the key
+#                         lives at "${SSM_CONTEXT7_PREFIX}/api-key"
+#   AWS_REGION          - the region the SSM read runs in
+set -euo pipefail
+
+: "${SSM_CONTEXT7_PREFIX:?SSM_CONTEXT7_PREFIX is not set: add the context7 SSM parameter base prefix to shell.env (the gitignored host config), then rebuild or rerun 'make push-creds' for remote instances}"
+: "${AWS_REGION:?AWS_REGION is not set: add it to shell.env (the gitignored host config), then rebuild}"
+
+CONTEXT7_API_KEY="$(aws ssm get-parameter --region "$AWS_REGION" --name "${SSM_CONTEXT7_PREFIX}/api-key" --with-decryption --query Parameter.Value --output text)"
+if [ -z "${CONTEXT7_API_KEY}" ] || [ "${CONTEXT7_API_KEY}" = "null" ]; then
+  echo "failed: could not fetch context7 api key from SSM ${SSM_CONTEXT7_PREFIX}/api-key" >&2
+  exit 1
+fi
+export CONTEXT7_API_KEY
+exec npx -y @upstash/context7-mcp

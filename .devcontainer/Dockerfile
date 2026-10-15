@@ -64,3 +64,43 @@ dpkg --install "${workdir}/session-manager-plugin.deb"
 find "${workdir}" -mindepth 1 -delete
 rmdir "${workdir}"
 INSTALL_SESSION_MANAGER_PLUGIN
+
+# Install the Google Cloud SDK from Google's own apt repository at build
+# time, so `gcloud` ships inside the immutable image: the g-whiz GCP MCP
+# server drives gcloud, and the login-state notice the postcreate prints
+# (notify_opencode_mcp_credentials) tells the operator to run 'gcloud auth
+# login' in the container. No trusted registry Feature installs the SDK from
+# Google's repository (the terraform feature ships neither the SDK nor its
+# signing key), so this RUN step follows the sanctioned session-manager-
+# plugin pattern above: the signing key is fetched over TLS from Google's
+# published URL and its fingerprint is verified before the repository line
+# is written; any mismatch aborts the build. The fingerprint below was read
+# from that same URL at authoring time (Google rotates the file when its
+# signing key changes, which is exactly what the pin catches). No package
+# checksum is pinned: apt verifies the downloaded packages against the
+# signed repository metadata with the key pinned here.
+RUN <<'INSTALL_GOOGLE_CLOUD_SDK'
+#!/usr/bin/env bash
+set -euo pipefail
+keyring="/usr/share/keyrings/cloud.google.gpg"
+staging="$(mktemp -d)"
+export GNUPGHOME="${staging}/gnupg"
+mkdir -m 700 "${GNUPGHOME}"
+curl --fail --show-error --silent --tlsv1.2 \
+  --output "${staging}/google-cloud-sdk-apt-key.gpg" \
+  "https://packages.cloud.google.com/apt/doc/apt-key.gpg"
+fingerprint="$(gpg --batch --with-colons --show-keys "${staging}/google-cloud-sdk-apt-key.gpg" \
+  | awk -F: '/^fpr:/ { print $10; exit }')"
+if [ "${fingerprint}" != "35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3" ]; then
+  echo "ERROR: google-cloud-sdk apt signing key fingerprint mismatch: got '${fingerprint}'" >&2
+  exit 1
+fi
+gpg --batch --yes --dearmor --output "${keyring}" "${staging}/google-cloud-sdk-apt-key.gpg"
+echo "deb [signed-by=${keyring}] https://packages.cloud.google.com/apt cloud-sdk main" \
+  > /etc/apt/sources.list.d/google-cloud-sdk.list
+apt-get update
+apt-get install -y --no-install-recommends google-cloud-sdk
+command -v gcloud > /dev/null 2>&1 \
+  || { echo "ERROR: google-cloud-sdk installed but gcloud is not on PATH" >&2; exit 1; }
+rm -rf "${staging}" /var/lib/apt/lists/*
+INSTALL_GOOGLE_CLOUD_SDK

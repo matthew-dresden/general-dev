@@ -1,0 +1,77 @@
+# project-setup.local.sh.example - the per-user project-setup seam.
+#
+# Copy this file to .devcontainer/project-setup.local.sh and edit it:
+#
+#   cp .devcontainer/project-setup.local.sh.example .devcontainer/project-setup.local.sh
+#
+# The live file is gitignored (see .gitignore's private-files block): it
+# carries per-developer overrides only, never a committed value. The
+# postcreate sources it, as the container user and in the same environment
+# context as project-setup.sh (WORK_DIR and shell.env exported, workspace on
+# PATH), AFTER the project script and AFTER the postcreate resolved the
+# opencode config -- so everything here overrides provisioning.
+#
+# The same three rules that govern shell.env apply here: no committed values,
+# no secrets (a credential belongs in the hostcreds manifest; see below),
+# and anything you leave commented stays untouched.
+
+########################
+# Model and default agent
+########################
+# The postcreate resolves the provider toggles (ZAI_ENABLED /
+# OPENROUTER_ENABLED, from devcontainer.json's containerEnv) into
+# enabled_providers and the model matrix. Override the result here, for this
+# user only. Every value must name a generated agent or a provider/model
+# pair the installed config defines; the generated set is listed in
+# ~/.config/opencode/lib/generated-agents.json.
+#
+# Pin the session driver to the openrouter flagship:
+#   jq '.model = "openrouter/glm-5.3" | .small_model = "openrouter/glm-5.3-flash"' \
+#     ~/.config/opencode/opencode.json > /tmp/oc.json \
+#     && mv /tmp/oc.json ~/.config/opencode/opencode.json
+#
+# Make a generated build driver the default agent:
+#   jq '.default_agent = "build-zai-max-glm-5.3-flash"' \
+#     ~/.config/opencode/opencode.json > /tmp/oc.json \
+#     && mv /tmp/oc.json ~/.config/opencode/opencode.json
+
+########################
+# MCP toggles
+########################
+# Disable one MCP server for this user only:
+#   jq '.mcp.playwright.enabled = false' \
+#     ~/.config/opencode/opencode.json > /tmp/oc.json \
+#     && mv /tmp/oc.json ~/.config/opencode/opencode.json
+
+########################
+# Provider API keys
+########################
+# Do NOT export a provider key here. opencode reads keys only through the
+# {env:ZAI_API_KEY} / {env:OPENROUTER_API_KEY} interpolations the shipped
+# config carries, and the values are exported automatically by the hostcreds
+# startup block -- the manifest (gitignored,
+# .devcontainer/hostcreds.map.json, created by 'make init' from its committed
+# example) names the entry, 'make creds-init' stores it in the keychain, and
+# 'make push-creds' delivers it into the container:
+#
+#   OPENROUTER_API_KEY -> add to .devcontainer/hostcreds.map.json:
+#     "OPENROUTER_API_KEY": { "source": "keychain" }
+#   then: make creds-init CREDS_INIT_ARGS='--stdin OPENROUTER_API_KEY'
+#         make push-creds
+#
+# (ZAI_API_KEY follows the same shape; it is already the entry this
+# repository's committed configuration expects.) Nothing here is needed for
+# that flow -- the block below exists only if you must re-read an exported
+# key for a non-opencode consumer in this same environment:
+#
+# : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is not exported; add it to the hostcreds manifest and run make creds-init + make push-creds}"
+
+########################
+# gws state restore
+########################
+# The gws CLI keeps its OAuth refresh token (encrypted) in ~/.config/gws; a
+# fresh container starts without it and the postcreate notices. Restore it
+# from a backup you keep outside this repository:
+#
+#   mkdir -p ~/.config/gws
+#   cp /path/to/your/gws-state-backup/* ~/.config/gws/

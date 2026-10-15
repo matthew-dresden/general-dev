@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Azure DevOps MCP wrapper: fetches the PAT from AWS SSM Parameter Store at
+# runtime (SSO-gated) so no secret lives on disk or in the opencode config.
+#
+# Every organization-specific value is parameterized. Each variable is set in
+# shell.env (the gitignored host config) and reaches this wrapper through the
+# container environment:
+#   SSM_ORG_PREFIX - the base prefix of this organization's SSM parameters; the PAT
+#                    lives at "${SSM_ORG_PREFIX}/azure-devops/opencode-pat"
+#   AWS_REGION     - the region the SSM read runs in
+#   ADO_ORG        - the Azure DevOps organization the MCP talks to
+#   ADO_USER       - the identity the PAT belongs to (BASIC auth user)
+set -euo pipefail
+
+: "${SSM_ORG_PREFIX:?SSM_ORG_PREFIX is not set: add the organization SSM parameter base prefix to shell.env (the gitignored host config), then rebuild or rerun 'make push-creds' for remote instances}"
+: "${AWS_REGION:?AWS_REGION is not set: add it to shell.env (the gitignored host config), then rebuild}"
+: "${ADO_ORG:?ADO_ORG is not set: add the Azure DevOps organization to shell.env (the gitignored host config), then rebuild}"
+: "${ADO_USER:?ADO_USER is not set: add the identity the Azure DevOps PAT belongs to to shell.env (the gitignored host config), then rebuild}"
+
+SSM_PARAM="${SSM_ORG_PREFIX}/azure-devops/opencode-pat"
+
+PAT="$(aws ssm get-parameter --region "$AWS_REGION" --name "$SSM_PARAM" --with-decryption --query Parameter.Value --output text | tr -d '\n')"
+
+if [ -z "$PAT" ]; then
+  echo "failed: empty PAT from SSM parameter $SSM_PARAM (is the AWS SSO session valid? run: aws sso login)" >&2
+  exit 1
+fi
+
+PERSONAL_ACCESS_TOKEN="$(printf '%s' "${ADO_USER}:${PAT}" | base64)"
+
+if [ -z "${PERSONAL_ACCESS_TOKEN}" ] || [ ${#PERSONAL_ACCESS_TOKEN} -lt 20 ]; then
+  echo "failed: could not build PERSONAL_ACCESS_TOKEN from SSM parameter" >&2
+  exit 1
+fi
+
+export PERSONAL_ACCESS_TOKEN
+
+exec npx -y @azure-devops/mcp "$ADO_ORG" --authentication pat -d core work work-items

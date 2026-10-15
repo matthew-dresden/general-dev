@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# gws MCP wrapper: locates the MCP server binary that ships with the gws
+# (Google Workspace) CLI and starts it in stdio mode. The gws CLI is not an
+# npm package (verified: @google/workspace-mcp is not published on the npm
+# registry), so the binary is resolved from PATH or the standard homebrew and
+# usr-local locations rather than installed here.
+#
+# The gws CLI holds its OAuth refresh token (encrypted) in ~/.config/gws; if
+# that state is absent the server starts but every call fails - the postcreate
+# notices this and names the enable step.
+set -euo pipefail
+
+: "${GWS_MCP_DENIED_METHODS:=gmail.users.messages.send}"
+export GWS_MCP_DENIED_METHODS
+: "${GWS_MCP_AUDIT_LOG:=${HOME}/.cache/gws-mcp/audit.log}"
+export GWS_MCP_AUDIT_LOG
+
+if command -v gws-mcp >/dev/null 2>&1; then
+  exec gws-mcp stdio
+fi
+for candidate in /opt/homebrew/bin/gws-mcp /usr/local/bin/gws-mcp; do
+  if [ -x "${candidate}" ]; then
+    exec "${candidate}" stdio
+  fi
+done
+echo "failed: gws-mcp binary not found on PATH or at /opt/homebrew/bin/gws-mcp; install the gws CLI (brew install gws on macOS; see its README for Linux) so the gws MCP server can start" >&2
+exit 1

@@ -290,9 +290,28 @@ configure_claude_settings() {
 # container user into the prefix configure_npm_global_ownership just handed
 # over, so the package and its bin symlink are user-owned from the start and
 # self-update never needs the handover to be re-run. The committed config
-# carries no credential: it injects the z.ai coding plan key through
-# {env:ZAI_API_KEY}, which the hostcreds startup block exports from the
-# fragment 'make push-creds' wrote for the manifest's keychain entry.
+# (.devcontainer/opencode.json) carries no credential: each provider block
+# injects its key through a {env:...} interpolation, which the hostcreds
+# startup block exports from the fragments 'make push-creds' wrote for the
+# manifest's keychain entries.
+#
+# The installed copy is resolved from the shipped one at provisioning time,
+# in three steps jq applies in one pass:
+#   - the ${WORK_DIR} placeholder in the MCP wrapper commands becomes the
+#     real workspace root. The placeholder is the only shape a committed
+#     JSON can carry: the committed wrappers live at
+#     <workspace>/.devcontainer/opencode/bin/ and the workspace root is
+#     known only at container runtime, so the shipped config names them
+#     through the literal token and this function is the single place the
+#     token is expanded (on the installed copy, never on the committed file,
+#     which stays environment-agnostic).
+#   - enabled_providers is written from the ZAI_ENABLED / OPENROUTER_ENABLED
+#     toggles (0/1 only; anything else aborts, naming the toggle and where
+#     it is set).
+#   - model/small_model follow the matrix: both toggles on -> the zai-max
+#     flagship + flash pair; openrouter only -> the openrouter pair; zai
+#     only -> the shipped zai-max defaults unchanged; both off -> the model
+#     keys removed entirely.
 configure_opencode() {
   if ! container_user_has npm; then
     log_section_skipped "opencode" \
@@ -303,14 +322,23 @@ configure_opencode() {
     || exit_with_error "opencode config not found at ${OPENCODE_CONFIG_FILE}"
   jq empty "${OPENCODE_CONFIG_FILE}" > /dev/null 2>&1 \
     || exit_with_error "${OPENCODE_CONFIG_FILE} is not valid JSON"
-  grep -q '{env:ZAI_API_KEY}' "${OPENCODE_CONFIG_FILE}" \
-    || exit_with_error "$(printf '%s\n' \
-      "${OPENCODE_CONFIG_FILE} does not reference {env:ZAI_API_KEY}." \
-      "The key reaches opencode only through that interpolation; a config without" \
-      "it would carry no credential path at all.")"
+
+  local toggle value
+  for toggle in ZAI_ENABLED OPENROUTER_ENABLED; do
+    value="${!toggle:-}"
+    case "${value}" in
+      0|1) ;;
+      *) exit_with_error "$(printf '%s\n' \
+        "${toggle} is '${value:-unset}', but only 0 (disabled) or 1 (enabled) is accepted." \
+        "It is set by the containerEnv block in .devcontainer/devcontainer.json, which" \
+        "reads the host environment of the same name; set ${toggle}=0 or ${toggle}=1" \
+        "on the host (or change the devcontainer.json default), then rebuild.")" ;;
+    esac
+  done
 
   local user_path="${CONTAINER_USER_PATH:-${PATH}}"
-  local target="${USER_HOME}/.config/opencode/opencode.json"
+  local installed="${USER_HOME}/.config/opencode"
+  local target="${installed}/opencode.json"
   log_section "opencode" "npm install, config -> ${target}"
 
   as_container_user "PATH='${user_path}' npm install --global opencode-ai" \
@@ -318,11 +346,208 @@ configure_opencode() {
   as_container_user "PATH='${user_path}' opencode --version" > /dev/null \
     || exit_with_error "opencode is installed but does not run"
 
+  # g-whiz, the gcp MCP server's binary: the shipped config runs it straight
+  # from PATH, so it is installed globally beside opencode rather than
+  # wrapped.
+  as_container_user "PATH='${user_path}' npm install --global g-whiz" \
+    || exit_with_error "npm install --global g-whiz failed, so the gcp MCP server has no binary"
+
+  local resolved_dir
+  resolved_dir="$(mktemp -d)" \
+    || exit_with_error "mktemp failed while preparing the resolved opencode config"
+  jq --arg workdir "${WORK_DIR}" \
+     --arg zai "${ZAI_ENABLED}" \
+     --arg openrouter "${OPENROUTER_ENABLED}" '
+    walk(if type == "string" then gsub("\\$\\{WORK_DIR\\}"; $workdir) else . end)
+    | if $zai == "1" and $openrouter == "1" then
+        .model = "zai-max/glm-5.3"
+        | .small_model = "zai-max/glm-5.3-flash"
+        | .enabled_providers = ["zai-max", "openrouter"]
+      elif $zai == "1" then
+        .enabled_providers = ["zai-max"]
+      elif $openrouter == "1" then
+        .model = "openrouter/glm-5.3"
+        | .small_model = "openrouter/glm-5.3-flash"
+        | .enabled_providers = ["openrouter"]
+      else
+        del(.model) | del(.small_model) | del(.enabled_providers)
+      end
+  ' "${OPENCODE_CONFIG_FILE}" > "${resolved_dir}/opencode.json" \
+    || exit_with_error "jq failed to resolve ${OPENCODE_CONFIG_FILE} into the installed copy"
+
+  # No credential beyond the {env:...} interpolations may reach the installed
+  # config: every apiKey it carries must be an interpolation (the count of
+  # apiKey keys equals the count of interpolated ones), and the two shipped
+  # provider blocks must each carry exactly the documented one. A literal key
+  # committed to the shipped config, or one surviving a bad rewrite, aborts
+  # here instead of installing.
+  # grep -c exits 1 (not 2) when nothing matched, which would end this script
+  # under set -e before the count check below could name the problem; the
+  # assignment fallbacks route a zero count into the explicit check instead.
+  local api_key_keys api_key_interpolations
+  api_key_keys="$(grep -c '"apiKey":' "${resolved_dir}/opencode.json")" || api_key_keys=0
+  api_key_interpolations="$(grep -c '"apiKey": *"{env:[A-Z][A-Z0-9_]*}"' "${resolved_dir}/opencode.json")" \
+    || api_key_interpolations=0
+  [ "${api_key_keys}" -gt 0 ] && [ "${api_key_keys}" = "${api_key_interpolations}" ] \
+    || exit_with_error "$(printf '%s\n' \
+      "the resolved opencode config carries an apiKey that is not a {env:...} interpolation." \
+      "The installed config may hold no credential but an interpolation; check" \
+      "${OPENCODE_CONFIG_FILE}'s provider options.")"
+  jq -e '.provider["zai-max"].options.apiKey == "{env:ZAI_API_KEY}" and .provider["openrouter"].options.apiKey == "{env:OPENROUTER_API_KEY}"' \
+      "${resolved_dir}/opencode.json" > /dev/null \
+    || exit_with_error "$(printf '%s\n' \
+      "the resolved opencode config does not interpolate ZAI_API_KEY and OPENROUTER_API_KEY." \
+      "The key reaches opencode only through those interpolations; a config without" \
+      "them would carry no credential path at all.")"
+
   install -d -m 755 -o "${CONTAINER_USER}" -g "${CONTAINER_USER}" "$(dirname "${target}")"
-  install -m 644 -o "${CONTAINER_USER}" -g "${CONTAINER_USER}" "${OPENCODE_CONFIG_FILE}" "${target}"
-  grep -q '{env:ZAI_API_KEY}' "${target}" \
-    || exit_with_error "the installed ${target} does not match ${OPENCODE_CONFIG_FILE}"
+  install -m 644 -o "${CONTAINER_USER}" -g "${CONTAINER_USER}" \
+    "${resolved_dir}/opencode.json" "${target}"
+
+  # Install-integrity: the installed bytes are compared against the resolved
+  # bytes, so truncation or drift between resolution and install aborts
+  # instead of leaving a half-written config that jq would parse but opencode
+  # would silently misread. (The old spot check grepped one marker string; a
+  # config that lost everything else around it passed.)
+  cmp -s "${target}" "${resolved_dir}/opencode.json" \
+    || exit_with_error "the installed ${target} does not match the post-jq expected bytes"
+  rm -rf "${resolved_dir}"
+
+  # The agent generator ships in the workspace: its lib/, its inputs, the
+  # model-profiles plugin it feeds, and its self-test suites are copied into
+  # the installed config, where the generator's own ROOT resolution places
+  # agents in ~/.config/opencode/agent and the manifest in
+  # ~/.config/opencode/lib/generated-agents.json. A generator failure leaves
+  # opencode without its agents, so it is fatal, not a warning.
+  local opencode_src="${WORK_DIR}/.devcontainer/opencode"
+  [ -f "${opencode_src}/lib/generate-agents.mjs" ] \
+    || exit_with_error "the committed agent generator is missing at ${opencode_src}/lib/generate-agents.mjs"
+  install -d -m 755 -o "${CONTAINER_USER}" -g "${CONTAINER_USER}" \
+    "${installed}/lib" "${installed}/plugins" "${installed}/tests" "${installed}/agent"
+  cp -R "${opencode_src}/lib/." "${installed}/lib/"
+  cp -R "${opencode_src}/tests/." "${installed}/tests/"
+  install -m 644 "${opencode_src}/plugins/model-profiles.js" "${installed}/plugins/model-profiles.js"
+  chown -R "${CONTAINER_USER}:${CONTAINER_USER}" "${installed}"
+
+  as_container_user "PATH='${user_path}' node '${installed}/lib/generate-agents.mjs'" \
+    || exit_with_error "$(printf '%s\n' \
+      "the agent generator failed, so opencode has no generated agents." \
+      "Rerun 'node ${installed}/lib/generate-agents.mjs' as ${CONTAINER_USER} to see the error.")"
+
+  notify_opencode_mcp_credentials
+
   log_section_done "opencode"
+}
+
+# MCP credential notices: opencode starts an MCP server lazily, so a wrapper
+# whose credential source is absent fails only when a session first reaches
+# for it. The sources the shipped config depends on are probed here -- the
+# SSM reads fetch a parameter's NAME only, never its decrypted value -- and
+# every miss becomes a warning naming the documented enable step, so the gap
+# is visible at provisioning time instead of mid-session.
+notify_opencode_mcp_credentials() {
+  # One SSM probe per wrapper-backed MCP: the read asks for the parameter's
+  # NAME only (no --with-decryption), so no credential value is ever read,
+  # and a failure means the parameter or the SSO session backing it is
+  # absent -- the same failure the wrapper itself would hit at first use.
+  local mcps=() params=()
+  if container_user_has aws && [ -n "${AWS_REGION:-}" ]; then
+    if [ -n "${SSM_ORG_PREFIX:-}" ]; then
+      mcps=("github" "azure-devops")
+      params=("${SSM_ORG_PREFIX}/github/github-app/app-id" "${SSM_ORG_PREFIX}/azure-devops/opencode-pat")
+    else
+      WARNINGS+=("the github and azure-devops MCPs' credential sources are absent: SSM_ORG_PREFIX is not set in shell.env (the gitignored host config), so the wrappers cannot read their parameters. Enable step: set SSM_ORG_PREFIX in shell.env and rebuild.")
+    fi
+    if [ -n "${SSM_CONTEXT7_PREFIX:-}" ]; then
+      mcps+=("context7")
+      params+=("${SSM_CONTEXT7_PREFIX}/api-key")
+    else
+      WARNINGS+=("the context7 MCP's credential source is absent: SSM_CONTEXT7_PREFIX is not set in shell.env (the gitignored host config). Enable step: set SSM_CONTEXT7_PREFIX in shell.env and rebuild.")
+    fi
+    local i
+    for i in "${!mcps[@]}"; do
+      as_container_user "PATH='${DEVCONTAINER_EXTRA_PATH}:${USER_BIN}:${PATH}' \
+        aws ssm get-parameter --region '${AWS_REGION}' --name '${params[$i]}' \
+        --query Parameter.Name --output text" > /dev/null 2>&1 \
+        || WARNINGS+=("the ${mcps[$i]} MCP's credential source is absent: the parameter ${params[$i]} is not readable in ${AWS_REGION} (the read is SSO-gated). Enable step: run 'aws sso login' on the host, then 'make push-creds', and rebuild.")
+    done
+  else
+    WARNINGS+=("the github, azure-devops and context7 MCPs' credential sources could not be probed: the aws CLI or AWS_REGION is unavailable in this build. Enable step: set AWS_REGION in shell.env and rebuild.")
+  fi
+
+  if [ ! -d "${USER_HOME}/.config/gws" ]; then
+    WARNINGS+=("the gws MCP's credential source is absent: no gws OAuth state at ${USER_HOME}/.config/gws. Enable step: run the gws CLI's auth command ('gws --help' lists it) in the container and follow the browser flow; the refresh token is stored encrypted there.")
+  fi
+
+  if [ ! -d "${USER_HOME}/.config/gcloud" ]; then
+    WARNINGS+=("the gcp MCP's credential source is absent: no gcloud login state at ${USER_HOME}/.config/gcloud. Enable step: run 'gcloud auth login' in the container (gcloud ships in the image) and set the project with 'gcloud config set project <project>'.")
+  fi
+
+  if [ ! -d "${USER_HOME}/.azure" ]; then
+    WARNINGS+=("the azure MCP's credential source is absent: no az login state at ${USER_HOME}/.azure. Enable step: run 'az login' in the container.")
+  fi
+}
+
+# The opencode aliases, in the same interactive-rc shape as ccd/ccdr:
+# ocd opens a session, ocdr resumes one.
+configure_opencode_aliases() {
+  if ! container_user_has opencode; then
+    log_section_skipped "opencode aliases" \
+      "opencode is not installed, add the node feature to devcontainer.json"
+    return 0
+  fi
+  log_section "opencode aliases" "ocd, ocdr"
+  local rc
+  while read -r rc; do
+    {
+      echo "alias ocd='opencode'"
+      echo "alias ocdr='opencode --resume'"
+    } >> "${rc}"
+  done < <(interactive_rcs)
+  log_section_done "opencode aliases"
+}
+
+# The github MCP's server binary. The wrapper resolves it from PATH and then
+# from ${USER_BIN}; postcreate downloads the release into ${USER_BIN} so the
+# MCP works out of the box. The version comes from the environment
+# (GITHUB_MCP_SERVER_VERSION in shell.env, the gitignored host config) rather
+# than a hardcoded value, so an update is an edit there plus a rebuild, and
+# the download is skipped when the binary already exists (a manual rerun of
+# provisioning, since a rebuild starts from an empty home).
+configure_github_mcp_server() {
+  if [ -x "${USER_BIN}/github-mcp-server" ]; then
+    log_section_skipped "github-mcp-server" "already present at ${USER_BIN}/github-mcp-server"
+    return 0
+  fi
+  [ -n "${GITHUB_MCP_SERVER_VERSION:-}" ] || exit_with_error "$(printf '%s\n' \
+    "GITHUB_MCP_SERVER_VERSION is not set, so the github MCP's server binary cannot" \
+    "be downloaded. Add the version (a github/github-mcp-server release tag, without" \
+    "the leading v) to shell.env (the gitignored host config), then rebuild.")"
+  local arch
+  arch="$(dpkg --print-architecture)" \
+    || exit_with_error "dpkg did not report the container architecture, so the github-mcp-server release asset cannot be selected"
+  case "${arch}" in
+    amd64|arm64) ;;
+    *) exit_with_error "github-mcp-server has no release asset for architecture '${arch}'" ;;
+  esac
+
+  log_section "github-mcp-server" "v${GITHUB_MCP_SERVER_VERSION} -> ${USER_BIN}"
+  local tarball_url="https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_SERVER_VERSION}/github-mcp-server_${GITHUB_MCP_SERVER_VERSION}_linux_${arch}.tar.gz"
+  local staging
+  staging="$(mktemp -d)" \
+    || exit_with_error "mktemp failed while preparing the github-mcp-server download"
+  curl --fail --show-error --silent --tlsv1.2 \
+    --output "${staging}/github-mcp-server.tar.gz" "${tarball_url}" \
+    || exit_with_error "downloading ${tarball_url} failed; check that GITHUB_MCP_SERVER_VERSION ('${GITHUB_MCP_SERVER_VERSION}') names a github/github-mcp-server release with a linux_${arch} asset"
+  tar -xzf "${staging}/github-mcp-server.tar.gz" -C "${staging}" github-mcp-server \
+    || exit_with_error "the github-mcp-server release tarball does not carry the github-mcp-server binary"
+  install -d -m 755 "${USER_BIN}"
+  install -m 755 "${staging}/github-mcp-server" "${USER_BIN}/github-mcp-server"
+  rm -rf "${staging}"
+  "${USER_BIN}/github-mcp-server" --version > /dev/null 2>&1 \
+    || exit_with_error "the downloaded github-mcp-server binary does not run; check GITHUB_MCP_SERVER_VERSION ('${GITHUB_MCP_SERVER_VERSION}') against the release's asset list"
+  chown "${CONTAINER_USER}:${CONTAINER_USER}" "${USER_BIN}/github-mcp-server"
+  log_section_done "github-mcp-server"
 }
 
 configure_tmux_commands() {
@@ -626,11 +851,21 @@ run_project_setup() {
   fi
   log_section "Project setup" "$(basename "${PROJECT_SETUP}")"
 
+  # The per-user seam: .devcontainer/project-setup.local.sh (gitignored,
+  # authored per developer from its committed .example) is sourced in this
+  # same environment context AFTER the project script, so its overrides --
+  # model/default-agent, MCP toggles, provider keys it re-reads from the
+  # hostcreds exports -- win over anything the project script did.
+  local local_setup="${WORK_DIR}/.devcontainer/project-setup.local.sh"
+
   local command="export WORK_DIR='${WORK_DIR}'
 export PATH='${DEVCONTAINER_EXTRA_PATH}:${USER_BIN}:'\"\$PATH\"
 source '${SHELL_ENV}'
 cd '${WORK_DIR}'
-BASH_ENV='${FUNCTIONS_FILE}' bash '${PROJECT_SETUP}'"
+BASH_ENV='${FUNCTIONS_FILE}' bash '${PROJECT_SETUP}'
+if [ -f '${local_setup}' ]; then
+  . '${local_setup}'
+fi"
 
   as_container_user "${command}"
   log_section_done "Project setup"
@@ -657,6 +892,8 @@ main() {
   configure_claude_aliases
   configure_claude_settings
   configure_opencode
+  configure_opencode_aliases
+  configure_github_mcp_server
   configure_tmux_commands
   configure_resmon_disks
   configure_vscode_settings_sync

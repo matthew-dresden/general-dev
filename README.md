@@ -225,4 +225,4 @@ How VS Code discovers nested repositories, and what postCreate writes to make cl
 | `docs/gcp-requirements.md` | Provisioning a gcp instance by hand: network, security and IAM, host configuration |
 | `docs/skills.md` | The skill roster: families, flows, coverage guarantee, and installing it for an agent |
 | `docs/opencode.md` | The opencode install in the container: providers and toggles, the eight shipped MCP servers, the generated agent harness, the keep-alive model and the per-user seam |
-| `CLAUDE.md` | Engineering standards for AI-assisted work in this repo |
+| `CLAUDE.md` | Engineering standards for AI-assisted work in this repo (opencode reads the same content as `AGENTS.md`, a symlink to it) |

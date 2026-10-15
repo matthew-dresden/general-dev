@@ -1,32 +1,164 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "zai-coding-plan/glm-5.3",
-  "small_model": "zai-coding-plan/glm-5.3-flash",
+  "shell": "zsh",
+  "model": "zai-max/glm-5.3",
+  "small_model": "zai-max/glm-5.3-flash",
+  "subagent_depth": 3,
   "share": "disabled",
   "autoupdate": true,
-  "enabled_providers": ["zai-coding-plan"],
-  "permission": "allow",
+  "snapshot": true,
+  "permission": {
+    "*": "allow"
+  },
+  "formatter": true,
+  "lsp": false,
+  "plugin": [
+    "opencode-glm-quota@latest",
+    "opencode-cross-session-messaging@latest",
+    "opencode-auto-continue"
+  ],
+  "tool_output": {
+    "max_lines": 2000,
+    "max_bytes": 51200
+  },
+  "compaction": {
+    "auto": true,
+    "tail_turns": 40
+  },
   "provider": {
-    "zai-coding-plan": {
+    "openrouter": {
+      "name": "openrouter.ai",
       "options": {
+        "baseURL": "https://openrouter.ai/api/v1",
+        "apiKey": "{env:OPENROUTER_API_KEY}"
+      },
+      "models": {
+        "glm-5.3": { "name": "GLM 5.3 (latest)" },
+        "glm-5.3-flash": { "name": "GLM 5.3 Flash (latest)" },
+        "gemini-3.8-flash": { "name": "Gemini 3.8 Flash (latest)" },
+        "claude-opus-5": { "name": "Claude Opus 5 (latest)" }
+      }
+    },
+    "zai-max": {
+      "name": "z.ai max coding plan",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "https://api.z.ai/api/coding/paas/v4",
+        "timeout": false,
+        "headerTimeout": false,
+        "chunkTimeout": 21600000,
         "apiKey": "{env:ZAI_API_KEY}"
       },
       "models": {
         "glm-5.3": {
-          "name": "GLM 5.3 (flagship)",
+          "name": "GLM 5.3 (Coding Plan)",
           "limit": {
             "context": 1000000,
             "output": 131072
           }
         },
         "glm-5.3-flash": {
-          "name": "GLM 5.3 Flash",
+          "name": "GLM 5.3-Flash (Coding Plan)",
           "limit": {
             "context": 1000000,
             "output": 131072
           }
+        },
+        "glm-5.2": {
+          "name": "GLM 5.2 (Coding Plan)",
+          "limit": {
+            "context": 1000000,
+            "output": 131072
+          }
+        },
+        "glm-5-turbo": {
+          "name": "GLM 5 Turbo (Coding Plan)",
+          "limit": {
+            "context": 200000,
+            "output": 131072
+          }
+        },
+        "glm-4.7": {
+          "name": "GLM 4.7 (Coding Plan)",
+          "limit": {
+            "context": 204800,
+            "output": 131072
+          }
         }
       }
+    }
+  },
+  "mcp": {
+    "playwright": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@playwright/mcp",
+        "--isolated"
+      ],
+      "enabled": true
+    },
+    "context7": {
+      "type": "local",
+      "command": [
+        "${WORK_DIR}/.devcontainer/opencode/bin/context7-mcp"
+      ],
+      "enabled": true
+    },
+    "gws": {
+      "type": "local",
+      "command": [
+        "${WORK_DIR}/.devcontainer/opencode/bin/gws-mcp"
+      ],
+      "enabled": true
+    },
+    "gcp": {
+      "type": "local",
+      "command": [
+        "g-whiz"
+      ],
+      "enabled": true
+    },
+    "aws-mcp": {
+      "type": "local",
+      "command": [
+        "uvx",
+        "mcp-proxy-for-aws@1.7.0",
+        "https://aws-mcp.us-east-1.api.aws/mcp",
+        "--metadata",
+        "AWS_REGION=us-east-1"
+      ],
+      "enabled": true,
+      "timeout": 100000
+    },
+    "azure-devops": {
+      "type": "local",
+      "command": [
+        "${WORK_DIR}/.devcontainer/opencode/bin/azure-devops-mcp"
+      ],
+      "enabled": true,
+      "timeout": 60000
+    },
+    "azure": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@azure/mcp@latest",
+        "server",
+        "start"
+      ],
+      "enabled": true,
+      "timeout": 60000
+    },
+    "github": {
+      "type": "local",
+      "command": [
+        "${WORK_DIR}/.devcontainer/opencode/bin/github-mcp"
+      ],
+      "enabled": true,
+      "timeout": 60000
     }
   }
 }

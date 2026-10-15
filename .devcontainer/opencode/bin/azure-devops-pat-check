@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# azure-devops-pat-check: verify the ADO PAT works and warn well before its
+# expiry. Rotation is manual (portal): the PAT value lives only in SSM and
+# process memory - never on disk or logs.
+#
+# Every organization-specific value is parameterized. Each variable is set in
+# shell.env (the gitignored host config) and reaches this wrapper through the
+# container environment:
+#   SSM_ORG_PREFIX - the base prefix of this organization's SSM parameters; the PAT
+#                    lives at "${SSM_ORG_PREFIX}/azure-devops/opencode-pat"
+#                    and its expiry date at
+#                    "${SSM_ORG_PREFIX}/azure-devops/opencode-pat-expires"
+#   AWS_REGION     - the region the SSM reads run in
+#   ADO_ORG        - the Azure DevOps organization the PAT authenticates to
+#   ADO_USER       - the identity the PAT belongs to (BASIC auth user)
+set -euo pipefail
+
+: "${SSM_ORG_PREFIX:?SSM_ORG_PREFIX is not set: add the organization SSM parameter base prefix to shell.env (the gitignored host config), then rebuild or rerun 'make push-creds' for remote instances}"
+: "${AWS_REGION:?AWS_REGION is not set: add it to shell.env (the gitignored host config), then rebuild}"
+: "${ADO_ORG:?ADO_ORG is not set: add the Azure DevOps organization to shell.env (the gitignored host config), then rebuild}"
+: "${ADO_USER:?ADO_USER is not set: add the identity the Azure DevOps PAT belongs to to shell.env (the gitignored host config), then rebuild}"
+
+: "${ADO_PAT_EXPIRY_WARN_DAYS:=30}"
+
+BIN_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG="${HOME}/.local/share/opencode/logs/azure-devops-pat-check.log"
+mkdir -p "$(dirname "$LOG")"
+
+# Optional desktop notifier: only called when a companion auth-alert
+# executable exists beside this wrapper.
+notify() {
+  if [ -x "${BIN_DIR}/auth-alert" ]; then
+    "${BIN_DIR}/auth-alert" "$1" "$2" >/dev/null || true
+  fi
+}
+
+PAT="$(aws ssm get-parameter --region "$AWS_REGION" --name "${SSM_ORG_PREFIX}/azure-devops/opencode-pat" --with-decryption --query Parameter.Value --output text 2>/dev/null || true)"
+EXPIRES="$(aws ssm get-parameter --region "$AWS_REGION" --name "${SSM_ORG_PREFIX}/azure-devops/opencode-pat-expires" --query Parameter.Value --output text 2>/dev/null || true)"
+
+if [ -z "$PAT" ]; then
+  notify "Azure DevOps" "cannot read PAT from SSM - check AWS SSO session"
+  echo "azure-devops-pat-check: FAILED to read SSM PAT ${SSM_ORG_PREFIX}/azure-devops/opencode-pat" >&2
+  exit 1
+fi
+
+if ! ADO_PAT="$PAT" ADO_USER="$ADO_USER" ADO_ORG="$ADO_ORG" uv run --no-project --quiet python3 - <<'PYEOF' >>"$LOG" 2>&1
+import base64
+import json
+import os
+import urllib.request
+
+PAT = os.environ["ADO_PAT"]
+ADO_USER = os.environ["ADO_USER"]
+ADO_ORG = os.environ["ADO_ORG"]
+auth = base64.b64encode(f"{ADO_USER}:{PAT}".encode()).decode()
+req = urllib.request.Request(
+    f"https://dev.azure.com/{ADO_ORG}/_apis/projects?api-version=7.1",
+    headers={"Authorization": f"Basic {auth}", "Accept": "application/json"},
+)
+with urllib.request.urlopen(req, timeout=30) as r:
+    count = json.load(r)["count"]
+print(f"ok: PAT authenticated, {count} projects visible")
+PYEOF
+then
+  notify "Azure DevOps" "PAT rejected by dev.azure.com - rotate in the portal, then update SSM"
+  echo "azure-devops-pat-check: FAILED - PAT rejected (see $LOG)" >&2
+  exit 1
+fi
+
+if [ -n "$EXPIRES" ]; then
+  DAYS=$(( ( $(date -d "$EXPIRES" "+%s") - $(date "+%s") ) / 86400 ))
+  if [ "$DAYS" -le "$ADO_PAT_EXPIRY_WARN_DAYS" ]; then
+    notify "Azure DevOps" "PAT expires in $DAYS days ($EXPIRES) - rotate in the portal now"
+    echo "azure-devops-pat-check: WARNING - expires in $DAYS days" >&2
+    exit 1
+  fi
+  printf 'expiry ok: %s (%s days out)\n' "$EXPIRES" "$DAYS" >> "$LOG"
+fi
+echo "azure-devops-pat-check: ok (see $LOG)"

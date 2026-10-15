@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# GitHub MCP wrapper: authenticates as a GitHub App. Fetches the App private
+# key + App ID from AWS SSM Parameter Store at runtime (SSO-gated), mints a
+# 1-hour installation token via node (built-in crypto only - no external
+# packages), and exports it for github-mcp-server. No secret ever lives on
+# disk or in the opencode config.
+#
+# Every organization-specific value is parameterized. Each variable is set in
+# shell.env (the gitignored host config) and reaches this wrapper through the
+# container environment:
+#   SSM_ORG_PREFIX    - the base prefix of this organization's SSM parameters; the App
+#                       path is "${SSM_ORG_PREFIX}/github/github-app"
+#   AWS_REGION        - the region the SSM reads run in
+#   GITHUB_APP_TARGET - the login the App installation lives under
+# GITHUB_MCP_DRYRUN=1 mints the token, prints target + length only, and exits
+# (diagnostic mode; the token itself is never printed).
+set -euo pipefail
+
+: "${SSM_ORG_PREFIX:?SSM_ORG_PREFIX is not set: add the organization SSM parameter base prefix to shell.env (the gitignored host config), then rebuild or rerun 'make push-creds' for remote instances}"
+: "${AWS_REGION:?AWS_REGION is not set: add it to shell.env (the gitignored host config), then rebuild}"
+: "${GITHUB_APP_TARGET:?GITHUB_APP_TARGET is not set: add the login the GitHub App is installed under to shell.env (the gitignored host config), then rebuild}"
+
+SSM_PREFIX="${SSM_ORG_PREFIX}/github/github-app"
+
+APP_ID="$(aws ssm get-parameter --region "$AWS_REGION" --name "$SSM_PREFIX/app-id" --with-decryption --query Parameter.Value --output text | tr -d '[:space:]')"
+if [ -z "$APP_ID" ]; then
+  echo "failed: empty App ID from SSM $SSM_PREFIX/app-id (is the AWS SSO session valid? run: aws sso login)" >&2
+  exit 1
+fi
+
+TARGET="$GITHUB_APP_TARGET"
+
+KEY="$(aws ssm get-parameter --region "$AWS_REGION" --name "$SSM_PREFIX/private-key" --with-decryption --query Parameter.Value --output text)"
+if [ -z "$KEY" ]; then
+  echo "failed: empty private key from SSM $SSM_PREFIX/private-key" >&2
+  exit 1
+fi
+
+TOKEN="$(GH_APP_KEY="$KEY" GH_APP_ID="$APP_ID" GH_APP_TARGET="$TARGET" node <<'NODEEOF'
+const crypto = require("crypto");
+const https = require("https");
+
+const key = process.env.GH_APP_KEY;
+const appId = process.env.GH_APP_ID;
+const target = process.env.GH_APP_TARGET.toLowerCase();
+
+const b64u = (b) => Buffer.from(b).toString("base64url");
+const now = Math.floor(Date.now() / 1000);
+const header = b64u(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+const payload = b64u(JSON.stringify({ iat: now - 60, exp: now + 540, iss: appId }));
+const signer = crypto.createSign("RSA-SHA256");
+signer.update(header + "." + payload);
+const jwt = header + "." + payload + "." + signer.sign(key, "base64url");
+
+function gh(url, data) {
+  return new Promise((resolve, reject) => {
+    const body = data || null;
+    const req = https.request(url, {
+      method: body ? "POST" : "GET",
+      headers: {
+        Authorization: "Bearer " + jwt,
+        Accept: "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "User-Agent": "opencode-github-mcp-wrapper",
+        "Content-Length": body ? Buffer.byteLength(body) : 0,
+      },
+    }, (res) => {
+      let buf = "";
+      res.on("data", (c) => (buf += c));
+      res.on("end", () => {
+        try { resolve(JSON.parse(buf)); } catch (e) { reject(new Error("bad JSON: " + buf.slice(0, 200))); }
+      });
+    });
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+(async () => {
+  const installations = await gh("https://api.github.com/app/installations");
+  const match = installations.find((i) => i.account.login.toLowerCase() === target);
+  if (!match) {
+    console.error("failed: no App installation for target '" + target + "' (installed on: " +
+      installations.map((i) => i.account.login).join(", ") + ")");
+    process.exit(1);
+  }
+  const token = await gh(match.access_tokens_url, "{}");
+  console.log(token.token);
+})().catch((e) => { console.error("failed: " + e.message); process.exit(1); });
+NODEEOF
+)"
+
+if [ -z "$TOKEN" ]; then
+  echo "failed: could not mint installation token for $TARGET" >&2
+  exit 1
+fi
+
+if [ "${GITHUB_MCP_DRYRUN:-0}" = "1" ]; then
+  echo "github-mcp dry-run: target=$TARGET token_len=${#TOKEN}"
+  exit 0
+fi
+
+export GITHUB_PERSONAL_ACCESS_TOKEN="$TOKEN"
+
+# Server resolution: PATH first (postcreate installs the binary into the
+# user's bin), then the same directory explicitly.
+if command -v github-mcp-server >/dev/null 2>&1; then
+  exec github-mcp-server stdio
+elif [ -x "${HOME}/.local/bin/github-mcp-server" ]; then
+  exec "${HOME}/.local/bin/github-mcp-server" stdio
+else
+  echo "failed: github-mcp-server not found on PATH or at ${HOME}/.local/bin/github-mcp-server (postcreate downloads it; see configure_github_mcp_server in .devcontainer/.devcontainer.postcreate.sh)" >&2
+  exit 1
+fi

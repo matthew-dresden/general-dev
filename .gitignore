@@ -63,6 +63,10 @@
 .devcontainer/aws-profile-map.json
 .devcontainer/hostcreds.map.json
 .devcontainer/devcontainer-lock.json
+# The per-user project-setup seam: authored from its committed
+# project-setup.local.sh.example and sourced by the container's project-setup
+# step; per-developer overrides never belong in git.
+.devcontainer/project-setup.local.sh
 .claude/settings.local.json
 
 # Environment files

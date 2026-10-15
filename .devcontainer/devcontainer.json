@@ -6,6 +6,10 @@
   },
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "shutdownAction": "none",
+  "containerEnv": {
+    "ZAI_ENABLED": "${localEnv:ZAI_ENABLED:1}",
+    "OPENROUTER_ENABLED": "${localEnv:OPENROUTER_ENABLED:1}"
+  },
   "remoteEnv": {
     "PATH": "${containerEnv:PATH}:/home/vscode/.local/bin"
   },

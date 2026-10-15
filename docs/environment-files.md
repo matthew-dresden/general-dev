@@ -256,7 +256,11 @@ The manifest is a JSON object mapping a credential name to an entry with a `sour
 - The default keychain service names this project and this credential, so one checkout's items cannot collide with another's without the operator choosing an explicit `service` label.
 - The account is asymmetric on purpose: storing (creds-init) always writes one, either the manifest's or the credential's own `NAME` when it set none, because `add-generic-password` without `-a` fails on current macOS, while the read and the probe omit `-a` entirely when the manifest sets none, since an empty account constraint matches a different item than no account constraint at all.
 
-The one entry this repository's committed configuration expects: `ZAI_API_KEY` from the keychain, because `.devcontainer/opencode.json` interpolates `{env:ZAI_API_KEY}` and opencode authenticates with nothing when the variable is absent.
+The provider keys this repository's committed configuration interpolates, both optional per provider:
+
+- `ZAI_API_KEY` from the keychain: the `zai-max` provider block reads it through `{env:ZAI_API_KEY}`.
+- `OPENROUTER_API_KEY` from the keychain: the `openrouter` provider block reads it through `{env:OPENROUTER_API_KEY}`.
+- Each entry is needed only while its provider is enabled through the `ZAI_ENABLED` / `OPENROUTER_ENABLED` toggles; an enabled provider whose variable is absent leaves opencode in the container authenticating with nothing, and the full story is in [opencode.md](opencode.md).
 
 #### What a push does
 

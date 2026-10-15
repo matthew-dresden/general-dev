@@ -19,6 +19,17 @@ What that buys you, and why you would use it:
   - Containers: building, naming, starting, stopping, checking, fleet operations, teardown.
   - `make help` lists them all. The `gd-*` skills drive the same targets when an agent runs them for you.
 
+## Contents
+
+- [Quick start, local](#quick-start-local)
+- [Quick start, remote](#quick-start-remote)
+- [The opencode MCP table](docs/opencode.md#the-mcp-servers)
+- [Daily use](#daily-use)
+- [Working on projects](#working-on-projects)
+- [Conveniences](#conveniences)
+- [Caveats](#caveats)
+- [Layout](#layout)
+
 ## Quick start, local
 
 - The local engine is the laptop's own Docker (OrbStack).
@@ -54,8 +65,9 @@ Deeper on each step:
 
 ## Quick start, remote
 
-Four kinds of remote engine, one workflow shape each: any machine reachable over SSH that runs Docker (general SSH), an EC2 instance this repository provisions (AWS EC2), an Azure virtual machine this repository provisions (Azure), or a Google Cloud virtual machine this repository provisions (Google Cloud).
+Four kinds of remote engine, one workflow shape each: three kinds this repository provisions with no SSH anywhere (EC2 through an SSM port forward, Azure through the relay the VM dials out to, GCP through an IAP forward), and general SSH, the only kind that uses SSH.
 
+- The three provisioned clouds share one route below; SSH has its own.
 - All four clone the workspace into a volume on the engine, and all four keep the container running after you disconnect.
 
 ### The cloud engines
@@ -170,8 +182,8 @@ How VS Code discovers nested repositories, and what postCreate writes to make cl
 
 - `ccd`, `claude --dangerously-skip-permissions`
 - `ccdr`, `claude --dangerously-skip-permissions --resume`
-- opencode, installed by postCreate (no devcontainer feature ships it), configured for the z.ai coding plan with GLM 5.3 flagship and GLM 5.3 Flash.
-  - Its config still injects the key through `{env:ZAI_API_KEY}`, and the variable itself is supplied by the hostcreds startup block from a `ZAI_API_KEY` manifest entry, never committed and never in `shell.env`.
+- opencode, installed by postCreate (no devcontainer feature ships it): a generic install against the neutral committed config, no vendor default, with the providers optional and toggleable and the full provider, MCP and agent-harness story in [docs/opencode.md](docs/opencode.md).
+  - The z.ai coding plan's GLM 5.3 flagship and GLM 5.3 Flash are one example of what a toggle can enable; each enabled provider reads its key at request time through the `{env:ZAI_API_KEY}` or `{env:OPENROUTER_API_KEY}` interpolation, supplied by the hostcreds startup block, never committed and never in `shell.env`.
 - The skills suite: `make skills-install`, `make skills-remove` and `make skills-list` wire, unwire and report this repo's `.agents/skills` roster in an agent on this Mac, selected by `AGENT=opencode|claude|both` and `SCOPE=global|project|runtime`.
   - For example, `make skills-install AGENT=claude SCOPE=global` symlinks the roster into `~/.claude/skills`.
   - Symlinks, never copies; see [docs/skills.md](docs/skills.md).
@@ -179,7 +191,7 @@ How VS Code discovers nested repositories, and what postCreate writes to make cl
 - One remote engine per project under `remote-instances/`, matching the quick-start table's row per cloud: `make instance-init` scaffolds, `make instance-deploy` converges, `make instance-stop`/`make instance-start` power and `make instance-destroy` retires, for the EC2 kind, the azure kind and the gcp kind alike; `make list-instances` shows every instance's live state.
   - The SSH kind, any machine reachable over SSH that runs Docker (a Linux daemon through its socket or a TCP endpoint, or Windows through Docker Desktop's exposed TCP endpoint), is declared by a `remote-instances/<name>/engine.json` manifest with no AWS behind it, and scaffolded, verified and removed with `make engine-init`, `make engine-verify` and `make engine-remove`.
 - Claude Code starts on the classic renderer and never offers the flicker-free fullscreen one, from `.devcontainer/claude-settings.json`. `/tui fullscreen` still opts in for the current container.
-- Claude Code talks to the z.ai GLM Coding Plan: `/model opus` (or `--model opus`) runs the GLM 5.3 flagship, `/model sonnet` runs GLM 5.3 Flash, and `/status` shows the active one. The key comes from `ZAI_API_KEY` at request time, never from a file.
+- Claude Code is configured through one committed settings file, the same generic-install shape: the shipped values point at the z.ai GLM Coding Plan, one example of what a configured provider looks like, where `/model opus` (or `--model opus`) runs the GLM 5.3 flagship, `/model sonnet` runs GLM 5.3 Flash, and `/status` shows the active one. The key comes from `ZAI_API_KEY` at request time, never from a file.
 - Shift+Enter inserts a newline in every VS Code terminal, tmux or not, once `make keybindings` has run on the machine.
 - kubectl + helm installed (minikube removed); Python 3.14, Node 25, AWS CLI, docker-in-docker via devcontainer features.
 
@@ -212,4 +224,5 @@ How VS Code discovers nested repositories, and what postCreate writes to make cl
 | `docs/azure-requirements.md` | Provisioning an azure instance by hand: network, identity and relay, host configuration |
 | `docs/gcp-requirements.md` | Provisioning a gcp instance by hand: network, security and IAM, host configuration |
 | `docs/skills.md` | The skill roster: families, flows, coverage guarantee, and installing it for an agent |
+| `docs/opencode.md` | The opencode install in the container: providers and toggles, the eight shipped MCP servers, the generated agent harness, the keep-alive model and the per-user seam |
 | `CLAUDE.md` | Engineering standards for AI-assisted work in this repo |

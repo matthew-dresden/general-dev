@@ -86,6 +86,37 @@ def test_the_remote_section_describes_the_transport_and_host_access() -> None:
     )
 
 
+def _remote_lead_in() -> str:
+    """The lead-in paragraph under `## Quick start, remote`, before the first bullet."""
+    text = _readme()
+    start = text.index("## Quick start, remote")
+    rest = text[text.index("\n", start) + 1 :]
+    match = re.search(r"\n\n|\n- ", rest)
+    return rest[: match.start()] if match else rest
+
+
+def test_the_remote_lead_in_states_only_one_kind_uses_ssh() -> None:
+    """AC-DOC-006: the lead-in states four kinds, of which only general SSH uses SSH.
+
+    The three provisioned kinds are reached with no SSH anywhere (EC2
+    through an SSM port forward, Azure through the relay the VM dials out
+    to, GCP through an IAP forward), so a lead-in that introduced all four
+    as SSH-reachable, or named no SSH split at all, would misstate the
+    platform's defining security property. Both halves of the statement are
+    pinned: the no-SSH-anywhere clause for the three, and the only-one clause
+    for the fourth.
+    """
+    lead = _remote_lead_in().lower()
+    assert "no ssh anywhere" in lead, (
+        "the remote lead-in must state that the three provisioned kinds are reached "
+        "with no SSH anywhere (EC2 through an SSM port forward, Azure through the "
+        "relay, GCP through an IAP forward)"
+    )
+    assert "the only kind that uses ssh" in lead, (
+        "the remote lead-in must state that general SSH is the only kind of the four that uses SSH"
+    )
+
+
 @pytest.mark.parametrize("token", ["make shell", "tunnel"])
 def test_removed_surfaces_are_named_nowhere(token: str) -> None:
     """AC-DOC-005: the README documents current state only, so none of these appear.

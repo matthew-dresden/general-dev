@@ -99,7 +99,7 @@ gpg --batch --yes --dearmor --output "${keyring}" "${staging}/google-cloud-sdk-a
 echo "deb [signed-by=${keyring}] https://packages.cloud.google.com/apt cloud-sdk main" \
   > /etc/apt/sources.list.d/google-cloud-sdk.list
 apt-get update
-apt-get install -y --no-install-recommends google-cloud-sdk
+apt-get install -y --no-install-recommends google-cloud-cli
 command -v gcloud > /dev/null 2>&1 \
   || { echo "ERROR: google-cloud-sdk installed but gcloud is not on PATH" >&2; exit 1; }
 rm -rf "${staging}" /var/lib/apt/lists/*

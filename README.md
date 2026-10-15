@@ -197,7 +197,7 @@ How VS Code discovers nested repositories, and what postCreate writes to make cl
 
 ## Caveats
 
-- This repo's `.devcontainer` is self-managed: asdf is not installed, minikube is disabled, and the postcreate wrapper carries the SSM secret bootstrap. Nothing regenerates the directory, so changes here stay. (Provenance and license attribution: `NOTICE`.)
+- This repo's `.devcontainer` is self-managed: minikube is disabled, and the postcreate wrapper carries the SSM secret bootstrap. Nothing regenerates the directory, so changes here stay. (Provenance and license attribution: `NOTICE`.)
 - Rotating a credential is `make creds-init` plus `make push-creds`, never a `shell.env` edit; after any `shell.env` change, re-run `make push-secrets` so the remote copies match.
 - Credentials live only in the macOS keychain, git's own credential helper and the AWS SSO session, all named in the gitignored hostcreds manifest, plus the fragments `make push-creds` writes inside the container.
   - Parameter Store (`/devcontainer/<project>/…`) holds the credential-free `shell.env` and profile map for an EC2 engine; an azure engine's copies publish to the instance's own Key Vault instead, one vault per instance; a gcp engine's publish into its project's Secret Manager under the instance's own secrets prefix, six per-instance secrets.

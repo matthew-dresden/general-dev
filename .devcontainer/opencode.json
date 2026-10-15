@@ -23,7 +23,8 @@
   },
   "compaction": {
     "auto": true,
-    "tail_turns": 40
+    "tail_turns": 40,
+    "buffer": 100000
   },
   "provider": {
     "openrouter": {
@@ -33,10 +34,46 @@
         "apiKey": "{env:OPENROUTER_API_KEY}"
       },
       "models": {
-        "glm-5.3": { "name": "GLM 5.3 (latest)" },
-        "glm-5.3-flash": { "name": "GLM 5.3 Flash (latest)" },
-        "gemini-3.8-flash": { "name": "Gemini 3.8 Flash (latest)" },
-        "claude-opus-5": { "name": "Claude Opus 5 (latest)" }
+        "glm-5.3": {
+          "name": "GLM 5.3 (latest)",
+          "limit": {
+            "context": 1048576,
+            "output": 131072
+          }
+        },
+        "glm-5.3-flash": {
+          "name": "GLM 5.3 Flash (latest)",
+          "limit": {
+            "context": 1048576,
+            "output": 131072
+          },
+          "modalities": {
+            "input": ["text", "image", "video"],
+            "output": ["text"]
+          }
+        },
+        "gemini-3.8-flash": {
+          "name": "Gemini 3.8 Flash (latest)",
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          },
+          "modalities": {
+            "input": ["text", "image", "video", "audio"],
+            "output": ["text"]
+          }
+        },
+        "claude-opus-5": {
+          "name": "Claude Opus 5 (latest)",
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          },
+          "modalities": {
+            "input": ["text", "image"],
+            "output": ["text"]
+          }
+        }
       }
     },
     "zai-max": {
@@ -62,6 +99,10 @@
           "limit": {
             "context": 1000000,
             "output": 131072
+          },
+          "modalities": {
+            "input": ["text", "image", "video"],
+            "output": ["text"]
           }
         },
         "glm-5.2": {

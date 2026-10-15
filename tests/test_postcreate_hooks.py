@@ -788,6 +788,117 @@ def test_configure_opencode_writes_enabled_providers_and_the_model_matrix() -> N
     )
 
 
+# A synthetic provider surface for the matrix-assertion fixtures below:
+# both shipped providers, each defining the pair the toggle matrix writes.
+_MATRIX_PROVIDERS = {
+    "zai-max": {"models": {"glm-5.3": {}, "glm-5.3-flash": {}}},
+    "openrouter": {"models": {"glm-5.3": {}, "glm-5.3-flash": {}}},
+}
+
+
+def _configure_opencode_matrix_assertion() -> str:
+    """The jq matrix-assertion program `configure_opencode` runs after the
+    rewrite, extracted from the script verbatim.
+
+    The unit tests below feed synthetic matrices through this real program
+    (jq, the same interpreter the postcreate uses) rather than through a
+    Python reimplementation that could drift from the shipped one. The
+    extraction is the only copy: the program lives in exactly one
+    single-quoted `local matrix_assert=` assignment in the script.
+    """
+    body = _configure_opencode_body()
+    match = re.search(r"local matrix_assert='(.*?)'", body, re.DOTALL)
+    assert match, (
+        "configure_opencode no longer carries the matrix_assert jq program in one "
+        "single-quoted local assignment; update this extraction"
+    )
+    return match.group(1)
+
+
+def _run_matrix_assertion(config: dict) -> int:
+    """Run the extracted assertion against `config` through jq -e, the same
+    interpreter and flag the postcreate uses, returning jq's exit code."""
+    return subprocess.run(
+        ["jq", "-e", _configure_opencode_matrix_assertion()],
+        input=json.dumps(config),
+        capture_output=True,
+        text=True,
+    ).returncode
+
+
+def test_configure_opencode_aborts_on_a_dangling_model_reference_before_install() -> None:
+    """The matrix assertion is wired to exit_with_error and runs before the
+    resolved config is installed, so a dangling reference aborts instead of
+    installing a config whose default model no enabled provider can serve."""
+    body = _configure_opencode_body()
+    gate_idx = body.index('jq -e "${matrix_assert}"')
+    assert "|| exit_with_error" in body[gate_idx : gate_idx + 300], (
+        "the matrix assertion's failure is not wired to exit_with_error"
+    )
+    install_idx = body.index("install -d")
+    assert gate_idx < install_idx, "the matrix assertion must run before the install"
+
+
+def test_shipped_config_model_keys_resolve_inside_their_provider_blocks() -> None:
+    """Shipped-config contract for the matrix assertion: the shipped
+    model/small_model pair (the pair the zai-only matrix branch keeps) parses
+    as <provider>/<model> against the provider blocks the shipped config
+    carries, so the zai-only resolution passes the postcreate's assertion."""
+    config = _shipped_opencode_config()
+    for key in ("model", "small_model"):
+        reference = config[key]
+        provider_id, model_id = reference.split("/", 1)
+        assert provider_id in config["provider"], (
+            f"{key} {reference!r} names provider {provider_id!r}, which the shipped "
+            "config does not define"
+        )
+        assert model_id in config["provider"][provider_id].get("models", {}), (
+            f"{key} {reference!r} names model {model_id!r}, which the {provider_id!r} "
+            "provider block does not define"
+        )
+
+
+def test_matrix_assertion_passes_every_toggle_matrix_branch() -> None:
+    """The real jq assertion accepts every resolved shape the toggle matrix
+    can produce: both toggles on, openrouter only, zai only (the shipped
+    defaults kept), and both off (the model keys removed entirely)."""
+    for enabled_providers, models in (
+        (
+            ["zai-max", "openrouter"],
+            {"model": "zai-max/glm-5.3", "small_model": "zai-max/glm-5.3-flash"},
+        ),
+        (
+            ["openrouter"],
+            {"model": "openrouter/glm-5.3", "small_model": "openrouter/glm-5.3-flash"},
+        ),
+        (
+            ["zai-max"],
+            {"model": "zai-max/glm-5.3", "small_model": "zai-max/glm-5.3-flash"},
+        ),
+    ):
+        config = {"provider": _MATRIX_PROVIDERS, "enabled_providers": enabled_providers, **models}
+        assert _run_matrix_assertion(config) == 0, (
+            f"the matrix assertion rejected a valid resolved config: {config}"
+        )
+    assert _run_matrix_assertion({"provider": _MATRIX_PROVIDERS}) == 0, (
+        "the matrix assertion rejected the both-off shape (no model keys)"
+    )
+
+
+def test_matrix_assertion_rejects_a_dangling_model_reference() -> None:
+    """The real jq assertion fails with a non-zero status on a dangling
+    reference: a provider that is not in enabled_providers, a model its
+    provider block does not define, or an id without a provider/model shape.
+    jq -e prints the dangling key and id on the failure branch, which the
+    postcreate's exit_with_error message carries."""
+    enabled = ["zai-max"]
+    for model in ("openrouter/glm-5.3", "zai-max/glm-9.9", "glm-5.3"):
+        config = {"model": model, "enabled_providers": enabled, "provider": _MATRIX_PROVIDERS}
+        assert _run_matrix_assertion(config) != 0, (
+            f"the matrix assertion accepted a dangling reference: {model!r}"
+        )
+
+
 def test_configure_opencode_asserts_no_literal_api_key_in_the_resolved_config() -> None:
     """The resolved config is asserted to carry only {env:...} apiKeys before
     it is installed, so a future literal in the shipped file aborts provisioning.
@@ -837,6 +948,31 @@ def test_configure_opencode_notifies_when_mcp_credential_sources_are_absent() ->
     assert ".azure" in notify_body, "the azure login-state check is missing"
     assert "SSM_ORG_PREFIX" in notify_body, "the github/azure-devops SSM source check is missing"
     assert "SSM_CONTEXT7_PREFIX" in notify_body, "the context7 SSM source check is missing"
+
+
+def test_notify_warns_when_a_provider_toggle_is_on_without_its_key_variable() -> None:
+    """A toggle at 1 whose key variable is absent from the environment gets a
+    provisioning-time warning naming the toggle, the hostcreds manifest
+    fragment named after that variable, and the make push-creds remedy. The
+    warning rides WARNINGS+= like every other notice here and is never
+    fatal: provisioning may legitimately run before the operator pushed the
+    credentials."""
+    notify_body = _function_body("notify_opencode_mcp_credentials")
+    for toggle, key in (
+        ("ZAI_ENABLED", "ZAI_API_KEY"),
+        ("OPENROUTER_ENABLED", "OPENROUTER_API_KEY"),
+    ):
+        assert toggle in notify_body, f"the {toggle} toggle is no longer checked for its key"
+        assert key in notify_body, f"the {key} key variable is no longer paired with {toggle}"
+    assert "make push-creds" in notify_body, (
+        "the missing-key warning must name the push-creds remedy"
+    )
+    assert "hostcreds manifest fragment named" in notify_body, (
+        "the missing-key warning must name the expected manifest fragment"
+    )
+    assert "exit_with_error" not in notify_body, (
+        "the credential notices must stay warnings; a missing key never aborts provisioning"
+    )
 
 
 def test_configure_opencode_aliases_define_ocd_and_ocdr() -> None:

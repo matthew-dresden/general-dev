@@ -170,6 +170,75 @@ def test_the_sso_or_static_statement_is_present() -> None:
     )
 
 
+# The committed wrapper scripts the shipped config runs MCP servers through,
+# and the fail-fast form a wrapper's required-variable check takes (the
+# `: "${VAR:?message}"` form, which aborts naming the variable when it is
+# unset). The required set is always parsed from the wrappers, never copied.
+_WRAPPER_BIN_RELATIVE_PATH = ".devcontainer/opencode/bin"
+_WRAPPER_COMMAND_PREFIX = "${WORK_DIR}/.devcontainer/opencode/bin/"
+_REQUIRED_VAR_CHECK = r':\s*"\$\{([A-Z][A-Z0-9_]*):\?'
+
+
+def _wrapper_backed_mcp_names() -> dict[str, str]:
+    """Map each MCP the shipped config runs through a committed wrapper to
+    its wrapper script name, derived from the config's own command paths."""
+    config = json.loads((repo_root() / _SHIPPED_CONFIG_RELATIVE_PATH).read_text(encoding="utf-8"))
+    backed: dict[str, str] = {}
+    for name, entry in config.get("mcp", {}).items():
+        command = entry.get("command", [])
+        if command and str(command[0]).startswith(_WRAPPER_COMMAND_PREFIX):
+            backed[name] = Path(str(command[0])).name
+    assert backed, (
+        f"the shipped config defines no wrapper-backed MCP; the {_SHIPPED_CONFIG_RELATIVE_PATH} "
+        "command-path derivation is stale"
+    )
+    return backed
+
+
+def _mcp_table_row_text(name: str) -> str:
+    """The doc's MCP table row for `name`, as one raw markdown line."""
+    for line in _section_text(_MCP_SECTION_HEADING).splitlines():
+        if line.startswith(f"| `{name}` |"):
+            return line
+    raise AssertionError(f"{_DOC_RELATIVE_PATH}'s MCP table has no row for {name!r}")
+
+
+def _wrapper_required_vars(wrapper: str) -> list[str]:
+    """The variables `wrapper` requires at spawn, parsed from its own
+    required-variable checks rather than a copied list."""
+    path = repo_root() / _WRAPPER_BIN_RELATIVE_PATH / wrapper
+    assert path.is_file(), f"the wrapper {wrapper} is missing from {_WRAPPER_BIN_RELATIVE_PATH}"
+    text = path.read_text(encoding="utf-8")
+    return re.findall(_REQUIRED_VAR_CHECK, text)
+
+
+def test_wrapper_mcp_rows_document_every_required_wrapper_variable() -> None:
+    """Each wrapper-backed MCP's doc row names every variable its wrapper
+    requires.
+
+    The required set is parsed fresh from the wrapper's own fail-fast checks
+    in `.devcontainer/opencode/bin/` (the same checks the
+    `test_mcp_wrappers_are_bash_and_parameterized` pins in the wrapper
+    suite), so a wrapper that renames or adds a required variable without
+    the doc row moving fails here by name. The count guard keeps the check
+    from going vacuous if the parse itself stops matching.
+    """
+    backed = _wrapper_backed_mcp_names()
+    checked = 0
+    for mcp_name, wrapper in sorted(backed.items()):
+        row = _mcp_table_row_text(mcp_name)
+        for variable in _wrapper_required_vars(wrapper):
+            checked += 1
+            assert variable in row, (
+                f"the {mcp_name} MCP's doc row does not name {variable}, which the "
+                f"{wrapper} wrapper requires through its own fail-fast check"
+            )
+    assert checked > 0, (
+        "the required-variable parse matched no wrapper check at all, so the "
+        "cross-check ran over nothing"
+    )
+
+
 def test_the_seam_files_are_documented() -> None:
     """Both per-user seam files appear by path in the doc."""
     text = _doc_text()

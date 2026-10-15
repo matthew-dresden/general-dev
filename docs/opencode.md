@@ -11,6 +11,7 @@ What opencode is here, which providers and MCP servers the committed config ship
 - `npm install --global opencode-ai` runs as the container user, with `g-whiz` installed beside it for the gcp MCP server.
 - `~/.config/opencode/opencode.json` is written from the committed config in one `jq` pass: the `${WORK_DIR}` placeholder in the MCP wrapper commands becomes the real workspace root, and `enabled_providers` plus the `model` / `small_model` pair follow the toggle matrix below.
 - The installed bytes are compared against the resolved bytes with `cmp`, so truncation or drift between resolution and install aborts the build instead of leaving a config opencode would silently misread.
+- After the rewrite, a `jq -e` matrix assertion aborts the build when a resolved `model` or `small_model` id names a provider that is not in `enabled_providers`, or a model its provider block does not define.
 - The opencode-level settings the committed config carries: `shell` zsh, `share` disabled, `subagent_depth` 3, `permission` allow, the three plugins, the `tool_output` caps (2000 lines, 51200 bytes) and the compaction block (`auto` true, `tail_turns` 40, `buffer` 100000).
 - The aliases `ocd` (`opencode`) and `ocdr` (`opencode --resume`) land in the container's interactive shell rc.
 - No vendor default ships: both providers are optional, the toggles choose which are available, and neither key is ever in the config.
@@ -32,11 +33,11 @@ Toggles:
   - Both on: both providers, `model` `zai-max/glm-5.3`, `small_model` `zai-max/glm-5.3-flash`.
   - `OPENROUTER_ENABLED=1` only: openrouter, `model` `openrouter/glm-5.3`, `small_model` `openrouter/glm-5.3-flash`.
   - `ZAI_ENABLED=1` only: zai-max with the shipped zai-max defaults.
-  - Both off: the `model`, `small_model` and `enabled_providers` keys are removed entirely.
+  - Both off: the `model`, `small_model` and `enabled_providers` keys are removed entirely, which means no restriction: both shipped providers still load (each `{env:...}` key resolves to an empty string when its variable is unset) and opencode picks a default model outside the shipped blocks.
 
 Keys:
 
-- Both keys ride the gitignored hostcreds manifest like every credential: add an entry named after the variable to `.devcontainer/hostcreds.map.json`, run `make creds-init` to store it in the keychain, and `make push-creds` delivers the fragment whose startup block exports it, never committed and never in `shell.env`.
+- Both keys ride the gitignored hostcreds manifest like every credential: add an entry named after the variable to `.devcontainer/hostcreds.map.json`, run `make creds-init` to store it in the keychain, and `make push-creds` delivers the fragment whose startup block exports it, never committed and never in `shell.env`. The postcreate warns, never fatally, when a toggle is 1 and its key variable (`ZAI_API_KEY` or `OPENROUTER_API_KEY`) is absent from the environment, naming the toggle, the manifest fragment named after that variable, and the `make push-creds` remedy.
 
 Limits and modalities:
 
@@ -46,7 +47,7 @@ Limits and modalities:
 
 ## The MCP servers
 
-Eight MCP servers ship in the committed config, one row each; the three wrapper-backed ones read every organization-specific value from the environment at spawn time and fail fast naming the variable when one is missing:
+Eight MCP servers ship in the committed config, one row each; the SSM-backed three (github, azure-devops and context7) read every organization-specific value from the environment at spawn time and fail fast naming the variable when one is missing:
 
 | MCP | What it does | Credential source, where the value lives | Toggle or enable step |
 |---|---|---|---|

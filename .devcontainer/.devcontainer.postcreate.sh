@@ -400,6 +400,35 @@ configure_opencode() {
       "The key reaches opencode only through those interpolations; a config without" \
       "them would carry no credential path at all.")"
 
+  # Matrix-integrity: every model id the jq matrix wrote (or the shipped
+  # zai-only branch kept) must resolve inside the config it landed in. When
+  # model or small_model is present it must parse as <provider>/<model> with
+  # that provider in enabled_providers and that model defined under
+  # provider.<provider>.models; the both-off branch (no model keys) passes.
+  # A dangling reference aborts naming the key and the id, instead of
+  # installing a config whose default model no enabled provider can serve.
+  local matrix_assert='def resolves($cfg; $ref):
+  ($ref | test("^[^/]+/.+$"))
+  and (($ref | capture("^(?<p>[^/]+)/(?<m>.+)$")) as $parts
+      | (($cfg.enabled_providers // []) | index($parts.p)) != null
+      and $cfg.provider[$parts.p].models[$parts.m] != null);
+[ "model", "small_model" ] as $keys
+| [ $keys[] as $key
+    | select(.[$key] != null)
+    | select((resolves(.; .[$key]) | not))
+    | $key + "=" + .[$key] ] as $dangling
+| if ($dangling | length) == 0
+  then true
+  else ($dangling | join("; ")), false
+  end'
+  local matrix_result
+  matrix_result="$(jq -e "${matrix_assert}" "${resolved_dir}/opencode.json")" \
+    || exit_with_error "$(printf '%s\n' \
+      "the resolved opencode config carries a dangling model reference: ${matrix_result%%$'\n'*}." \
+      "When model or small_model is present it must parse as <provider>/<model> with that" \
+      "provider in enabled_providers and that model defined under provider.<provider>.models;" \
+      "check the jq matrix above and the shipped defaults in ${OPENCODE_CONFIG_FILE}.")"
+
   install -d -m 755 -o "${CONTAINER_USER}" -g "${CONTAINER_USER}" "$(dirname "${target}")"
   install -m 644 -o "${CONTAINER_USER}" -g "${CONTAINER_USER}" \
     "${resolved_dir}/opencode.json" "${target}"
@@ -446,6 +475,21 @@ configure_opencode() {
 # every miss becomes a warning naming the documented enable step, so the gap
 # is visible at provisioning time instead of mid-session.
 notify_opencode_mcp_credentials() {
+  # Provider keys: a toggle at 1 whose key variable is absent from the
+  # environment means the hostcreds fragment named after the variable did
+  # not export it, so the provider would load with an empty key and fail at
+  # first request. One warning per gap, naming the toggle, the expected
+  # fragment name and the remedy; never fatal, since provisioning may
+  # legitimately run before the operator pushed the credentials.
+  local -a provider_toggles=("ZAI_ENABLED" "OPENROUTER_ENABLED")
+  local -a provider_keys=("ZAI_API_KEY" "OPENROUTER_API_KEY")
+  local i
+  for i in "${!provider_toggles[@]}"; do
+    if [ "${!provider_toggles[$i]:-}" = "1" ] && [ -z "${!provider_keys[$i]:-}" ]; then
+      WARNINGS+=("the ${provider_toggles[$i]} toggle is 1 but ${provider_keys[$i]} is absent from the environment: the hostcreds manifest fragment named ${provider_keys[$i]} did not export it. Remedy: add the ${provider_keys[$i]} entry to the gitignored hostcreds manifest, run 'make creds-init', then 'make push-creds'.")
+    fi
+  done
+
   # One SSM probe per wrapper-backed MCP: the read asks for the parameter's
   # NAME only (no --with-decryption), so no credential value is ever read,
   # and a failure means the parameter or the SSO session backing it is

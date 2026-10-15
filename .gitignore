@@ -17,6 +17,7 @@
 !/.gitignore
 !/.pymarkdown.json
 !/CLAUDE.md
+!/AGENTS.md
 !/Makefile
 !/README.md
 !/LICENSE

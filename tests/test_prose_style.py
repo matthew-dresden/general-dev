@@ -200,13 +200,14 @@ def _repo_prose_files() -> list[Path]:
 
     Same selection as
     `find . -name '*.md' $(LINT_EXCLUDES) -not -path './.agents/skills/*'
-    -not -name 'CLAUDE.md' -not -path './tests/*'
+    -not -name 'CLAUDE.md' -not -name 'AGENTS.md' -not -path './tests/*'
     -not -path '*/.terragrunt-cache/*' -not -path './.pytest_cache/*'
     -not -path './.venv/*'`:
     every markdown file under the checkout, minus the four `LINT_EXCLUDES`
     trees (`.git`, `devbench`, `node_modules`, `repos`), the prose gate's
-    own three excludes (the `.agents/skills` roster, any `CLAUDE.md`, and
-    `tests/`), and the generated caches -- `.terragrunt-cache` copies of
+    own three excludes (the `.agents/skills` roster, `CLAUDE.md` and its
+    `AGENTS.md` symlink, and `tests/`), and the generated caches --
+    `.terragrunt-cache` copies of
     the repo's docs that terragrunt refreshes on its own schedule, and
     `.pytest_cache` whose README pytest itself writes at session start
     (the CI run creates it before this test executes). The make-side find
@@ -234,7 +235,7 @@ def _repo_prose_files() -> list[Path]:
             continue
         if parts[0] == ".agents" and len(parts) > 1 and parts[1] == "skills":
             continue
-        if relative.name == "CLAUDE.md":
+        if relative.name in ("CLAUDE.md", "AGENTS.md"):
             continue
         files.append(relative)
     return files

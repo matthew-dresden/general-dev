@@ -698,12 +698,43 @@ def test_shipped_config_carries_the_live_runtime_settings() -> None:
     assert config["formatter"] is True
     assert config["lsp"] is False
     assert config["tool_output"] == {"max_lines": 2000, "max_bytes": 51200}
-    assert config["compaction"] == {"auto": True, "tail_turns": 40}
+    assert config["compaction"] == {"auto": True, "tail_turns": 40, "buffer": 100000}
     assert config["plugin"] == [
         "opencode-glm-quota@latest",
         "opencode-cross-session-messaging@latest",
         "opencode-auto-continue",
     ]
+
+
+def test_shipped_config_carries_model_limits_and_compaction_buffer() -> None:
+    """The shipped config carries the per-model verification payload.
+
+    Each shipped model entry mirrors the host config's verified per-model
+    context/output limits (and modalities where the host entry carries them);
+    the compaction block pins the token buffer. A regression that strips
+    `limit` keys or the compaction `buffer` goes red here.
+    """
+    config = _shipped_opencode_config()
+    entries_with_limit = [
+        (provider_id, model_id)
+        for provider_id, provider in config["provider"].items()
+        for model_id, entry in provider.get("models", {}).items()
+        if "limit" in entry
+    ]
+    assert entries_with_limit, (
+        "no shipped model entry carries a limit: the verified per-model limits were stripped"
+    )
+    for provider_id, model_id in entries_with_limit:
+        limit = config["provider"][provider_id]["models"][model_id]["limit"]
+        assert set(limit) == {"context", "output"}, (
+            f"{provider_id}/{model_id} limit {limit!r} must carry exactly context and output"
+        )
+        assert all(isinstance(value, int) and value > 0 for value in limit.values()), (
+            f"{provider_id}/{model_id} limit {limit!r} must carry positive integer values"
+        )
+    assert config["compaction"].get("buffer") == 100000, (
+        "the shipped compaction block must pin buffer=100000 alongside auto/tail_turns"
+    )
 
 
 # ---------------------------------------------------------------- devcontainer.json

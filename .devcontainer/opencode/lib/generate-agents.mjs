@@ -326,9 +326,11 @@ function concurrencyRule(provider, inputs) {
 function buildBody({ name, provider, model, tier, depth, flashWorker, fullWorker, inputs }) {
   const delegation =
     tier === "flash"
-      ? `- ALL work - dev, review, judgment, security checks, and anything else - is ALWAYS and only delegated to the ${flashWorker} worker. You never delegate to any other agent.`
+      ? `- ALL work - dev, review, judgment, security checks, and anything else - is ALWAYS and only delegated to the ${flashWorker} worker. You never delegate to any other agent.
+- Reading images (screenshots, image attachments, Playwright screenshots) is always delegated to the ${flashWorker} worker with you: glm-5.3-flash supports image input.`
       : `- Dev execution: you do focused dev work directly. Parallelizable chunks (independent files, test scaffolding, mechanical refactors) are ALWAYS delegated to the ${flashWorker} worker.
-- Review, judgment, design analysis, and security checks are ALWAYS delegated to the ${fullWorker} worker. The strict judge agents (code-reviewer, test-reviewer, doc-reviewer, security-reviewer, changes-manifest) return JSON verdicts you act on.`
+- Review, judgment, design analysis, and security checks are ALWAYS delegated to the ${fullWorker} worker. The strict judge agents (code-reviewer, test-reviewer, doc-reviewer, security-reviewer, changes-manifest) return JSON verdicts you act on.
+- Reading images (screenshots, image attachments, Playwright screenshots) is ALWAYS delegated to the ${flashWorker} worker: glm-5.3-flash supports image input, other glm models may not have it registered in the models catalog.`
   return `You are the ${name} session driver, running ${provider}/${model}. You manage development work and judgment work. Follow the engineering standards in AGENTS.md.
 
 ## Delegation contract
@@ -346,7 +348,7 @@ You own verification and final signoff: never mark work complete without verific
 Report back concisely: what you did, what you delegated, verification results.`
 }
 
-function planBody({ name, provider, model, depth, delegation, inputs }) {
+function planBody({ name, provider, model, depth, delegation, flashWorker, inputs }) {
   return `You are the ${name} planning agent, running ${provider}/${model}. You analyze code and produce plans; you cannot modify anything (file edits are denied). Follow the engineering standards in AGENTS.md.
 
 ## Interactivity mandate
@@ -356,6 +358,7 @@ Before producing any plan, surface every open decision to the user with the ques
 - Tool first: inspect the repo with the dedicated tools, not bash. Use read (its offset/limit arguments replace sed/awk line ranges), glob, grep, and list for anything inside the worktree; they run without approval and are the reason bash rarely needs to fire. Webfetch/websearch and LSP/skills also run without approval for external context.
 - Bash is for what tools cannot do: git, gh, and cloud CLIs (az/aws/gcloud), and pipelines between the allowlisted text tools (jq, grep, tr, cut, sort, uniq). Read-only commands on that list run without approval; anything state-changing requires explicit user approval. Interpreters (python3, node -e) and awk are not allowlisted: restructure their work as jq or tool pipelines. Shell loops pass only when every parsed statement inside them is allowlisted; prefer single piped commands over loops.
 - Delegate research and analysis to ${delegation}, as many in parallel as concurrency allows, nesting up to ${depth} levels.
+- Reading images (screenshots, image attachments, Playwright screenshots) is always delegated to the ${flashWorker} worker: glm-5.3-flash supports image input, other glm models may not have it registered in the models catalog.
 - ${concurrencyRule(provider, inputs)}
 - Verify delegated findings before folding them into the plan.
 
@@ -363,10 +366,15 @@ Before producing any plan, surface every open decision to the user with the ques
 Concrete, actionable plans: file paths, exact changes, verification steps, and open questions resolved interactively.`
 }
 
-function workerBody({ name, provider, model, depth, inputs }) {
+function workerBody({ name, provider, model, tier, depth, inputs }) {
+  const images =
+    tier === "flash"
+      ? `- You read images directly (screenshots, image attachments, Playwright screenshots): glm-5.3-flash supports image input.`
+      : `- When a task requires reading an image (screenshot, image attachment, Playwright screenshot), delegate that image to the same-provider flash worker instead of reading it yourself: glm-5.3-flash supports image input, your model may not have it registered in the models catalog.`
   return `You are the ${name} worker agent running ${provider}/${model}. You execute delegated chunks of work: development, review, judgment, security checks, and analysis. Follow the engineering standards in AGENTS.md.
 
 - Do the delegated work with full tool access; fail fast, no fallback logic, no silent failures.
+${images}
 - You may delegate sub-chunks to same-provider workers (${provider}-glm-*) when it genuinely parallelizes the work, nesting up to ${depth} levels.
 - ${concurrencyRule(provider, inputs)}
 - Verify your own work (tests, lint) before reporting.
@@ -413,7 +421,7 @@ function buildAgentSet(inputs, config) {
             mode: "primary",
             permission: planPermission(task),
             description: "Read-only planning agent; asks before assuming",
-            body: planBody({ name: common.name, provider, model, depth, delegation, inputs }),
+            body: planBody({ name: common.name, provider, model, depth, delegation, flashWorker, inputs }),
           })
         }
       }
@@ -431,7 +439,7 @@ function buildAgentSet(inputs, config) {
           tier === "flash"
             ? "Fast worker: dev, review, judgment, security, analysis"
             : "Worker: dev, review, judgment, security",
-        body: workerBody({ name: workerName(provider, model), provider, model, depth, inputs }),
+        body: workerBody({ name: workerName(provider, model), provider, model, tier, depth, inputs }),
       })
     }
   }

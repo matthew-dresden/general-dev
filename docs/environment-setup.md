@@ -165,7 +165,11 @@ Credential naming:
 - A credential name must match `[A-Z][A-Z0-9_]*`, an uppercase letter followed by uppercase letters, digits or underscores, because the name becomes both a shell variable and a `<NAME>.env` fragment filename.
 - Reserved names are refused outright: `PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, each of which would silently shadow a real variable at shell startup.
 
-The one entry this repository's committed configuration expects is `ZAI_API_KEY` from the keychain: the opencode config interpolates `{env:ZAI_API_KEY}`, and without that entry opencode in the container authenticates with nothing.
+The provider keys the committed configuration interpolates, both optional per provider: add a keychain entry for each provider you leave enabled through the `ZAI_ENABLED` / `OPENROUTER_ENABLED` toggles.
+
+- `ZAI_API_KEY`: the `zai-max` provider block reads it through `{env:ZAI_API_KEY}`.
+- `OPENROUTER_API_KEY`: the `openrouter` provider block reads it through `{env:OPENROUTER_API_KEY}`.
+- An enabled provider whose key entry is absent leaves opencode in the container authenticating with nothing; both keys and the toggle story are in [opencode.md](opencode.md).
 
 The full schema, defaults and the scanner integration are in [environment-files.md](environment-files.md)'s "Host credentials (hostcreds)" section.
 

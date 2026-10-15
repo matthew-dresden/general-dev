@@ -383,6 +383,64 @@ def test_creds_init_output_claims_quoted_in_the_runbook_appear_in_cli_source(
     )
 
 
+# The manifest section's provider-key story: the committed config
+# interpolates BOTH provider keys, each optional per provider (needed only
+# while its toggle leaves that provider enabled), and the old one-key
+# prescriptive claim ("the one entry this repository's committed
+# configuration expects") is retired: it predates the openrouter provider
+# and would mislead a reader into shipping an incomplete manifest.
+_MANIFEST_PROVIDER_KEY_FACTS: tuple[tuple[str, str], ...] = (
+    ("zai_key_named", "ZAI_API_KEY"),
+    ("openrouter_key_named", "OPENROUTER_API_KEY"),
+    ("zai_interpolation_form", "{env:ZAI_API_KEY}"),
+    ("openrouter_interpolation_form", "{env:OPENROUTER_API_KEY}"),
+    ("zai_toggle_named", "ZAI_ENABLED"),
+    ("openrouter_toggle_named", "OPENROUTER_ENABLED"),
+    ("optional_per_provider_wording", "optional per provider"),
+)
+
+_MANIFEST_RETIRED_ONE_KEY_CLAIM = "The one entry this repository's committed configuration expects"
+
+
+@pytest.mark.parametrize(
+    "fact_id,needle",
+    _MANIFEST_PROVIDER_KEY_FACTS,
+    ids=[fact_id for fact_id, _ in _MANIFEST_PROVIDER_KEY_FACTS],
+)
+def test_manifest_section_states_both_provider_keys_as_optional(fact_id: str, needle: str) -> None:
+    """The manifest section names both provider keys, both interpolation forms,
+    both toggles and the optional-per-provider story.
+
+    The shipped opencode config carries two `{env:...}` interpolations since
+    the openrouter provider landed, and each entry's need is conditional on
+    its provider's toggle. Pinning each fact separately (the
+    `_SECRETS_FACTS` discipline of `test_docs_environment_files.py`) means a
+    future edit that drops one name, one interpolation form, or the
+    optionality qualifier fails the one assertion that names it.
+    """
+    section = _section_text_normalized(_MANIFEST_SECTION_HEADING)
+    assert needle in section, (
+        f"{_RUNBOOK_RELATIVE_PATH}'s {_MANIFEST_SECTION_HEADING!r} section is missing the "
+        f"provider-key fact {fact_id!r}: expected to find {needle!r}."
+    )
+
+
+def test_manifest_section_does_not_claim_one_expected_entry() -> None:
+    """The retired one-key prescriptive claim is absent from the runbook.
+
+    The claim predates the openrouter provider: the committed config now
+    interpolates two keys, each optional per provider, so a surviving
+    "one entry" statement would contradict the manifest section's own
+    parametrized facts above.
+    """
+    section = _section_text_normalized(_MANIFEST_SECTION_HEADING)
+    assert _MANIFEST_RETIRED_ONE_KEY_CLAIM not in section, (
+        f"{_RUNBOOK_RELATIVE_PATH}'s {_MANIFEST_SECTION_HEADING!r} section still carries "
+        f"the retired one-key claim ({_MANIFEST_RETIRED_ONE_KEY_CLAIM!r}): the committed "
+        "config interpolates ZAI_API_KEY and OPENROUTER_API_KEY, both optional per provider."
+    )
+
+
 @pytest.mark.parametrize(
     "flag,expected_sources",
     _FLAG_LOCATIONS,

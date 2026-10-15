@@ -256,6 +256,66 @@ def test_secrets_section_states_hostcreds_fact(fact_id: str, needle: str) -> Non
     )
 
 
+# The Secrets section's provider-key story: the committed opencode config
+# interpolates BOTH provider keys, each optional per provider (needed only
+# while its toggle leaves that provider enabled), and the old one-key
+# prescriptive claim ("The one entry this repository's committed
+# configuration expects: ZAI_API_KEY ...") is retired: it predates the
+# openrouter provider and would mislead a reader into shipping an
+# incomplete manifest. The same fact list drives the runbook's pins in
+# `tests/test_docs_environment_setup.py`; the two documents must not drift
+# apart on which keys exist and what makes an entry necessary.
+_PROVIDER_KEY_FACTS: tuple[tuple[str, str], ...] = (
+    ("zai_key_named", "ZAI_API_KEY"),
+    ("openrouter_key_named", "OPENROUTER_API_KEY"),
+    ("zai_interpolation_form", "{env:ZAI_API_KEY}"),
+    ("openrouter_interpolation_form", "{env:OPENROUTER_API_KEY}"),
+    ("zai_toggle_named", "ZAI_ENABLED"),
+    ("openrouter_toggle_named", "OPENROUTER_ENABLED"),
+    ("optional_per_provider_wording", "optional per provider"),
+)
+
+_RETIRED_ONE_KEY_CLAIM = "The one entry this repository's committed configuration expects"
+
+
+@pytest.mark.parametrize(
+    "fact_id,needle",
+    _PROVIDER_KEY_FACTS,
+    ids=[fact_id for fact_id, _ in _PROVIDER_KEY_FACTS],
+)
+def test_secrets_section_states_both_provider_keys_as_optional(fact_id: str, needle: str) -> None:
+    """The Secrets section names both provider keys, both interpolation forms,
+    both toggles and the optional-per-provider story.
+
+    Each fact is pinned separately (the same discipline `_SECRETS_FACTS`
+    uses) so an edit that drops one name, one interpolation form, or the
+    optionality qualifier fails the one assertion that names it, rather than
+    a generic mismatch.
+    """
+    text = _secrets_section_text_normalized()
+    assert needle in text, (
+        f"{_DOC_RELATIVE_PATH} is missing the provider-key fact {fact_id!r}: "
+        f"expected to find {needle!r} in the '## Secrets' section."
+    )
+
+
+def test_secrets_section_does_not_claim_one_expected_entry() -> None:
+    """The retired one-key prescriptive claim is absent from the Secrets section.
+
+    The claim predates the openrouter provider: the committed config now
+    interpolates two keys, each optional per provider, so a surviving
+    "one entry" statement would contradict the section's own parametrized
+    facts above.
+    """
+    text = _secrets_section_text_normalized()
+    assert _RETIRED_ONE_KEY_CLAIM not in text, (
+        f"{_DOC_RELATIVE_PATH} still carries the retired one-key claim "
+        f"({_RETIRED_ONE_KEY_CLAIM!r}) in the '## Secrets' section: the committed "
+        "config interpolates ZAI_API_KEY and OPENROUTER_API_KEY, both optional per "
+        "provider."
+    )
+
+
 def test_shell_env_still_published_for_remote_bootstrap() -> None:
     text = _secrets_section_text()
     assert "make push-secrets" in text, (

@@ -2,7 +2,10 @@
 
 set -euo pipefail
 
-RD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "${BASH_SOURCE[0]}" in
+  */*) RD_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)" ;;
+  *) RD_DIR="$PWD" ;;
+esac
 
 RD_RED=$'\033[0;31m'
 RD_GREEN=$'\033[0;32m'

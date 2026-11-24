@@ -1008,6 +1008,38 @@ def test_configure_github_mcp_server_is_installed_by_postcreate() -> None:
     assert re.search(r"^\s*configure_github_mcp_server\s*$", _main_body(), re.MULTILINE)
 
 
+def test_configure_github_mcp_server_asset_name_matches_upstream() -> None:
+    """The release asset is named the way upstream names it: a case-sensitive
+    `Linux` prefix and `x86_64` where dpkg says `amd64` (`Linux_x86_64.tar.gz`
+    / `Linux_arm64.tar.gz`). The former `_linux_${arch}` template built asset
+    names no release carries, so curl 404'd and postcreate died on every
+    amd64 rebuild."""
+    body = _function_body("configure_github_mcp_server")
+    assert re.search(r"amd64\)\s*asset_arch=x86_64", body), (
+        "dpkg's amd64 must map to upstream's x86_64 asset name"
+    )
+    assert re.search(r"arm64\)\s*asset_arch=arm64", body), (
+        "dpkg's arm64 must pass through to upstream's arm64 asset name"
+    )
+    assert (
+        re.search(
+            r"github-mcp-server_Linux_\$\{asset_arch\}\.tar\.gz",
+            body,
+        )
+        is not None
+    ), "the tarball URL must be built from the mapped, case-sensitive upstream asset name"
+    assert re.search(r"github-mcp-server_\$\{GITHUB_MCP_SERVER_VERSION\}_", body) is None, (
+        "upstream names assets without the version; the URL must not interpolate it"
+    )
+    assert re.search(r"\*\)\s*exit_with_error", body) is not None, (
+        "an unknown architecture must still fail loudly"
+    )
+    assert "linux_${arch}" not in body, (
+        "the defunct lowercase linux_${arch} name must not survive anywhere, "
+        "error messages included"
+    )
+
+
 # ---------------------------------------------------------------- scrub rule
 
 

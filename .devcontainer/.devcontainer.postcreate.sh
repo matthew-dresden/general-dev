@@ -567,22 +567,23 @@ configure_github_mcp_server() {
     "GITHUB_MCP_SERVER_VERSION is not set, so the github MCP's server binary cannot" \
     "be downloaded. Add the version (a github/github-mcp-server release tag, without" \
     "the leading v) to shell.env (the gitignored host config), then rebuild.")"
-  local arch
+  local arch asset_arch
   arch="$(dpkg --print-architecture)" \
     || exit_with_error "dpkg did not report the container architecture, so the github-mcp-server release asset cannot be selected"
   case "${arch}" in
-    amd64|arm64) ;;
+    amd64) asset_arch=x86_64 ;;
+    arm64) asset_arch=arm64 ;;
     *) exit_with_error "github-mcp-server has no release asset for architecture '${arch}'" ;;
   esac
 
   log_section "github-mcp-server" "v${GITHUB_MCP_SERVER_VERSION} -> ${USER_BIN}"
-  local tarball_url="https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_SERVER_VERSION}/github-mcp-server_${GITHUB_MCP_SERVER_VERSION}_linux_${arch}.tar.gz"
+  local tarball_url="https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_SERVER_VERSION}/github-mcp-server_Linux_${asset_arch}.tar.gz"
   local staging
   staging="$(mktemp -d)" \
     || exit_with_error "mktemp failed while preparing the github-mcp-server download"
   curl --fail --show-error --silent --tlsv1.2 \
     --output "${staging}/github-mcp-server.tar.gz" "${tarball_url}" \
-    || exit_with_error "downloading ${tarball_url} failed; check that GITHUB_MCP_SERVER_VERSION ('${GITHUB_MCP_SERVER_VERSION}') names a github/github-mcp-server release with a linux_${arch} asset"
+    || exit_with_error "downloading ${tarball_url} failed; check that GITHUB_MCP_SERVER_VERSION ('${GITHUB_MCP_SERVER_VERSION}') names a github/github-mcp-server release with a Linux_${asset_arch} asset"
   tar -xzf "${staging}/github-mcp-server.tar.gz" -C "${staging}" github-mcp-server \
     || exit_with_error "the github-mcp-server release tarball does not carry the github-mcp-server binary"
   install -d -m 755 "${USER_BIN}"

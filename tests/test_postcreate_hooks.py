@@ -1040,6 +1040,18 @@ def test_configure_github_mcp_server_asset_name_matches_upstream() -> None:
     )
 
 
+def test_configure_github_mcp_server_download_follows_redirects() -> None:
+    """The download follows GitHub's release redirect: a release download URL
+    302s to the signed asset host, and a no-follow curl still exits 0, so the
+    file on disk is the redirect body and the tar step dies on the truncated
+    gzip (observed as `gzip: stdin: unexpected end of file` on rebuilds)."""
+    body = _function_body("configure_github_mcp_server")
+    invocation = re.search(r"curl[^|]*", body)
+    assert invocation is not None, "the function must download the release with curl"
+    for flag in ("--fail", "--show-error", "--silent", "--location", "--tlsv1.2"):
+        assert flag in invocation.group(0), f"the release download must carry {flag}"
+
+
 # ---------------------------------------------------------------- scrub rule
 
 

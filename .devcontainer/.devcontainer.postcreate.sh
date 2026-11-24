@@ -581,7 +581,7 @@ configure_github_mcp_server() {
   local staging
   staging="$(mktemp -d)" \
     || exit_with_error "mktemp failed while preparing the github-mcp-server download"
-  curl --fail --show-error --silent --tlsv1.2 \
+  curl --fail --show-error --silent --location --tlsv1.2 \
     --output "${staging}/github-mcp-server.tar.gz" "${tarball_url}" \
     || exit_with_error "downloading ${tarball_url} failed; check that GITHUB_MCP_SERVER_VERSION ('${GITHUB_MCP_SERVER_VERSION}') names a github/github-mcp-server release with a Linux_${asset_arch} asset"
   tar -xzf "${staging}/github-mcp-server.tar.gz" -C "${staging}" github-mcp-server \
